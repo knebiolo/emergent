@@ -35,11 +35,12 @@ obs = obs.append(land)
 
 # Create Origins Dataframe
 origins = pd.read_csv(os.path.join(inputWS,'origin.csv'))
+origins = origins[origins.OBJECTID != 5]
 nodes = origins.OBJECTID.values
 
 # Create Destinations Dataframe
 destinations = pd.read_csv(os.path.join(inputWS,'destination.csv'))
-
+fuck
 # start up simulation initialization function
 start_up = emergent.simulation(proj_dir,simName, n_frames,n_agents,obs, land, origins, destinations)
 
