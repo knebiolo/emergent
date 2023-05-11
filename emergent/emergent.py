@@ -1211,6 +1211,13 @@ class Ship():  # create a class object to describe a self agent
                 self.delta_c = np.sign(self.delta_c) * self.delta_max
             # start movement
             self.prevPos = self.currentPos                                          # previous position is now equal to the current position
+            '''need to incorpoate effects of current
+            - set and drift
+            first calculate course over ground
+
+            calculate speed over ground
+            self.SOG = np.sqrt(self.u**2 + self.wvel**2)
+            '''
             newX = np.array([self.currentPos[0] + self.u * np.cos(self.psi[0])])       # calculate New X
             newY = np.array([self.currentPos[1] + self.u * np.sin(self.psi[0])])       # calculate New Y
             self.currentPos = np.zeros(3)
