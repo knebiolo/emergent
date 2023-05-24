@@ -122,6 +122,7 @@ for t in np.arange(0,3600,1):
             
             # calculate time to fatigue at current swim speed
             ttf = np.exp(a_p + swim_speed * b_p)
+            fuck
             
         elif swim_speed > max_U:
             # reset stopwatch
