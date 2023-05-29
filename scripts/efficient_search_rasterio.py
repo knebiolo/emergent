@@ -26,7 +26,7 @@ inputWS = r"J:\2819\005\Calcs\ABM\Data"
 outputWS = r"J:\2819\005\Calcs\ABM\Output"
 
 #%% opening and visualizing data
-rast = rasterio.open(os.path.join(inputWS,'DEM2019_elev_ft.tif'))
+rast = rasterio.open(os.path.join(outputWS,'elev.tif'))
 show(rast)
 
 #%% spatial indexing 
@@ -34,7 +34,8 @@ bounds = rast.bounds
 height = bounds[3] - bounds[1]
 width = bounds[2] - bounds[0]
 ll = (bounds[0],bounds[1])
-x, y = (rast.bounds.left + width / 2., rast.bounds.bottom + height / 4.)
+#x, y = (rast.bounds.left + width / 2., rast.bounds.bottom + height / 4.)
+x, y = (548725,6642518)
 row, col = rast.index(x, y)
 elev = rast.read(1)[row, col]
 
@@ -87,7 +88,7 @@ mask_x = masked[1][2]
 mask_y = masked[1][5]
 
 # get indices of cell in mask with highest elevation
-zs = zonal_stats(sense_gdf, rast.read(1), affine = rast.transform, stats=['min', 'max', 'mean', 'median', 'majority'])
+zs = zonal_stats(sense_gdf, rast.read(1), affine = rast.transform, stats=['min', 'max'])
 idx = np.where(masked[0] == zs[0]['min'])
 
 # compute position of max value
@@ -108,13 +109,13 @@ v_hat = v/np.linalg.norm(v)
 
 # visualize and check 
 # make geopandas dataframe and plot
-gdf_max = gpd.GeoDataFrame(index = [0],crs = rast.crs, geometry = [max_elev])
+#gdf_max = gpd.GeoDataFrame(index = [0],crs = rast.crs, geometry = [max_elev])
 gdf_current = gpd.GeoDataFrame(index = [0],crs = rast.crs, geometry = [fish])
 
 # Plot the Polygons on top of the DEM
 base = sense_gdf.plot(facecolor='None', edgecolor='red', linewidth=1)
-max_elev = gdf_max.plot(ax = base, marker = 'o', color = 'magenta', markersize = 12)
-current = gdf_current.plot(ax = base, marker = 'o', color = 'blue', markersize = 12)
+#max_elev = gdf_max.plot(ax = base, marker = 'o', color = 'magenta', markersize = 12)
+#current = gdf_current.plot(ax = base, marker = 'o', color = 'blue', markersize = 12)
 
 # Plot DEM
 show(rast, ax=base) 
