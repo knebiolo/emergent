@@ -10,8 +10,7 @@ Script Intent: Extract raster grid of values from 2D HECRAS Model
 import h5py
 import os
 import numpy as np
-from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator, griddata
-import matplotlib.pyplot as plt
+from scipy.interpolate import LinearNDInterpolator
 import rasterio
 from rasterio.transform import Affine
 import geopandas as gpd
@@ -32,9 +31,9 @@ hdf = h5py.File(os.path.join(inputWS,name),'r')
 # Extract Data from HECRAS HDF model
 print ("Extracting Model Geometry and Results")
 pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
-vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
-vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
-wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1]
+vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-2]
+vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-2]
+wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-2]
 elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
 
 #%% Create shapefile of observations and export
@@ -64,10 +63,10 @@ gdf.to_file(os.path.join(outputWS,'model_output.shp'))
 
 #%% Create Interpolators for velocity, wsel and elevation
 print ("Create multidimensional interpolator functions for velocity, wsel, elev")
-vel_x_interp = LinearNDInterpolator(pts,vel_x)
-vel_y_interp = LinearNDInterpolator(pts,vel_y)
-wsel_interp = LinearNDInterpolator(pts,wsel)
-elev_interp = LinearNDInterpolator(pts,elev)
+vel_x_interp = LinearNDInterpolator(pts,gdf.vel_x)
+vel_y_interp = LinearNDInterpolator(pts,gdf.vel_y)
+wsel_interp = LinearNDInterpolator(pts,gdf.wsel)
+elev_interp = LinearNDInterpolator(pts,gdf.elev)
 
 #%% Interpolate Images
 
@@ -78,8 +77,8 @@ ymin = np.min(pts[:,1])
 ymax = np.max(pts[:,1])
 
 # interpoate velocity, wsel, and elevation at new xy's
-xint = np.arange(xmax,xmin,1)
-yint = np.arange(ymax,ymin,1)
+xint = np.arange(xmin,xmax,1)
+yint = np.arange(ymax,ymin,-1)
 xnew, ynew = np.meshgrid(xint,yint, sparse = True)
 
 print ("Interpolate Velocity East")
@@ -94,25 +93,21 @@ elev_new = elev_interp(xnew, ynew)
 # create a depth raster
 depth = wsel_new - elev_new
 
-# visualize images
-plt.imshow(depth,cmap='gray', vmin=0, vmax=255)
-plt.show()
 
 #%% Write Raster Files
-
-xres = (xmax - xmin) / len(pts)
-yres = (ymax - ymin) / len(pts)
+print ("Exporting Rasters")
 
 # create raster properties
 driver = 'GTiff'
-width = elev_new.shape[0]
-height = elev_new.shape[1]
+width = elev_new.shape[1]
+height = elev_new.shape[0]
 count = 1
 dtype = 'float64'
 crs = 'EPSG:32604'
-transform = Affine.translation(np.min(pts[:,0]),np.min(pts[:,1])) * Affine.scale(1,1)
+transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
+#Affine.translation(np.min(pts[:,0]),np.max(pts[:,1])) * Affine.scale(1,1)
 
-# write raster
+# write elev raster
 with rasterio.open(os.path.join(outputWS,'elev.tif'),
                    mode = 'w',
                    driver = driver,
@@ -121,6 +116,53 @@ with rasterio.open(os.path.join(outputWS,'elev.tif'),
                    count = count,
                    dtype = 'float64',
                    crs = crs,
-                   transform = transform) as new_dataset:
-    new_dataset.write(elev_new,1)
+                   transform = transform) as elev_rast:
+    elev_rast.write(elev_new,1)
 
+# write wsel raster
+with rasterio.open(os.path.join(outputWS,'wsel.tif'),
+                   mode = 'w',
+                   driver = driver,
+                   width = width,
+                   height = height,
+                   count = count,
+                   dtype = 'float64',
+                   crs = crs,
+                   transform = transform) as wsel_rast:
+    wsel_rast.write(wsel_new,1)
+    
+# write depth raster
+with rasterio.open(os.path.join(outputWS,'depth.tif'),
+                   mode = 'w',
+                   driver = driver,
+                   width = width,
+                   height = height,
+                   count = count,
+                   dtype = 'float64',
+                   crs = crs,
+                   transform = transform) as depth_rast:
+    depth_rast.write(depth,1)
+
+# write velocity x raster
+with rasterio.open(os.path.join(outputWS,'vel_x.tif'),
+                   mode = 'w',
+                   driver = driver,
+                   width = width,
+                   height = height,
+                   count = count,
+                   dtype = 'float64',
+                   crs = crs,
+                   transform = transform) as vel_x_rast:
+    vel_x_rast.write(vel_x_new,1)
+    
+# write velocity y raster
+with rasterio.open(os.path.join(outputWS,'vel_y.tif'),
+                   mode = 'w',
+                   driver = driver,
+                   width = width,
+                   height = height,
+                   count = count,
+                   dtype = 'float64',
+                   crs = crs,
+                   transform = transform) as vel_y_rast:
+    vel_y_rast.write(vel_y_new,1)
