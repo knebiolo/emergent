@@ -28,12 +28,12 @@ import math
 import scipy
 import matplotlib.pyplot as plt
 
-
+# define import values - note units!!
 length = 20 #cm
-water_vel = 2.5 #meters/sec
+water_vel = np.array([0.75,1]) #meters/sec
 water_temp = 20 #deg C
 species = 'sockeye'
-fish_vel = 3 #meters/sec
+fish_vel = np.array([2,1]) #meters/sec
 
 # identify workspaces
 inputWS = r"J:\2819\005\Calcs\ABM\Data\\"
@@ -56,7 +56,7 @@ def calc_Reynolds(length, kin_visc, water_vel):
     length_m = length / 100
     return water_vel * length_m / kin_visc
 
-reynolds = calc_Reynolds(length, kin_visc, water_vel)
+reynolds = calc_Reynolds(length, kin_visc, np.linalg.norm(water_vel))
 
 # calculate surface area of fish; assuming salmon for now
 def calc_surface_area(length, species):
@@ -92,7 +92,5 @@ drag_coeff = fit_dragcoeffs(reynolds, dragf_popt[0], dragf_popt[1])
 drag_ax.scatter(reynolds, drag_coeff)
 
 # calculate drag!
-# ***assuming fish is moving directly opposite of the water velocity... which is an estimate
-
-drag = -0.5 * (density * 1000) * (surface_area / 100**2) * drag_coeff * (fish_vel - water_vel)**2
+drag = -0.5 * (density * 1000) * (surface_area / 100**2) * drag_coeff * (np.linalg.norm(fish_vel - water_vel)**2)*(fish_vel/np.linalg.norm(fish_vel))
 
