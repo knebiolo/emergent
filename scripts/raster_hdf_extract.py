@@ -25,7 +25,7 @@ outputWS = r"J:\2819\005\Calcs\ABM\Output"
 # connect to a HECRAS Model
 print ("Connecting to HECRAS Models")
 inputWS = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
-name = 'NuyakukABM2D.p01.hdf'
+name = 'NuyakukABM2D.p02.hdf'
 hdf = h5py.File(os.path.join(inputWS,name),'r')
 
 # Extract Data from HECRAS HDF model
