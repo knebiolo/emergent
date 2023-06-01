@@ -26,7 +26,7 @@ inputWS = r"J:\2819\005\Calcs\ABM\Data"
 outputWS = r"J:\2819\005\Calcs\ABM\Output"
 
 #%% opening and visualizing data
-rast = rasterio.open(os.path.join(outputWS,'elev.tif'))
+rast = rasterio.open(os.path.join(outputWS,'depth.tif'))
 show(rast)
 
 #%% spatial indexing 
@@ -35,7 +35,7 @@ height = bounds[3] - bounds[1]
 width = bounds[2] - bounds[0]
 ll = (bounds[0],bounds[1])
 #x, y = (rast.bounds.left + width / 2., rast.bounds.bottom + height / 4.)
-x, y = (548725,6642518)
+x, y = (549500,6641600)
 row, col = rast.index(x, y)
 elev = rast.read(1)[row, col]
 
@@ -55,7 +55,7 @@ the position of the fish.'''
 fish = Point(x, y)
 
 # create sensory buffer
-l = 25.
+l = 75
 sensory = fish.buffer(2 * l)
 
 # make a geopandas geodataframe of sensory buffer
@@ -77,7 +77,7 @@ arc_gdf = gpd.GeoDataFrame(index = [0],crs = rast.crs, geometry = [arc])
 #########################################
 
 # perform mask
-masked = mask(rast,sense_gdf.loc[0], crop = True)
+masked = mask(rast,arc_gdf.loc[0],all_touched = True, crop = True)
 
 ##############################################
 # Step 3: Get Cell Center of Highest Velocity
@@ -88,8 +88,8 @@ mask_x = masked[1][2]
 mask_y = masked[1][5]
 
 # get indices of cell in mask with highest elevation
-zs = zonal_stats(sense_gdf, rast.read(1), affine = rast.transform, stats=['min', 'max'])
-idx = np.where(masked[0] == zs[0]['min'])
+zs = zonal_stats(arc_gdf, rast.read(1), affine = rast.transform, stats=['min', 'max'], all_touched = True)
+idx = np.where(masked[0] == zs[0]['max'])
 
 # compute position of max value
 max_x = mask_x + idx[1][-1] * masked[1][0]
@@ -109,13 +109,13 @@ v_hat = v/np.linalg.norm(v)
 
 # visualize and check 
 # make geopandas dataframe and plot
-#gdf_max = gpd.GeoDataFrame(index = [0],crs = rast.crs, geometry = [max_elev])
+gdf_max = gpd.GeoDataFrame(index = [0],crs = rast.crs, geometry = [max_elev])
 gdf_current = gpd.GeoDataFrame(index = [0],crs = rast.crs, geometry = [fish])
 
 # Plot the Polygons on top of the DEM
-base = sense_gdf.plot(facecolor='None', edgecolor='red', linewidth=1)
-#max_elev = gdf_max.plot(ax = base, marker = 'o', color = 'magenta', markersize = 12)
-#current = gdf_current.plot(ax = base, marker = 'o', color = 'blue', markersize = 12)
+base = arc_gdf.plot(facecolor='None', edgecolor='red', linewidth=1)
+max_elev = gdf_max.plot(ax = base, marker = 'o', color = 'magenta', markersize = 12)
+current = gdf_current.plot(ax = base, marker = 'o', color = 'green', markersize = 12)
 
 # Plot DEM
 show(rast, ax=base) 

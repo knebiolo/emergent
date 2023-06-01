@@ -9,19 +9,38 @@ with intent of understanding the potential ramifications of river discharge
 changes on ability of fish to succesffuly pass upstream through a riffle - 
 cascade complex.  
 
+An agent is a goal-directed, autonomous, software-object that interacts with 
+other agents in simulated space.  In the case of a fish passage agent, our fish 
+are motivated to move upstream to spawn, thus their goal is simply to pass the 
+impediment.   Their motivation is clear, they have an overriding instinct to 
+migrate upstream to their natal reach and will do so at the cost of their own 
+mortality.   
+
+Our fish agents are python class objects with initialization methods, and 
+methods for movement, behaviors, and perception.  Movement is continuous in 2d 
+space as our environment is a depth and time averaged 2d model.  Movement in 
+the Z direction is handled with logic.  We will use velocity distributions and 
+the agent's position within the water column to understand the forces acting on 
+the body of the fish (drag).  To maintain position, the agent must generate 
+enough thrust to counteract drag.  The fish generates thrust by beating its tail.  
+According to Castro-Santos (2006), fish tend to migrate at a specific speed over 
+ground in body lengths per second depending upon the mode of swimming it is in.  
+Therefore their tail beat per minute rate is dependent on the amount of drag 
+and swimming mode.   
 """
 # import dependencies
 import h5py
-import pandas as pd
-import os
 import geopandas as gpd
-import shapely
-import rasterio
 import numpy as np
-from scipy import interpolate
+import os
+import pandas as pd
+import rasterio
+from rasterio.transform import Affine
+from shapely import Point, Polygon
+from scipy.interpolate import LinearNDInterpolator, UnivariateSpline
     
 # create a sockeye agent 
-class sockeye():
+class fish():
     ''' Python class object for a sockeye agent. 
     
     Class object contains all of the sockeye's attributes, while the methods
@@ -91,7 +110,6 @@ class sockeye():
                                                     'body_depth':self.body_depth})
         self.hdf.flush()
     
-    
     def thrust (U,L,f):
         '''Lighthill 1970 thrust equation. '''
         # density of freshwater assumed to be 1
@@ -108,9 +126,9 @@ class sockeye():
         edge_dat = np.array([1.,2.,3.,4.,5.,6.,8.,10.,12.])
         
         # fit univariate spline
-        amplitude = interpolate.UnivariateSpline(length_dat,amp_dat,k = 2) 
-        wave = interpolate.UnivariateSpline(speed_dat,wave_dat,k = 1) 
-        trail = interpolate.UnivariateSpline(length_dat,edge_dat,k = 1) 
+        amplitude = UnivariateSpline(length_dat,amp_dat,k = 2) 
+        wave = UnivariateSpline(speed_dat,wave_dat,k = 1) 
+        trail = UnivariateSpline(length_dat,edge_dat,k = 1) 
         
         # interpolate A, V, B
         A = amplitude(L)
@@ -126,7 +144,7 @@ class sockeye():
         
         return (thrust)
     
-    def frequency (U,L,D):
+    def frequency (self):
         ''' Function for tailbeat frequency.  By setting Lighthill (1970) equations 
         equal to drag, we can solve for tailbeat frequency (Hz).  
         
@@ -152,22 +170,188 @@ class sockeye():
         edge_dat = np.array([1.,2.,3.,4.,5.,6.,8.,10.,12.])
         
         # fit univariate spline
-        amplitude = interpolate.UnivariateSpline(length_dat,amp_dat,k = 2) 
-        wave = interpolate.UnivariateSpline(speed_dat,wave_dat,k = 1) 
-        trail = interpolate.UnivariateSpline(length_dat,edge_dat,k = 1) 
+        amplitude = UnivariateSpline(length_dat,amp_dat,k = 2) 
+        wave = UnivariateSpline(speed_dat,wave_dat,k = 1) 
+        trail = UnivariateSpline(length_dat,edge_dat,k = 1) 
         
         # interpolate A, V, B
-        A = amplitude(L)
-        V = wave(U)
-        B = trail(L)    
+        A = amplitude(self.length)
+        V = wave(self.swim_speed)
+        B = trail(self.length)    
         
         # now that we have all variables, solve for f
         #sol1 = -1 * np.sqrt(D*V**2*np.cos(np.radians(theta))/(A**2*B**2*U*np.pi**3*rho*(U - V)*(-0.062518880701972*U - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
-        Hz = np.sqrt(D*V**2*np.cos(np.radians(theta))/(A**2*B**2*U*np.pi**3*rho*(U - V)*(-0.062518880701972*U - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
+        Hz = np.sqrt(self.swim_speed*V**2*np.cos(np.radians(theta))/(A**2*B**2*self.swim_speed*np.pi**3*rho*(self.swim_speed - V)*(-0.062518880701972*self.swim_speed - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
         
         return Hz
 
+class simulation():
+    '''Python class object that implements an Agent Basded Model of adult upstream
+    migrating sockeye salmon through a modeled riffle cascade complex'''
+    
+    def __init__(self, model_dir, model_name, crs):
+        '''initialization function that sets up a simulation.'''
+        # model directory and model name
+        self.model_dir = model_dir
+        self.model_name = model_name
+        
+        # coordinate reference system for the model
+        self.crs = crs
+        
+        # create empty geodataframe of agents
+        self.agents = gpd.GeoDataFrame(columns=['id', 'loc', 'vel', 'dir'], geometry='loc', crs= crs) 
+        
+        # create an empty hdf file for results
+        self.hdf = pd.HDFStore(os.path.join(self.model_dir,self.model_name))
+        
+       
+    def HECRAS (self,HECRAS_model):
+        '''Function reads 2D HECRAS model and creates environmental surfaces 
 
+        Parameters
+        ----------
+        HECRAS_model : TYPE
+            DESCRIPTION.
+
+        Returns
+        -------
+        None.
+        '''
+        # Initialization Part 1: Connect to HECRAS model and import environment
+        hdf = h5py.File(HECRAS_model,'r')
+        
+        # Extract Data from HECRAS HDF model
+        print ("Extracting Model Geometry and Results")
+        
+        pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
+        vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-2]
+        vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-2]
+        wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-2]
+        elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
+        
+        # create list of xy tuples
+        geom = list(tuple(zip(pts[:,0],pts[:,1])))
+        
+        # create a dataframe with geom column and observations
+        df = pd.DataFrame.from_dict({'index':np.arange(0,len(pts),1),
+                                     'geom_tup':geom,
+                                     'vel_x':vel_x,
+                                     'vel_y':vel_y,
+                                     'wsel':wsel,
+                                     'elev':elev})
+        
+        # add a geometry column
+        df['geometry'] = df.geom_tup.apply(Point)
+        
+        # convert into a geodataframe
+        gdf = gpd.GeoDataFrame(df,crs = 'EPSG:32604')
+        
+        # remove the tuple column cuz shapefiles are babies
+        gdf.drop(axis = 1, columns = 'geom_tup', inplace = True)
+        
+        print ("Create multidimensional interpolator functions for velocity, wsel, elev")
+        
+        vel_x_interp = LinearNDInterpolator(pts,gdf.vel_x)
+        vel_y_interp = LinearNDInterpolator(pts,gdf.vel_y)
+        wsel_interp = LinearNDInterpolator(pts,gdf.wsel)
+        elev_interp = LinearNDInterpolator(pts,gdf.elev)
+        
+        # first identify extents of image
+        xmin = np.min(pts[:,0])
+        xmax = np.max(pts[:,0])
+        ymin = np.min(pts[:,1])
+        ymax = np.max(pts[:,1])
+        
+        # interpoate velocity, wsel, and elevation at new xy's
+        xint = np.arange(xmin,xmax,1)
+        yint = np.arange(ymax,ymin,-1)
+        xnew, ynew = np.meshgrid(xint,yint, sparse = True)
+        
+        print ("Interpolate Velocity East")
+        vel_x_new = vel_x_interp(xnew, ynew)
+        print ("Interpolate Velocity North")
+        vel_y_new = vel_y_interp(xnew, ynew)
+        print ("Interpolate WSEL")
+        wsel_new = wsel_interp(xnew, ynew)
+        print ("Interpolate bathymetry")
+        elev_new = elev_interp(xnew, ynew)
+        
+        # create a depth raster
+        depth = wsel_new - elev_new
+        
+        print ("Exporting Rasters")
+
+        # create raster properties
+        driver = 'GTiff'
+        width = elev_new.shape[1]
+        height = elev_new.shape[0]
+        count = 1
+        dtype = 'float64'
+        crs = self.crs
+        transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
+        #Affine.translation(np.min(pts[:,0]),np.max(pts[:,1])) * Affine.scale(1,1)
+
+        # write elev raster
+        with rasterio.open(os.path.join(self.model_dir,'elev.tif'),
+                           mode = 'w',
+                           driver = driver,
+                           width = width,
+                           height = height,
+                           count = count,
+                           dtype = 'float64',
+                           crs = crs,
+                           transform = transform) as self.elev_rast:
+            self.elev_rast.write(elev_new,1)
+
+        # write wsel raster
+        with rasterio.open(os.path.join(self.model_dir,'wsel.tif'),
+                           mode = 'w',
+                           driver = driver,
+                           width = width,
+                           height = height,
+                           count = count,
+                           dtype = 'float64',
+                           crs = crs,
+                           transform = transform) as self.wsel_rast:
+            self.wsel_rast.write(wsel_new,1)
+            
+        # write depth raster
+        with rasterio.open(os.path.join(self.model_dir,'depth.tif'),
+                           mode = 'w',
+                           driver = driver,
+                           width = width,
+                           height = height,
+                           count = count,
+                           dtype = 'float64',
+                           crs = crs,
+                           transform = transform) as self.depth_rast:
+            self.depth_rast.write(depth,1)
+
+        # write velocity x raster
+        with rasterio.open(os.path.join(self.model_dir,'vel_x.tif'),
+                           mode = 'w',
+                           driver = driver,
+                           width = width,
+                           height = height,
+                           count = count,
+                           dtype = 'float64',
+                           crs = crs,
+                           transform = transform) as self.vel_x_rast:
+            self.vel_x_rast.write(vel_x_new,1)
+            
+        # write velocity y raster
+        with rasterio.open(os.path.join(self.model_dir,'vel_y.tif'),
+                           mode = 'w',
+                           driver = driver,
+                           width = width,
+                           height = height,
+                           count = count,
+                           dtype = 'float64',
+                           crs = crs,
+                           transform = transform) as self.vel_y_rast:
+            self.vel_y_rast.write(vel_y_new,1)
+        
+        
     
     
         
