@@ -19,7 +19,7 @@ model_dir = r"J:\2819\005\Calcs\ABM\Output"
 HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify input and output model names
-HECRAS_model = 'NuyakukABM2D.p01.hdf'
+HECRAS_model = 'NuyakukABM2D.p02.hdf'
 model_name = 'test.hdf'
 
 # identify the coordinate reference system for the model
@@ -29,3 +29,5 @@ crs = 'EPSG:32604'
 sim = sockeye.simulation(model_dir,model_name,crs)
 sim.HECRAS(os.path.join(HECRAS_dir,HECRAS_model))
 
+# create an array of agents
+#fish = sim.agents(5,model_dir,'Nushugak')

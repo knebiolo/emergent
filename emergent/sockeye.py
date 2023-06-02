@@ -50,7 +50,7 @@ class fish():
     behavior.
     '''
     
-    def __init__(self, ID, ws, basin):
+    def __init__(self, ID, model_dir, basin, starting_box):
         '''initialization function for a sockeye agent.  this function creates
         an agent and parameterizes morphometric parameters from basin specific
         distributions
@@ -90,7 +90,7 @@ class fish():
         # initialize movement parameters
         self.swim_speed = 0.
         self.sog = 0.        # sog = speed over ground
-        self.heading = 0.
+        self.heading = 0.    # direction of travel in radians
         self.drag_coef = 0.
         self.drag = 0.
         self.thrust = 0.
@@ -102,7 +102,7 @@ class fish():
         self.pos = (0.,0.,0.)
         
         # create agent database and write agent parameters 
-        self.hdf = pd.HDFStore(os.path.join(ws,'%s.h5'%('agent_%s.h5'%(ID))))
+        self.hdf = pd.HDFStore(os.path.join(model_dir,'%s.h5'%('agent_%s.h5'%(ID))))
         self.hdf['agent'] = pd.DataFrame.from_dict({'ID':self.ID,
                                                     'sex':self.sex,
                                                     'length':self.length,
@@ -224,9 +224,9 @@ class simulation():
         print ("Extracting Model Geometry and Results")
         
         pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
-        vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-2]
-        vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-2]
-        wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-2]
+        vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
+        vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
+        wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1]
         elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
         
         # create list of xy tuples
@@ -244,10 +244,7 @@ class simulation():
         df['geometry'] = df.geom_tup.apply(Point)
         
         # convert into a geodataframe
-        gdf = gpd.GeoDataFrame(df,crs = 'EPSG:32604')
-        
-        # remove the tuple column cuz shapefiles are babies
-        gdf.drop(axis = 1, columns = 'geom_tup', inplace = True)
+        gdf = gpd.GeoDataFrame(df,crs = self.crs)
         
         print ("Create multidimensional interpolator functions for velocity, wsel, elev")
         
@@ -286,7 +283,6 @@ class simulation():
         width = elev_new.shape[1]
         height = elev_new.shape[0]
         count = 1
-        dtype = 'float64'
         crs = self.crs
         transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
         #Affine.translation(np.min(pts[:,0]),np.max(pts[:,1])) * Affine.scale(1,1)
@@ -300,8 +296,10 @@ class simulation():
                            count = count,
                            dtype = 'float64',
                            crs = crs,
-                           transform = transform) as self.elev_rast:
-            self.elev_rast.write(elev_new,1)
+                           transform = transform) as elev_rast:
+            elev_rast.write(elev_new,1)
+            
+        self.elev_rast = rasterio.open(os.path.join(self.model_dir,'elev.tif'))
 
         # write wsel raster
         with rasterio.open(os.path.join(self.model_dir,'wsel.tif'),
@@ -312,8 +310,11 @@ class simulation():
                            count = count,
                            dtype = 'float64',
                            crs = crs,
-                           transform = transform) as self.wsel_rast:
-            self.wsel_rast.write(wsel_new,1)
+                           transform = transform) as wsel_rast:
+            wsel_rast.write(wsel_new,1)
+            
+        self.wsel_rast = rasterio.open(os.path.join(self.model_dir,'wsel.tif'))
+
             
         # write depth raster
         with rasterio.open(os.path.join(self.model_dir,'depth.tif'),
@@ -324,8 +325,11 @@ class simulation():
                            count = count,
                            dtype = 'float64',
                            crs = crs,
-                           transform = transform) as self.depth_rast:
-            self.depth_rast.write(depth,1)
+                           transform = transform) as depth_rast:
+            depth_rast.write(depth,1)
+            
+        self.depth_rast = rasterio.open(os.path.join(self.model_dir,'depth.tif'))
+
 
         # write velocity x raster
         with rasterio.open(os.path.join(self.model_dir,'vel_x.tif'),
@@ -336,8 +340,11 @@ class simulation():
                            count = count,
                            dtype = 'float64',
                            crs = crs,
-                           transform = transform) as self.vel_x_rast:
-            self.vel_x_rast.write(vel_x_new,1)
+                           transform = transform) as vel_x_rast:
+            vel_x_rast.write(vel_x_new,1)
+            
+        self.vel_x_rast = rasterio.open(os.path.join(self.model_dir,'vel_x.tif'))
+
             
         # write velocity y raster
         with rasterio.open(os.path.join(self.model_dir,'vel_y.tif'),
@@ -348,8 +355,18 @@ class simulation():
                            count = count,
                            dtype = 'float64',
                            crs = crs,
-                           transform = transform) as self.vel_y_rast:
-            self.vel_y_rast.write(vel_y_new,1)
+                           transform = transform) as vel_y_rast:
+            vel_y_rast.write(vel_y_new,1)
+            
+        self.vel_y_rast = rasterio.open(os.path.join(self.model_dir,'vel_y.tif'))
+
+            
+    # def agents(n, model_dir, basin):
+    #     '''method that creates an agent'''
+    #     agents = np.array([])
+    #     for i in np.arange(0,n,1):
+            
+        
         
         
     
