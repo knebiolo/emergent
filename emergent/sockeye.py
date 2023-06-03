@@ -92,7 +92,7 @@ class fish():
         
         # initialize movement parameters
         self.swim_speed = 0.
-        self.sog = 0.        # sog = speed over ground
+        self.sog = self.length/1000 # sog = speed over ground - assume fish maintain 1 body length per second
         self.heading = 0.    # direction of travel in radians
         self.drag_coef = 0.
         self.drag = 0.
@@ -126,8 +126,13 @@ class fish():
         # find the row and column in the direction raster
         row, col = vel_dir.index(x, y)
         
+        # flow direction
+        flow_dir = vel_dir.read(1)[row, col]
         # set direction 
-        self.heading = vel_dir.read(1)[row, col] - np.radians(180)
+        if flow_dir < 0:
+            self.heading = (np.radians(360) + flow_dir) - np.radians(180)
+        else:
+            self.heading = flow_dir - np.radians(180)
         
     def thrust (U,L,f):
         '''Lighthill 1970 thrust equation. '''

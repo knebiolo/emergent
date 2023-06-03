@@ -86,12 +86,12 @@ vel_x_new = vel_x_interp(xnew, ynew)
 print ("Interpolate Velocity North")
 vel_y_new = vel_y_interp(xnew, ynew)
 print ("Interpolate WSEL")
-wsel_new = wsel_interp(xnew, ynew)
+#wsel_new = wsel_interp(xnew, ynew)
 print ("Interpolate bathymetry")
-elev_new = elev_interp(xnew, ynew)
+#elev_new = elev_interp(xnew, ynew)
 
 # create a depth raster
-depth = wsel_new - elev_new
+#depth = wsel_new - elev_new
 
 # calculate velocity magnitude
 vel_mag = np.sqrt((np.power(vel_x_new,2)+np.power(vel_y_new,2)))
