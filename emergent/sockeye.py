@@ -50,7 +50,7 @@ class fish():
     behavior.
     '''
     
-    def __init__(self, ID, model_dir, basin, starting_box):
+    def __init__(self, ID, model_dir, starting_block):
         '''initialization function for a sockeye agent.  this function creates
         an agent and parameterizes morphometric parameters from basin specific
         distributions
@@ -59,7 +59,10 @@ class fish():
             length = mm
             weight = kg
             body depth = mm
-            velocity = cms SOG'''
+            velocity = cms SOG
+            
+        fish are randomly positioned within the starting block, which is passed
+        as a tuple (xmin, xmax, ymin, ymax) '''
             
         # initialization methods
         def sex(self, basin):
@@ -78,10 +81,10 @@ class fish():
             sex of fish'''    
         # initialize morphometric paramters
         self.ID = ID
-        self.sex = sex(basin)
-        self.length = length(basin)
-        self.weight = weight(basin)
-        self.body_depth = body_depth(basin)
+        self.sex = 'F'
+        self.length = 250.
+        self.weight = 2.2
+        self.body_depth = 6.2
         
         # initialize internal states
         self.swim_mode = 'M' # swimming modes, M = migratory, R = refugia, S = station holding
@@ -98,18 +101,34 @@ class fish():
         # initialize the odometer
         self.kcal = 0.
         
-        # position the fish
-        self.pos = (0.,0.,0.)
+        #position the fish within the starting block
+        x = np.random.uniform(starting_block[0],starting_block[1])
+        y = np.random.uniform(starting_block[2],starting_block[3])
+        self.pos = (x,y,0.)
         
         # create agent database and write agent parameters 
         self.hdf = pd.HDFStore(os.path.join(model_dir,'%s.h5'%('agent_%s.h5'%(ID))))
-        self.hdf['agent'] = pd.DataFrame.from_dict({'ID':self.ID,
-                                                    'sex':self.sex,
-                                                    'length':self.length,
-                                                    'weight':self.weight,
-                                                    'body_depth':self.body_depth})
+        self.hdf['agent'] = pd.DataFrame.from_dict({'ID':[self.ID],
+                                                    'sex':[self.sex],
+                                                    'length':[self.length],
+                                                    'weight':[self.weight],
+                                                    'body_depth':[self.body_depth]})
         self.hdf.flush()
-    
+        
+    def initial_heading (self,vel_dir):
+        '''function that sets the initial heading of a fish, inputs are itself
+        and a velocity direction raster.  Use spatial indexing to find direction,
+        then we are -180 degrees.'''
+        
+        # get the x, y position of the agent 
+        x, y = (self.pos[0], self.pos[1])
+        
+        # find the row and column in the direction raster
+        row, col = vel_dir.index(x, y)
+        
+        # set direction 
+        self.heading = vel_dir.read(1)[row, col] - np.radians(180)
+        
     def thrust (U,L,f):
         '''Lighthill 1970 thrust equation. '''
         # density of freshwater assumed to be 1
@@ -180,7 +199,6 @@ class fish():
         B = trail(self.length)    
         
         # now that we have all variables, solve for f
-        #sol1 = -1 * np.sqrt(D*V**2*np.cos(np.radians(theta))/(A**2*B**2*U*np.pi**3*rho*(U - V)*(-0.062518880701972*U - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
         Hz = np.sqrt(self.swim_speed*V**2*np.cos(np.radians(theta))/(A**2*B**2*self.swim_speed*np.pi**3*rho*(self.swim_speed - V)*(-0.062518880701972*self.swim_speed - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
         
         return Hz
@@ -276,6 +294,12 @@ class simulation():
         # create a depth raster
         depth = wsel_new - elev_new
         
+        # calculate velocity magnitude
+        vel_mag = np.sqrt((np.power(vel_x_new,2)+np.power(vel_y_new,2)))
+        
+        # calculate velocity direction in radians
+        vel_dir = np.arctan2(vel_y_new,vel_x_new)
+        
         print ("Exporting Rasters")
 
         # create raster properties
@@ -285,7 +309,6 @@ class simulation():
         count = 1
         crs = self.crs
         transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
-        #Affine.translation(np.min(pts[:,0]),np.max(pts[:,1])) * Affine.scale(1,1)
 
         # write elev raster
         with rasterio.open(os.path.join(self.model_dir,'elev.tif'),
@@ -314,7 +337,6 @@ class simulation():
             wsel_rast.write(wsel_new,1)
             
         self.wsel_rast = rasterio.open(os.path.join(self.model_dir,'wsel.tif'))
-
             
         # write depth raster
         with rasterio.open(os.path.join(self.model_dir,'depth.tif'),
@@ -330,9 +352,8 @@ class simulation():
             
         self.depth_rast = rasterio.open(os.path.join(self.model_dir,'depth.tif'))
 
-
         # write velocity x raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_x.tif'),
+        with rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'),
                            mode = 'w',
                            driver = driver,
                            width = width,
@@ -340,14 +361,13 @@ class simulation():
                            count = count,
                            dtype = 'float64',
                            crs = crs,
-                           transform = transform) as vel_x_rast:
-            vel_x_rast.write(vel_x_new,1)
+                           transform = transform) as vel_dir_rast:
+            vel_dir_rast.write(vel_dir,1)
             
-        self.vel_x_rast = rasterio.open(os.path.join(self.model_dir,'vel_x.tif'))
-
+        self.vel_dir_rast = rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'))
             
         # write velocity y raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_y.tif'),
+        with rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'),
                            mode = 'w',
                            driver = driver,
                            width = width,
@@ -355,16 +375,38 @@ class simulation():
                            count = count,
                            dtype = 'float64',
                            crs = crs,
-                           transform = transform) as vel_y_rast:
-            vel_y_rast.write(vel_y_new,1)
+                           transform = transform) as vel_mag_rast:
+            vel_mag_rast.write(vel_mag,1)
             
-        self.vel_y_rast = rasterio.open(os.path.join(self.model_dir,'vel_y.tif'))
-
+        self.vel_mag_rast = rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'))
+        
+    def create_agents(self, numb_agnts, model_dir, starting_box):
+        '''method that creates a set of agents for simulation'''
+        
+        agents_list = []
+        
+        for i in np.arange(0,numb_agnts,1):
+            # create a fish
+            fishy = fish(i,model_dir, starting_box)
             
-    # def agents(n, model_dir, basin):
-    #     '''method that creates an agent'''
-    #     agents = np.array([])
-    #     for i in np.arange(0,n,1):
+            # set it's initial heading
+            fishy.initial_heading(self.vel_dir_rast)
+            
+            # add it to the output list
+            agents_list.append(fishy)
+            
+            # create a dataframe for this agent 
+            df = pd.DataFrame.from_dict(data = {'id':[i],
+                                                'loc':[Point(fishy.pos)],
+                                                'vel':[fishy.sog],
+                                                'dir':[fishy.heading]},
+                                        orient = 'columns')
+            
+            gdf = gpd.GeoDataFrame(df, geometry='loc', crs= self.crs) 
+            self.agents = pd.concat([self.agents,gdf])
+            
+        return agents_list
+            
             
         
         

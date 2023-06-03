@@ -93,6 +93,11 @@ elev_new = elev_interp(xnew, ynew)
 # create a depth raster
 depth = wsel_new - elev_new
 
+# calculate velocity magnitude
+vel_mag = np.sqrt((np.power(vel_x_new,2)+np.power(vel_y_new,2)))
+
+vel_dir = np.arctan2(vel_y_new,vel_x_new)
+
 
 #%% Write Raster Files
 print ("Exporting Rasters")

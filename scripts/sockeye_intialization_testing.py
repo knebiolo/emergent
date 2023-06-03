@@ -25,9 +25,18 @@ model_name = 'test.hdf'
 # identify the coordinate reference system for the model
 crs = 'EPSG:32604'
 
-# test out sockeye
+# create a starting box - aka where are all the fish starting from?
+bbox = (550328.25,550510.05,6641424.76,6641609.31)
+
+# how many agents in the simulation?
+n = 5
+
+# create a simulation object 
 sim = sockeye.simulation(model_dir,model_name,crs)
+
+# read HECRAS model and create environment rasters
 sim.HECRAS(os.path.join(HECRAS_dir,HECRAS_model))
 
 # create an array of agents
-#fish = sim.agents(5,model_dir,'Nushugak')
+fishes = sim.create_agents(n, model_dir, bbox) 
+
