@@ -20,12 +20,13 @@ HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'test.hdf'
+model_name = 'test'
 
 # identify the coordinate reference system for the model
 crs = 'EPSG:32604'
 
 # create a starting box - aka where are all the fish starting from?
+# W,E,S,N
 bbox = (550328.25,550510.05,6641424.76,6641609.31)
 
 # how many agents in the simulation?
@@ -39,4 +40,7 @@ sim.HECRAS(os.path.join(HECRAS_dir,HECRAS_model))
 
 # create an array of agents
 fishes = sim.create_agents(n, model_dir, bbox) 
+
+# run the model
+sim.run(model_name)
 

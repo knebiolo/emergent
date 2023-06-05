@@ -38,6 +38,9 @@ import rasterio
 from rasterio.transform import Affine
 from shapely import Point, Polygon
 from scipy.interpolate import LinearNDInterpolator, UnivariateSpline
+import matplotlib.animation as manimation
+import matplotlib.pyplot as plt
+from datetime import datetime
     
 # create a sockeye agent 
 class fish():
@@ -114,6 +117,7 @@ class fish():
                                                     'weight':[self.weight],
                                                     'body_depth':[self.body_depth]})
         self.hdf.flush()
+        self.model_dir = model_dir
         
     def initial_heading (self,vel_dir):
         '''function that sets the initial heading of a fish, inputs are itself
@@ -225,7 +229,7 @@ class simulation():
         self.agents = gpd.GeoDataFrame(columns=['id', 'loc', 'vel', 'dir'], geometry='loc', crs= crs) 
         
         # create an empty hdf file for results
-        self.hdf = pd.HDFStore(os.path.join(self.model_dir,self.model_name))
+        self.hdf = pd.HDFStore(os.path.join(self.model_dir,'%s.hdf'%(self.model_name)))
         
        
     def HECRAS (self,HECRAS_model):
@@ -411,6 +415,36 @@ class simulation():
             self.agents = pd.concat([self.agents,gdf])
             
         return agents_list
+    
+    def run(self,model_name):
+        
+        # define metadata for movie
+        FFMpegWriter = manimation.writers['ffmpeg']
+        metadata = dict(title= model_name, artist='Matplotlib',
+                        comment='emergent model run %s'%(datetime.now()))
+        writer = FFMpegWriter(fps=15, metadata=metadata)
+        
+        # initialize background figure
+        n = 1000
+        x = np.linspace(0, 6*np.pi, n)
+        y = np.sin(x)
+        
+        # initialize 
+        fig = plt.figure()
+        
+        # plot the sine wave line
+        sine_line, = plt.plot(x, y, 'b')
+        red_circle, = plt.plot([], [], 'ro', markersize = 10)
+        plt.xlabel('x')
+        plt.ylabel('sin(x)')
+        
+        # Update the frames for the movie
+        with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 100):
+            for i in range(n):
+                x0 = x[i]
+                y0 = y[i]
+                red_circle.set_data(x0, y0)
+                writer.grab_frame()        
             
             
         
