@@ -94,6 +94,7 @@ idx = np.where(masked[0] == zs[0]['max'])
 # compute position of max value
 max_x = mask_x + idx[1][-1] * masked[1][0]
 max_y = mask_y + idx[2][-1] * masked[1][4]
+
 # create a point
 max_elev = Point([max_x,max_y])   
 

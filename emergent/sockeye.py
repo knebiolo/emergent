@@ -36,7 +36,10 @@ import os
 import pandas as pd
 import rasterio
 from rasterio.transform import Affine
+from rasterio.mask import mask
+from rasterstats import zonal_stats
 from shapely import Point, Polygon
+from shapely import affinity
 from scipy.interpolate import LinearNDInterpolator, UnivariateSpline
 import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
@@ -95,11 +98,12 @@ class fish():
         
         # initialize movement parameters
         self.swim_speed = 0.
-        self.sog = self.length/1000 # sog = speed over ground - assume fish maintain 1 body length per second
-        self.heading = 0.    # direction of travel in radians
-        self.drag_coef = 0.
-        self.drag = 0.
-        self.thrust = 0.
+        self.sog = self.length/1000                                            # sog = speed over ground - assume fish maintain 1 body length per second
+        self.heading = 0.                                                      # direction of travel in radians
+        self.drag_coef = 0.                                                    # drag coefficient 
+        self.drag = 0                                                          # computed theoretical drag
+        self.thrust = 0                                                        # computed theoretical thrust Lighthill 
+        self.Hz = 0.                                                           # tail beats per second
         
         # initialize the odometer
         self.kcal = 0.
@@ -108,6 +112,7 @@ class fish():
         x = np.random.uniform(starting_block[0],starting_block[1])
         y = np.random.uniform(starting_block[2],starting_block[3])
         self.pos = (x,y,0.)
+        self.prevPos = self.pos
         
         # create agent database and write agent parameters 
         self.hdf = pd.HDFStore(os.path.join(model_dir,'%s.h5'%('agent_%s.h5'%(ID))))
@@ -138,7 +143,80 @@ class fish():
         else:
             self.heading = flow_dir - np.radians(180)
         
-    def thrust (U,L,f):
+    def rheo_comm (self):
+        '''Function that returns a rheotactic heading command - i.e. where is 
+        the way upstream within this narrow arc in front of me - looking for 
+        lowest velocity'''
+
+        ##########################################
+        # Step 2: Create Sensory Buffer
+        #########################################        
+
+        # create sensory buffer
+        l = self.length * 2
+        
+        # create wedge looking in front of fish 
+        theta = np.radians(np.linspace(0,45,100))
+        arc_x = self.pos[0] + l * np.cos(theta)
+        arc_y = self.pos[1] + l * np.sin(theta)
+        arc_x = np.insert(arc_x,0,self.pos[0])
+        arc_y = np.insert(arc_y,0,self.pos[1])
+        arc = np.column_stack([arc_x, arc_y])
+        arc = Polygon(arc)
+        arc_rot = affinity.rotate(arc,self.heading)
+        
+        arc_gdf = gpd.GeoDataFrame(index = [0],
+                                   crs = self.vel_mag_rast.crs,
+                                   geometry = [arc_rot])
+        
+        ##########################################
+        # Step 2: Mask Velocity Magnitude Surface
+        #########################################
+        
+        # perform mask
+        masked = mask(self.vel_mag_rast,
+                      arc_gdf.loc[0],
+                      all_touched = True,
+                      crop = True)
+        
+        ##############################################
+        # Step 3: Get Cell Center of Highest Velocity
+        ##############################################
+        
+        # get mask origin
+        mask_x = masked[1][2]
+        mask_y = masked[1][5]
+        
+        # get indices of cell in mask with highest elevation
+        zs = zonal_stats(arc_gdf,
+                         self.mag_rast.read(1),
+                         affine = self.mag_vel_rast.transform,
+                         stats=['min'],
+                         all_touched = True)
+        idx = np.where(masked[0] == zs[0]['max'])
+        
+        # compute position of max value
+        min_x = mask_x + idx[1][-1] * masked[1][0]
+        min_y = mask_y + idx[2][-1] * masked[1][4]
+        
+        ##################################################
+        # Step 4: Get Direction (unit vector) To Goal Cell
+        ##################################################
+        
+        # vector of max velocity position relative to position of fish 
+        v = (np.array([min_x,min_y]) - np.array([self.pos[0],self.pos[1]]))   
+         
+        # unit vector                               
+        v_hat = v/np.linalg.norm(v)         
+        
+        self.rheo_comm = np.arctan2(v_hat[1],v_hat[0])
+        
+    def heading_comm(self):
+        '''method arbitrates heading commands returning a new heading'''
+        # TODO - obv. this has to get filled out, for now can the fish get upstream
+        self.heading = self.rheo_comm
+        
+    def thrust (self):
         '''Lighthill 1970 thrust equation. '''
         # density of freshwater assumed to be 1
         rho = 1.0 
@@ -159,18 +237,16 @@ class fish():
         trail = UnivariateSpline(length_dat,edge_dat,k = 1) 
         
         # interpolate A, V, B
-        A = amplitude(L)
-        V = wave(U)
-        B = trail(L) 
+        A = amplitude(self.length)
+        V = wave(self.swim_speed)
+        B = trail(self.length) 
         
         # Calculate thrust
         m = (np.pi * rho * B**2)/4.
-        W = (f * A * np.pi)/1.414
-        w = W * (1 - U/V)
+        W = (self.Hz * A * np.pi)/1.414
+        w = W * (1 - self.swim_speed/V)
             
-        thrust = m * W * w * U - (m * w**2 * U)/(2. * np.cos(np.radians(theta)))
-        
-        return (thrust)
+        self.thrhust = m * W * w * self.swim_speed - (m * w**2 * self.swim_speed)/(2. * np.cos(np.radians(theta)))
     
     def frequency (self):
         ''' Function for tailbeat frequency.  By setting Lighthill (1970) equations 
@@ -208,9 +284,23 @@ class fish():
         B = trail(self.length)    
         
         # now that we have all variables, solve for f
-        Hz = np.sqrt(self.swim_speed*V**2*np.cos(np.radians(theta))/(A**2*B**2*self.swim_speed*np.pi**3*rho*(self.swim_speed - V)*(-0.062518880701972*self.swim_speed - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
+        self.Hz = np.sqrt(self.drag*V**2*np.cos(np.radians(theta))/(A**2*B**2*self.swim_speed*np.pi**3*rho*(self.swim_speed - V)*(-0.062518880701972*self.swim_speed - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
+
+    def swim(self):
+        '''
+
+        '''
+        # TODO incorporate drag and thrust
         
-        return Hz
+        # start movement
+        self.prevPos = self.pos                                          # previous position is now equal to the current position
+
+
+        newX = np.array([self.pos[0] + self.sog * np.cos(self.heading)])       # calculate New X
+        newY = np.array([self.pos[1] + self.sog * np.sin(self.heading)])       # calculate New Y
+        self.pos = np.zeros(3)
+        self.pos = np.array([newX[0],newY[0],0])                         # set current position
+        
 
 class simulation():
     '''Python class object that implements an Agent Basded Model of adult upstream
@@ -230,8 +320,64 @@ class simulation():
         
         # create an empty hdf file for results
         self.hdf = pd.HDFStore(os.path.join(self.model_dir,'%s.hdf'%(self.model_name)))
+    
+    def enviro_import(self,data_dir,surface_type):
+        '''Function imports existing environmental surfaces into new simulation'''
+        if surface_type == 'velocity x':
+            self.vel_x_rast = rasterio.open(data_dir, masked=True)
+        elif surface_type == 'velocity y':
+            self.vel_y_rast = rasterio.open(data_dir, masked=True)
+        elif surface_type == 'depth':
+            self.depth_rast = rasterio.open(data_dir, masked=True)
+        elif surface_type == 'wsel':
+            self.depth_rast = rasterio.open(data_dir, masked=True)
+        elif surface_type == 'elevation':
+            self.elev_rast = rasterio.open(data_dir, masked=True)
+            
+    def vel_surf(self):
+        '''Function calculates velocity magnitude and direction'''
+        # calculate velocity magnitude
+        vel_mag = np.sqrt((np.power(self.vel_x_rast.read(1),2)+np.power(self.vel_y_rast.read(1),2)))
         
-       
+        # calculate velocity direction in radians
+        vel_dir = np.arctan2(self.vel_y_rast.read(1),self.vel_x_rast.read(1))            
+        
+        # create raster properties
+        driver = 'GTiff'
+        width = vel_mag.shape[1]
+        height = vel_mag.shape[0]
+        count = 1
+        crs = self.crs
+        transform = Affine.translation(self.vel_x_rast.bounds[0] - 0.5, self.vel_x_rast.bounds[3] - 0.5) * Affine.scale(1,-1)
+
+        # write velocity x raster
+        with rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'),
+                           mode = 'w',
+                           driver = driver,
+                           width = width,
+                           height = height,
+                           count = count,
+                           dtype = 'float64',
+                           crs = crs,
+                           transform = transform) as vel_dir_rast:
+            vel_dir_rast.write(vel_dir,1)
+            
+        self.vel_dir_rast = rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'))
+            
+        # write velocity y raster
+        with rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'),
+                           mode = 'w',
+                           driver = driver,
+                           width = width,
+                           height = height,
+                           count = count,
+                           dtype = 'float64',
+                           crs = crs,
+                           transform = transform) as vel_mag_rast:
+            vel_mag_rast.write(vel_mag,1)
+            
+        self.vel_mag_rast = rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'))
+        
     def HECRAS (self,HECRAS_model):
         '''Function reads 2D HECRAS model and creates environmental surfaces 
 
@@ -416,7 +562,36 @@ class simulation():
             
         return agents_list
     
-    def run(self,model_name):
+    def ts_log(self, ts):
+        '''method that writes to log at end of timestep'''
+    
+        # first step writes current positions to the projec database
+        #TODO fix this
+        # self.agents['ts'] = np.repeat(ts,len(self.agents))
+        # self.agents.astype(dtype = {'id':np.str}, copy = False)
+        # self.agents.to_hdf(self.hdf,'TS',mode = 'a',format = 'table', append = True)
+        # self.hdf.flush()        
+        
+        # second step creates a new agents geo dataframe
+        self.agents = gpd.GeoDataFrame(columns=['id', 'loc', 'vel', 'dir'],
+                                       geometry='loc',
+                                       crs= self.crs) 
+
+        agent_dict = {'id':[],'loc':[],'vel':[],'dir':[]}
+        
+        for i in self.agents_list: 
+            agent_dict['id'].append(i.ID)
+            agent_dict['loc'].append(Point(i.pos))
+            agent_dict['vel'].append(i.sog)
+            agent_dict['dir'].append(i.heading)
+            
+        # create an agents dataframe 
+        df = pd.DataFrame.from_dict(agent_dict, orient = 'columns')
+        
+        gdf = gpd.GeoDataFrame(df, geometry='loc', crs= self.crs) 
+        self.agents = pd.concat([self.agents,gdf])
+    
+    def run(self, model_name, agents, n):
         
         # define metadata for movie
         FFMpegWriter = manimation.writers['ffmpeg']
@@ -424,35 +599,37 @@ class simulation():
                         comment='emergent model run %s'%(datetime.now()))
         writer = FFMpegWriter(fps=15, metadata=metadata)
         
-        # initialize background figure
-        n = 1000
-        x = np.linspace(0, 6*np.pi, n)
-        y = np.sin(x)
+        self.agents_list = agents
         
         # initialize 
-        fig = plt.figure()
+        fig, ax = plt.subplots(figsize = (10,5))
         
-        # plot the sine wave line
-        sine_line, = plt.plot(x, y, 'b')
-        red_circle, = plt.plot([], [], 'ro', markersize = 10)
-        plt.xlabel('x')
-        plt.ylabel('sin(x)')
+        background = ax.imshow(self.depth_rast.read(1), 
+                               origin = 'upper',
+                               extent = [self.depth_rast.bounds[0],
+                                          self.depth_rast.bounds[2],
+                                          self.depth_rast.bounds[1],
+                                          self.depth_rast.bounds[3]])
+        
+        agent_pts, = plt.plot([], [], marker = 'o', ms = 5, ls = '', color = 'red')
+        
+        plt.xlabel('Easting')
+        plt.ylabel('Northing')
         
         # Update the frames for the movie
-        with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 100):
+        with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
             for i in range(n):
-                x0 = x[i]
-                y0 = y[i]
-                red_circle.set_data(x0, y0)
-                writer.grab_frame()        
-            
-            
-        
-        
-        
-    
-    
-        
+                for agent in agents:
+                    agent.swim()
+                
+                # write frame
+                agent_pts.set_data(self.agents.geometry.x.values, self.agents.geometry.y.values)
+                writer.grab_frame() 
+                
+                # log data to hdf
+                self.ts_log(i)
+                
+                print ('Time Step %s complete'%(i))
 
 # create a simulation function     
     
