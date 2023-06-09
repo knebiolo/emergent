@@ -44,6 +44,8 @@ from scipy.interpolate import LinearNDInterpolator, UnivariateSpline
 import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
 from datetime import datetime
+import warnings
+warnings.filterwarnings("ignore")
     
 # create a sockeye agent 
 class fish():
@@ -143,30 +145,30 @@ class fish():
         else:
             self.heading = flow_dir - np.radians(180)
         
-    def rheo_comm (self):
-        '''Function that returns a rheotactic heading command - i.e. where is 
+    def vel_comm (self, vel_mag_rast):
+        '''Function that returns a lowest velocity heading command - 
         the way upstream within this narrow arc in front of me - looking for 
         lowest velocity'''
 
         ##########################################
-        # Step 2: Create Sensory Buffer
+        # Step 1: Create Sensory Buffer
         #########################################        
 
         # create sensory buffer
-        l = self.length * 2
+        l = (self.length/1000.) * 10
         
         # create wedge looking in front of fish 
-        theta = np.radians(np.linspace(0,45,100))
+        theta = np.radians(np.linspace(-10,10,100))
         arc_x = self.pos[0] + l * np.cos(theta)
         arc_y = self.pos[1] + l * np.sin(theta)
         arc_x = np.insert(arc_x,0,self.pos[0])
         arc_y = np.insert(arc_y,0,self.pos[1])
         arc = np.column_stack([arc_x, arc_y])
         arc = Polygon(arc)
-        arc_rot = affinity.rotate(arc,self.heading)
+        arc_rot = affinity.rotate(arc,np.degrees(self.heading))
         
         arc_gdf = gpd.GeoDataFrame(index = [0],
-                                   crs = self.vel_mag_rast.crs,
+                                   crs = vel_mag_rast.crs,
                                    geometry = [arc_rot])
         
         ##########################################
@@ -174,7 +176,7 @@ class fish():
         #########################################
         
         # perform mask
-        masked = mask(self.vel_mag_rast,
+        masked = mask(vel_mag_rast,
                       arc_gdf.loc[0],
                       all_touched = True,
                       crop = True)
@@ -189,11 +191,12 @@ class fish():
         
         # get indices of cell in mask with highest elevation
         zs = zonal_stats(arc_gdf,
-                         self.mag_rast.read(1),
-                         affine = self.mag_vel_rast.transform,
+                         vel_mag_rast.read(1),
+                         affine = vel_mag_rast.transform,
                          stats=['min'],
                          all_touched = True)
-        idx = np.where(masked[0] == zs[0]['max'])
+        
+        idx = np.where(masked[0] == zs[0]['min'])
         
         # compute position of max value
         min_x = mask_x + idx[1][-1] * masked[1][0]
@@ -209,12 +212,125 @@ class fish():
         # unit vector                               
         v_hat = v/np.linalg.norm(v)         
         
-        self.rheo_comm = np.arctan2(v_hat[1],v_hat[0])
+        self.min_velocity_heading = np.arctan2(v_hat[1],v_hat[0])
         
-    def heading_comm(self):
-        '''method arbitrates heading commands returning a new heading'''
+    def rheo_comm (self,vel_dir):
+        '''function rheotactic heading command.  
+        
+        Use spatial indexing to current find direction, heading is -180 degrees.'''
+        
+        # get the x, y position of the agent 
+        x, y = (self.pos[0], self.pos[1])
+        
+        # find the row and column in the direction raster
+        row, col = vel_dir.index(x, y)
+        
+        # flow direction
+        flow_dir = vel_dir.read(1)[row, col]
+        # set direction 
+        if flow_dir < 0:
+            heading = (np.radians(360) + flow_dir) - np.radians(180)
+        else:
+            heading = flow_dir - np.radians(180)
+        
+        return heading
+        
+    def shallow_comm(self, depth_rast):
+        '''
+
+        Function finds all cells that are too shallow within the sensory buffer
+        and then calculates their inverse gravitational potential.  Then adds up 
+        all forces to produce the sum total repulsive force.
+        '''
+        fish = Point(self.pos)
+        
+        # create sensory buffer
+        l = (self.length/1000.) * 2
+        
+        # create a sensory buffer that is 2 fish lengths
+        sensory = fish.buffer(2 * l)
+        
+        # make a geopandas geodataframe of sensory buffer
+        sense_gdf = gpd.GeoDataFrame(index = [0],
+                                     crs = depth_rast.crs,
+                                     geometry = [sensory])
+    
+        # perform mask
+        masked = mask(depth_rast,sense_gdf.loc[0],all_touched = True, crop = True)
+        
+        # get mask origin
+        mask_x = masked[1][2]
+        mask_y = masked[1][5]
+
+        # calculate max depth 
+        min_depth = (self.body_depth * 2.) / 100.        
+        
+        # get indices of those cells shallower than min depth
+        idxs = np.where(masked[0] < min_depth)
+        
+        # get position of fish
+        fpos = np.array(self.pos[:2])
+        
+        repArr = []
+        
+        # if there are shallow cells, loop over indices and grab point
+        if len(idxs[1]) > 0:
+            for i in idxs:
+                # get position of cell 
+                idx_x = mask_x + idxs[1][-1] * masked[1][0]
+                idx_y = mask_y + idxs[2][-1] * masked[1][4]
+                
+                # vector of index relative to position of fish 
+                v = (np.array([self.pos[0],self.pos[1]]) - np.array([idx_x,idx_y]))   
+                 
+                # unit vector                               
+                v_hat = v/np.linalg.norm(v)  
+                
+                rep = (self.weight * 1000 * v_hat)/(np.linalg.norm(v)**2)
+            
+            repArr = np.sum(np.nan_to_num(np.array(repArr)),axis = 0)
+        
+        else:
+            repArr = np.array([0., 0.])
+        
+        return np.arctan2(repArr[1],repArr[0])
+       
+    def arbitrate(self,vel_mag_rast, depth_rast, vel_dir_rast):
+        '''method arbitrates heading commands returning a new heading
+        
+        going to give Reynolds 1987 a shot - we only have so many fucks, the fish
+        can only change heading by 180'''
         # TODO - obv. this has to get filled out, for now can the fish get upstream
-        self.heading = self.rheo_comm
+        
+        max_delta_heading = 90
+        rheotaxis = self.rheo_comm(vel_mag_rast)
+        shallow = self.shallow_comm(depth_rast)
+        
+        # calculate the change in current heading the result of rheotaxis and shallow 
+        curr_heading = self.heading
+        delta_rheo = curr_heading - rheotaxis
+        delta_shallow = curr_heading - shallow
+        
+        if delta_shallow > max_delta_heading:
+            shallow_weight = 1.
+            rheo_weight = 0.
+        elif delta_rheo + delta_shallow > max_delta_heading:
+            shallow_weight = delta_shallow/max_delta_heading
+            rheo_weight = (max_delta_heading - delta_shallow)/max_delta_heading
+        else:
+            shallow_weight = 1.
+            rheo_weight = 1.
+            
+        self.heading = np.sum([shallow * shallow_weight, rheotaxis * rheo_weight])/np.sum([shallow_weight,rheo_weight])
+            
+        
+
+        # if len(shallow) > 0:
+        #     self.heading = shallow
+        # else:
+        #     self.heading = rheotaxis 
+        
+        #self.heading = self.rheotaxis
         
     def thrust (self):
         '''Lighthill 1970 thrust equation. '''
@@ -597,7 +713,7 @@ class simulation():
         FFMpegWriter = manimation.writers['ffmpeg']
         metadata = dict(title= model_name, artist='Matplotlib',
                         comment='emergent model run %s'%(datetime.now()))
-        writer = FFMpegWriter(fps=15, metadata=metadata)
+        writer = FFMpegWriter(fps=30, metadata=metadata)
         
         self.agents_list = agents
         
@@ -620,6 +736,9 @@ class simulation():
         with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
             for i in range(n):
                 for agent in agents:
+                    agent.arbitrate(vel_mag_rast = self.vel_mag_rast, 
+                                    depth_rast = self.depth_rast,
+                                    vel_dir_rast = self.vel_dir_rast)
                     agent.swim()
                 
                 # write frame
@@ -630,6 +749,7 @@ class simulation():
                 self.ts_log(i)
                 
                 print ('Time Step %s complete'%(i))
+        writer.finish()
 
 # create a simulation function     
     
