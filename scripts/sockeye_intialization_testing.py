@@ -54,5 +54,5 @@ sim.vel_surf()
 fishes = sim.create_agents(n, model_dir, bbox) 
 
 #%% Run the model
-sim.run(model_name, fishes, 1000)
+sim.run(model_name, fishes, 3600)
 
