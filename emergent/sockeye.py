@@ -228,20 +228,10 @@ class fish():
         # get velocity direction
         vel_dir = vel_dir_rast.read(1)[row, col] - np.radians(180)
         
-        # if vel_dir < 0:
-        #     vel_dir = (np.radians(360) + vel_dir) - np.radians(180)
-        # else:
-        #     vel_dir = vel_dir - np.radians(180)
-        
         v_hat = np.array([np.cos(vel_dir), np.sin(vel_dir)])
-        
-        # create unit vector        
-        # v_hat = v/np.linalg.norm(v)
     
         # calculate attractive force
-        #rheotaxis = np.negative((1000 * v_hat)/2**2)
         rheotaxis = (self.weight * 1000 * v_hat)/2**2
-        
         
         return rheotaxis
         
@@ -310,9 +300,7 @@ class fish():
                 rep = (1000 * v_hat)/(np.linalg.norm(v)**2)
                 
                 repArr.append(rep)
-                    
-        
-                    
+                            
             # sum all repulsive forces
             repArr = np.sum(np.nan_to_num(np.array(repArr)),axis = 0)
             #return np.arctan2(repArr[1],repArr[0])
@@ -344,31 +332,6 @@ class fish():
         
         # change heading
         self.heading = heading
-        
-        # if np.isnan(shallow):
-        #     shallow_weight = 0.
-        #     rheo_weight = 1.
-            
-        #     self.heading = rheotaxis
-            
-        # else:
-        #     if delta_shallow > max_delta_heading:
-        #         shallow_weight = 1.
-        #         rheo_weight = 0.
-        #     elif delta_rheo + delta_shallow > max_delta_heading:
-        #         shallow_weight = delta_shallow/max_delta_heading
-        #         rheo_weight = (max_delta_heading - delta_shallow)/max_delta_heading
-        #     else:
-        #         shallow_weight = 1.
-        #         rheo_weight = 1.
-            
-        #     self.heading = np.sum([shallow * shallow_weight, rheotaxis * rheo_weight])/np.sum([shallow_weight,rheo_weight])
-        # if len(shallow) > 0:
-        #     self.heading = shallow
-        # else:
-        #     self.heading = rheotaxis 
-        
-        #self.heading = self.rheotaxis
         
     def thrust (self):
         '''Lighthill 1970 thrust equation. '''
@@ -455,7 +418,6 @@ class fish():
         self.pos = np.zeros(3)
         self.pos = np.array([newX[0],newY[0],0])                         # set current position
         
-
 class simulation():
     '''Python class object that implements an Agent Basded Model of adult upstream
     migrating sockeye salmon through a modeled riffle cascade complex'''
@@ -788,6 +750,5 @@ class simulation():
                 
                 print ('Time Step %s complete'%(i))
         writer.finish()
-
-# create a simulation function     
+ 
     
