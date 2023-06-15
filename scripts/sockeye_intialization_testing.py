@@ -22,7 +22,7 @@ HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'test'
+model_name = 'test_4'
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
@@ -33,7 +33,16 @@ crs = 'EPSG:32604'
 bbox = (550328.25,550510.05,6641424.76,6641609.31)
 
 # how many agents in the simulation?
-n = 5
+n = 15
+
+# how many timesteps in the model?
+ts = 9000
+
+# what is the delta t
+dt = 1.
+
+# what is the water temp?
+water_temp = 20.
 
 #%% create a simulation object 
 sim = sockeye.simulation(model_dir,model_name,crs)
@@ -51,8 +60,9 @@ sim.enviro_import(os.path.join(model_dir,'elev.tif'),'elevation')
 sim.vel_surf()
 
 #%% Create an array of agents
-fishes = sim.create_agents(n, model_dir, bbox) 
+fishes = sim.create_agents(n, model_dir, bbox, water_temp) 
 
 #%% Run the model
-sim.run(model_name, fishes, 9000)
+sim.run(model_name, fishes, ts, dt)
 
+ 

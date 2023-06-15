@@ -30,10 +30,10 @@ import matplotlib.pyplot as plt
 
 # define import values - note units!!
 length = 20 #cm
-water_vel = np.array([0.75,1]) #meters/sec
+water_vel = np.array([0.75,1.]) #meters/sec
 water_temp = 20 #deg C
 species = 'sockeye'
-fish_vel = np.array([2,1]) #meters/sec
+fish_vel = np.array([-0.75,-1.]) #meters/sec
 
 # identify workspaces
 inputWS = r"J:\2819\005\Calcs\ABM\Data\\"

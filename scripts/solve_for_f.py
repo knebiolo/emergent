@@ -159,11 +159,13 @@ def frequency (U,L,D):
 #%% Part 4: Validation
 # calculate thrust
 vthrust = np.vectorize(thrust)
-dat['thrust'] =  vthrust(dat.U,dat.Length,dat.f)
+dat['thrust_erg_per_s'] = vthrust(dat.U,dat.Length,dat.f)
+dat['thrust_Nm'] = dat.thrust_erg_per_s / 10000000. 
+dat['thrust_N'] = dat.thrust_Nm / (dat.Length / 100.)
 
 # calculate frequency
 vfrequency = np.vectorize(frequency)
-dat['freq'] = vfrequency(dat.U,dat.Length,dat.thrust)[1]
+dat['freq'] = vfrequency(dat.U,dat.Length,dat.thrust_erg_per_s)[1]
 
 
 
