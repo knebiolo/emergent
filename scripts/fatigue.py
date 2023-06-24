@@ -69,18 +69,19 @@ int_recover = recovery(secs)
 '''variables are exogenous and will be properties of an agent class object,
 therefore instead of passing all variables we will just pass self'''
 
-# use American Shad as surrogate for now
-max_U = 7.2
-a_p = 10.7
-b_p = -1.0
-a_s = 6.16
-b_s = -0.33
+# Values for Sockeye digitized from Bret 1964
+max_s_U = 2.77  # maximum sustained swim speed
+max_p_U = 4.43  # maximum prolonged swim speed
+a_p = 8.643     # prolonged intercept
+b_p = -2.0894   # prolonged slope
+a_s = 0.1746    # sprint intercept
+b_s = -0.1806   # spring slope
 
 # swimming mode
 mode = 'sustained' # sustained, prolonged, sprint, or holding 
 
 # current and previous swim speed - if swim speed changes so does rate of fatigue
-swim_speed = 2. 
+swim_speed = 3.7 
 
 # current battery level
 batt = 1.
@@ -107,24 +108,23 @@ batt_arr = np.zeros(3600)
 mode_arr = np.repeat('',3600)
 
 for t in np.arange(0,3600,1):
-    # fish is moving and behavior may or may not be aneorbic
+    #swim_speed = np.random.uniform(max_s_U - 1.,max_p_U + 1.,1)[0]
+    
+    # fish is not station holding and battery above critical state
     if batt > 0.1 and mode != 'holding':
-        # # make things interesting, throw a random swim speed
-        swim_speed = np.random.randint(1,10,1)[0]
-        
-        # calculate ttf
-        if 4 < swim_speed <= max_U:
+
+        # calculate ttf at current swim speed
+        if max_s_U < swim_speed <= max_p_U:
             # reset stopwatch
             stopwatch = 0.0
             
             # set swimming mode
             mode = 'prolonged'
             
-            # calculate time to fatigue at current swim speed
-            ttf = np.exp(a_p + swim_speed * b_p)
-            fuck
-            
-        elif swim_speed > max_U:
+            # calculate time to fatigue at current swim speed - Brett 1964 was minutes!
+            ttf = 10. ** (a_p + swim_speed * b_p) * 60.
+    
+        elif swim_speed > max_p_U:
             # reset stopwatch
             stopwatch = 0.0
             
@@ -132,7 +132,7 @@ for t in np.arange(0,3600,1):
             mode = 'sprint'
             
             # calculate time to fatigue at current swim speed
-            ttf = np.exp(a_s + swim_speed * b_s)
+            ttf = 10. ** (a_s + swim_speed * b_s) * 60.
             
         else:
             mode = 'sustained'
@@ -156,7 +156,7 @@ for t in np.arange(0,3600,1):
             # stopwatch
             stopwatch = stopwatch + dt
             
-            ttf = 1
+
             
         # take into account the time that has already past - that's now how long a fish has
         ttf0 = ttf - ttfr
@@ -226,7 +226,7 @@ for t in np.arange(0,3600,1):
             recharge = batt
             
             # set swim speed to something reasonable
-            swim_speed = 3.
+            #swim_speed = 3.
  
     # insert into array
     batt_arr[t] = batt

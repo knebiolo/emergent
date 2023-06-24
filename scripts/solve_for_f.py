@@ -49,6 +49,7 @@ R = Reals
 
 # Solve for frequency algebraicly with sympy.solveset
 print (solveset(Eq(lhs,simplify(rhs)),f,R))
+#print (solveset(Eq(lhs,simplify(rhs)),U,R))
 
 #%% Part 2: Fit functions to Webb 1975
 
@@ -90,10 +91,10 @@ def thrust (U,L,f):
     
     # sockeye parameters (Webb 1975, Table 20)
     length_dat = np.array([5.,10.,15.,20.,25.,30.,40.,50.,60.])
-    speed_dat = np.array([37.4,58.,75.1,90.1,104.,116.,140.,161.,181.])
-    amp_dat = np.array([1.06,2.01,3.,4.02,4.91,5.64,6.78,7.67,8.4])
+    speed_dat = np.array([37.4,58.,75.1,90.1,104.,116.,140.,161.,181.]) /100.
+    amp_dat = np.array([1.06,2.01,3.,4.02,4.91,5.64,6.78,7.67,8.4]) / 100.
     wave_dat = np.array([53.4361,82.863,107.2632,131.7,148.125,166.278,199.5652,230.0044,258.3])
-    edge_dat = np.array([1.,2.,3.,4.,5.,6.,8.,10.,12.])
+    edge_dat = np.array([1.,2.,3.,4.,5.,6.,8.,10.,12.]) / 100.
     
     # fit univariate spline
     amplitude = interpolate.UnivariateSpline(length_dat,amp_dat,k = 2) 
@@ -135,10 +136,10 @@ def frequency (U,L,D):
     
     # sockeye parameters (Webb 1975, Table 20)
     length_dat = np.array([5.,10.,15.,20.,25.,30.,40.,50.,60.])
-    speed_dat = np.array([37.4,58.,75.1,90.1,104.,116.,140.,161.,181.])
-    amp_dat = np.array([1.06,2.01,3.,4.02,4.91,5.64,6.78,7.67,8.4])
+    speed_dat = np.array([37.4,58.,75.1,90.1,104.,116.,140.,161.,181.]) / 100.
+    amp_dat = np.array([1.06,2.01,3.,4.02,4.91,5.64,6.78,7.67,8.4]) / 100.
     wave_dat = np.array([53.4361,82.863,107.2632,131.7,148.125,166.278,199.5652,230.0044,258.3])
-    edge_dat = np.array([1.,2.,3.,4.,5.,6.,8.,10.,12.])
+    edge_dat = np.array([1.,2.,3.,4.,5.,6.,8.,10.,12.]) / 100.
     
     # fit univariate spline
     amplitude = interpolate.UnivariateSpline(length_dat,amp_dat,k = 2) 

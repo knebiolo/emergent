@@ -40,7 +40,7 @@ from rasterio.mask import mask
 from rasterstats import zonal_stats
 from shapely import Point, Polygon
 from shapely import affinity
-from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d
+from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline
 from scipy.optimize import curve_fit
 import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
@@ -102,17 +102,33 @@ class fish():
         self.depth = 0.
         
         # initialize internal states
-        self.swim_mode = 'M' # swimming modes, M = migratory, R = refugia, S = station holding
-        self.battery = 1.
+        recover = pd.read_csv("../data/recovery.csv")
+        recover['Seconds'] = recover.Minutes * 60.
+        self.recovery = CubicSpline(recover.Seconds,recover.Recovery,extrapolate = True,)
+        self.swim_behav = 'migratory'# swimming behavior, migratory, refugia, station holding
+        self.swim_mode = 'sustained' # swimming mode, prolonged, sprint, or sustained
+        self.battery = 1.            # at start of simulation battery is full
+        self.recharge = 1.           # recharge state - initial battery drain has recharge state of 1.
+        self.recover_stopwatch = 0.0 # total recovery time    
+        self.ttfr = 0.0              # running time to fatigue in seconds
+        del recover
+        
+        # Time to Fatigue values for Sockeye digitized from Bret 1964
+        self.max_s_U = 2.77  # maximum sustained swim speed
+        self.max_p_U = 4.43  # maximum prolonged swim speed
+        self.a_p = 8.643     # prolonged intercept
+        self.b_p = -2.0894   # prolonged slope
+        self.a_s = 0.1746    # sprint intercept
+        self.b_s = -0.1806   # spring slope
         
         # initialize movement parameters
-        self.swim_speed = 0.
-        self.sog = self.length/1000                                            # sog = speed over ground - assume fish maintain 1 body length per second
-        self.heading = 0.                                                      # direction of travel in radians
-        self.drag_coef = 0.                                                    # drag coefficient 
-        self.drag = 0                                                          # computed theoretical drag
-        self.thrust = 0                                                        # computed theoretical thrust Lighthill 
-        self.Hz = 0.                                                           # tail beats per second
+        self.sog = self.length/1000  # sog = speed over ground - assume fish maintain 1 body length per second
+        self.swim_speed = self.length/1000        # set initial swim speed
+        self.heading = 0.            # direction of travel in radians
+        self.drag_coef = 0.          # drag coefficient 
+        self.drag = 0.               # computed theoretical drag
+        self.thrust = 0.             # computed theoretical thrust Lighthill 
+        self.Hz = 0.                 # tail beats per second
         
         # initialize the odometer
         self.kcal = 0.
@@ -120,7 +136,7 @@ class fish():
         #position the fish within the starting block
         x = np.random.uniform(starting_block[0],starting_block[1])
         y = np.random.uniform(starting_block[2],starting_block[3])
-        self.pos = (x,y,0.)
+        self.pos = (x,y)
         self.prevPos = self.pos
         
         # create agent database and write agent parameters 
@@ -332,18 +348,31 @@ class fish():
     def arbitrate(self,vel_mag_rast, depth_rast, vel_dir_rast):
         '''method arbitrates heading commands returning a new heading
         
-        we adding up forces now'''
+        Depending on overall behavioral mode, fish cares about different inputs'''
         
         # TODO - obv. this has to get filled out, for now can the fish get upstream
         
         rheotaxis = self.rheo_comm(vel_dir_rast)
         shallow = self.shallow_comm(depth_rast)
 
-        # create a heading vector - based on input from sensory cues
-        head_vec = rheotaxis + shallow
+        # if fish is actively migrating
+        if self.swim_behav == 'migratory':
+            # create a heading vector - based on input from sensory cues
+            head_vec = rheotaxis + shallow
+        
+        # else if fish is seeking refugia
+        elif self.swim_behav == 'refugia':
+            # create a heading vector - based on input from sensory cues
+            head_vec = rheotaxis + shallow
+        
+        # otherwise
+        else:
+            # create a heading vector - based on input from sensory cues
+            head_vec = rheotaxis + shallow
         
         # convert into preferred heading for timestep
         heading = np.arctan2(head_vec[1],head_vec[0])
+
         
         # change heading
         self.heading = heading
@@ -356,12 +385,16 @@ class fish():
         # theta that produces cos(theta) = 0.85
         theta = 32.
         
-        # sockeye parameters (Webb 1975, Table 20)
-        length_dat = np.array([5.,10.,15.,20.,25.,30.,40.,50.,60.])
-        speed_dat = np.array([37.4,58.,75.1,90.1,104.,116.,140.,161.,181.])
-        amp_dat = np.array([1.06,2.01,3.,4.02,4.91,5.64,6.78,7.67,8.4])
-        wave_dat = np.array([53.4361,82.863,107.2632,131.7,148.125,166.278,199.5652,230.0044,258.3])
-        edge_dat = np.array([1.,2.,3.,4.,5.,6.,8.,10.,12.])
+        # convert to units required for model
+        length_cm = self.length/1000 * 100.
+        swim_speed_cms = self.swim_speed * 100.
+        
+        # sockeye parameters (Webb 1975, Table 20) units in CM!!! FUCK
+        length_dat = np.array([5.,10.,15.,20.,25.,30.,40.,50.,60.]) 
+        speed_dat = np.array([37.4,58.,75.1,90.1,104.,116.,140.,161.,181.]) 
+        amp_dat = np.array([1.06,2.01,3.,4.02,4.91,5.64,6.78,7.67,8.4]) 
+        wave_dat = np.array([53.4361,82.863,107.2632,131.7,148.125,166.278,199.5652,230.0044,258.3]) 
+        edge_dat = np.array([1.,2.,3.,4.,5.,6.,8.,10.,12.]) 
         
         # fit univariate spline
         amplitude = UnivariateSpline(length_dat,amp_dat,k = 2) 
@@ -369,18 +402,21 @@ class fish():
         trail = UnivariateSpline(length_dat,edge_dat,k = 1) 
         
         # interpolate A, V, B
-        A = amplitude(self.length)
-        V = wave(self.swim_speed)
-        B = trail(self.length) 
+        A = amplitude(length_cm)
+        V = wave(swim_speed_cms)
+        B = trail(length_cm) 
         
         # Calculate thrust
         m = (np.pi * rho * B**2)/4.
         W = (self.Hz * A * np.pi)/1.414
-        w = W * (1 - self.swim_speed/V)
-            
-        thrust_erg_s = m * W * w * self.swim_speed - (m * w**2 * self.swim_speed)/(2. * np.cos(np.radians(theta)))
+        w = W * (1 - swim_speed_cms/V)
+        
+        # calculate thrust 
+        thrust_erg_s = m * W * w * swim_speed_cms - (m * w**2 * swim_speed_cms)/(2. * np.cos(np.radians(theta)))
         thrust_Nm = thrust_erg_s / 10000000.
-        self.thrust = thrust_Nm / (self.length/1000.)
+        thrust_N = thrust_Nm / (self.length/1000.)
+        self.thrust = np.array([thrust_N * np.cos(self.heading), 
+                                thrust_N * np.sin(self.heading)]) #meters/sec
         
     def frequency (self):
         ''' Function for tailbeat frequency.  By setting Lighthill (1970) equations 
@@ -400,6 +436,10 @@ class fish():
         # theta that produces cos(theta) = 0.85
         theta = 32.
         
+        # convert to units required for model
+        length_cm = self.length/1000 * 100.
+        swim_speed_cms = self.swim_speed * 100.
+        
         # sockeye parameters (Webb 1975, Table 20)
         length_dat = np.array([5.,10.,15.,20.,25.,30.,40.,50.,60.])
         speed_dat = np.array([37.4,58.,75.1,90.1,104.,116.,140.,161.,181.])
@@ -413,12 +453,15 @@ class fish():
         trail = UnivariateSpline(length_dat,edge_dat,k = 1) 
         
         # interpolate A, V, B
-        A = amplitude(self.length)
-        V = wave(self.swim_speed)
-        B = trail(self.length)    
+        A = amplitude(length_cm)
+        V = wave(swim_speed_cms)
+        B = trail(length_cm)  
+        
+        # convert vector drag to scalar in units of erg/s
+        drag = np.linalg.norm(self.drag) * (self.length/1000) * 10000000.
         
         # now that we have all variables, solve for f
-        self.Hz = np.sqrt(self.drag*V**2*np.cos(np.radians(theta))/(A**2*B**2*self.swim_speed*np.pi**3*rho*(self.swim_speed - V)*(-0.062518880701972*self.swim_speed - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
+        self.Hz = np.sqrt(drag*V**2*np.cos(np.radians(theta))/(A**2*B**2*swim_speed_cms*np.pi**3*rho*(swim_speed_cms - V)*(-0.062518880701972*swim_speed_cms - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
 
     def drag_fun (self):
         """
@@ -441,10 +484,11 @@ class fish():
         """
         
         # define import values - note units!!
-        self.length = 20 #cm
+        
         water_vel = np.array([self.x_vel,self.y_vel])
-        fish_vel = np.array([self.swim_speed * np.cos(self.heading), 
-                             self.swim_speed * np.sin(self.heading)]) #meters/sec
+        
+        fish_vel = np.array([self.sog * np.cos(self.heading), 
+                             self.sog * np.sin(self.heading)]) #meters/sec
         
 
         
@@ -488,7 +532,7 @@ class fish():
         
         # calculate Reynold's number
         def calc_Reynolds(length, visc, water_vel):
-            length_m = length / 100
+            length_m = length / 1000
             return water_vel * length_m / visc
         
         #TODO check to make sure length in cm correct
@@ -503,7 +547,7 @@ class fish():
                 return 10 ** (a + b*np.log10(length))
             return np.nan
         
-        surface_area = calc_surface_area(self.length, 'sockeye')
+        surface_area = calc_surface_area((self.length/1000.) * 100., 'sockeye')
         
         # set up drag coefficient vs Reynolds number dataframe
         drag_coeffs_df = pd.DataFrame(data = {'Reynolds Number': [2.5e4, 5.0e4, 7.4e4, 9.9e4, 1.2e5, 1.5e5, 1.7e5, 2.0e5],
@@ -522,47 +566,182 @@ class fish():
         # calculate drag!
         self.drag = -0.5 * (dens * 1000) * (surface_area / 100**2) * drag_coeff * (np.linalg.norm(fish_vel - water_vel)**2)*(fish_vel/np.linalg.norm(fish_vel))
     
-    def new_swim_speed (self):
+    def initial_swim_speed (self):
         '''Function calculates swim speed required to overcome current water 
         velocities and maintain speed over ground'''
         
         # get vector components of water velocity
-        water_vel = np.array([self.x_vel,self.y_vel])
+        water_vel = np.linalg.norm(np.array([self.x_vel,self.y_vel]))
         
         # get vector components of speed over ground
         ideal_vel = np.array([self.sog * np.cos(self.heading), 
                              self.sog * np.sin(self.heading)]) #meters/sec
         
-        # calculate swim speed to maintain current sog
-        fish_vel = ideal_vel + water_vel
+        # make sure fish is capable of this swim speed - if not we're kneecapping it
+        if self.swim_behav == 'refugia' or self.swim_behav == 'station holding':
+            fish_vel = self.max_s_U
+            #TODO is this where we can incorporate tail beats and thrust??
+            
+        else:        
+            # calculate swim speed to maintain current sog
+            fish_vel = self.sog + water_vel
         
         # calculate new speed over ground 
-        self.swim_speed = np.linalg.norm(fish_vel)
+        #self.swim_speed = np.linalg.norm(fish_vel)
+        self.swim_speed = fish_vel
 
     def swim(self, dt):
-        '''
-
-        '''
-        # TODO incorporate drag and thrust
+        '''Method propels a fish forward'''
         
         # calculate surge
-        surge = self.thrust - self.drag
+        surge = self.thrust + self.drag
+        acc = surge/self.weight
         
-        # solve for acceleration 
-        acc = surge / self.weight
+        fish_vel = np.array([self.swim_speed * np.cos(self.heading), 
+                             self.swim_speed * np.sin(self.heading)]) #meters/sec
         
-        self.swim_speed = self.swim_speed + acc * dt
+        fish_vel + acc * dt
         
         # start movement
-        self.prevPos = self.pos                                          
-
-        # calculate new x and y
-        newX = np.array([self.pos[0] + self.sog * np.cos(self.heading)])       
-        newY = np.array([self.pos[1] + self.sog * np.sin(self.heading)])       
+        self.prevPos = self.pos                                           
         
         # set new position
-        self.pos = np.zeros(3)
-        self.pos = np.array([newX[0],newY[0],0])                         
+        self.pos = self.prevPos + fish_vel * dt
+
+    def fatigue(self):    
+        '''Method tracks battery levels and assigns swimming modes'''
+        
+        # Values for Sockeye digitized from Bret 1964
+        dt = 1.
+
+        # fish is not station holding and battery above critical state
+        if self.battery > 0.1 and self.swim_behav != 'station holding':
+
+            # calculate ttf at current swim speed
+            if self.max_s_U < self.swim_speed <= self.max_p_U:
+                # reset stopwatch
+                self.recover_stopwatch = 0.0
+                
+                # set swimming mode
+                self.swim_mode = 'prolonged'
+                
+                # calculate time to fatigue at current swim speed - Brett 1964 was minutes!
+                ttf = 10. ** (self.a_p + self.swim_speed * self.b_p) * 60.
+        
+            elif self.swim_speed > self.max_p_U:
+                # reset stopwatch
+                self.recover_stopwatch = 0.0
+                
+                # set swimming mode
+                self.swim_mode = 'sprint'
+                
+                # calculate time to fatigue at current swim speed
+                ttf = 10. ** (self.a_s + self.swim_speed * self.b_s) * 60.
+                
+            else:
+                self.swim_mode = 'sustained'
+                
+                # calculate recovery % at beginning of time step
+                rec0 = self.recovery(self.recover_stopwatch) / 100.
+                
+                # make sure realistic value - also can't divide by 0
+                if rec0 < 0.0:
+                    rec0 = 0.0
+                    
+                # calculate recovery % at end of time step
+                rec1 = self.recovery(self.recover_stopwatch + dt) / 100. 
+                
+                if rec1 > 1.0:
+                    rec1 = 1.0
+                
+                # calculate percent increase
+                per_rec = rec1 - rec0
+                
+                # stopwatch
+                self.recover_stopwatch = self.recover_stopwatch + dt
+                
+                ttf = np.nan
+                
+            if ttf != np.nan:
+
+                # take into account the time that has already past - that's now how long a fish has
+                ttf0 = ttf - self.ttfr
+            
+                # calculate time to fatigue at end of time step
+                ttf1 = ttf0 - dt
+                
+                # add to running timer
+                self.ttfr = self.ttfr + dt
+                
+                if self.swim_mode != 'sustained':
+                    # calculate battery level
+                    self.battery = self.recharge * ttf1/ttf
+                    
+                    # make sure battery drain is reasonable
+                    if self.battery < 0.0:
+                        self.battery = 0.0
+                else:
+                    # calculate battery level
+                    self.battery = self.battery + per_rec    
+                    
+                    # make sure battery recharge is reasonable
+                    if self.battery > 1.0:
+                        self.battery = 1.0
+            
+            # set swimming behavior based on battery level
+            if self.battery <= 0.1:
+                self.swim_behav = 'station holding'
+                self.swim_mode = 'sustained'
+                self.sog = 0.
+                self.ttfr = 0.
+                
+            elif 0.1 < self.battery <= 0.3:
+                self.swim_behav = 'refugia'
+                self.swim_mode = 'sustained'
+                self.sog = 0.02
+
+            else:
+                self.swim_behav = 'migratory'
+                self.sog = self.length/1000.
+                
+        # fish is station holding and recovering    
+        else:
+            ''' recovery is based on how long a fish has been in a recovery state'''
+            # calculate recovery % at beginning of time step
+            rec0 = self.recovery(self.recover_stopwatch) / 100.
+            
+            # make sure realistic value - also can't divide by 0
+            if rec0 < 0.0:
+                rec0 = 0.0
+                
+            # calculate recovery % at end of time step
+            rec1 = self.recovery(self.recover_stopwatch + dt) / 100. 
+            
+            if rec1 > 1.0:
+                rec1 = 1.0
+            
+            # calculate percent increase
+            per_rec = rec1 - rec0
+            
+            # calculate battery level
+            self.battery = self.battery + per_rec
+            
+            # stopwatch
+            self.recover_stopwatch = self.recover_stopwatch + dt
+            
+            # battery is charged enough to start moving again
+            if self.battery >= 0.9:
+                # reset recharge stopwatch
+                self.recover_stopwatch = 0.0
+                
+                # change swimming mode to sustained
+                self.swim_mode = 'sustained'
+                self.swim_behav = 'migratory'
+                
+                # set the recharge rate to the current battery 
+                self.recharge = self.battery
+
+
         
 class simulation():
     '''Python class object that implements an Agent Basded Model of adult upstream
@@ -808,6 +987,7 @@ class simulation():
             
             # set it's initial heading
             fishy.initial_heading(self.vel_dir_rast)
+            fishy.initial_swim_speed()
             
             # add it to the output list
             agents_list.append(fishy)
@@ -889,15 +1069,18 @@ class simulation():
                                       y_vel = self.vel_y_rast,
                                       agents_df = self.agents)
                     
+                    # check battery state
+                    agent.fatigue()
+                    
                     # arbitrate behavioral cues
                     agent.arbitrate(vel_mag_rast = self.vel_mag_rast, 
                                     depth_rast = self.depth_rast,
                                     vel_dir_rast = self.vel_dir_rast)
                     
-                    # get the swim speed required to maintain sog
-                    #agent.new_swim_speed()
-                    
-                    # swim like your life dependend upon it
+                    # swim like your life depended on it
+                    agent.drag_fun()
+                    agent.frequency()
+                    agent.thrust_fun()
                     agent.swim(dt)
                 
                 # write frame
