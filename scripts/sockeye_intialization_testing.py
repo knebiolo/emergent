@@ -17,12 +17,12 @@ from emergent import sockeye
 import os
 
 # identify directories
-model_dir = r"J:\2819\005\Calcs\ABM\Output"
+model_dir = r"C:\Users\knebiolo\Desktop\simulations"
 HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'test_8'
+model_name = 'test_11'
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
@@ -30,13 +30,14 @@ crs = 'EPSG:32604'
 
 # create a starting box - aka where are all the fish starting from?
 # W,E,S,N
-bbox = (550328.25,550510.05,6641424.76,6641609.31)
+#bbox = (550328.25,550510.05,6641424.76,6641609.31)                             # starting box way downstream
+bbox = (549505.65,549589.76,6641543.32,6641574.74)                             # starting box right near the falls
 
 # how many agents in the simulation?
-n = 20
+n = 1
 
 # how many timesteps in the model?
-ts = 7200
+ts = 750
 
 # what is the delta t
 dt = 1.
