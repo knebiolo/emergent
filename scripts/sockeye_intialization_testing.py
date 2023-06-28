@@ -37,7 +37,7 @@ bbox = (549505.65,549589.76,6641543.32,6641574.74)                             #
 n = 1
 
 # how many timesteps in the model?
-ts = 750
+ts = 900
 
 # what is the delta t
 dt = 1.
