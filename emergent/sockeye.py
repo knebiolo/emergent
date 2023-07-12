@@ -246,7 +246,7 @@ class fish():
         row, col = depth_rast.index(x, y) 
         
         # create array slice bounds
-        buff = 5
+        buff = 2
         xmin = col - buff
         xmax = col + buff
         ymin = row - buff
@@ -444,7 +444,7 @@ class fish():
         fish = Point(self.pos)
         
         # create a sensory buffer that is 2 fish lengths
-        sensory = fish.buffer(5. * self.length/1000.)
+        sensory = fish.buffer(10. * self.length/1000.)
         
         # make a geopandas geodataframe of sensory buffer
         sense_gdf = gpd.GeoDataFrame(index = [0],
@@ -587,10 +587,10 @@ class fish():
         Depending on overall behavioral mode, fish cares about different inputs'''
                 
         rheotaxis = self.rheo_comm(vel_dir_rast,10000)
-        shallow = self.shallow_comm(depth_rast,10000)
+        shallow = self.shallow_comm(depth_rast,1000)
         wave_drag = self.wave_drag_comm(depth_rast,900)
         low_speed = self.vel_comm(vel_mag_rast,5000)
-        avoid = self.already_been_here(depth_rast,8000, t)
+        avoid = self.already_been_here(depth_rast,500, t)
         
         self.ideal_heading = np.arctan2(rheotaxis[1],rheotaxis[0])
         #fucks = 20000 # the fish only has so many fucks - aka prioritized acceleration - Reynolds 1987
@@ -606,17 +606,20 @@ class fish():
         # if fish is actively migrating
         if self.swim_behav == 'migratory':
             # most important cue is shallow - we can't hav ea fish out of water
-            if shallow_n > 0.0:
-                # create a heading vector - based on input from sensory cues
-                head_vec = shallow
+            # if shallow_n > 5000.0:
+            #     # create a heading vector - based on input from sensory cues
+            #     head_vec = shallow
+                
+            # elif 0 < shallow_n <= 5000:
+            #     head_vec = rheotaxis + shallow
                     
-            elif avoid_n > 0.0:
-                # create a heading vector - based on input from sensory cue
-                head_vec = rheotaxis + avoid
-            else:
-                # create a heading vector - based on input from sensory cues
-                head_vec = rheotaxis + low_speed 
-        
+            # elif avoid_n > 0.0:
+            #     # create a heading vector - based on input from sensory cue
+            #     head_vec = rheotaxis + avoid
+            # else:
+            #     # create a heading vector - based on input from sensory cues
+            #     head_vec = rheotaxis + low_speed + shallow
+            head_vec = rheotaxis
         # else if fish is seeking refugia
         elif self.swim_behav == 'refugia':
             # create a heading vector - based on input from sensory cues
@@ -625,7 +628,7 @@ class fish():
         # otherwise we are station holding
         else:
             # create a heading vector - based on input from sensory cues
-            head_vec = rheotaxis + avoid
+            head_vec = rheotaxis
         
         # convert into preferred heading for timestep
         heading = np.arctan2(head_vec[1],head_vec[0])
@@ -657,7 +660,13 @@ class fish():
         
         # convert to units required for model
         length_cm = self.length/1000 * 100.
-        swim_speed_cms = self.swim_speed * 100.
+        
+        water_vel = np.linalg.norm(np.array([self.x_vel,self.y_vel]))
+        
+        ideal_swim_speed  = self.ideal_sog + water_vel
+
+        #swim_speed_cms = self.swim_speed * 100.
+        swim_speed_cms = ideal_swim_speed * 100.
         
         # sockeye parameters (Webb 1975, Table 20) units in CM!!! FUCK
         length_dat = np.array([5.,10.,15.,20.,25.,30.,40.,50.,60.]) 
@@ -735,6 +744,8 @@ class fish():
             self.Hz = 1.
         else:
             self.Hz = np.sqrt(drag*V**2*np.cos(np.radians(theta))/(A**2*B**2*swim_speed_cms*np.pi**3*rho*(swim_speed_cms - V)*(-0.062518880701972*swim_speed_cms - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
+
+        
         #print (self.Hz)
         
         # if np.isnan(self.Hz):
@@ -855,8 +866,11 @@ class fish():
         
         water_vel = np.array([self.x_vel,self.y_vel])
         
-        fish_vel = np.array([self.sog * np.cos(self.heading), 
-                             self.sog * np.sin(self.heading)]) #meters/sec
+        # fish_vel = np.array([self.sog * np.cos(self.heading), 
+        #                       self.sog * np.sin(self.heading)]) #meters/sec
+        
+        fish_vel = np.array([self.ideal_sog * np.cos(self.heading), 
+                              self.ideal_sog * np.sin(self.heading)]) #meters/sec
         
         if np.linalg.norm(fish_vel) == 0.0:
             fish_vel = [0.0001,0.0001]
@@ -879,10 +893,6 @@ class fish():
         # calculate drag!
         #self.drag = -0.5 * (dens * 1000) * (surface_area / 100**2) * drag_coeff * (np.linalg.norm(fish_vel - water_vel)**2)*(fish_vel/np.linalg.norm(fish_vel))
         self.drag = -0.5 * (dens * 1000) * (surface_area * 0.0001) * drag_coeff * (np.linalg.norm(fish_vel - water_vel)**2)*(fish_vel/np.linalg.norm(fish_vel))
-        
-        #print (self.drag)
-        # if np.linalg.norm(self.drag) > 8.:
-        #     print('fuck')
         
         if np.all(np.isnan(self.drag)):
             print ('fuck')
@@ -911,25 +921,32 @@ class fish():
         # define import values - note units!!       
         water_vel = np.array([self.x_vel,self.y_vel])
     
-        # get max practical speed over ground
-        ideal_swim_speed = self.ideal_sog + np.linalg.norm(water_vel)
+        fish_vel = np.array([self.ideal_sog * np.cos(self.heading), 
+                              self.ideal_sog * np.sin(self.heading)]) 
+        
+        # # get max practical speed over ground
+        # ideal_swim_speed = self.ideal_sog + np.linalg.norm(water_vel)
+        
+        # # ideal_swim_speed = np.linalg.norm(np.array([self.ideal_sog * np.cos(self.heading), 
+        # #                                             self.ideal_sog * np.sin(self.heading)]) +\
+        # #                                            water_vel)
 
         
-        # make sure this fish isn't swimming faster than it can
-        if self.swim_behav == 'refugia' or self.swim_behav == 'station holding':
-            if ideal_swim_speed > self.max_s_U:
-                ideal_swim_speed = self.max_s_U
+        # # make sure this fish isn't swimming faster than it can
+        # if self.swim_behav == 'refugia' or self.swim_behav == 'station holding':
+        #     if ideal_swim_speed > self.max_s_U:
+        #         ideal_swim_speed = self.max_s_U
         
-        max_practical_sog = ideal_swim_speed - np.linalg.norm(water_vel)
+        # max_practical_sog = ideal_swim_speed - np.linalg.norm(water_vel)
         
-        # calculate speed over ground vector 
-        fish_vel = np.array([self.ideal_sog * np.cos(self.ideal_heading), 
-                             self.ideal_sog * np.sin(self.ideal_heading)]) #meters/sec
+        # # calculate speed over ground vector       
+        # fish_vel = np.array([max_practical_sog * np.cos(self.heading), 
+        #                       max_practical_sog * np.sin(self.heading)]) #meters/sec        
         
-        self.max_practical_sog = max_practical_sog
+        # self.max_practical_sog = max_practical_sog
         
         if np.linalg.norm(fish_vel) == 0.0:
-            fish_vel = [0.01,0.01]
+            fish_vel = [0.0001,0.0001]
                 
         # determine kinematic viscosity based on water temperature
         visc = self.kin_visc(self.water_temp)
@@ -980,20 +997,21 @@ class fish():
         
         # calculate surge
         surge = self.thrust + self.drag
-        acc = surge/self.weight
+        acc = surge/self.weight 
+        
+        # dampen that acceleration
+        damp = acc * 0.5
+        
+        acc = acc - damp
         
         # what will velocity be at end of time step
-        fish_vel_1 = fish_vel_0 + np.round(acc,4) * dt
+        fish_vel_1 = fish_vel_0 + acc * dt
         
-        if np.linalg.norm(fish_vel_1) > 1.5 * self.length/1000.:
-            if np.linalg.norm(self.drag) > np.linalg.norm(self.thrust):
-                fish_vel_1 = 1.5 * self.length/1000. * (self.drag/np.linalg.norm(self.drag))
-            # else:  
-            #     fish_vel_1 = self.ideal_sog * (self.drag/np.linalg.norm(self.drag))
-
+        # if np.round(np.linalg.norm(fish_vel_1),2) != self.ideal_sog:
+        #     print ('fuck')
             
-        self.sog = np.linalg.norm(fish_vel_1)
-
+        self.sog = np.round(np.linalg.norm(fish_vel_1),6)
+        
         # start movement
         self.prevPos = self.pos  
         
@@ -1004,17 +1022,23 @@ class fish():
         water depth:        %s m,
         caudal fin:         %s Hz,
         thrust:             %s N,
-        drag:               %s N'''%(self.ID,
+        drag:               %s N,
+        surge:              %s N,
+        acceleration:       %s m/s/s'''%(self.ID,
         np.round(self.sog,2),
         np.round(self.swim_speed,2),
         np.round(np.linalg.norm([self.x_vel, self.y_vel]),2),
         np.round(self.depth,2),
         np.round(self.Hz,2),
         np.round(np.linalg.norm(self.thrust),2),
-        np.round(np.linalg.norm(self.drag),2)))
-        
+        np.round(np.linalg.norm(self.drag),2),
+        np.round(np.linalg.norm(surge),2),
+        np.round(np.linalg.norm(acc),2)))
+    
+        # if np.linalg.norm(acc) >= 0.01:
+        #     print ('fuck')
         # set new position
-        self.pos = self.prevPos + fish_vel_1 * dt  
+        self.pos = self.prevPos + fish_vel_1  
         print ('Fish %s is at %s'%(self.ID,np.round(self.pos,3)))
                                         
     def fatigue(self):    
@@ -1111,8 +1135,11 @@ class fish():
    
             else:
                 self.swim_behav = 'migratory'
-                ideal_bls = 0.0075 * np.exp(4.89 * self.battery)
-                self.ideal_sog = ideal_bls * (self.length/1000.)           
+                if self.battery == 1.0:
+                    self.ideal_sog = self.length/1000.
+                else:
+                    ideal_bls = 0.0075 * np.exp(4.89 * self.battery)
+                    self.ideal_sog = np.round(ideal_bls * (self.length/1000.),2)          
                       
         # fish is station holding and recovering    
         else:
