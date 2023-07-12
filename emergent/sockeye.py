@@ -91,7 +91,7 @@ class fish():
         # initialize morphometric paramters
         self.ID = ID
         self.sex = 'F'
-        self.length = 650.                             # mm
+        self.length = 750.                             # mm
         self.weight = 4.3                              # kg
         self.body_depth = 15.                          # cm
         self.too_shallow = self.body_depth /1000. / 2. # m
@@ -212,7 +212,10 @@ class fish():
             row, col = depth_rast.index(x, y)
 
             # write timestep to cell
-            self.map[row, col] = t  
+            if t - 60 < 0:
+                self.map[row, col] = t
+            elif self.map[row, col] < t - 60.:
+                self.map[row, col] = t
              
     def mental_map_export(self, depth_rast):
         '''function exports mental map to model directory'''
@@ -243,10 +246,11 @@ class fish():
         row, col = depth_rast.index(x, y) 
         
         # create array slice bounds
-        xmin = col - 5
-        xmax = col + 5
-        ymin = row - 5
-        ymax = row + 5
+        buff = 5
+        xmin = col - buff
+        xmax = col + buff
+        ymin = row - buff
+        ymax = row + buff
         
         # sclice up the mental map
         mmap = self.map[ymin:ymax+1,xmin:xmax+1]
@@ -255,22 +259,26 @@ class fish():
             '''function that incorporates time since visit - we only have 
             repulsive force between 1 minute and 1 hour since visiting a cell'''
         
-            t_since = t - i 
+            if i != 0.0:
+                t_since = t - i 
+            else:
+                t_since = 0.0
             
             # calc force
-            if 60 < t_since <= 3600:
-                return  -0.0003 * i + 1.0084
+            if 60. < t_since <= 3600.:
+                return  -0.0003 * t_since + 1.0084
             
             else:
-                return 0
+                return 0.
             
         v_force_multiplier = np.vectorize(force_multiplier,excluded = [1])
         
         multiplier = v_force_multiplier(mmap, t)
+
         
         # create an array of x and y coordinates of cells
-        ys = np.arange(y + 5,y - 6,-1)
-        xs = np.arange(x - 5,x + 6 ,1)
+        ys = np.arange(y + buff,y - (buff +1),-1)
+        xs = np.arange(x - buff,x + (buff +1) ,1)
         
         # create a meshgrid of coordinates
         repx, repy = np.meshgrid(xs,ys)
@@ -297,7 +305,8 @@ class fish():
         def direction (xi, yi, x, y):
             '''function that calculates a unit vector from mental map cell to agent'''
             
-            v = np.array([xi, yi]) - np.array([x, y])
+            #v = np.array([xi, yi]) - np.array([x, y])
+            v = np.array([x, y]) - np.array([xi, yi])
             
             # if np.all(v,0):
             #     v = [0.0001,0.0001]
@@ -315,9 +324,6 @@ class fish():
         # calculate repulsive force in X and Y directions 
         x_force = ((weight * np.cos(dir_grid))/ dist_grid) * multiplier
         y_force = ((weight * np.sin(dir_grid))/ dist_grid) * multiplier
-        
-        # if np.nansum(multiplier) > 0:
-        #     print ('fuck')
         
         return [np.nansum(x_force),np.nansum(y_force)]                                     
         
@@ -353,7 +359,7 @@ class fish():
             
         else:
             # create sensory buffer
-            l = (self.length/1000.) * 9.
+            l = (self.length/1000.) * 4.
             
             # create wedge looking in front of fish 
             theta = np.radians(np.linspace(-15,15,100))
@@ -373,28 +379,30 @@ class fish():
         # perform mask
         masked = mask(vel_mag_rast,
                       arc_gdf.loc[0],
-                      all_touched = True,
-                      crop = True)
+                      crop = True,
+                      nodata = np.nan,
+                      pad = True)    
         
         # get mask origin
         mask_x = masked[1][2]
         mask_y = masked[1][5]
         
         # get indices of cell in mask with highest elevation
-        zs = zonal_stats(arc_gdf,
-                         vel_mag_rast.read(1),
-                         affine = vel_mag_rast.transform,
-                         stats=['min'],
-                         all_touched = True)
+        # zs = zonal_stats(arc_gdf,
+        #                  vel_mag_rast.read(1),
+        #                  affine = vel_mag_rast.transform,
+        #                  stats=['min'],
+        #                  all_touched = True)
         
-        idx = np.where(masked[0] == zs[0]['min'])
+        idx = np.where(masked[0] == np.nanmin(masked[0]))
         
         # compute position of max value
         min_x = mask_x + idx[1][-1] * masked[1][0]
         min_y = mask_y + idx[2][-1] * masked[1][4]
         
         # vector of min velocity position relative to position of fish
-        v = np.array([min_x,min_y]) - np.array([self.pos[0],self.pos[1]])  
+        v = np.array([min_x,min_y]) - np.array([self.pos[0],self.pos[1]])
+        #v =  np.array([self.pos[0],self.pos[1]]) - np.array([min_x,min_y])
          
         # unit vector                               
         v_hat = v/np.linalg.norm(v)         
@@ -420,7 +428,6 @@ class fish():
         
         v_hat = np.array([np.cos(vel_dir), np.sin(vel_dir)])
         
-
         # calculate attractive force
         rheotaxis = (weight * v_hat)/((5 * self.length/1000.)**2)
         
@@ -433,22 +440,24 @@ class fish():
         and then calculates their inverse gravitational potential.  Then adds up 
         all forces to produce the sum total repulsive force.
         '''
+        # create shapely point
         fish = Point(self.pos)
         
         # create a sensory buffer that is 2 fish lengths
-        sensory = fish.buffer(10. * self.length/1000.)
+        sensory = fish.buffer(5. * self.length/1000.)
         
         # make a geopandas geodataframe of sensory buffer
         sense_gdf = gpd.GeoDataFrame(index = [0],
-                                     crs = depth_rast.crs,
-                                     geometry = [sensory])
+                                      crs = depth_rast.crs,
+                                      geometry = [sensory])
+        
     
         # perform mask
         masked = mask(depth_rast,
                       sense_gdf.loc[0],
                       all_touched = True,
                       crop = True,
-                      nodata = 9999.,
+                      nodata = np.nan,
                       pad = True)
         
         # get mask origin
@@ -475,13 +484,11 @@ class fish():
                 idx_y = mask_y + idxs[2][-1] * masked[1][4]
                 
                 x, y = depth_rast.index(idx_x,idx_y)
-                dpt = depth_rast.read(1)[x, y]
-                
-                #if dpt > 0.
                 
                 # vector pointing from the towards the agent
                 v = np.array([self.pos[0],self.pos[1]]) - np.array([idx_x,idx_y])
-                 
+                #v = np.array([idx_x,idx_y]) - np.array([self.pos[0],self.pos[1]])
+
                 # unit vector                               
                 v_hat = v/np.linalg.norm(v)  
                 
@@ -542,7 +549,7 @@ class fish():
                       arc_gdf.loc[0],
                       all_touched = True,
                       crop = True,
-                      nodata = 9999.,
+                      nodata = np.nan,
                       pad = True)
         
         # get mask origin
@@ -550,14 +557,14 @@ class fish():
         mask_y = masked[1][5]
         
 
-        # get indices of cell in mask with deepest point
-        zs = zonal_stats(arc_gdf,
-                         depth_rast.read(1),
-                         affine = depth_rast.transform,
-                         stats=['max'],
-                         all_touched = True)
+        # # get indices of cell in mask with deepest point
+        # zs = zonal_stats(arc_gdf,
+        #                  depth_rast.read(1),
+        #                  affine = depth_rast.transform,
+        #                  stats=['max'],
+        #                  all_touched = True)
         
-        idx = np.where(masked[0] == zs[0]['max'])
+        idx = np.where(masked[0] == np.nanmax(masked[0]))
         
         # compute position of max value
         min_x = mask_x + idx[1][-1] * masked[1][0]
@@ -580,12 +587,13 @@ class fish():
         Depending on overall behavioral mode, fish cares about different inputs'''
                 
         rheotaxis = self.rheo_comm(vel_dir_rast,10000)
-        shallow = self.shallow_comm(depth_rast,750000)
+        shallow = self.shallow_comm(depth_rast,10000)
         wave_drag = self.wave_drag_comm(depth_rast,900)
-        low_speed = self.vel_comm(vel_mag_rast,4500)
-        avoid = self.already_been_here(depth_rast,10000, t)
+        low_speed = self.vel_comm(vel_mag_rast,5000)
+        avoid = self.already_been_here(depth_rast,8000, t)
         
-        fucks = 10000 # the fish only has so many fucks - aka prioritized acceleration - Reynolds 1987
+        self.ideal_heading = np.arctan2(rheotaxis[1],rheotaxis[0])
+        #fucks = 20000 # the fish only has so many fucks - aka prioritized acceleration - Reynolds 1987
         
         # calculate the norm of each behavioral cue
         shallow_n = np.linalg.norm(shallow)
@@ -598,25 +606,16 @@ class fish():
         # if fish is actively migrating
         if self.swim_behav == 'migratory':
             # most important cue is shallow - we can't hav ea fish out of water
-            if shallow_n >= fucks:
+            if shallow_n > 0.0:
                 # create a heading vector - based on input from sensory cues
                 head_vec = shallow
-                
-            elif shallow_n + avoid_n >= fucks:
-                # remaning fucks
-                rem = fucks - (shallow_n + avoid_n)
-                
-                
-                # create a heading vector - based on input from sensory cues
-                head_vec = shallow + avoid
                     
-            elif shallow_n + rheotaxis_n + avoid_n >= fucks:
-                # create a heading vector - based on input from sensory cues
-                head_vec = rheotaxis + shallow + avoid
-            
+            elif avoid_n > 0.0:
+                # create a heading vector - based on input from sensory cue
+                head_vec = rheotaxis + avoid
             else:
                 # create a heading vector - based on input from sensory cues
-                head_vec = rheotaxis + shallow + low_speed + avoid
+                head_vec = rheotaxis + low_speed 
         
         # else if fish is seeking refugia
         elif self.swim_behav == 'refugia':
@@ -632,7 +631,7 @@ class fish():
         heading = np.arctan2(head_vec[1],head_vec[0])
         
         # change heading
-        self.new_heading = heading
+        self.heading = heading
         
         print('''Fish %s heading arbitration:
         rheotaxis:        %s
@@ -732,7 +731,10 @@ class fish():
         drag = np.linalg.norm(self.ideal_drag_fun()) * (self.length/1000) * 10000000.
         
         # now that we have all variables, solve for f
-        self.Hz = np.sqrt(drag*V**2*np.cos(np.radians(theta))/(A**2*B**2*swim_speed_cms*np.pi**3*rho*(swim_speed_cms - V)*(-0.062518880701972*swim_speed_cms - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
+        if self.swim_behav == 'station holding':
+            self.Hz = 1.
+        else:
+            self.Hz = np.sqrt(drag*V**2*np.cos(np.radians(theta))/(A**2*B**2*swim_speed_cms*np.pi**3*rho*(swim_speed_cms - V)*(-0.062518880701972*swim_speed_cms - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
         #print (self.Hz)
         
         # if np.isnan(self.Hz):
@@ -911,6 +913,7 @@ class fish():
     
         # get max practical speed over ground
         ideal_swim_speed = self.ideal_sog + np.linalg.norm(water_vel)
+
         
         # make sure this fish isn't swimming faster than it can
         if self.swim_behav == 'refugia' or self.swim_behav == 'station holding':
@@ -920,8 +923,8 @@ class fish():
         max_practical_sog = ideal_swim_speed - np.linalg.norm(water_vel)
         
         # calculate speed over ground vector 
-        fish_vel = np.array([max_practical_sog * np.cos(self.heading), 
-                             max_practical_sog * np.sin(self.heading)]) #meters/sec
+        fish_vel = np.array([self.ideal_sog * np.cos(self.ideal_heading), 
+                             self.ideal_sog * np.sin(self.ideal_heading)]) #meters/sec
         
         self.max_practical_sog = max_practical_sog
         
@@ -971,9 +974,7 @@ class fish():
 
     def swim(self, dt):
         '''Method propels a fish forward'''
-        # get vector fish velocity
-        self.heading = self.new_heading
-        
+        # get fish velocity in vector form        
         fish_vel_0 = np.array([self.sog * np.cos(self.heading), 
                              self.sog * np.sin(self.heading)]) #meters/sec
         
@@ -986,22 +987,12 @@ class fish():
         
         if np.linalg.norm(fish_vel_1) > 1.5 * self.length/1000.:
             if np.linalg.norm(self.drag) > np.linalg.norm(self.thrust):
-                fish_vel_1 = 1.5 * self.length/1000. * (acc/np.linalg.norm(acc))
-            else:  
-                fish_vel_1 = self.ideal_sog * (acc/np.linalg.norm(acc))
-            print ('fuck')
-            
-        if np.linalg.norm(self.thrust + self.drag) > 1.:
-                if self.swim_behav == 'station holding':
-                    print ('fuck')
-        
-        #if np.linalg.norm(acc) > self.length/1000.:
-            #print ('fuck')
-        # if np.isnan(np.linalg.norm(fish_vel_1)):
-        #     print ('fuck')
+                fish_vel_1 = 1.5 * self.length/1000. * (self.drag/np.linalg.norm(self.drag))
+            # else:  
+            #     fish_vel_1 = self.ideal_sog * (self.drag/np.linalg.norm(self.drag))
+
             
         self.sog = np.linalg.norm(fish_vel_1)
-
 
         # start movement
         self.prevPos = self.pos  
@@ -1009,7 +1000,7 @@ class fish():
         print ('''Fish %s movement summary: 
         speed over ground:  %s m/s, 
         swim speed:         %s m/s,
-        water velocity:     %s cms,
+        water velocity:     %s m/s,
         water depth:        %s m,
         caudal fin:         %s Hz,
         thrust:             %s N,
@@ -1025,9 +1016,6 @@ class fish():
         # set new position
         self.pos = self.prevPos + fish_vel_1 * dt  
         print ('Fish %s is at %s'%(self.ID,np.round(self.pos,3)))
-        
-        # if np.round(np.linalg.norm(np.array(self.prevPos) - np.array(self.pos)),2) > self.ideal_sog:
-        #     print ('fuck')
                                         
     def fatigue(self):    
         '''Method tracks battery levels and assigns swimming modes'''
@@ -1125,12 +1113,6 @@ class fish():
                 self.swim_behav = 'migratory'
                 ideal_bls = 0.0075 * np.exp(4.89 * self.battery)
                 self.ideal_sog = ideal_bls * (self.length/1000.)           
-            
-            # if self.battery == 0.0:
-            #     print('fuck')
-                
-            # if self.battery > 1.0:
-            #     print('fuck')
                       
         # fish is station holding and recovering    
         else:
@@ -1162,6 +1144,7 @@ class fish():
                 # reset recharge stopwatch
                 self.recover_stopwatch = 0.0
                 self.swim_behav = 'migratory'
+                self.swim_mode = 'sustained'
 
             else:
                 self.swim_behav = 'station holding'
