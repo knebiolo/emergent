@@ -556,14 +556,6 @@ class fish():
         mask_x = masked[1][2]
         mask_y = masked[1][5]
         
-
-        # # get indices of cell in mask with deepest point
-        # zs = zonal_stats(arc_gdf,
-        #                  depth_rast.read(1),
-        #                  affine = depth_rast.transform,
-        #                  stats=['max'],
-        #                  all_touched = True)
-        
         idx = np.where(masked[0] == np.nanmax(masked[0]))
         
         # compute position of max value
@@ -587,12 +579,12 @@ class fish():
         Depending on overall behavioral mode, fish cares about different inputs'''
                 
         rheotaxis = self.rheo_comm(vel_dir_rast,10000)
-        shallow = self.shallow_comm(depth_rast,1000)
+        shallow = self.shallow_comm(depth_rast,2000)
         wave_drag = self.wave_drag_comm(depth_rast,900)
         low_speed = self.vel_comm(vel_mag_rast,5000)
         avoid = self.already_been_here(depth_rast,500, t)
         
-        self.ideal_heading = np.arctan2(rheotaxis[1],rheotaxis[0])
+        #self.ideal_heading = np.arctan2(rheotaxis[1],rheotaxis[0])
         #fucks = 20000 # the fish only has so many fucks - aka prioritized acceleration - Reynolds 1987
         
         # calculate the norm of each behavioral cue
@@ -606,20 +598,20 @@ class fish():
         # if fish is actively migrating
         if self.swim_behav == 'migratory':
             # most important cue is shallow - we can't hav ea fish out of water
-            # if shallow_n > 5000.0:
-            #     # create a heading vector - based on input from sensory cues
-            #     head_vec = shallow
+            if shallow_n > 5000.0:
+                # create a heading vector - based on input from sensory cues
+                head_vec = shallow
                 
-            # elif 0 < shallow_n <= 5000:
-            #     head_vec = rheotaxis + shallow
+            elif 0 < shallow_n <= 5000:
+                head_vec = rheotaxis + shallow
                     
-            # elif avoid_n > 0.0:
-            #     # create a heading vector - based on input from sensory cue
-            #     head_vec = rheotaxis + avoid
-            # else:
-            #     # create a heading vector - based on input from sensory cues
-            #     head_vec = rheotaxis + low_speed + shallow
-            head_vec = rheotaxis
+            elif avoid_n > 0.0:
+                # create a heading vector - based on input from sensory cue
+                head_vec = rheotaxis + avoid
+            else:
+                # create a heading vector - based on input from sensory cues
+                head_vec = rheotaxis + low_speed + shallow
+            #head_vec = rheotaxis
         # else if fish is seeking refugia
         elif self.swim_behav == 'refugia':
             # create a heading vector - based on input from sensory cues
@@ -663,7 +655,7 @@ class fish():
         
         water_vel = np.linalg.norm(np.array([self.x_vel,self.y_vel]))
         
-        ideal_swim_speed  = self.ideal_sog + water_vel
+        ideal_swim_speed  = self.max_practical_sog + water_vel
 
         #swim_speed_cms = self.swim_speed * 100.
         swim_speed_cms = ideal_swim_speed * 100.
@@ -921,29 +913,29 @@ class fish():
         # define import values - note units!!       
         water_vel = np.array([self.x_vel,self.y_vel])
     
-        fish_vel = np.array([self.ideal_sog * np.cos(self.heading), 
-                              self.ideal_sog * np.sin(self.heading)]) 
+        # fish_vel = np.array([self.ideal_sog * np.cos(self.heading), 
+        #                       self.ideal_sog * np.sin(self.heading)]) 
         
-        # # get max practical speed over ground
-        # ideal_swim_speed = self.ideal_sog + np.linalg.norm(water_vel)
+        # get max practical speed over ground
+        ideal_swim_speed = self.ideal_sog + np.linalg.norm(water_vel)
         
         # # ideal_swim_speed = np.linalg.norm(np.array([self.ideal_sog * np.cos(self.heading), 
         # #                                             self.ideal_sog * np.sin(self.heading)]) +\
         # #                                            water_vel)
 
         
-        # # make sure this fish isn't swimming faster than it can
-        # if self.swim_behav == 'refugia' or self.swim_behav == 'station holding':
-        #     if ideal_swim_speed > self.max_s_U:
-        #         ideal_swim_speed = self.max_s_U
+        # make sure this fish isn't swimming faster than it can
+        if self.swim_behav == 'refugia' or self.swim_behav == 'station holding':
+            if ideal_swim_speed > self.max_s_U:
+                ideal_swim_speed = self.max_s_U
         
-        # max_practical_sog = ideal_swim_speed - np.linalg.norm(water_vel)
+        max_practical_sog = ideal_swim_speed - np.linalg.norm(water_vel)
         
-        # # calculate speed over ground vector       
-        # fish_vel = np.array([max_practical_sog * np.cos(self.heading), 
-        #                       max_practical_sog * np.sin(self.heading)]) #meters/sec        
+        # calculate speed over ground vector       
+        fish_vel = np.array([max_practical_sog * np.cos(self.heading), 
+                              max_practical_sog * np.sin(self.heading)]) #meters/sec        
         
-        # self.max_practical_sog = max_practical_sog
+        self.max_practical_sog = max_practical_sog
         
         if np.linalg.norm(fish_vel) == 0.0:
             fish_vel = [0.0001,0.0001]

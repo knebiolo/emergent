@@ -22,7 +22,7 @@ HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'test_11'
+model_name = 'test_12'
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
