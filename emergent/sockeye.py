@@ -91,7 +91,7 @@ class fish():
         # initialize morphometric paramters
         self.ID = ID
         self.sex = 'F'
-        self.length = 750.                             # mm
+        self.length = 700.                             # mm
         self.weight = 4.3                              # kg
         self.body_depth = 15.                          # cm
         self.too_shallow = self.body_depth /1000. / 2. # m
@@ -125,7 +125,6 @@ class fish():
         
         # initialize movement parameters
         self.sog = self.length/1000  # sog = speed over ground - assume fish maintain 1 body length per second
-        #self.sog = self.length/1000 * 5.3 # sog = speed over ground - assume fish maintain 1 body length per second
         self.ideal_sog = self.sog
                 
 
@@ -171,12 +170,14 @@ class fish():
         
         # flow direction
         flow_dir = vel_dir.read(1)[row, col]
+        
         # set direction 
         if flow_dir < 0:
             self.heading = (np.radians(360) + flow_dir) - np.radians(180)
         else:
             self.heading = flow_dir - np.radians(180) 
-            
+        
+        # set initial max practical speed over ground as well
         self.max_practical_sog = np.array([self.sog * np.cos(self.heading), 
                                            self.sog * np.sin(self.heading)]) #meters/sec
             
@@ -186,27 +187,12 @@ class fish():
         
         # if there is no mental map, make one
         if self.map is None:
+            
             # create meshgrid of same size and shape as depth_rast
             X = np.zeros(depth_rast.width)
             Y = np.zeros(depth_rast.height)
             X, Y = np.meshgrid(X, Y)
             Z = X * Y
-            
-            # # create a raster file
-            # with rasterio.open(
-            #       os.path.join(self.model_dir,'agent_%s_mental_map0.tif'%(self.ID)),
-            #       mode = 'w', 
-            #       driver = 'GTiff',
-            #       width = depth_rast.width,
-            #       height = depth_rast.height,
-            #       count = 1,
-            #       dtype = np.float32,
-            #       crs = depth_rast.crs,
-            #       transform = depth_rast.transform,
-            # ) as raster:
-            #     raster.write(Z,1)
-            #     #mental map is the array we just created
-            # raster.close()
                 
             self.map = Z
 
@@ -239,8 +225,7 @@ class fish():
               transform = depth_rast.transform,
         ) as new_dataset:
             new_dataset.write(self.map,1)        
-
-        
+    
     def already_been_here(self, depth_rast, weight, t):
         '''function that reads mental map and quantifies repulsive force emitted
         from previously visited locations.  The repulsive force does not present 
@@ -282,7 +267,6 @@ class fish():
         
         multiplier = v_force_multiplier(mmap, t)
 
-        
         # create an array of x and y coordinates of cells
         ys = np.arange(y + buff,y - (buff +1),-1)
         xs = np.arange(x - buff,x + (buff +1) ,1)
@@ -312,11 +296,7 @@ class fish():
         def direction (xi, yi, x, y):
             '''function that calculates a unit vector from mental map cell to agent'''
             
-            #v = np.array([xi, yi]) - np.array([x, y])
             v = np.array([x, y]) - np.array([xi, yi])
-            
-            # if np.all(v,0):
-            #     v = [0.0001,0.0001]
                 
             vhat = v / np.linalg.norm(v)
             
@@ -353,7 +333,7 @@ class fish():
             print ('FISH OUT OF WATER OH SHIT')
             self.time_out_of_water = self.time_out_of_water + 1
             
-    def vel_comm (self, vel_mag_rast, weight):
+    def vel_cue (self, vel_mag_rast, weight):
         '''Function that returns a lowest velocity heading command - 
         the way upstream within this narrow arc in front of me - looking for 
         lowest velocity'''       
@@ -411,7 +391,7 @@ class fish():
         
         return velocity_min
         
-    def rheo_comm (self, vel_dir_rast, weight):
+    def rheo_cue (self, vel_dir_rast, weight):
         '''function rheotactic heading command.  
         
         Use spatial indexing to find current direction, heading is -180 degrees.'''
@@ -432,7 +412,7 @@ class fish():
         
         return rheotaxis
         
-    def shallow_comm(self, depth_rast, weight):
+    def shallow_cue(self, depth_rast, weight):
         '''
 
         Function finds all cells that are too shallow within the sensory buffer
@@ -524,7 +504,7 @@ class fish():
         
         self.wave_drag_multiplier = wave_drag_fun(body_depths)
         
-    def wave_drag_comm(self, depth_rast, weight):
+    def wave_drag_cue(self, depth_rast, weight):
         '''Function finds the direction to the optimal depth cell so that the 
         agent minimizes wave drag'''
         
@@ -579,23 +559,17 @@ class fish():
         
         Depending on overall behavioral mode, fish cares about different inputs'''
                 
-        rheotaxis = self.rheo_comm(vel_dir_rast,10000)
-        shallow = self.shallow_comm(depth_rast,4000)
-        wave_drag = self.wave_drag_comm(depth_rast,900)
-        low_speed = self.vel_comm(vel_mag_rast,5000)
+        rheotaxis = self.rheo_cue(vel_dir_rast,10000)
+        shallow = self.shallow_cue(depth_rast,5000)
+        wave_drag = self.wave_drag_cue(depth_rast,900)
+        low_speed = self.vel_cue(vel_mag_rast,5000)
         avoid = self.already_been_here(depth_rast,500, t)
-        
-        #self.ideal_heading = np.arctan2(rheotaxis[1],rheotaxis[0])
-        #fucks = 20000 # the fish only has so many fucks - aka prioritized acceleration - Reynolds 1987
-        
-        # calculate the norm of each behavioral cue
+                
+        # calculate the norm of some important behavioral cues
         shallow_n = np.linalg.norm(shallow)
-        rheotaxis_n = np.linalg.norm(rheotaxis)
-        low_speed_n = np.linalg.norm(low_speed)
         avoid_n = np.linalg.norm(avoid)
-        wave_drag_n = np.linalg.norm(wave_drag)
         
-
+        # the fish only has so many fucks - aka prioritized acceleration - Reynolds 1987
         # if fish is actively migrating
         if self.swim_behav == 'migratory':
             # #most important cue is shallow - we can't hav ea fish out of water
@@ -610,7 +584,6 @@ class fish():
                 # create a heading vector - based on input from sensory cues
                 head_vec = rheotaxis + low_speed + shallow
             
-            #head_vec = rheotaxis
         # else if fish is seeking refugia
         elif self.swim_behav == 'refugia':
             # create a heading vector - based on input from sensory cues
@@ -659,7 +632,6 @@ class fish():
                                   self.ideal_sog * np.sin(self.heading)]) #meters/sec
         
         ideal_swim_speed = np.linalg.norm(ideal_vel_vec - water_vel)
-
         swim_speed_cms = ideal_swim_speed * 100.
         
         # sockeye parameters (Webb 1975, Table 20) units in CM!!! FUCK
@@ -740,25 +712,12 @@ class fish():
         # convert vector drag to scalar in units of erg/s        
         drag = np.linalg.norm(self.ideal_drag_fun()) * (self.length/1000) * 10000000.
         
-        # if np.all(self.ideal_drag_fun() != self.drag):
-        #     print ('fuck')
-        
         # now that we have all variables, solve for f
-        self.prevHz = self.Hz
         
         if self.swim_behav == 'station holding':
             self.Hz = 1.
         else:
             self.Hz = np.sqrt(drag*V**2*np.cos(np.radians(theta))/(A**2*B**2*swim_speed_cms*np.pi**3*rho*(swim_speed_cms - V)*(-0.062518880701972*swim_speed_cms - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
-            # dHz = self.Hz - self.prevHz
-            # Hz_damp = dHz * 0.05
-            # self.Hz = self.Hz - Hz_damp
-            
-        if self.Hz > 30:
-            print ('fuck')
-        
-        # if np.isnan(self.Hz):
-        #     print ('fuck')
 
     def kin_visc(self,temp):
         '''kinematic viscocity as a function of temperature
@@ -1003,7 +962,11 @@ class fish():
         
         # dampen that acceleration
         damp = acc * 0.90
-        #damp = np.sqrt(np.linalg.norm(acc)) * (acc/np.linalg.norm(acc))
+        
+        # TODO
+        '''this is a tricky bit, the procedure is correct but because drag is 
+        proportional to velocity squared - our thrust change will always over 
+        react.  Until I figure this out - we are applying a massive dampener''' 
         
         acc = np.round(acc - damp,2)
         
@@ -1151,8 +1114,8 @@ class fish():
                       
             # check distance travelled per bout - is it enough to warrant keeping going?
             if self.bout_dur > 300:
+                 # if m/s is averaging below 10 cm/s after 5 min - let's give up
                 if self.dist_per_bout/self.bout_dur < 0.1:
-                    # we have only moved 10 meters in 5 minutes, give it up find a differen tway
                     self.swim_behav = 'station holding'
                     self.swim_mode = 'sustained'
                     self.ideal_sog = 0.
