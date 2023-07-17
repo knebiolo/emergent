@@ -41,6 +41,7 @@ from shapely import Point, Polygon
 from shapely import affinity
 from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline
 from scipy.optimize import curve_fit
+from scipy.constants import g
 import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -110,7 +111,7 @@ class fish():
         self.swim_behav = 'migratory'# swimming behavior, migratory, refugia, station holding
         self.swim_mode = 'sustained' # swimming mode, prolonged, sprint, or sustained
         self.battery = 1.            # at start of simulation battery is full
-        self.recharge = 1.           # recharge state - initial battery drain has recharge state of 1.
+        #self.recharge = 1.           # recharge state - initial battery drain has recharge state of 1.
         self.recover_stopwatch = 0.0 # total recovery time    
         self.ttfr = 0.0              # running time to fatigue in seconds
         self.time_out_of_water = 0.0
@@ -133,7 +134,8 @@ class fish():
         self.Hz = 0.                 # tail beats per second
         self.dist_per_bout = 0.      # running counter of the distance travelled per bout
         self.bout_dur = 0.           # running bout timer 
-        self.ucrit = self.sog * 7
+        self.ucrit = self.sog * 7    # TODO - what is the ucrit for sockeye?
+        self.time_of_jump = 0.0   # time since last jump - can't happen every timestep
         
         # initialize the odometer
         self.kcal = 0.
@@ -325,6 +327,8 @@ class fish():
         self.depth = depth.read(1)[row, col]
         self.x_vel = x_vel.read(1)[row, col]
         self.y_vel = y_vel.read(1)[row, col]
+        
+        
         if self.x_vel == 0.0 and self.y_vel == 0.0:
             self.x_vel = 0.0001
             self.y_vel = 0.0001
@@ -990,17 +994,23 @@ class fish():
         acc = np.round(surge/self.weight,2)
         
         # dampen that acceleration
-        damp = acc * 0.90
-        
-        # TODO
-        '''this is a tricky bit, the procedure is correct but because drag is 
-        proportional to velocity squared - our thrust change will always over 
-        react.  Until I figure this out - we are applying a massive dampener''' 
-        
-        acc = np.round(acc - damp,2)
-        
-        if np.linalg.norm(acc) > 5.0:
-            print ('fuck') 
+        acc_mag = np.linalg.norm(acc)
+        if acc_mag > 0.0:
+            damp = (-0.067 * np.log(acc_mag) + 0.3718)
+            
+            if damp < 0:
+                damp = 0.0000001
+            #damp = acc * 0.90
+            
+            # TODO
+            '''this is a tricky bit, the procedure is correct but because drag is 
+            proportional to velocity squared - our thrust change will always over 
+            react.  Until I figure this out - we are applying a massive dampener''' 
+
+            acc = acc * damp 
+            
+            # if np.linalg.norm(acc) > 5.0:
+            #     print ('fuck') 
         
         # what will velocity be at end of time step
         fish_vel_1 = fish_vel_0 + acc * dt
@@ -1008,6 +1018,12 @@ class fish():
         self.sog = np.round(np.linalg.norm(fish_vel_1),6)
         
         if np.isnan(self.sog):
+            print ('fuck')
+            
+        if self.sog > 5:
+            print ('fuck')
+            
+        if np.all(self.thrust / self.drag > 10):
             print ('fuck')
         
         # start movement
@@ -1041,7 +1057,56 @@ class fish():
         self.pos = self.prevPos + fish_vel_1 
         
         print ('Fish %s is at %s'%(self.ID,np.round(self.pos,3)))
-                                        
+        
+    def jump (self,t):
+        '''Method that simulates fish jumping.
+        A jump happens in the following 4 steps:
+            1: the agent's swimming depth is updated to the min depth and the 
+            ideal sog is changed to ucrit
+            2: agent has two jump angles (45 or 60) - apply ballistic trajectory
+            2a: calculate time airborne
+            2b: calculate horizontal displacement
+            3: given current xy and heading, what is new xy
+            4: move
+        
+        Returns
+        -------
+        None.
+
+        '''
+
+        # reset jump time
+        self.time_of_jump = t
+        
+        # get jump angle
+        jump_angle = np.random.choice([np.radians(45),np.radians(60)])
+        
+        # calculate time airborne
+        time_airborne = (2 * self.ucrit * np.sin(jump_angle))/g
+        
+        # calculate displacement 
+        displacement = self.ucrit * time_airborne * np.cos(jump_angle)
+        
+        # set speed over ground to ucrit
+        self.sog = self.ucrit
+        
+        # calculate the new position 
+        pos = np.array(self.pos)
+        
+        new_pos = pos + displacement * np.array([np.cos(self.heading),np.sin(self.heading)])
+        # set new position
+        self.pos = new_pos
+        
+        print ('''jump report:
+            jump angle:      %s
+            time airborne:   %s
+            displacement:    %s'''%(
+            np.degrees(jump_angle),
+            np.round(time_airborne,2),
+            np.round(displacement,2)))
+                                     
+        print ("Fish %s is at %s"%(self.ID,self.pos))
+        
     def fatigue(self):    
         '''Method tracks battery levels and assigns swimming modes'''
         
@@ -1511,10 +1576,15 @@ class simulation():
     
         # first step writes current positions to the project database
         #TODO fix this
-        # self.agents['ts'] = np.repeat(ts,len(self.agents))
-        # self.agents.astype(dtype = {'id':np.str}, copy = False)
-        # self.agents.to_hdf(self.hdf,'TS',mode = 'a',format = 'table', append = True)
-        # self.hdf.flush()        
+        self.agents['ts'] = np.repeat(ts,len(self.agents))
+        timestep = pd.DataFrame()
+        timestep['ts'] = self.agents['ts']
+        timestep['id'] = self.agents['id'].astype(str)
+        timestep['loc'] = self.agents['loc'].astype(str)
+        timestep['vel'] = self.agents['vel']
+        timestep['dir'] = self.agents['dir']
+        timestep.to_hdf(self.hdf,'TS',mode = 'a',format = 'table', append = True)
+        self.hdf.flush()        
         
         # second step creates a new agents geo dataframe
         self.agents = gpd.GeoDataFrame(columns=['id', 'loc', 'vel', 'dir'],
@@ -1582,11 +1652,21 @@ class simulation():
                                     vel_dir_rast = self.vel_dir_rast,
                                     t = i)
                     
-                    # swim like your life depended on it
-                    agent.drag_fun()
-                    agent.frequency()
-                    agent.thrust_fun()
-                    agent.swim(dt)
+                    '''if the ratio to ideal speed over ground to water velocity 
+                    is less than 0.15 
+                    and the agent is travelling against flow
+                    and it's been more than 60 seconds since its last jump'''
+                    if agent.ideal_sog / np.linalg.norm([agent.x_vel,agent.y_vel]) < 0.15 and\
+                        np.sign(agent.heading) != np.sign(np.arctan2(agent.y_vel,agent.x_vel)) and\
+                            i - agent.time_of_jump > 60:
+                                # jump
+                                agent.jump(t = i)
+                    else:
+                        # swim like your life depended on it
+                        agent.drag_fun()
+                        agent.frequency()
+                        agent.thrust_fun()
+                        agent.swim(dt)
                     
                     # calculate mileage
                     agent.odometer()
@@ -1601,6 +1681,18 @@ class simulation():
                 print ('Time Step %s complete'%(i))
             for agent in agents:
                 agent.mental_map_export(self.depth_rast)
+        
+        # clean up
         writer.finish()
+        self.hdf.flush()
+        self.hdf.close()
+        self.wsel_rast.close()
+        self.vel_dir_rast.close()
+        self.vel_mag_rast.close()
+        self.depth_rast.close()
+        self.vel_x_rast.close()
+        self.vel_y_rast.close()
+        
+
  
     
