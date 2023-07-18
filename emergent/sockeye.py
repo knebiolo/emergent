@@ -601,7 +601,7 @@ class fish():
         shallow = self.shallow_cue(depth_rast,5000)
         wave_drag = self.wave_drag_cue(depth_rast,2000)
         low_speed = self.vel_cue(vel_mag_rast,5000)
-        avoid = self.already_been_here(depth_rast,1500, t)
+        avoid = self.already_been_here(depth_rast,3000, t)
                 
         # calculate the norm of some important behavioral cues
         shallow_n = np.linalg.norm(shallow)
@@ -1060,12 +1060,13 @@ class fish():
         
     def jump (self,t):
         '''Method that simulates fish jumping.
+        
         A jump happens in the following 4 steps:
             1: the agent's swimming depth is updated to the min depth and the 
             ideal sog is changed to ucrit
             2: agent has two jump angles (45 or 60) - apply ballistic trajectory
-            2a: calculate time airborne
-            2b: calculate horizontal displacement
+                2a: calculate time airborne
+                2b: calculate horizontal displacement
             3: given current xy and heading, what is new xy
             4: move
         
@@ -1090,17 +1091,19 @@ class fish():
         # set speed over ground to ucrit
         self.sog = self.ucrit
         
-        # calculate the new position 
-        pos = np.array(self.pos)
+        # calculate new heading angle - based soley on flow direction
+        self.heading = np.arctan2(self.y_vel,self.x_vel) - np.radians(180)
         
-        new_pos = pos + displacement * np.array([np.cos(self.heading),np.sin(self.heading)])
+        # calculate the new position 
+        new_pos = np.array(self.pos) + displacement * np.array([np.cos(self.heading),np.sin(self.heading)])
+        
         # set new position
         self.pos = new_pos
         
-        print ('''jump report:
+        print ('''Fish %s jump report:
             jump angle:      %s
             time airborne:   %s
-            displacement:    %s'''%(
+            displacement:    %s'''%(self.ID,
             np.degrees(jump_angle),
             np.round(time_airborne,2),
             np.round(displacement,2)))
@@ -1656,9 +1659,9 @@ class simulation():
                     is less than 0.15 
                     and the agent is travelling against flow
                     and it's been more than 60 seconds since its last jump'''
-                    if agent.ideal_sog / np.linalg.norm([agent.x_vel,agent.y_vel]) < 0.15 and\
+                    if agent.ideal_sog / np.linalg.norm([agent.x_vel,agent.y_vel]) < 0.05 and\
                         np.sign(agent.heading) != np.sign(np.arctan2(agent.y_vel,agent.x_vel)) and\
-                            i - agent.time_of_jump > 60:
+                            i - agent.time_of_jump > 60 and agent.battery > 0.4:
                                 # jump
                                 agent.jump(t = i)
                     else:

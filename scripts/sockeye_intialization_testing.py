@@ -22,7 +22,7 @@ HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'test_19'
+model_name = 'test_22'
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
@@ -34,7 +34,7 @@ crs = 'EPSG:32604'
 bbox = (549505.65,549589.76,6641543.32,6641574.74)                             # starting box right near the falls
 
 # how many agents in the simulation?
-n = 3
+n = 50
 
 # how many timesteps in the model?
 ts = 600
