@@ -37,11 +37,11 @@ import pandas as pd
 import rasterio
 from rasterio.transform import Affine
 from rasterio.mask import mask
-from rasterstats import zonal_stats
 from shapely import Point, Polygon
 from shapely import affinity
 from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline
 from scipy.optimize import curve_fit
+from scipy.constants import g
 import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -91,15 +91,18 @@ class fish():
         # initialize morphometric paramters
         self.ID = ID
         self.sex = 'F'
-        self.length = 250.
-        self.weight = 2.2
-        self.body_depth = 6.2
+        self.length = 700.                             # mm
+        self.weight = 4.3                              # kg
+        self.body_depth = 15.                          # cm
+        self.too_shallow = self.body_depth /100. / 2. # m
+        self.opt_wat_depth = self.body_depth /100 * 3.0 + self.too_shallow
         
         # initialize environmental states
         self.water_temp = water_temp
         self.x_vel = 0.
         self.y_vel = 0.
         self.depth = 0.
+        self.z = 0.0
         
         # initialize internal states
         recover = pd.read_csv("../data/recovery.csv")
@@ -108,9 +111,10 @@ class fish():
         self.swim_behav = 'migratory'# swimming behavior, migratory, refugia, station holding
         self.swim_mode = 'sustained' # swimming mode, prolonged, sprint, or sustained
         self.battery = 1.            # at start of simulation battery is full
-        self.recharge = 1.           # recharge state - initial battery drain has recharge state of 1.
+        #self.recharge = 1.           # recharge state - initial battery drain has recharge state of 1.
         self.recover_stopwatch = 0.0 # total recovery time    
         self.ttfr = 0.0              # running time to fatigue in seconds
+        self.time_out_of_water = 0.0
         del recover
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
@@ -123,12 +127,15 @@ class fish():
         
         # initialize movement parameters
         self.sog = self.length/1000  # sog = speed over ground - assume fish maintain 1 body length per second
+        self.ideal_sog = self.sog
         self.swim_speed = self.length/1000        # set initial swim speed
-        self.heading = 0.            # direction of travel in radians
-        self.drag_coef = 0.          # drag coefficient 
         self.drag = 0.               # computed theoretical drag
         self.thrust = 0.             # computed theoretical thrust Lighthill 
         self.Hz = 0.                 # tail beats per second
+        self.dist_per_bout = 0.      # running counter of the distance travelled per bout
+        self.bout_dur = 0.           # running bout timer 
+        self.ucrit = self.sog * 7    # TODO - what is the ucrit for sockeye?
+        self.time_of_jump = 0.0   # time since last jump - can't happen every timestep
         
         # initialize the odometer
         self.kcal = 0.
@@ -149,19 +156,9 @@ class fish():
         self.hdf.flush()
         self.model_dir = model_dir
         
-    
-    def environment(self, depth, x_vel, y_vel, agents_df):
-        '''method finds the current depth, x velocity, y velocity, and neighbors'''
+        # create an empty map array
+        self.map = None
         
-        # get current position 
-        x, y = (self.pos[0],self.pos[1])
-        row, col = depth.index(x, y)
-        
-        # set variables
-        self.depth = depth.read(1)[row, col]
-        self.x_vel = x_vel.read(1)[row, col]
-        self.y_vel = y_vel.read(1)[row, col]
-    
     def initial_heading (self,vel_dir):
         '''function that sets the initial heading of a fish, inputs are itself
         and a velocity direction raster.  Use spatial indexing to find direction,
@@ -175,82 +172,256 @@ class fish():
         
         # flow direction
         flow_dir = vel_dir.read(1)[row, col]
+        
         # set direction 
         if flow_dir < 0:
             self.heading = (np.radians(360) + flow_dir) - np.radians(180)
         else:
-            self.heading = flow_dir - np.radians(180)
+            self.heading = flow_dir - np.radians(180) 
         
-    def vel_comm (self, vel_mag_rast):
+        # set initial max practical speed over ground as well
+        self.max_practical_sog = np.array([self.sog * np.cos(self.heading), 
+                                           self.sog * np.sin(self.heading)]) #meters/sec
+            
+    def mental_map (self, depth_rast = None, t = None):
+        '''function creates and updates a mental map with the time step when the
+        cell was last visited by an agent'''
+        
+        # if there is no mental map, make one
+        if self.map is None:
+            
+            # create meshgrid of same size and shape as depth_rast
+            X = np.zeros(depth_rast.width)
+            Y = np.zeros(depth_rast.height)
+            X, Y = np.meshgrid(X, Y)
+            Z = X * Y
+                
+            self.map = Z
+
+        # if there is one, figure out where the agent is and write the timestep
+        else:
+            # get the x, y position of the agent 
+            x, y = (self.pos[0], self.pos[1])
+            
+            # find the row and column in the direction raster
+            row, col = depth_rast.index(x, y)
+
+            # write timestep to cell
+            if t - 60 < 0:
+                self.map[row, col] = t
+            elif self.map[row, col] < t - 60.:
+                self.map[row, col] = t
+             
+    def mental_map_export(self, depth_rast):
+        '''function exports mental map to model directory'''
+            
+        with rasterio.open(
+              os.path.join(self.model_dir,'agent_%s_mental_map.tif'%(self.ID)),
+              mode = 'w', 
+              driver = 'GTiff',
+              width = depth_rast.width,
+              height = depth_rast.height,
+              count = 1,
+              dtype = np.float32,
+              crs = depth_rast.crs,
+              transform = depth_rast.transform,
+        ) as new_dataset:
+            new_dataset.write(self.map,1)        
+    
+    def already_been_here(self, depth_rast, weight, t):
+        '''function that reads mental map and quantifies repulsive force emitted
+        from previously visited locations.  The repulsive force does not present 
+        itself until 30 seconds after the visit starts and persists for 1 hour.'''
+
+        # get the x, y position of the agent 
+        x, y = (self.pos[0], self.pos[1])
+        
+        # find the row and column in the direction raster
+        row, col = depth_rast.index(x, y) 
+        
+        # create array slice bounds
+        buff = 2
+        xmin = col - buff
+        xmax = col + buff
+        ymin = row - buff
+        ymax = row + buff
+        
+        # sclice up the mental map
+        mmap = self.map[ymin:ymax+1,xmin:xmax+1]
+        
+        def force_multiplier(i, t):
+            '''function that incorporates time since visit - we only have 
+            repulsive force between 1 minute and 1 hour since visiting a cell'''
+        
+            if i != 0.0:
+                t_since = t - i 
+            else:
+                t_since = 0.0
+            
+            # calc force
+            if 60. < t_since <= 3600.:
+                return  -0.0003 * t_since + 1.0084
+            
+            else:
+                return 0.
+            
+        v_force_multiplier = np.vectorize(force_multiplier,excluded = [1])
+        
+        multiplier = v_force_multiplier(mmap, t)
+
+        # create an array of x and y coordinates of cells
+        ys = np.arange(y + buff,y - (buff +1),-1)
+        xs = np.arange(x - buff,x + (buff +1) ,1)
+        
+        # create a meshgrid of coordinates
+        repx, repy = np.meshgrid(xs,ys)
+        
+        # make a function to calculate distance squared from each cell to agent
+        def distance (xi, yi, x, y):
+            '''function to calculate distance between mental map cell and agent
+            xs = mental map x, 
+            ys = mental map y
+            x = fish x
+            y = fisy y'''
+            
+            dx = xi - x
+            dy = yi - y
+            return np.linalg.norm([dx,dy])
+        
+        # vectorize 
+        v_distance = np.vectorize(distance,excluded = [2,3])
+        
+        # calculate distance 
+        dist_grid = np.power(v_distance(repx, repy, x, y),2)
+        
+        # make a functio to calculate direction from each cell to agent
+        def direction (xi, yi, x, y):
+            '''function that calculates a unit vector from mental map cell to agent'''
+            
+            v = np.array([x, y]) - np.array([xi, yi])
+                
+            vhat = v / np.linalg.norm(v)
+            
+            return np.arctan2(vhat[1],vhat[0])
+        
+        # vectorize
+        v_direction = np.vectorize(direction, excluded = [2,3])
+        
+        # calculate direction 
+        dir_grid = v_direction(repx, repy, x, y)
+        
+        # calculate repulsive force in X and Y directions 
+        x_force = ((weight * np.cos(dir_grid))/ dist_grid) * multiplier
+        y_force = ((weight * np.sin(dir_grid))/ dist_grid) * multiplier
+        
+        return [np.nansum(x_force),np.nansum(y_force)]                                     
+        
+    def environment(self, depth, x_vel, y_vel, agents_df):
+        '''method finds the current depth, x velocity, y velocity, and neighbors'''
+        
+        # get current position 
+        x, y = (self.pos[0],self.pos[1])
+        row, col = depth.index(x, y)
+        
+        # set variables
+        self.depth = depth.read(1)[row, col]
+        self.x_vel = x_vel.read(1)[row, col]
+        self.y_vel = y_vel.read(1)[row, col]
+        
+        
+        if self.x_vel == 0.0 and self.y_vel == 0.0:
+            self.x_vel = 0.0001
+            self.y_vel = 0.0001
+            
+        if self.depth < self.too_shallow:
+            print ('FISH OUT OF WATER OH SHIT')
+            self.time_out_of_water = self.time_out_of_water + 1
+            
+    def find_z(self):
+        '''Method resolves agent depth.  
+        
+        The agent wants to minimize wave drag. 
+        
+        If the water column depth is less than the minimum wave drag depth of 
+        3 body depths, then the agent obtains its minimum depth. Else the agent
+        is at the mimum wave drag depth
+
+        Returns
+        -------
+        None.
+
+        '''
+        if self.depth < self.body_depth * 3 / 100.:
+            self.z = self.depth + self.too_shallow
+        else:
+            self.z = self.body_depth * 3 / 100.
+        
+        
+    def vel_cue (self, vel_mag_rast, weight):
         '''Function that returns a lowest velocity heading command - 
         the way upstream within this narrow arc in front of me - looking for 
-        lowest velocity'''
+        lowest velocity'''       
 
-        ##########################################
-        # Step 1: Create Sensory Buffer
-        #########################################        
-
-        # create sensory buffer
-        l = (self.length/1000.) * 10
-        
-        # create wedge looking in front of fish 
-        theta = np.radians(np.linspace(-10,10,100))
+        if self.swim_mode == 'refugia':        
+            # create sensory buffer
+            l = (self.length/1000.) * 15.
+            
+            # create wedge looking in front of fish 
+            theta = np.radians(np.linspace(-120,120,100))
+            
+        else:
+            # create sensory buffer
+            l = (self.length/1000.) * 4.
+            
+            # create wedge looking in front of fish 
+            theta = np.radians(np.linspace(-15,15,100))
+            
         arc_x = self.pos[0] + l * np.cos(theta)
         arc_y = self.pos[1] + l * np.sin(theta)
         arc_x = np.insert(arc_x,0,self.pos[0])
         arc_y = np.insert(arc_y,0,self.pos[1])
         arc = np.column_stack([arc_x, arc_y])
         arc = Polygon(arc)
-        arc_rot = affinity.rotate(arc,np.degrees(self.heading))
-        
+        arc_rot = affinity.rotate(arc,np.degrees(self.heading))    
+            
         arc_gdf = gpd.GeoDataFrame(index = [0],
                                    crs = vel_mag_rast.crs,
                                    geometry = [arc_rot])
         
-        ##########################################
-        # Step 2: Mask Velocity Magnitude Surface
-        #########################################
-        
         # perform mask
         masked = mask(vel_mag_rast,
                       arc_gdf.loc[0],
-                      all_touched = True,
-                      crop = True)
-        
-        ##############################################
-        # Step 3: Get Cell Center of Highest Velocity
-        ##############################################
+                      crop = True,
+                      nodata = np.nan,
+                      pad = True)    
         
         # get mask origin
         mask_x = masked[1][2]
         mask_y = masked[1][5]
         
-        # get indices of cell in mask with highest elevation
-        zs = zonal_stats(arc_gdf,
-                         vel_mag_rast.read(1),
-                         affine = vel_mag_rast.transform,
-                         stats=['min'],
-                         all_touched = True)
-        
-        idx = np.where(masked[0] == zs[0]['min'])
+        idx = np.where(masked[0] == np.nanmin(masked[0]))
         
         # compute position of max value
-        min_x = mask_x + idx[1][-1] * masked[1][0]
-        min_y = mask_y + idx[2][-1] * masked[1][4]
+        # TODO - figure out why this fails so I'm not using an exception
+        try:
+            min_x = mask_x + idx[1][-1] * masked[1][0]
+            min_y = mask_y + idx[2][-1] * masked[1][4]
+            
+            # vector of min velocity position relative to position of fish
+            v = np.array([min_x,min_y]) - np.array([self.pos[0],self.pos[1]])
+             
+            # unit vector                               
+            v_hat = v/np.linalg.norm(v)         
+            
+            velocity_min = (weight * v_hat)/((5 * self.length/1000.)**2)
+            
+            return velocity_min
         
-        ##################################################
-        # Step 4: Get Direction (unit vector) To Goal Cell
-        ##################################################
+        except:
+            return [0., 0.]
         
-        # vector of max velocity position relative to position of fish 
-        v = (np.array([min_x,min_y]) - np.array([self.pos[0],self.pos[1]]))   
-         
-        # unit vector                               
-        v_hat = v/np.linalg.norm(v)         
         
-        self.min_velocity_heading = np.arctan2(v_hat[1],v_hat[0])
-        
-    def rheo_comm (self, vel_dir_rast):
+    def rheo_cue (self, vel_dir_rast, weight):
         '''function rheotactic heading command.  
         
         Use spatial indexing to find current direction, heading is -180 degrees.'''
@@ -265,53 +436,52 @@ class fish():
         vel_dir = vel_dir_rast.read(1)[row, col] - np.radians(180)
         
         v_hat = np.array([np.cos(vel_dir), np.sin(vel_dir)])
-    
+        
         # calculate attractive force
-        rheotaxis = (self.weight * 1000 * v_hat)/2**2
+        rheotaxis = (weight * v_hat)/((5 * self.length/1000.)**2)
         
         return rheotaxis
         
-    def shallow_comm(self, depth_rast):
+    def shallow_cue(self, depth_rast, weight):
         '''
 
         Function finds all cells that are too shallow within the sensory buffer
         and then calculates their inverse gravitational potential.  Then adds up 
         all forces to produce the sum total repulsive force.
         '''
-        fish = Point(self.pos)
         
-        # create sensory buffer
-        l = (self.length/1000.)
+        # create a sensory wedge looking in front of fish 
+        theta = np.radians(np.linspace(-45,45,100))
+        arc_x = self.pos[0] + (10. * self.length/1000.) * np.cos(theta)
+        arc_y = self.pos[1] + (10. * self.length/1000.) * np.sin(theta)
+        arc_x = np.insert(arc_x,0,self.pos[0])
+        arc_y = np.insert(arc_y,0,self.pos[1])
+        arc = np.column_stack([arc_x, arc_y])
+        arc = Polygon(arc)
+        arc_rot = affinity.rotate(arc,np.degrees(self.heading))
         
-        # create a sensory buffer that is 2 fish lengths
-        sensory = fish.buffer(10 * l)
-        
-        # make a geopandas geodataframe of sensory buffer
-        sense_gdf = gpd.GeoDataFrame(index = [0],
-                                     crs = depth_rast.crs,
-                                     geometry = [sensory])
+        arc_gdf = gpd.GeoDataFrame(index = [0],
+                                   crs = depth_rast.crs,
+                                   geometry = [arc_rot])        
     
         # perform mask
         masked = mask(depth_rast,
-                      sense_gdf.loc[0],
+                      arc_gdf.loc[0],
                       all_touched = True,
                       crop = True,
-                      nodata = 9999.,
+                      nodata = np.nan,
                       pad = True)
         
         # get mask origin
         mask_x = masked[1][2]
         mask_y = masked[1][5]
 
-        # calculate max depth 
-        min_depth = (self.body_depth * 2.) / 100.        
+        # calculate max depth - body depth in cm - make sure we divide by 100. 
+        min_depth = (self.body_depth * 2.) / 100.  
         
         # get indices of those cells shallower than min depth
         idxs = np.where(masked[0] < min_depth)
-        
-        # get position of fish
-        fpos = np.array(self.pos[:2])
-        
+               
         repArr = []
         
         # if there are shallow cells, loop over indices and grab point
@@ -322,60 +492,165 @@ class fish():
                 idx_y = mask_y + idxs[2][-1] * masked[1][4]
                 
                 x, y = depth_rast.index(idx_x,idx_y)
-                dpt = depth_rast.read(1)[x, y]
                 
-                #if dpt > 0.
-                
-                # vector of index relative to position of fish 
+                # vector pointing from the towards the agent
                 v = np.array([self.pos[0],self.pos[1]]) - np.array([idx_x,idx_y])
-                 
+
                 # unit vector                               
                 v_hat = v/np.linalg.norm(v)  
                 
                 # calculate the repulsive force generated by the current cell
-                rep = (1000 * v_hat)/(np.linalg.norm(v)**2)
-                
+                rep = (weight * v_hat)/(np.linalg.norm(v)**2)
+            
                 repArr.append(rep)
                             
             # sum all repulsive forces
             repArr = np.sum(np.nan_to_num(np.array(repArr)),axis = 0)
-            #return np.arctan2(repArr[1],repArr[0])
+
             return repArr
         
         else:
             return np.array([0., 0.])
         
-    def arbitrate(self,vel_mag_rast, depth_rast, vel_dir_rast):
+    def wave_drag_multiplier(self):
+        '''Function calculates the wave drag multiplier from data digitized from 
+        Hughes 2004 Figure 3'''
+        
+        # get data
+        hughes = pd.read_csv(r'../data/wave_drag_huges_2004_fig3.csv')
+        hughes.sort_values(by = 'body_depths_submerged', 
+                           ascending = True,
+                           inplace = True)
+        # fit function 
+        wave_drag_fun = UnivariateSpline(hughes.body_depths_submerged,
+                                         hughes.wave_drag_multiplier,
+                                         k = 3, ext = 0) 
+        
+        # how submerged is this fish - that's how many
+        body_depths = self.z / (self.body_depth / 100.) 
+        
+        if body_depths >= 3:
+            self.wave_drag = 1.
+        else:
+            self.wave_drag = wave_drag_fun(body_depths)
+        
+    def wave_drag_cue(self, depth_rast, weight):
+        '''Function finds the direction to the optimal depth cell so that the 
+        agent minimizes wave drag'''
+        
+        # create sensory buffer
+        l = (self.length/1000.) * 4
+        
+        # create wedge looking in front of fish 
+        theta = np.radians(np.linspace(-15,15,100))
+        arc_x = self.pos[0] + l * np.cos(theta)
+        arc_y = self.pos[1] + l * np.sin(theta)
+        arc_x = np.insert(arc_x,0,self.pos[0])
+        arc_y = np.insert(arc_y,0,self.pos[1])
+        arc = np.column_stack([arc_x, arc_y])
+        arc = Polygon(arc)
+        arc_rot = affinity.rotate(arc,np.degrees(self.heading))
+        
+        arc_gdf = gpd.GeoDataFrame(index = [0],
+                                   crs = depth_rast.crs,
+                                   geometry = [arc_rot])
+         
+        # perform mask
+        masked = mask(depth_rast,
+                      arc_gdf.loc[0],
+                      all_touched = True,
+                      crop = True,
+                      nodata = np.nan,
+                      pad = True)
+        
+        # get mask origin
+        mask_x = masked[1][2]
+        mask_y = masked[1][5]
+        
+        '''where is the ideal location - the location that minimizes wave drag
+        we are looking for the cell that has the smallest difference between 
+        itself and the minimum depth'''
+        
+        idx = np.where(masked[0] - self.opt_wat_depth == np.nanmin(np.abs(masked[0] - self.opt_wat_depth)))
+        
+        # compute position of max value
+        try:
+            min_x = mask_x + idx[1][-1] * masked[1][0]
+            min_y = mask_y + idx[2][-1] * masked[1][4]
+                
+            # vector of max velocity position relative to position of fish
+            v = np.array([min_x,min_y]) - np.array([self.pos[0],self.pos[1]]) 
+             
+            # unit vector                               
+            v_hat = v/np.linalg.norm(v) 
+            
+            # calculate attractive potential towards deepest point
+            attArr = (weight * v_hat)/((5 * self.length/1000.)**2)
+            
+            return attArr
+        
+        except:
+            return [0., 0.]
+
+    def arbitrate(self,vel_mag_rast, depth_rast, vel_dir_rast, t):
         '''method arbitrates heading commands returning a new heading
         
         Depending on overall behavioral mode, fish cares about different inputs'''
+                
+        rheotaxis = self.rheo_cue(vel_dir_rast,10000)
+        shallow = self.shallow_cue(depth_rast,5000)
+        wave_drag = self.wave_drag_cue(depth_rast,2000)
+        low_speed = self.vel_cue(vel_mag_rast,5000)
+        avoid = self.already_been_here(depth_rast,3000, t)
+                
+        # calculate the norm of some important behavioral cues
+        shallow_n = np.linalg.norm(shallow)
+        avoid_n = np.linalg.norm(avoid)
         
-        # TODO - obv. this has to get filled out, for now can the fish get upstream
-        
-        rheotaxis = self.rheo_comm(vel_dir_rast)
-        shallow = self.shallow_comm(depth_rast)
-
+        # the fish only has so many fucks - aka prioritized acceleration - Reynolds 1987
         # if fish is actively migrating
         if self.swim_behav == 'migratory':
-            # create a heading vector - based on input from sensory cues
-            head_vec = rheotaxis + shallow
-        
+            # #most important cue is shallow - we can't hav ea fish out of water
+            if shallow_n > 5000.0:
+                # create a heading vector - based on input from sensory cues
+                head_vec = shallow
+                    
+            elif avoid_n > 0.0 and shallow_n <= 5000:
+                # create a heading vector - based on input from sensory cue
+                head_vec = rheotaxis + avoid + shallow
+            else:
+                # create a heading vector - based on input from sensory cues
+                head_vec = rheotaxis + low_speed + shallow
+            
         # else if fish is seeking refugia
         elif self.swim_behav == 'refugia':
             # create a heading vector - based on input from sensory cues
-            head_vec = rheotaxis + shallow
+            head_vec = shallow + low_speed
         
-        # otherwise
+        # otherwise we are station holding
         else:
             # create a heading vector - based on input from sensory cues
-            head_vec = rheotaxis + shallow
+            head_vec = rheotaxis
         
         # convert into preferred heading for timestep
         heading = np.arctan2(head_vec[1],head_vec[0])
-
         
         # change heading
         self.heading = heading
+        
+        print('''Fish %s heading arbitration:
+        rheotaxis:        %s
+        too shallow:      %s
+        wave drag:        %s
+        lowest velocity:  %s
+        place response:   %s
+        final heading:    %s'''%(self.ID,
+        np.round(rheotaxis,2),
+        np.round(shallow,2),
+        np.round(wave_drag,2),
+        np.round(low_speed,2),
+        np.round(avoid,2),
+        np.round(np.degrees(self.heading),2)))
         
     def thrust_fun (self):
         '''Lighthill 1970 thrust equation. '''
@@ -387,7 +662,15 @@ class fish():
         
         # convert to units required for model
         length_cm = self.length/1000 * 100.
-        swim_speed_cms = self.swim_speed * 100.
+        
+        # calculate swim sweed
+        water_vel = np.array([self.x_vel,self.y_vel])
+        
+        ideal_vel_vec = np.array([self.ideal_sog * np.cos(self.heading),
+                                  self.ideal_sog * np.sin(self.heading)]) #meters/sec
+        
+        ideal_swim_speed = np.linalg.norm(ideal_vel_vec - water_vel)
+        swim_speed_cms = ideal_swim_speed * 100.
         
         # sockeye parameters (Webb 1975, Table 20) units in CM!!! FUCK
         length_dat = np.array([5.,10.,15.,20.,25.,30.,40.,50.,60.]) 
@@ -438,7 +721,14 @@ class fish():
         
         # convert to units required for model
         length_cm = self.length/1000 * 100.
-        swim_speed_cms = self.swim_speed * 100.
+        
+        # get ideal swim speed
+        water_vel = np.array([self.x_vel,self.y_vel])
+        fish_vel = np.array([self.ideal_sog * np.cos(self.heading), 
+                              self.ideal_sog * np.sin(self.heading)]) #meters/sec
+        
+        ideal_swim_speed  = np.linalg.norm(fish_vel - water_vel) 
+        swim_speed_cms = ideal_swim_speed * 100.
         
         # sockeye parameters (Webb 1975, Table 20)
         length_dat = np.array([5.,10.,15.,20.,25.,30.,40.,50.,60.])
@@ -457,12 +747,107 @@ class fish():
         V = wave(swim_speed_cms)
         B = trail(length_cm)  
         
-        # convert vector drag to scalar in units of erg/s
-        drag = np.linalg.norm(self.drag) * (self.length/1000) * 10000000.
+        # convert vector drag to scalar in units of erg/s        
+        drag = np.linalg.norm(self.ideal_drag_fun()) * (self.length/1000) * 10000000.
         
         # now that we have all variables, solve for f
-        self.Hz = np.sqrt(drag*V**2*np.cos(np.radians(theta))/(A**2*B**2*swim_speed_cms*np.pi**3*rho*(swim_speed_cms - V)*(-0.062518880701972*swim_speed_cms - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
+        
+        if self.swim_behav == 'station holding':
+            self.Hz = 1.
+        else:
+            self.Hz = np.sqrt(drag*V**2*np.cos(np.radians(theta))/(A**2*B**2*swim_speed_cms*np.pi**3*rho*(swim_speed_cms - V)*(-0.062518880701972*swim_speed_cms - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
 
+    def kin_visc(self,temp):
+        '''kinematic viscocity as a function of temperature
+        author: Isha Deo
+        '''
+
+        # read databases for kinematic viscosity and density from Engineering Toolbox
+        kin_temp = np.array([0.01, 10., 20., 25., 30., 40., 50., 60., 70., 80., 
+                             90., 100., 110., 120., 140., 160., 180., 200., 
+                             220., 240., 260., 280., 300., 320., 340., 360.])
+        
+        kin_visc = np.array([0.00000179180, 0.00000130650, 0.00000100350, 
+                             0.00000089270, 0.00000080070, 0.00000065790, 
+                             0.00000055310, 0.00000047400, 0.00000041270, 
+                             0.00000036430, 0.00000032550, 0.00000029380, 
+                             0.00000026770, 0.00000024600, 0.00000021230, 
+                             0.00000018780, 0.00000016950, 0.00000015560, 
+                             0.00000014490, 0.00000013650, 0.00000012990, 
+                             0.00000012470, 0.00000012060, 0.00000011740, 
+                             0.00000011520, 0.00000011430])
+        
+        # create function 
+        f_kinvisc = interp1d(kin_temp, kin_visc)
+        
+        return f_kinvisc(temp)
+        
+    def wat_dens(self,temp):
+        '''water density g/ml3 as a function of water temperature
+        author: Isha Deo'''
+        
+        dens_temp = np.array([0.1, 1., 4., 10., 15., 20., 25., 30., 35., 40., 
+                              45., 50., 55., 60., 65., 70., 75., 80., 85., 90., 
+                              95., 100., 110., 120., 140., 160., 180., 200., 
+                              220., 240., 260., 280., 300., 320., 340., 360., 
+                              373.946])
+        
+        density = np.array([0.9998495, 0.9999017, 0.9999749, 0.9997, 0.9991026, 
+                            0.9982067, 0.997047, 0.9956488, 0.9940326, 0.9922152, 
+                            0.99021, 0.98804, 0.98569, 0.9832, 0.98055, 0.97776, 
+                            0.97484, 0.97179, 0.96861, 0.96531, 0.96189, 0.95835, 
+                            0.95095, 0.94311, 0.92613, 0.90745, 0.887, 0.86466, 
+                            0.84022, 0.81337, 0.78363, 0.75028, 0.71214, 0.66709, 
+                            0.61067, 0.52759, 0.322])
+        
+        # create function 
+        f_density = interp1d(dens_temp, density)   
+        
+        return f_density(temp)
+    
+    def calc_Reynolds(self, length, visc, water_vel):
+        '''function to calculate Reynolds Number
+        author: Isha Deo'''
+        
+        length_m = length / 1000.
+        
+        return water_vel * length_m / visc
+        
+    def calc_surface_area(self, length, species):
+        '''# calculate surface area of fish; assuming salmon for now'''
+        
+        if species == 'sockeye': # add other salmon species if we get there
+            # uses length based method for salmon - better estimates with weight
+            a = -0.143
+            b = 1.881
+            
+            return 10 ** (a + b*np.log10(length))
+        
+        else:
+            return np.nan
+        
+    def drag_coeff(self, reynolds):
+        '''function to calculate the drag coefficient given the current Reynolds
+        number
+        author: Isha Deo'''
+        
+        # set up drag coefficient vs Reynolds number dataframe
+        drag_coeffs_df = pd.DataFrame(data = {'Reynolds Number': [2.5e4, 5.0e4, 7.4e4, 9.9e4, 1.2e5, 1.5e5, 1.7e5, 2.0e5],
+                                      'Drag Coefficient': [0.23,0.19,0.15,0.14,0.12,0.12,0.11,0.10]}).set_index('Reynolds Number')
+        
+        # fit drag coefficient vs Reynolds number to functio
+        
+        def fit_dragcoeffs(reynolds, a, b):
+            return np.log(reynolds)*a + b
+        
+        dragf_popt, dragf_pcov = curve_fit(f = fit_dragcoeffs, xdata = drag_coeffs_df.index, ydata = drag_coeffs_df['Drag Coefficient'])
+        
+        # determine drag coefficient for calculated Reynolds number
+        drag_coeff = np.abs(fit_dragcoeffs(reynolds, dragf_popt[0], dragf_popt[1]))
+        
+        return drag_coeff
+        
+        
     def drag_fun (self):
         """
         Created on Mon May 29 10:16:26 2023
@@ -488,83 +873,101 @@ class fish():
         water_vel = np.array([self.x_vel,self.y_vel])
         
         fish_vel = np.array([self.sog * np.cos(self.heading), 
-                             self.sog * np.sin(self.heading)]) #meters/sec
+                              self.sog * np.sin(self.heading)]) #meters/sec
         
-
+        # fish_vel = np.array([self.ideal_sog * np.cos(self.heading), 
+        #                       self.ideal_sog * np.sin(self.heading)]) #meters/sec
         
-        # read databases for kinematic viscosity and density from Engineering Toolbox
-        kin_temp = np.array([0.01, 10., 20., 25., 30., 40., 50., 60., 70., 80., 
-                             90., 100., 110., 120., 140., 160., 180., 200., 
-                             220., 240., 260., 280., 300., 320., 340., 360.])
-        
-        kin_visc = np.array([0.00000179180, 0.00000130650, 0.00000100350, 
-                             0.00000089270, 0.00000080070, 0.00000065790, 
-                             0.00000055310, 0.00000047400, 0.00000041270, 
-                             0.00000036430, 0.00000032550, 0.00000029380, 
-                             0.00000026770, 0.00000024600, 0.00000021230, 
-                             0.00000018780, 0.00000016950, 0.00000015560, 
-                             0.00000014490, 0.00000013650, 0.00000012990, 
-                             0.00000012470, 0.00000012060, 0.00000011740, 
-                             0.00000011520, 0.00000011430])
-        
-        dens_temp = np.array([0.1, 1., 4., 10., 15., 20., 25., 30., 35., 40., 
-                              45., 50., 55., 60., 65., 70., 75., 80., 85., 90., 
-                              95., 100., 110., 120., 140., 160., 180., 200., 
-                              220., 240., 260., 280., 300., 320., 340., 360., 
-                              373.946])
-        
-        density = np.array([0.9998495, 0.9999017, 0.9999749, 0.9997, 0.9991026, 
-                            0.9982067, 0.997047, 0.9956488, 0.9940326, 0.9922152, 
-                            0.99021, 0.98804, 0.98569, 0.9832, 0.98055, 0.97776, 
-                            0.97484, 0.97179, 0.96861, 0.96531, 0.96189, 0.95835, 
-                            0.95095, 0.94311, 0.92613, 0.90745, 0.887, 0.86466, 
-                            0.84022, 0.81337, 0.78363, 0.75028, 0.71214, 0.66709, 
-                            0.61067, 0.52759, 0.322])
-        
-        
+        if np.linalg.norm(fish_vel) == 0.0:
+            fish_vel = [0.0001,0.0001]
+                        
         # determine kinematic viscosity based on water temperature
-        f_kinvisc = interp1d(kin_temp, kin_visc)
-        visc = f_kinvisc(self.water_temp)
+        visc = self.kin_visc(self.water_temp)
         
         # determine density based on water temperature
-        f_density = interp1d(dens_temp, density)
-        dens = f_density(self.water_temp)
-        
-        # calculate Reynold's number
-        def calc_Reynolds(length, visc, water_vel):
-            length_m = length / 1000
-            return water_vel * length_m / visc
+        dens = self.wat_dens(self.water_temp)
         
         #TODO check to make sure length in cm correct
-        reynolds = calc_Reynolds(self.length, visc, np.linalg.norm(water_vel))
+        reynolds = self.calc_Reynolds(self.length, visc, np.linalg.norm(water_vel))
         
-        # calculate surface area of fish; assuming salmon for now
-        def calc_surface_area(length, species):
-            if species == 'sockeye': # add other salmon species if we get there
-                # uses length based method for salmon - better estimates with weight
-                a = -0.143
-                b = 1.881
-                return 10 ** (a + b*np.log10(length))
-            return np.nan
+        # Calculate surface area
+        surface_area = self.calc_surface_area((self.length/1000.) * 100., 'sockeye')
         
-        surface_area = calc_surface_area((self.length/1000.) * 100., 'sockeye')
-        
-        # set up drag coefficient vs Reynolds number dataframe
-        drag_coeffs_df = pd.DataFrame(data = {'Reynolds Number': [2.5e4, 5.0e4, 7.4e4, 9.9e4, 1.2e5, 1.5e5, 1.7e5, 2.0e5],
-                                      'Drag Coefficient': [0.23,0.19,0.15,0.14,0.12,0.12,0.11,0.10]}).set_index('Reynolds Number')
-        
-        # fit drag coefficient vs Reynolds number to functio
-        
-        def fit_dragcoeffs(reynolds, a, b):
-            return np.log(reynolds)*a + b
-        
-        dragf_popt, dragf_pcov = curve_fit(f = fit_dragcoeffs, xdata = drag_coeffs_df.index, ydata = drag_coeffs_df['Drag Coefficient'])
-        
-        # determine drag coefficient for calculated Reynolds number
-        drag_coeff = fit_dragcoeffs(reynolds, dragf_popt[0], dragf_popt[1])
+        # calculate the drag coefficient
+        drag_coeff = self.drag_coeff(reynolds)
         
         # calculate drag!
-        self.drag = -0.5 * (dens * 1000) * (surface_area / 100**2) * drag_coeff * (np.linalg.norm(fish_vel - water_vel)**2)*(fish_vel/np.linalg.norm(fish_vel))
+        self.drag = -0.5 * (dens * 1000) * (surface_area / 100**2) * drag_coeff * (np.linalg.norm(fish_vel - water_vel)**2)*(fish_vel/np.linalg.norm(fish_vel)) * self.wave_drag
+
+    def ideal_drag_fun (self):
+        """
+        Created on Mon May 29 10:16:26 2023
+
+        @author: Isha Deo
+
+        Calculate drag force on a sockeye salmon swimming upstream 
+        given the fish length, water & fish velocities, and water temperature.
+
+        The drag on a fish is calculated using the drag force equation given in Mirzaei 2017:
+            
+            drag = -0.5 * density * surface area * drag coefficient * |fish velocity - water velocity|^2 * (fish velocity / |fish velocity|)
+            
+        The surface area of the fish is determined using an empirical relationship 
+        developed in Oshea 2006 for salmon
+
+        The drag coefficient is determined using measured values from Brett 1963 
+        (adapted from Webb 1975), fitted to a log function
+        """
+        
+        # get vector components of water velocity and speed over ground
+        water_vel = np.array([self.x_vel,self.y_vel])
+        fish_vel = np.array([self.ideal_sog * np.cos(self.heading), 
+                             self.ideal_sog * np.sin(self.heading)]) #meters/sec
+        
+        # calculate ideal swim speed
+        ideal_swim_speed = np.linalg.norm(fish_vel - water_vel)
+       
+        # make sure this fish isn't swimming faster than it can
+        if self.swim_behav == 'refugia' or self.swim_behav == 'station holding':
+            if ideal_swim_speed > self.max_s_U:
+                fish_vel = fish_vel * (ideal_swim_speed/self.max_s_U)
+        
+                # convert back to vector form
+                ideal_swim_speed_vec = np.array([ideal_swim_speed * np.cos(self.heading), 
+                                                  ideal_swim_speed * np.sin(self.heading)]) #meters/sec
+                
+                # calculate the maximum practical sog that this fish can attain
+                max_practical_sog = ideal_swim_speed_vec + water_vel
+                
+                # we will use this later for thrust - save as property
+                self.max_practical_sog = max_practical_sog
+            else:
+                self.max_practical_sog = fish_vel
+        else:
+            self.max_practical_sog = fish_vel
+        
+        if np.linalg.norm(self.max_practical_sog) == 0.0:
+            self.max_practical_sog = [0.0001,0.0001]
+                
+        # determine kinematic viscosity based on water temperature
+        visc = self.kin_visc(self.water_temp)
+        
+        # determine density based on water temperature
+        dens = self.wat_dens(self.water_temp)
+        
+        #TODO check to make sure length in cm correct
+        reynolds = self.calc_Reynolds(self.length, visc, np.linalg.norm(water_vel))
+        
+        # Calculate surface area
+        surface_area = self.calc_surface_area((self.length/1000.) * 100., 'sockeye')
+        
+        # calculate the drag coefficient
+        drag_coeff = self.drag_coeff(reynolds)   
+        
+        # calculate drag!
+        ideal_drag = -0.5 * (dens * 1000.) * (surface_area / 100**2) * drag_coeff * (np.linalg.norm(self.max_practical_sog - water_vel)**2)*(self.max_practical_sog/np.linalg.norm(self.max_practical_sog)) * self.wave_drag
+
+        return ideal_drag
     
     def initial_swim_speed (self):
         '''Function calculates swim speed required to overcome current water 
@@ -574,48 +977,159 @@ class fish():
         water_vel = np.linalg.norm(np.array([self.x_vel,self.y_vel]))
         
         # get vector components of speed over ground
-        ideal_vel = np.array([self.sog * np.cos(self.heading), 
-                             self.sog * np.sin(self.heading)]) #meters/sec
-        
-        # make sure fish is capable of this swim speed - if not we're kneecapping it
-        if self.swim_behav == 'refugia' or self.swim_behav == 'station holding':
-            fish_vel = self.max_s_U
-            #TODO is this where we can incorporate tail beats and thrust??
-            
-        else:        
-            # calculate swim speed to maintain current sog
-            fish_vel = self.sog + water_vel
-        
-        # calculate new speed over ground 
-        #self.swim_speed = np.linalg.norm(fish_vel)
-        self.swim_speed = fish_vel
+        ideal_vel = np.array([self.ideal_sog * np.cos(self.heading), 
+                             self.ideal_sog * np.sin(self.heading)]) #meters/sec
+
+        # calculate swim speed
+        self.swim_speed = np.linalg.norm(ideal_vel - water_vel)
 
     def swim(self, dt):
         '''Method propels a fish forward'''
+        # get fish velocity in vector form        
+        fish_vel_0 = np.array([self.sog * np.cos(self.heading), 
+                             self.sog * np.sin(self.heading)]) #meters/sec
         
         # calculate surge
-        surge = self.thrust + self.drag
-        acc = surge/self.weight
+        surge = np.round(self.thrust,2) + np.round(self.drag,2)
+        acc = np.round(surge/self.weight,2)
         
-        fish_vel = np.array([self.swim_speed * np.cos(self.heading), 
-                             self.swim_speed * np.sin(self.heading)]) #meters/sec
+        # dampen that acceleration
+        acc_mag = np.linalg.norm(acc)
+        if acc_mag > 0.0:
+            damp = (-0.067 * np.log(acc_mag) + 0.3718)
+            
+            if damp < 0:
+                damp = 0.0000001
+            #damp = acc * 0.90
+            
+            # TODO
+            '''this is a tricky bit, the procedure is correct but because drag is 
+            proportional to velocity squared - our thrust change will always over 
+            react.  Until I figure this out - we are applying a massive dampener''' 
+
+            acc = acc * damp 
+            
+            # if np.linalg.norm(acc) > 5.0:
+            #     print ('fuck') 
         
-        fish_vel + acc * dt
+        # what will velocity be at end of time step
+        fish_vel_1 = fish_vel_0 + acc * dt
+            
+        self.sog = np.round(np.linalg.norm(fish_vel_1),6)
+        
+        if np.isnan(self.sog):
+            print ('fuck')
+            
+        if self.sog > 5:
+            print ('fuck')
+            
+        if np.all(self.thrust / self.drag > 10):
+            print ('fuck')
         
         # start movement
-        self.prevPos = self.pos                                           
+        self.prevPos = self.pos  
+        
+        print ('''Fish %s movement summary: 
+        speed over ground:  %s m/s, 
+        swim speed:         %s m/s,
+        water velocity:     %s m/s,
+        water depth:        %s m,
+        swim depth:         %s m,
+        wave drag:          %s,
+        caudal fin:         %s Hz,
+        thrust:             %s N,
+        drag:               %s N,
+        surge:              %s N,
+        acceleration:       %s m/s/s'''%(self.ID,
+        np.round(self.sog,2),
+        np.round(self.swim_speed,2),
+        np.round(np.linalg.norm([self.x_vel, self.y_vel]),2),
+        np.round(self.depth,2),
+        np.round(self.z,2),
+        np.round(self.wave_drag,2),
+        np.round(self.Hz,2),
+        np.round(np.linalg.norm(self.thrust),2),
+        np.round(np.linalg.norm(self.drag),2),
+        np.round(np.linalg.norm(surge),2),
+        np.round(np.linalg.norm(acc),2)))
+   
+        # set new position
+        self.pos = self.prevPos + fish_vel_1 
+        
+        print ('Fish %s is at %s'%(self.ID,np.round(self.pos,3)))
+        
+    def jump (self,t):
+        '''Method that simulates fish jumping.
+        
+        A jump happens in the following 4 steps:
+            1: the agent's swimming depth is updated to the min depth and the 
+            ideal sog is changed to ucrit
+            2: agent has two jump angles (45 or 60) - apply ballistic trajectory
+                2a: calculate time airborne
+                2b: calculate horizontal displacement
+            3: given current xy and heading, what is new xy
+            4: move
+        
+        Returns
+        -------
+        None.
+
+        '''
+
+        # reset jump time
+        self.time_of_jump = t
+        
+        # get jump angle
+        jump_angle = np.random.choice([np.radians(45),np.radians(60)])
+        
+        # calculate time airborne
+        time_airborne = (2 * self.ucrit * np.sin(jump_angle))/g
+        
+        # calculate displacement 
+        displacement = self.ucrit * time_airborne * np.cos(jump_angle)
+        
+        # set speed over ground to ucrit
+        self.sog = self.ucrit
+        
+        # calculate new heading angle - based soley on flow direction
+        self.heading = np.arctan2(self.y_vel,self.x_vel) - np.radians(180)
+        
+        # calculate the new position 
+        new_pos = np.array(self.pos) + displacement * np.array([np.cos(self.heading),np.sin(self.heading)])
         
         # set new position
-        self.pos = self.prevPos + fish_vel * dt
-
+        self.pos = new_pos
+        
+        print ('''Fish %s jump report:
+            jump angle:      %s
+            time airborne:   %s
+            displacement:    %s'''%(self.ID,
+            np.degrees(jump_angle),
+            np.round(time_airborne,2),
+            np.round(displacement,2)))
+                                     
+        print ("Fish %s is at %s"%(self.ID,self.pos))
+        
     def fatigue(self):    
         '''Method tracks battery levels and assigns swimming modes'''
         
         # Values for Sockeye digitized from Bret 1964
         dt = 1.
-
+        
+        # get vector components of water velocity and speed over ground
+        water_vel = np.array([self.x_vel,self.y_vel])
+        fish_vel = np.array([self.sog * np.cos(self.heading), 
+                             self.sog * np.sin(self.heading)]) #meters/sec
+        
+        # calculate swim speed
+        self.swim_speed = np.linalg.norm(fish_vel - water_vel)
+        
         # fish is not station holding and battery above critical state
-        if self.battery > 0.1 and self.swim_behav != 'station holding':
+        if self.swim_behav != 'station holding':
+            # add distance travelled to bout odometer
+            dist_travelled = np.linalg.norm(np.array(self.pos) - np.array(self.prevPos))
+            self.dist_per_bout = self.dist_per_bout + dist_travelled
+            self.bout_dur = self.bout_dur + 1
 
             # calculate ttf at current swim speed
             if self.max_s_U < self.swim_speed <= self.max_p_U:
@@ -660,53 +1174,62 @@ class fish():
                 # stopwatch
                 self.recover_stopwatch = self.recover_stopwatch + dt
                 
-                ttf = np.nan
+                ttf = np.nan                
                 
-            if ttf != np.nan:
-
-                # take into account the time that has already past - that's now how long a fish has
-                ttf0 = ttf - self.ttfr
+                # calculate battery level
+                self.battery = self.battery + per_rec    
+                
+                # make sure battery recharge is reasonable
+                if self.battery > 1.0:
+                    self.battery = 1.0
             
+            if self.swim_mode != 'sustained':
+                # take into account the time that has already past by multiplying by the batery %
+                ttf0 = ttf * self.battery
+                
                 # calculate time to fatigue at end of time step
                 ttf1 = ttf0 - dt
                 
-                # add to running timer
-                self.ttfr = self.ttfr + dt
+                # calculate battery level
+                self.battery = self.battery * ttf1/ttf0
                 
-                if self.swim_mode != 'sustained':
-                    # calculate battery level
-                    self.battery = self.recharge * ttf1/ttf
-                    
-                    # make sure battery drain is reasonable
-                    if self.battery < 0.0:
-                        self.battery = 0.0
-                else:
-                    # calculate battery level
-                    self.battery = self.battery + per_rec    
-                    
-                    # make sure battery recharge is reasonable
-                    if self.battery > 1.0:
-                        self.battery = 1.0
+                # make sure battery drain is reasonable
+                if self.battery < 0.0:
+                    self.battery = 0.0            
             
             # set swimming behavior based on battery level
             if self.battery <= 0.1:
                 self.swim_behav = 'station holding'
                 self.swim_mode = 'sustained'
-                self.sog = 0.
+                self.ideal_sog = 0.
                 self.ttfr = 0.
                 
             elif 0.1 < self.battery <= 0.3:
                 self.swim_behav = 'refugia'
-                self.swim_mode = 'sustained'
-                self.sog = 0.02
-
+                self.ideal_sog = 0.02
+   
             else:
                 self.swim_behav = 'migratory'
-                self.sog = self.length/1000.
-                
+                if self.battery == 1.0:
+                    self.ideal_sog = self.length/1000.
+                else:
+                    ideal_bls = 0.0075 * np.exp(4.89 * self.battery)
+                    self.ideal_sog = np.round(ideal_bls * (self.length/1000.),2)          
+                      
+            # check distance travelled per bout - is it enough to warrant keeping going?
+            if self.bout_dur > 300:
+                 # if m/s is averaging below 10 cm/s after 5 min - let's give up
+                if self.dist_per_bout/self.bout_dur < 0.1:
+                    self.swim_behav = 'station holding'
+                    self.swim_mode = 'sustained'
+                    self.ideal_sog = 0.
+                    self.ttfr = 0
+                    
         # fish is station holding and recovering    
         else:
             ''' recovery is based on how long a fish has been in a recovery state'''
+            self.bout_dur = 0.
+            self.dist_per_bout = 0.
             # calculate recovery % at beginning of time step
             rec0 = self.recovery(self.recover_stopwatch) / 100.
             
@@ -730,19 +1253,64 @@ class fish():
             self.recover_stopwatch = self.recover_stopwatch + dt
             
             # battery is charged enough to start moving again
-            if self.battery >= 0.9:
+            if self.battery >= 0.85:
                 # reset recharge stopwatch
                 self.recover_stopwatch = 0.0
-                
-                # change swimming mode to sustained
-                self.swim_mode = 'sustained'
                 self.swim_behav = 'migratory'
+                self.swim_mode = 'sustained'
+
+            else:
+                self.swim_behav = 'station holding'
+                self.swim_mode = 'sustained'  
                 
-                # set the recharge rate to the current battery 
-                self.recharge = self.battery
-
-
+        print ('''Fish %s battery summary: 
+        battery:       %s   
+        swimming mode: %s
+        behavior:      %s
+        dist per bout: %s m
+        bout duration: %s s'''%(self.ID,
+        np.round(self.battery,4),
+        self.swim_mode,
+        self.swim_behav,
+        np.round(self.dist_per_bout,2),
+        self.bout_dur)) 
+    
+    def odometer(self):
+        '''Created on Thu May 18 20:17:28 2023
+    
+        @author: KNebiolo
+    
+        Method that accounts for the amount of kCal consumed during a simulation.  
+        An odometer if you will. 
+    
+        The intent of this method is to keep a running counter of the amount of kCal 
+        consumed by converting the amount of oxygen resprired into calories with standard
+        metabolic equations.  
+    
+        Brett (1964) provides active metabolic rates or oxygen consumption (O2/kg/hr) 
+        as a function of water temperature and swimming speed (body lengths/second), 
+        while Brett and Glass (1973) provide standard metabolic rate as a function of 
+        water temperature and weight.  '''
         
+        # calculate active standard metabolic rate using Table 2 from Brett and Glass (1973)
+        # 02_rate in units of mg O2/hr
+        if self.water_temp <= 5.3:
+            sr_o2_rate = np.exp(0.0565 * np.power(np.log(self.weight*1000),0.9141)) 
+            ar_o2_rate = np.exp(0.4667 * np.power(np.log(self.weight*1000),0.9989))
+            
+        elif 5.3 < self.water_temp <= 15:
+            sr_o2_rate = np.exp(0.1498 * np.power(np.log(self.weight*1000),0.8465))
+            ar_o2_rate = np.exp(0.9513 * np.power(np.log(self.weight*1000),0.9632))
+    
+        elif self.water_temp > 15:
+            sr_o2_rate = np.exp(0.1987 * np.power(np.log(self.weight*1000),0.8844))
+            ar_o2_rate = np.exp(0.8237 * np.power(np.log(self.weight*1000),0.9947))
+    
+        # calculate total metabolic rate
+        swim_cost = sr_o2_rate + self.wave_drag * (np.exp(np.log(sr_o2_rate) + self.swim_speed * ((np.log(ar_o2_rate) - np.log(sr_o2_rate))/self.ucrit))-sr_o2_rate)
+        
+        self.kcal = self.kcal + swim_cost
+      
 class simulation():
     '''Python class object that implements an Agent Basded Model of adult upstream
     migrating sockeye salmon through a modeled riffle cascade complex'''
@@ -985,9 +1553,10 @@ class simulation():
             # create a fish
             fishy = fish(i,model_dir, starting_box, water_temp)
             
-            # set it's initial heading
+            # set initial parameters
             fishy.initial_heading(self.vel_dir_rast)
             fishy.initial_swim_speed()
+            fishy.mental_map(self.depth_rast)
             
             # add it to the output list
             agents_list.append(fishy)
@@ -1008,12 +1577,17 @@ class simulation():
         '''method that writes to log at end of timestep and updates agents 
         geodataframe for next time step'''
     
-        # first step writes current positions to the projec database
+        # first step writes current positions to the project database
         #TODO fix this
-        # self.agents['ts'] = np.repeat(ts,len(self.agents))
-        # self.agents.astype(dtype = {'id':np.str}, copy = False)
-        # self.agents.to_hdf(self.hdf,'TS',mode = 'a',format = 'table', append = True)
-        # self.hdf.flush()        
+        self.agents['ts'] = np.repeat(ts,len(self.agents))
+        timestep = pd.DataFrame()
+        timestep['ts'] = self.agents['ts']
+        timestep['id'] = self.agents['id'].astype(str)
+        timestep['loc'] = self.agents['loc'].astype(str)
+        timestep['vel'] = self.agents['vel']
+        timestep['dir'] = self.agents['dir']
+        timestep.to_hdf(self.hdf,'TS',mode = 'a',format = 'table', append = True)
+        self.hdf.flush()        
         
         # second step creates a new agents geo dataframe
         self.agents = gpd.GeoDataFrame(columns=['id', 'loc', 'vel', 'dir'],
@@ -1064,24 +1638,41 @@ class simulation():
             for i in range(n):
                 for agent in agents:
                     # check the environment 
+                    agent.mental_map(depth_rast = self.depth_rast, t = i)
                     agent.environment(depth = self.depth_rast,
                                       x_vel = self.vel_x_rast,
                                       y_vel = self.vel_y_rast,
                                       agents_df = self.agents)
                     
-                    # check battery state
+                    # take stock of internal states
+                    agent.find_z()
+                    agent.wave_drag_multiplier()
                     agent.fatigue()
                     
                     # arbitrate behavioral cues
                     agent.arbitrate(vel_mag_rast = self.vel_mag_rast, 
                                     depth_rast = self.depth_rast,
-                                    vel_dir_rast = self.vel_dir_rast)
+                                    vel_dir_rast = self.vel_dir_rast,
+                                    t = i)
                     
-                    # swim like your life depended on it
-                    agent.drag_fun()
-                    agent.frequency()
-                    agent.thrust_fun()
-                    agent.swim(dt)
+                    '''if the ratio to ideal speed over ground to water velocity 
+                    is less than 0.15 
+                    and the agent is travelling against flow
+                    and it's been more than 60 seconds since its last jump'''
+                    if agent.ideal_sog / np.linalg.norm([agent.x_vel,agent.y_vel]) < 0.05 and\
+                        np.sign(agent.heading) != np.sign(np.arctan2(agent.y_vel,agent.x_vel)) and\
+                            i - agent.time_of_jump > 60 and agent.battery > 0.4:
+                                # jump
+                                agent.jump(t = i)
+                    else:
+                        # swim like your life depended on it
+                        agent.drag_fun()
+                        agent.frequency()
+                        agent.thrust_fun()
+                        agent.swim(dt)
+                    
+                    # calculate mileage
+                    agent.odometer()
                 
                 # write frame
                 agent_pts.set_data(self.agents.geometry.x.values, self.agents.geometry.y.values)
@@ -1091,6 +1682,20 @@ class simulation():
                 self.ts_log(i)
                 
                 print ('Time Step %s complete'%(i))
+            for agent in agents:
+                agent.mental_map_export(self.depth_rast)
+        
+        # clean up
         writer.finish()
+        self.hdf.flush()
+        self.hdf.close()
+        self.wsel_rast.close()
+        self.vel_dir_rast.close()
+        self.vel_mag_rast.close()
+        self.depth_rast.close()
+        self.vel_x_rast.close()
+        self.vel_y_rast.close()
+        
+
  
     
