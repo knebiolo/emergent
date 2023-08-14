@@ -9,7 +9,9 @@ Script Intent: test out simulation intialization methods
 #%% Import emergent
 # software directory
 import sys
-sys.path.append(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent")
+#sys.path.append(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent")
+sys.path.append(r"C:\Users\Isha Deo\OneDrive - Kleinschmidt Associates, Inc\GitHub\emergent\emergent")
+
 
 #%% Import dpeendencies
 # import dependencies
@@ -17,12 +19,12 @@ from emergent import sockeye
 import os
 
 # identify directories
-model_dir = r"C:\Users\knebiolo\Desktop\simulations"
+model_dir = r"C:\Users\Isha Deo\Documents\Projects\Nuyakuk\simulations"
 HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify input and output model names
-HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'test_23'
+HECRAS_model = 'NuyakukABM2D.p03.hdf'
+model_name = 'test_ipd_1'
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
@@ -50,15 +52,15 @@ sim = sockeye.simulation(model_dir,model_name,crs)
 
 #%% Read environmental data into model
 # read HECRAS model and create environment rasters
-#sim.HECRAS(os.path.join(HECRAS_dir,HECRAS_model))
+sim.HECRAS(os.path.join(HECRAS_dir,HECRAS_model))
 
 # or import from directory
-sim.enviro_import(os.path.join(model_dir,'vel_x.tif'),'velocity x')
-sim.enviro_import(os.path.join(model_dir,'vel_y.tif'),'velocity y')
-sim.enviro_import(os.path.join(model_dir,'depth.tif'),'depth')
-sim.enviro_import(os.path.join(model_dir,'wsel.tif'),'wsel')
-sim.enviro_import(os.path.join(model_dir,'elev.tif'),'elevation')
-sim.vel_surf()
+# sim.enviro_import(os.path.join(model_dir,'vel_x.tif'),'velocity x')
+# sim.enviro_import(os.path.join(model_dir,'vel_y.tif'),'velocity y')
+# sim.enviro_import(os.path.join(model_dir,'depth.tif'),'depth')
+# sim.enviro_import(os.path.join(model_dir,'wsel.tif'),'wsel')
+# sim.enviro_import(os.path.join(model_dir,'elev.tif'),'elevation')
+# sim.vel_surf()
 
 #%% Create an array of agents
 fishes = sim.create_agents(n, model_dir, bbox, water_temp) 

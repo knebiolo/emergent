@@ -105,7 +105,10 @@ class fish():
         self.z = 0.0
         
         # initialize internal states
-        recover = pd.read_csv("../data/recovery.csv")
+        ## TODO KEVIN I CHANGED THIS!! ## CHANGE BACK!!!! I CAN'T MAKE IT WORK RN
+        #recover = pd.read_csv("../data/recovery.csv")
+        
+        recover = pd.read_csv(r"C:\Users\Isha Deo\OneDrive - Kleinschmidt Associates, Inc\GitHub\emergent\emergent\data\recovery.csv")
         recover['Seconds'] = recover.Minutes * 60.
         self.recovery = CubicSpline(recover.Seconds,recover.Recovery,extrapolate = True,)
         self.swim_behav = 'migratory'# swimming behavior, migratory, refugia, station holding
@@ -627,6 +630,79 @@ class fish():
         except:
             return [0., 0.]
 
+    def buffer_poly(self):
+        
+        # create sensory buffer
+        l = (self.length) * 2.
+                
+        # create wedge looking in front of fish 
+        theta = np.radians(np.linspace(-120,120,100))
+        arc_x = self.pos[0] + l * np.cos(theta)
+        arc_y = self.pos[1] + l * np.sin(theta)
+        arc_x = np.insert(arc_x,0,self.pos[0])
+        arc_y = np.insert(arc_y,0,self.pos[1])
+        arc = np.column_stack([arc_x, arc_y])
+        arc = Polygon(arc)
+        arc_rot = affinity.rotate(arc,np.degrees(self.heading), origin = (self.pos[0],self.pos[1]))    
+            
+        arc_gdf = gpd.GeoDataFrame(index = [0],
+                                   crs = 'EPSG:3473',
+                                   geometry = [arc_rot])
+        return arc_rot
+        
+    def school_cue(self, buffer_poly, weight):
+        
+        nearbyfish_ser = self.agents_df.intersection(buffer_poly)
+        nearbyfish_df = self.agents_df[~nearbyfish_ser.is_empty].drop(self)
+        
+        if not nearbyfish_df.empty:
+            # find average speed and heading of nearby fish
+            self.sog = nearbyfish_df.mean(numeric_only = True)['speed']
+            
+            # find centroid of nearby fish
+            cent_x, cent_y = nearbyfish_df[['Longitude','Latitude']].mean(axis = 0)
+            
+            # distance to centroid of nearby fish
+            cent_dist = self.pos.distance(Point(cent_x, cent_y))
+            
+            # vector of nearby fish centroid position relative to position of fish
+            v = np.array([cent_x, cent_y] - self.pos)
+            
+            # unit vector
+            v_hat = v/np.linalg.norm(v)
+            
+            school_cue = (weight * v_hat)/(cent_dist)
+            
+            return school_cue
+        else:
+            return [0.,0.]
+        
+    def collision_cue(self, buffer_poly, weight):
+        
+        nearbyfish_ser = self.agents_df.intersection(buffer_poly)
+        nearbyfish_df = self.agents_df[~nearbyfish_ser.is_empty].drop(self)
+        
+        
+        if not nearbyfish_df.empty:
+            
+            # calculate distance to each nearby fish normalized by self length
+            nearbyfish_df['distance'] = [self.pos.distance(x)/self.length for x in nearbyfish_df['geometry']]
+            
+            # find closest nearby fish
+            closest_fish = nearbyfish_df[nearbyfish_df['distance'] == nearbyfish_df['distance'].min()]
+            
+            # vector of closest fish position relative to position of fish
+            c = np.array(np.array([closest_fish['Longitude'].values[0], closest_fish['Latitude'].values[0]]) - self.pos)
+            
+            # unit vector
+            c_hat = -1*c/np.linalg.norm(c)
+            
+            collision_cue = (weight * c_hat)/(closest_fish['distance'].values[0]**2)
+        
+            return collision_cue
+        else:
+            return [0.,0.]
+        
     def arbitrate(self,vel_mag_rast, depth_rast, vel_dir_rast, t):
         '''method arbitrates heading commands returning a new heading
         
@@ -638,9 +714,15 @@ class fish():
         low_speed = self.vel_cue(vel_mag_rast,9000)
         avoid = self.already_been_here(depth_rast,6000, t)
                 
+        buffer_poly = self.buffer_poly()
+        school = self.school_cue(buffer_poly, 2000)
+        collision = self.collision_cue(buffer_poly, 10000)
+        
         # calculate the norm of some important behavioral cues
         shallow_n = np.linalg.norm(shallow)
         avoid_n = np.linalg.norm(avoid)
+        school_n = np.linalg.norm(school)
+        collision_n = np.linalg.norm(collision)
         
         # the fish only has so many fucks - aka prioritized acceleration - Reynolds 1987
         # if fish is actively migrating
@@ -649,13 +731,21 @@ class fish():
             if shallow_n > 0.0:
                 # create a heading vector - based on input from sensory cues
                 head_vec = shallow
+            
+            elif collision_n > 0.0:
+                # create a heading vector - based on input from sensory cues
+                head_vec = collision
                     
             elif avoid_n > 0.0:
                 # create a heading vector - based on input from sensory cue
                 head_vec = rheotaxis + avoid
+                
+            elif school_n > 0.0:
+                # create a heading vector - based on input from sensory cue
+                head_vec = rheotaxis + school
             else:
                 # create a heading vector - based on input from sensory cues
-                head_vec = rheotaxis + low_speed + wave_drag + shallow
+                head_vec = rheotaxis + low_speed + wave_drag + shallow + school
             
         # else if fish is seeking refugia
         elif self.swim_behav == 'refugia':
@@ -679,12 +769,16 @@ class fish():
         wave drag:        %s
         lowest velocity:  %s
         place response:   %s
+        schooling:        %s
+        collision:        %s
         final heading:    %s'''%(self.ID,
         np.round(rheotaxis,2),
         np.round(shallow,2),
         np.round(wave_drag,2),
         np.round(low_speed,2),
         np.round(avoid,2),
+        np.round(school,2),
+        np.round(collision, 2),
         np.round(np.degrees(self.heading),2)))
         
     def thrust_fun (self):
@@ -1354,7 +1448,7 @@ class fish():
         self.kcal = self.kcal + swim_cost
       
 class simulation():
-    '''Python class object that implements an Agent Basded Model of adult upstream
+    '''Python class object that implements an Agent Based Model of adult upstream
     migrating sockeye salmon through a modeled riffle cascade complex'''
     
     def __init__(self, model_dir, model_name, crs):
@@ -1484,6 +1578,7 @@ class simulation():
         ymax = np.max(pts[:,1])
         
         # interpoate velocity, wsel, and elevation at new xy's
+        ## TODO ISHA TO CHECK IF RASTER OUTPUTS LOOK DIFFERENT AT 0.5m vs 1m
         xint = np.arange(xmin,xmax,1)
         yint = np.arange(ymax,ymin,-1)
         xnew, ynew = np.meshgrid(xint,yint, sparse = True)
@@ -1558,7 +1653,7 @@ class simulation():
             
         self.depth_rast = rasterio.open(os.path.join(self.model_dir,'depth.tif'))
 
-        # write velocity x raster
+        # write velocity dir raster
         with rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'),
                            mode = 'w',
                            driver = driver,
@@ -1572,7 +1667,7 @@ class simulation():
             
         self.vel_dir_rast = rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'))
             
-        # write velocity y raster
+        # write velocity .mag raster
         with rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'),
                            mode = 'w',
                            driver = driver,
@@ -1585,6 +1680,34 @@ class simulation():
             vel_mag_rast.write(vel_mag,1)
             
         self.vel_mag_rast = rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'))
+        
+        # write velocity x raster
+        with rasterio.open(os.path.join(self.model_dir,'vel_x.tif'),
+                           mode = 'w',
+                           driver = driver,
+                           width = width,
+                           height = height,
+                           count = count,
+                           dtype = 'float64',
+                           crs = crs,
+                           transform = transform) as vel_x_rast:
+            vel_x_rast.write(vel_x,1)
+            
+        self.vel_x_rast = rasterio.open(os.path.join(self.model_dir,'vel_x.tif'))
+            
+        # write velocity y raster
+        with rasterio.open(os.path.join(self.model_dir,'vel_y.tif'),
+                           mode = 'w',
+                           driver = driver,
+                           width = width,
+                           height = height,
+                           count = count,
+                           dtype = 'float64',
+                           crs = crs,
+                           transform = transform) as vel_y_rast:
+            vel_y_rast.write(vel_y,1)
+            
+        self.vel_y_rast = rasterio.open(os.path.join(self.model_dir,'vel_y.tif'))
         
     def create_agents(self, numb_agnts, model_dir, starting_box, water_temp):
         '''method that creates a set of agents for simulation'''

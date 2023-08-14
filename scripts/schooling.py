@@ -32,7 +32,8 @@ import pandas as pd
 import numpy as np
 import rasterio
 import rasterio.plot
-import shapely
+from shapely.geometry import Point, Polygon
+import shapely.affinity as affinity
 import geopandas
 import matplotlib.pyplot as plt
 import os
@@ -137,6 +138,7 @@ for fish_i in range(0,100):
     nearbyfish_ser = fish_gdf.intersection(buffer_poly)
     nearbyfish_df = fish_gdf[~nearbyfish_ser.is_empty].drop(fish_i)
     
+    
     # find average speed and heading of nearby fish
     fish_gdf.at[fish_i, 'speed'] = nearbyfish_df.mean(numeric_only = True)['speed']
     
@@ -194,5 +196,130 @@ for fish_i in range(0,10):
 
     print('done')
     
+#%% arbitration function try
+
+def school_cue(fish_i, weight, buffer_poly):
+    
+    nearbyfish_ser = fish_gdf.intersection(buffer_poly)
+    nearbyfish_df = fish_gdf[~nearbyfish_ser.is_empty].drop(fish_i)
+    
+    if not nearbyfish_df.empty:
+        # find average speed and heading of nearby fish
+        fish_gdf.at[fish_i, 'speed'] = nearbyfish_df.mean(numeric_only = True)['speed']
+        
+        # find centroid of nearby fish
+        cent_x, cent_y = nearbyfish_df[['Longitude','Latitude']].mean(axis = 0)
+        
+        # distance to centroid of nearby fish
+        cent_dist = fish_gdf.at[fish_i, 'geometry'].distance(shapely.geometry.Point(cent_x, cent_y))
+        
+        # vector of nearby fish centroid position relative to position of fish
+        v = np.array([cent_x, cent_y] - np.array(fish_gdf.loc[fish_i, ['Longitude','Latitude']]))
+        
+        # unit vector
+        v_hat = v/np.linalg.norm(v)
+        
+        school_cue = (weight * v_hat)/(cent_dist)
+        
+        return school_cue
+    else:
+        return [0.,0.]
+
+def collision_cue(fish_i, weight, buffer_poly):
+    
+
+    nearbyfish_ser = fish_gdf.intersection(buffer_poly)
+    nearbyfish_df = fish_gdf[~nearbyfish_ser.is_empty].drop(fish_i)
+    
+    nearbyfish_df['distance'] = [fish_gdf.at[fish_i, 'geometry'].distance(x)/fish_gdf.at[fish_i,'length'] for x in nearbyfish_df['geometry']]
+    
+    if not nearbyfish_df.empty:
+        # find closest nearby fish
+        closest_fish = nearbyfish_df[nearbyfish_df['distance'] == nearbyfish_df['distance'].min()]
+        
+        # vector of closest fish position relative to position of fish
+        c = np.array(np.array([closest_fish['Longitude'].values[0], closest_fish['Latitude'].values[0]]) - np.array(fish_gdf.loc[fish_i, ['Longitude','Latitude']]))
+        
+        # unit vector
+        c_hat = -1*c/np.linalg.norm(c)
+        
+        collision_cue = (weight * c_hat)/(closest_fish['distance'].values[0]**2)
+    
+        return collision_cue
+    else:
+        return [0.,0.]
+    
+def one_timestep():
+    fish_xs = fish_gdf['Longitude'] + (fish_gdf['speed'] * np.cos(fish_gdf['heading']))
+    fish_ys = fish_gdf['Latitude'] + (fish_gdf['speed'] * np.sin(fish_gdf['heading']))
+    
+    fish_gdf.set_geometry(geopandas.points_from_xy(x=fish_xs, y=fish_ys))
+
+def arbitrate(fish_i, buffer):
+    
+    collision = collision_cue(fish_i, 2000, buffer)
+    school = school_cue(fish_i, 1000, buffer)
+    
+    collision_n = np.linalg.norm(collision)
+    school_n = np.linalg.norm(school)
+    
+    if collision_n > 5000:
+        head_vec = collision
+    else:
+        head_vec = school
+
+    return head_vec
 
 
+#%% run arbitration schooling
+
+fig2, ax2 = plt.subplots(figsize = (10,10))
+
+fish_gdf.plot(ax=ax2, color = 'white', zorder = 0)
+fish_xmin, fish_xmax = ax2.get_xlim()
+fish_ymin, fish_ymax = ax2.get_ylim()
+
+elev_raster = rasterio.open(os.path.join(inputWS, 'elev.tif'))
+rasterio.plot.show(elev_raster, ax = ax2, zorder = 0, cmap = 'gist_earth')
+ 
+for i, row in fish_gdf.iterrows():
+    ax2.arrow(x = row['Longitude'], y = row['Latitude'], dx = row['length'] * math.cos(row['heading']), dy = row['length'] * math.sin(row['heading']), width = 0.1, head_width = 0.4, zorder = 3, fc = 'white', ec = 'k',length_includes_head = True)
+
+# and run the schooling analysis
+for fish_i in range(0,100):
+    
+    #buffer = fish_gdf.at[fish_i,'geometry'].buffer(distance = 2*fish_gdf.at[fish_i,'length'])
+    
+    # create sensory buffer
+    l = (fish_gdf.at[fish_i,'length']) * 2.
+            
+    # create wedge looking in front of fish 
+    theta = np.radians(np.linspace(-120,120,100))
+    arc_x = fish_gdf.at[fish_i,'Longitude'] + l * np.cos(theta)
+    arc_y = fish_gdf.at[fish_i,'Latitude'] + l * np.sin(theta)
+    arc_x = np.insert(arc_x,0,fish_gdf.at[fish_i,'Longitude'])
+    arc_y = np.insert(arc_y,0,fish_gdf.at[fish_i,'Latitude'])
+    arc = np.column_stack([arc_x, arc_y])
+    arc = Polygon(arc)
+    arc_rot = affinity.rotate(arc,np.degrees(fish_gdf.at[fish_i,'heading']), origin = (fish_gdf.at[fish_i,'Longitude'],fish_gdf.at[fish_i,'Latitude']))    
+        
+    arc_gdf = geopandas.GeoDataFrame(index = [0],
+                               crs = 'EPSG:3473',
+                               geometry = [arc_rot])
+    
+    ax2.plot(*arc.exterior.xy, color = 'g', zorder = 3)
+    
+    head_vec = arbitrate(fish_i, arc)
+    fish_gdf.at[fish_i, 'heading'] = np.arctan2(head_vec[1],head_vec[0])
+   
+one_timestep()
+for i, row in fish_gdf.iterrows():
+    ax2.arrow(x = row['Longitude'], y = row['Latitude'], dx = row['length'] * math.cos(row['heading']), dy = row['length'] * math.sin(row['heading']), width = 0.1, head_width = 0.4, zorder = 2, fc = 'r', ec = 'r',length_includes_head = True)
+
+ax2.set_xlim(fish_xmin, fish_xmax)
+ax2.set_ylim(fish_ymin, fish_ymax)
+
+
+        
+    
+    
