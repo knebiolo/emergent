@@ -18,7 +18,7 @@ mortality.
 
 Our fish agents are python class objects with initialization methods, and 
 methods for movement, behaviors, and perception.  Movement is continuous in 2d 
-space as our environment is a depth and time averaged 2d model.  Movement in 
+space as our environment is a depth averaged 2d model.  Movement in 
 the Z direction is handled with logic.  We will use velocity distributions and 
 the agent's position within the water column to understand the forces acting on 
 the body of the fish (drag).  To maintain position, the agent must generate 
@@ -135,6 +135,7 @@ class fish():
         self.drag = 0.               # computed theoretical drag
         self.thrust = 0.             # computed theoretical thrust Lighthill 
         self.Hz = 0.                 # tail beats per second
+        self.bout_no = 0.            # bout number - new bout whenever fish recovers
         self.dist_per_bout = 0.      # running counter of the distance travelled per bout
         self.bout_dur = 0.           # running bout timer 
         self.ucrit = self.sog * 7    # TODO - what is the ucrit for sockeye?
@@ -263,8 +264,9 @@ class fish():
             
             # calc force
             if 60. < t_since <= 3600.:
-                return  -0.0003 * t_since + 1.0084
-            
+                #return  -0.0003 * t_since + 1.0084
+                return  1.
+
             else:
                 return 0.
             
@@ -331,11 +333,12 @@ class fish():
         self.x_vel = x_vel.read(1)[row, col]
         self.y_vel = y_vel.read(1)[row, col]
         
-        
+        # can't have divide by zero
         if self.x_vel == 0.0 and self.y_vel == 0.0:
             self.x_vel = 0.0001
             self.y_vel = 0.0001
-            
+        
+        # keep track of the amount of time a fish spends out of water
         if self.depth < self.too_shallow:
             print ('FISH OUT OF WATER OH SHIT')
             self.time_out_of_water = self.time_out_of_water + 1
@@ -357,8 +360,7 @@ class fish():
         if self.depth < self.body_depth * 3 / 100.:
             self.z = self.depth + self.too_shallow
         else:
-            self.z = self.body_depth * 3 / 100.
-        
+            self.z = self.body_depth * 3 / 100.  
         
     def vel_cue (self, vel_mag_rast, weight):
         '''Function that returns a lowest velocity heading command - 
@@ -454,7 +456,7 @@ class fish():
         '''
         
         # create a sensory wedge looking in front of fish 
-        theta = np.radians(np.linspace(-45,45,100))
+        theta = np.radians(np.linspace(-15,15,100))
         arc_x = self.pos[0] + (2. * self.length/1000.) * np.cos(theta)
         arc_y = self.pos[1] + (2. * self.length/1000.) * np.sin(theta)
         arc_x = np.insert(arc_x,0,self.pos[0])
@@ -492,8 +494,7 @@ class fish():
                 return 1.0 
             else:
                 return 0.0
-
-            
+  
         v_force_multiplier = np.vectorize(force_multiplier,excluded = [1])
         
         multiplier = v_force_multiplier(masked[0], min_depth)
@@ -547,9 +548,7 @@ class fish():
             print ('fuck - lets look at these arrays to make sure we good')
         
         return [np.nansum(x_force),np.nansum(y_force)]                                     
-
-
-        
+     
     def wave_drag_multiplier(self):
         '''Function calculates the wave drag multiplier from data digitized from 
         Hughes 2004 Figure 3'''
@@ -712,7 +711,7 @@ class fish():
         shallow = self.shallow_cue(depth_rast,5000)
         wave_drag = self.wave_drag_cue(depth_rast,8000)
         low_speed = self.vel_cue(vel_mag_rast,9000)
-        avoid = self.already_been_here(depth_rast,6000, t)
+        avoid = self.already_been_here(depth_rast,8000, t)
                 
         buffer_poly = self.buffer_poly()
         school = self.school_cue(buffer_poly, 2000)
@@ -763,6 +762,7 @@ class fish():
         # change heading
         self.heading = heading
         
+        # log this!        
         print('''Fish %s heading arbitration:
         rheotaxis:        %s
         too shallow:      %s
@@ -780,7 +780,30 @@ class fish():
         np.round(school,2),
         np.round(collision, 2),
         np.round(np.degrees(self.heading),2)))
+    
+        row_dict = {'ID':[self.ID],
+                    'timestamp':[t],
+                    'rheotaxis':['{:50}'.format(str(tuple(np.round(rheotaxis,2))))],
+                    'shallow':['{:50}'.format(str(tuple(np.round(shallow,2))))],
+                    'wave_drag':['{:50}'.format(str(tuple(np.round(wave_drag,2))))],
+                    'low_speed':['{:50}'.format(str(tuple(np.round(low_speed,2))))],
+                    'place_response':['{:50}'.format(str(tuple(np.round(avoid,2))))],
+                    'final_heading':[np.round(np.degrees(self.heading),2)]}
         
+        arb_df = pd.DataFrame.from_dict(row_dict, orient = 'columns')
+        arb_df.to_hdf(self.hdf,
+                      key = 'arbitrate',
+                      mode = 'a',
+                      format = 'table',
+                      min_itemsize = {'rheotaxis':50,
+                                       'shallow':50,
+                                       'wave_drag':50,
+                                       'low_speed':50,
+                                       'place_response':50},
+                      append = True,
+                      data_columns = True)
+        self.hdf.flush()        
+
     def thrust_fun (self):
         '''Lighthill 1970 thrust equation. '''
         # density of freshwater assumed to be 1
@@ -1112,7 +1135,7 @@ class fish():
         # calculate swim speed
         self.swim_speed = np.linalg.norm(ideal_vel - water_vel)
 
-    def swim(self, dt):
+    def swim(self, dt, t):
         '''Method propels a fish forward'''
         # get fish velocity in vector form        
         fish_vel_0 = np.array([self.sog * np.cos(self.heading), 
@@ -1181,6 +1204,24 @@ class fish():
         np.round(np.linalg.norm(self.drag),2),
         np.round(np.linalg.norm(surge),2),
         np.round(np.linalg.norm(acc),2)))
+    
+        swim_dict = {'ID':[self.ID],
+                     'timestep':[t],
+                     'speed_over_ground':[np.round(self.sog,2)],
+                     'swim_speed':[np.round(self.swim_speed,2)],
+                     'water_velocity':[np.round(np.linalg.norm([self.x_vel, self.y_vel]),2)],
+                     'water_depth':[np.round(self.depth,2)],
+                     'swim_depth':[np.round(self.z,2)],
+                     'wave_drag':[np.round(self.wave_drag,2)],
+                     'tail_beats_Hz':[np.round(self.Hz,2)],
+                     'thrust':[np.round(np.linalg.norm(self.thrust),2)],
+                     'drag':[np.round(np.linalg.norm(self.drag),2)],
+                     'surge':[np.round(np.linalg.norm(surge),2)],
+                     'acceleration':[np.round(np.linalg.norm(acc),2)]}
+    
+        swim_df = pd.DataFrame.from_dict(swim_dict, orient = 'columns')
+        swim_df.to_hdf(self.hdf,'swim',mode = 'a',format = 'table', append = True)
+        self.hdf.flush()  
    
         # set new position
         self.pos = self.prevPos + fish_vel_1 
@@ -1188,16 +1229,10 @@ class fish():
         print ('Fish %s is at %s'%(self.ID,np.round(self.pos,3)))
         
     def jump (self,t):
-        '''Method that simulates fish jumping.
+        '''Method that simulates fish jumping using ballistic trajectory.
         
-        A jump happens in the following 4 steps:
-            1: the agent's swimming depth is updated to the min depth and the 
-            ideal sog is changed to ucrit
-            2: agent has two jump angles (45 or 60) - apply ballistic trajectory
-                2a: calculate time airborne
-                2b: calculate horizontal displacement
-            3: given current xy and heading, what is new xy
-            4: move
+        We make simplifying assumption that a fish can accelerate to ucrit by 
+        the time it leaves the water column regardless of water depth.  
         
         Returns
         -------
@@ -1236,10 +1271,20 @@ class fish():
             np.degrees(jump_angle),
             np.round(time_airborne,2),
             np.round(displacement,2)))
+    
+        jump_dict = {'ID':[self.ID],
+                     'timestep':[t],
+                     'jump_angle':[np.degrees(jump_angle)],
+                     'time_airborne':[np.round(time_airborne,2)],
+                     'displacement':[np.round(displacement,2)]}
+    
+        jump_df = pd.DataFrame.from_dict(jump_dict, orient = 'columns')
+        jump_df.to_hdf(self.hdf,'jump',mode = 'a',format = 'table', append = True)
+        self.hdf.flush()  
                                      
         print ("Fish %s is at %s"%(self.ID,self.pos))
         
-    def fatigue(self):    
+    def fatigue(self,t):    
         '''
         Method tracks battery levels and assigns swimming modes
 
@@ -1339,6 +1384,7 @@ class fish():
                 self.swim_mode = 'sustained'
                 self.ideal_sog = 0.
                 self.ttfr = 0.
+                self.bout_no = self.bout_no + 1
                 
             elif 0.1 < self.battery <= 0.3:
                 self.swim_behav = 'refugia'
@@ -1360,6 +1406,7 @@ class fish():
                     self.swim_mode = 'sustained'
                     self.ideal_sog = 0.
                     self.ttfr = 0
+                    self.bout_no = self.bout_no + 1
                     
         # fish is station holding and recovering    
         else:
@@ -1398,18 +1445,40 @@ class fish():
             else:
                 self.swim_behav = 'station holding'
                 self.swim_mode = 'sustained'  
-                
+        
+        # log this!
         print ('''Fish %s battery summary: 
         battery:       %s   
         swimming mode: %s
         behavior:      %s
+        bout number:   %s
         dist per bout: %s m
         bout duration: %s s'''%(self.ID,
         np.round(self.battery,4),
         self.swim_mode,
         self.swim_behav,
+        self.bout_no,
         np.round(self.dist_per_bout,2),
         self.bout_dur)) 
+    
+        batt_dict = {'ID':[self.ID],
+                     'timestep':[t],
+                     'battery':[np.round(self.battery,4)],
+                     'swim_mode':['{:50}'.format(self.swim_mode)],
+                     'swim_behavior':['{:50}'.format(self.swim_behav)],
+                     'bout_no':[self.bout_no],
+                     'dist_per_bout':[np.round(self.dist_per_bout,2)],
+                     'bout_duration':[self.bout_dur]}
+        
+        batt_df = pd.DataFrame.from_dict(batt_dict)
+        batt_df.to_hdf(self.hdf,
+                       key = 'battery',
+                       mode = 'a',
+                       format = 'table', 
+                       min_itemsize = {'swim_mode':50,
+                                        'swim_behavior':50},
+                       append = True,)
+        self.hdf.flush()      
     
     def odometer(self):
         '''Created on Thu May 18 20:17:28 2023
@@ -1457,6 +1526,11 @@ class simulation():
         self.model_dir = model_dir
         self.model_name = model_name
         
+        # first step creates a project directory if it doesn't already exist
+        if not os.path.exists(os.path.join(self.model_dir,self.model_name)):
+            os.makedirs(os.path.join(self.model_dir,self.model_name))
+
+        
         # coordinate reference system for the model
         self.crs = crs
         
@@ -1464,7 +1538,9 @@ class simulation():
         self.agents = gpd.GeoDataFrame(columns=['id', 'loc', 'vel', 'dir'], geometry='loc', crs= crs) 
         
         # create an empty hdf file for results
-        self.hdf = pd.HDFStore(os.path.join(self.model_dir,'%s.hdf'%(self.model_name)))
+        self.hdf = pd.HDFStore(os.path.join(self.model_dir,self.model_name,'%s.hdf'%(self.model_name)))
+        
+        
     
     def enviro_import(self,data_dir,surface_type):
         '''Function imports existing environmental surfaces into new simulation'''
@@ -1798,7 +1874,7 @@ class simulation():
         plt.ylabel('Northing')
         
         # Update the frames for the movie
-        with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
+        with writer.saving(fig, os.path.join(self.model_dir,self.model_name,'%s.mp4'%(model_name)), 300):
             for i in range(n):
                 for agent in agents:
                     # check the environment 
@@ -1811,7 +1887,7 @@ class simulation():
                     # take stock of internal states
                     agent.find_z()
                     agent.wave_drag_multiplier()
-                    agent.fatigue()
+                    agent.fatigue(t = i)
                     
                     # arbitrate behavioral cues
                     agent.arbitrate(vel_mag_rast = self.vel_mag_rast, 
@@ -1820,7 +1896,7 @@ class simulation():
                                     t = i)
                     
                     '''if the ratio to ideal speed over ground to water velocity 
-                    is less than 0.15 
+                    is less than 0.05 
                     and the agent is travelling against flow
                     and it's been more than 60 seconds since its last jump
                     and there is more than 40% remaining in battery'''
@@ -1834,7 +1910,7 @@ class simulation():
                         agent.drag_fun()
                         agent.frequency()
                         agent.thrust_fun()
-                        agent.swim(dt)
+                        agent.swim(dt, t = i)
                     
                     # calculate mileage
                     agent.odometer()
