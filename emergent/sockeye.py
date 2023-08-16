@@ -318,7 +318,27 @@ class fish():
         y_force = ((weight * np.sin(dir_grid))/ dist_grid) * multiplier
         
         return [np.nansum(x_force),np.nansum(y_force)]                                     
+   
+    def buffer_poly(self):
         
+        # create sensory buffer
+        l = (self.length) * 2.
+                
+        # create wedge looking in front of fish 
+        theta = np.radians(np.linspace(-120,120,100))
+        arc_x = self.pos[0] + l * np.cos(theta)
+        arc_y = self.pos[1] + l * np.sin(theta)
+        arc_x = np.insert(arc_x,0,self.pos[0])
+        arc_y = np.insert(arc_y,0,self.pos[1])
+        arc = np.column_stack([arc_x, arc_y])
+        arc = Polygon(arc)
+        arc_rot = affinity.rotate(arc,np.degrees(self.heading), origin = (self.pos[0],self.pos[1]))    
+            
+        arc_gdf = gpd.GeoDataFrame(index = [0],
+                                   crs = 'EPSG:3473',
+                                   geometry = [arc_rot])
+        return arc_rot        
+    
     def environment(self, depth, x_vel, y_vel, agents_df):
         '''method finds the current depth, x velocity, y velocity, and neighbors'''
         
@@ -339,6 +359,12 @@ class fish():
         if self.depth < self.too_shallow:
             print ('FISH OUT OF WATER OH SHIT')
             self.time_out_of_water = self.time_out_of_water + 1
+            
+        buffer_poly = self.buffer_poly()
+        nearbyfish_ser = agents_df.intersection(buffer_poly)
+        nearbyfish_df = agents_df[~nearbyfish_ser.is_empty]
+        
+        self.neighbors = nearbyfish_df
             
     def find_z(self):
         '''Method resolves agent depth.  
@@ -555,7 +581,12 @@ class fish():
         Hughes 2004 Figure 3'''
         
         # get data
-        hughes = pd.read_csv(r'../data/wave_drag_huges_2004_fig3.csv')
+        try:
+            hughes = pd.read_csv(r'../data/wave_drag_huges_2004_fig3.csv')
+
+        except:
+            hughes = pd.read_csv(r'C:\Users\Isha Deo\OneDrive - Kleinschmidt Associates, Inc\GitHub\emergent\emergent\data/wave_drag_huges_2004_fig3.csv')
+                                 
         hughes.sort_values(by = 'body_depths_submerged', 
                            ascending = True,
                            inplace = True)
@@ -630,45 +661,36 @@ class fish():
         except:
             return [0., 0.]
 
-    def buffer_poly(self):
+
         
-        # create sensory buffer
-        l = (self.length) * 2.
-                
-        # create wedge looking in front of fish 
-        theta = np.radians(np.linspace(-120,120,100))
-        arc_x = self.pos[0] + l * np.cos(theta)
-        arc_y = self.pos[1] + l * np.sin(theta)
-        arc_x = np.insert(arc_x,0,self.pos[0])
-        arc_y = np.insert(arc_y,0,self.pos[1])
-        arc = np.column_stack([arc_x, arc_y])
-        arc = Polygon(arc)
-        arc_rot = affinity.rotate(arc,np.degrees(self.heading), origin = (self.pos[0],self.pos[1]))    
-            
-        arc_gdf = gpd.GeoDataFrame(index = [0],
-                                   crs = 'EPSG:3473',
-                                   geometry = [arc_rot])
-        return arc_rot
+    def school_cue(self, weight):
         
-    def school_cue(self, buffer_poly, weight):
-        
-        nearbyfish_ser = self.agents_df.intersection(buffer_poly)
-        nearbyfish_df = self.agents_df[~nearbyfish_ser.is_empty].drop(self)
-        
-        if not nearbyfish_df.empty:
-            # find average speed and heading of nearby fish
-            self.sog = nearbyfish_df.mean(numeric_only = True)['speed']
-            
-            # find centroid of nearby fish
-            cent_x, cent_y = nearbyfish_df[['Longitude','Latitude']].mean(axis = 0)
-            
-            # distance to centroid of nearby fish
-            cent_dist = self.pos.distance(Point(cent_x, cent_y))
+        # make a functio to calculate direction from each fish to centroid of nearby fish
+        def direction (xi, yi, x, y):
+            '''function that calculates a unit vector from mental map cell to agent'''
             
             # vector of nearby fish centroid position relative to position of fish
-            v = np.array([cent_x, cent_y] - self.pos)
+            v = np.array([x, y]) - np.array([xi, yi])
             
             # unit vector
+            vhat = v / np.linalg.norm(v)
+            
+            return np.arctan2(vhat[1],vhat[0])
+        
+        if not self.neighbors.empty:
+            # find average speed and heading of nearby fish
+            self.sog = self.neighbors.mean(numeric_only = True)['vel']
+            
+            # find centroid of nearby fish
+            centroid = self.neighbors.dissolve().centroid
+            
+            # distance to centroid of nearby fish
+            cent_dist = Point(self.pos).distance(centroid)[0]
+            
+            direction = direction(self.pos[0], self.pos[1], centroid.x[0], centroid.y[0])
+            
+            v = np.array(centroid - self.pos)
+    
             v_hat = v/np.linalg.norm(v)
             
             school_cue = (weight * v_hat)/(cent_dist)
@@ -677,21 +699,19 @@ class fish():
         else:
             return [0.,0.]
         
-    def collision_cue(self, buffer_poly, weight):
+    def collision_cue(self, weight):
+             
         
-        nearbyfish_ser = self.agents_df.intersection(buffer_poly)
-        nearbyfish_df = self.agents_df[~nearbyfish_ser.is_empty].drop(self)
-        
-        
-        if not nearbyfish_df.empty:
+        if not self.neighbors.empty:
             
             # calculate distance to each nearby fish normalized by self length
-            nearbyfish_df['distance'] = [self.pos.distance(x)/self.length for x in nearbyfish_df['geometry']]
+            self.neighbors['distance'] = [Point(self.pos).distance(x)/self.length for x in self.neighbors['geometry']]
             
             # find closest nearby fish
-            closest_fish = nearbyfish_df[nearbyfish_df['distance'] == nearbyfish_df['distance'].min()]
+            closest_fish = self.neighbors[self.neighbors['distance'] == self.neighbors['distance'].min()]
             
             # vector of closest fish position relative to position of fish
+            #TODO fix this statement
             c = np.array(np.array([closest_fish['Longitude'].values[0], closest_fish['Latitude'].values[0]]) - self.pos)
             
             # unit vector
@@ -713,10 +733,9 @@ class fish():
         wave_drag = self.wave_drag_cue(depth_rast,8000)
         low_speed = self.vel_cue(vel_mag_rast,9000)
         avoid = self.already_been_here(depth_rast,6000, t)
-                
-        buffer_poly = self.buffer_poly()
-        school = self.school_cue(buffer_poly, 2000)
-        collision = self.collision_cue(buffer_poly, 10000)
+
+        school = self.school_cue(2000)
+        collision = self.collision_cue(10000)
         
         # calculate the norm of some important behavioral cues
         shallow_n = np.linalg.norm(shallow)
@@ -1495,7 +1514,7 @@ class simulation():
         crs = self.crs
         transform = Affine.translation(self.vel_x_rast.bounds[0] - 0.5, self.vel_x_rast.bounds[3] - 0.5) * Affine.scale(1,-1)
 
-        # write velocity x raster
+        # write velocity dir raster
         with rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'),
                            mode = 'w',
                            driver = driver,
@@ -1509,7 +1528,7 @@ class simulation():
             
         self.vel_dir_rast = rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'))
             
-        # write velocity y raster
+        # write velocity mag raster
         with rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'),
                            mode = 'w',
                            driver = driver,
@@ -1691,7 +1710,7 @@ class simulation():
                            dtype = 'float64',
                            crs = crs,
                            transform = transform) as vel_x_rast:
-            vel_x_rast.write(vel_x,1)
+            vel_x_rast.write(vel_x_new,1)
             
         self.vel_x_rast = rasterio.open(os.path.join(self.model_dir,'vel_x.tif'))
             
@@ -1705,7 +1724,7 @@ class simulation():
                            dtype = 'float64',
                            crs = crs,
                            transform = transform) as vel_y_rast:
-            vel_y_rast.write(vel_y,1)
+            vel_y_rast.write(vel_y_new,1)
             
         self.vel_y_rast = rasterio.open(os.path.join(self.model_dir,'vel_y.tif'))
         

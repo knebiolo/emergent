@@ -19,12 +19,12 @@ from emergent import sockeye
 import os
 
 # identify directories
-model_dir = r"C:\Users\Isha Deo\Documents\Projects\Nuyakuk\simulations"
+model_dir = r"C:\Users\Isha Deo\Documents\Projects\Nuyakuk\simulations\test_ipd_11"
 HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify input and output model names
-HECRAS_model = 'NuyakukABM2D.p03.hdf'
-model_name = 'test_ipd_1'
+HECRAS_model = 'NuyakukABM2D.p08.hdf'
+model_name = 'test_ipd_11'
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
