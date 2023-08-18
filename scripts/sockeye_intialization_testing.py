@@ -19,12 +19,12 @@ from emergent import sockeye
 import os
 
 # identify directories
-model_dir = r"C:\Users\Isha Deo\Documents\Projects\Nuyakuk\simulations\test_ipd_11"
+model_dir = r"C:\Users\Isha Deo\Documents\Projects\Nuyakuk\simulations\test_ipd_15"
 HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p08.hdf'
-model_name = 'test_ipd_11'
+model_name = 'test_ipd_15'
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
@@ -52,14 +52,16 @@ sim = sockeye.simulation(model_dir,model_name,crs)
 
 #%% Read environmental data into model
 # read HECRAS model and create environment rasters
-sim.HECRAS(os.path.join(HECRAS_dir,HECRAS_model))
+# sim.HECRAS(os.path.join(HECRAS_dir,HECRAS_model))
 
 # or import from directory
-# sim.enviro_import(os.path.join(model_dir,'vel_x.tif'),'velocity x')
-# sim.enviro_import(os.path.join(model_dir,'vel_y.tif'),'velocity y')
-# sim.enviro_import(os.path.join(model_dir,'depth.tif'),'depth')
-# sim.enviro_import(os.path.join(model_dir,'wsel.tif'),'wsel')
-# sim.enviro_import(os.path.join(model_dir,'elev.tif'),'elevation')
+sim.enviro_import(os.path.join(model_dir,'vel_x.tif'),'velocity x')
+sim.enviro_import(os.path.join(model_dir,'vel_y.tif'),'velocity y')
+sim.enviro_import(os.path.join(model_dir,'depth.tif'),'depth')
+sim.enviro_import(os.path.join(model_dir,'wsel.tif'),'wsel')
+sim.enviro_import(os.path.join(model_dir,'elev.tif'),'elevation')
+sim.enviro_import(os.path.join(model_dir,'vel_dir.tif'),'velocity direction')
+sim.enviro_import(os.path.join(model_dir,'vel_mag.tif'),'velocity magnitude')
 # sim.vel_surf()
 
 #%% Create an array of agents
