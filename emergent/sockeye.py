@@ -106,9 +106,9 @@ class fish():
         
         # initialize internal states
         ## TODO KEVIN I CHANGED THIS!! ## CHANGE BACK!!!! I CAN'T MAKE IT WORK RN
-        #recover = pd.read_csv("../data/recovery.csv")
+        recover = pd.read_csv("../data/recovery.csv")
         
-        recover = pd.read_csv(r"C:\Users\Isha Deo\OneDrive - Kleinschmidt Associates, Inc\GitHub\emergent\emergent\data\recovery.csv")
+        #recover = pd.read_csv(r"C:\Users\Isha Deo\OneDrive - Kleinschmidt Associates, Inc\GitHub\emergent\emergent\data\recovery.csv")
         recover['Seconds'] = recover.Minutes * 60.
         self.recovery = CubicSpline(recover.Seconds,recover.Recovery,extrapolate = True,)
         self.swim_behav = 'migratory'# swimming behavior, migratory, refugia, station holding
@@ -812,6 +812,8 @@ class fish():
                     'wave_drag':['{:50}'.format(str(tuple(np.round(wave_drag,2))))],
                     'low_speed':['{:50}'.format(str(tuple(np.round(low_speed,2))))],
                     'place_response':['{:50}'.format(str(tuple(np.round(avoid,2))))],
+                    'schooling':['{:50}'.format(str(tuple(np.round(school,2))))],
+                    'collision':['{:50}'.format(str(tuple(np.round(collision,2))))],                    
                     'final_heading':[np.round(np.degrees(self.heading),2)]}
         
         arb_df = pd.DataFrame.from_dict(row_dict, orient = 'columns')
@@ -823,7 +825,9 @@ class fish():
                                        'shallow':50,
                                        'wave_drag':50,
                                        'low_speed':50,
-                                       'place_response':50},
+                                       'place_response':50,
+                                       'schooling':50,
+                                       'collision':50},
                       append = True,
                       data_columns = True)
         self.hdf.flush()        
@@ -931,7 +935,10 @@ class fish():
         if self.swim_behav == 'station holding':
             self.Hz = 1.
         else:
-            self.Hz = np.sqrt(drag*V**2*np.cos(np.radians(theta))/(A**2*B**2*swim_speed_cms*np.pi**3*rho*(swim_speed_cms - V)*(-0.062518880701972*swim_speed_cms - 0.125037761403944*V*np.cos(np.radians(theta)) + 0.062518880701972*V)))
+            self.Hz = np.sqrt(drag*V**2*np.cos(np.radians(theta))/\
+                              (A**2*B**2*swim_speed_cms*np.pi**3*rho*(swim_speed_cms - V)*\
+                               (-0.062518880701972*swim_speed_cms - 0.125037761403944*V*\
+                                np.cos(np.radians(theta)) + 0.062518880701972*V)))
 
     def kin_visc(self,temp):
         '''kinematic viscocity as a function of temperature
@@ -1008,15 +1015,22 @@ class fish():
         author: Isha Deo'''
         
         # set up drag coefficient vs Reynolds number dataframe
-        drag_coeffs_df = pd.DataFrame(data = {'Reynolds Number': [2.5e4, 5.0e4, 7.4e4, 9.9e4, 1.2e5, 1.5e5, 1.7e5, 2.0e5],
-                                      'Drag Coefficient': [0.23,0.19,0.15,0.14,0.12,0.12,0.11,0.10]}).set_index('Reynolds Number')
+        drag_coeffs_df = pd.DataFrame(data = {'Reynolds Number': [2.5e4, 5.0e4, 
+                                                                  7.4e4, 9.9e4, 
+                                                                  1.2e5, 1.5e5, 
+                                                                  1.7e5, 2.0e5],
+                                      'Drag Coefficient': [0.23,0.19,0.15,0.14,
+                                                           0.12,0.12,0.11,0.10]}).\
+            set_index('Reynolds Number')
         
         # fit drag coefficient vs Reynolds number to functio
         
         def fit_dragcoeffs(reynolds, a, b):
             return np.log(reynolds)*a + b
         
-        dragf_popt, dragf_pcov = curve_fit(f = fit_dragcoeffs, xdata = drag_coeffs_df.index, ydata = drag_coeffs_df['Drag Coefficient'])
+        dragf_popt, dragf_pcov = curve_fit(f = fit_dragcoeffs, 
+                                           xdata = drag_coeffs_df.index, 
+                                           ydata = drag_coeffs_df['Drag Coefficient'])
         
         # determine drag coefficient for calculated Reynolds number
         drag_coeff = np.abs(fit_dragcoeffs(reynolds, dragf_popt[0], dragf_popt[1]))
@@ -1073,7 +1087,12 @@ class fish():
         drag_coeff = self.drag_coeff(reynolds)
         
         # calculate drag!
-        self.drag = -0.5 * (dens * 1000) * (surface_area / 100**2) * drag_coeff * (np.linalg.norm(fish_vel - water_vel)**2)*(fish_vel/np.linalg.norm(fish_vel)) * self.wave_drag
+        self.drag = -0.5 * (dens * 1000) *\
+            (surface_area / 100**2) *\
+                drag_coeff *\
+                    (np.linalg.norm(fish_vel - water_vel)**2) *\
+                        (fish_vel/np.linalg.norm(fish_vel)) *\
+                            self.wave_drag
 
     def ideal_drag_fun (self):
         """
@@ -1141,7 +1160,12 @@ class fish():
         drag_coeff = self.drag_coeff(reynolds)   
         
         # calculate drag!
-        ideal_drag = -0.5 * (dens * 1000.) * (surface_area / 100**2) * drag_coeff * (np.linalg.norm(self.max_practical_sog - water_vel)**2)*(self.max_practical_sog/np.linalg.norm(self.max_practical_sog)) * self.wave_drag
+        ideal_drag = -0.5 * (dens * 1000.) *\
+            (surface_area / 100**2) *\
+                drag_coeff *\
+                    (np.linalg.norm(self.max_practical_sog - water_vel)**2) *\
+                        (self.max_practical_sog/np.linalg.norm(self.max_practical_sog)) *\
+                            self.wave_drag
 
         return ideal_drag
     
