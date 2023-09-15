@@ -321,10 +321,30 @@ class fish():
         
         return [np.nansum(x_force),np.nansum(y_force)]                                     
    
-    def buffer_poly(self):
+    def schooling_buffer_poly(self):
         
         # create sensory buffer
-        l = (self.length) * 2.
+        l = (self.length) * 10.
+                
+        # create wedge looking in front of fish 
+        theta = np.radians(np.linspace(-120,120,100))
+        arc_x = self.pos[0] + l * np.cos(theta)
+        arc_y = self.pos[1] + l * np.sin(theta)
+        arc_x = np.insert(arc_x,0,self.pos[0])
+        arc_y = np.insert(arc_y,0,self.pos[1])
+        arc = np.column_stack([arc_x, arc_y])
+        arc = Polygon(arc)
+        arc_rot = affinity.rotate(arc,np.degrees(self.heading), origin = (self.pos[0],self.pos[1]))    
+            
+        arc_gdf = gpd.GeoDataFrame(index = [0],
+                                   crs = 'EPSG:3473',
+                                   geometry = [arc_rot])
+        return arc_rot        
+    
+    def collision_buffer_poly(self):
+        
+        # create sensory buffer
+        l = (self.length) * 1.
                 
         # create wedge looking in front of fish 
         theta = np.radians(np.linspace(-120,120,100))
@@ -363,12 +383,19 @@ class fish():
             print ('FISH OUT OF WATER OH SHIT')
             self.time_out_of_water = self.time_out_of_water + 1
             
-        buffer_poly = self.buffer_poly()
-        nearbyfish_ser = agents_df.intersection(buffer_poly)
-        nearbyfish_df = agents_df[~nearbyfish_ser.is_empty]
-        nearbyfish_df = nearbyfish_df[nearbyfish_df.id != self.ID]
+        school_buffer_poly = self.schooling_buffer_poly()
+        sch_nearbyfish_ser = agents_df.intersection(school_buffer_poly)
+        sch_nearbyfish_df = agents_df[~sch_nearbyfish_ser.is_empty]
+        sch_nearbyfish_df = sch_nearbyfish_df[sch_nearbyfish_df.id != self.ID]
+        self.school_neighbors = sch_nearbyfish_df
         
-        self.neighbors = nearbyfish_df
+        collision_buffer_poly = self.collision_buffer_poly()
+        coll_nearbyfish_ser = agents_df.intersection(collision_buffer_poly)
+        coll_nearbyfish_df = agents_df[~coll_nearbyfish_ser.is_empty]
+        coll_nearbyfish_df = coll_nearbyfish_df[coll_nearbyfish_df.id != self.ID]
+        self.collision_neighbors = coll_nearbyfish_df
+
+
             
     def find_z(self):
         '''Method resolves agent depth.  
@@ -666,23 +693,23 @@ class fish():
     def school_cue(self, weight):
         
         # make a functio to calculate direction from each fish to centroid of nearby fish
-        def direction (xi, yi, x, y):
-            '''function that calculates a unit vector from mental map cell to agent'''
+        # def direction (xi, yi, x, y):
+        #     '''function that calculates a unit vector from mental map cell to agent'''
             
-            # vector of nearby fish centroid position relative to position of fish
-            v = np.array([x, y]) - np.array([xi, yi])
+        #     # vector of nearby fish centroid position relative to position of fish
+        #     v = np.array([x, y]) - np.array([xi, yi])
             
-            # unit vector
-            vhat = v / np.linalg.norm(v)
+        #     # unit vector
+        #     vhat = v / np.linalg.norm(v)
             
-            return np.arctan2(vhat[1],vhat[0])
+        #     return np.arctan2(vhat[1],vhat[0])
         
-        if not self.neighbors.empty:
+        if not self.school_neighbors.empty:
             # find average speed and heading of nearby fish
-            self.sog = self.neighbors.mean(numeric_only = True)['vel']
+            self.sog = self.school_neighbors.mean(numeric_only = True)['vel']
             
             # find centroid of nearby fish
-            centroid = self.neighbors.dissolve().centroid
+            centroid = self.school_neighbors.dissolve().centroid
             
             # distance to centroid of nearby fish
             cent_dist = Point(self.pos).distance(centroid)[0]
@@ -700,18 +727,18 @@ class fish():
         
     def collision_cue(self, weight):
         
-        if not self.neighbors.empty:
+        if not self.collision_neighbors.empty:
             
             # calculate distance to each nearby fish normalized by self length
-            self.neighbors['distance'] = np.array([Point(self.pos).distance(x)/self.length for x in self.neighbors['loc']])
+            self.collision_neighbors['distance'] = np.array([Point(self.pos).distance(x)/self.length for x in self.collision_neighbors['loc']])
             
-            if self.neighbors['distance'].min() == 0:
+            if self.collision_neighbors['distance'].min() == 0:
                 print('FISH BOINKED')
                 return [0.,0.]
             
             else:
                 # find closest nearby fish
-                closest_fish = self.neighbors[self.neighbors['distance'] == self.neighbors['distance'].min()]
+                closest_fish = self.collision_neighbors[self.collision_neighbors['distance'] == self.collision_neighbors['distance'].min()]
                 
                 # vector of closest fish position relative to position of fish
                 c = np.array([closest_fish['loc'].x.values[0], closest_fish['loc'].y.values[0]]) - np.array(self.pos)
@@ -719,7 +746,7 @@ class fish():
                 # unit vector
                 c_hat = -1*c/np.linalg.norm(c)
                 print(c_hat)
-                collision_cue = (weight * c_hat)/((closest_fish['distance'].values[0]*1000))
+                collision_cue = (weight * c_hat)/((closest_fish['distance'].values[0])*1000)
             
                 return collision_cue
         else:
@@ -738,7 +765,7 @@ class fish():
 
         avoid = self.already_been_here(depth_rast,8000, t)
                 
-        school = self.school_cue(2000)
+        school = self.school_cue(5000)
         collision = self.collision_cue(10000)
         
         # calculate the norm of some important behavioral cues
@@ -755,7 +782,7 @@ class fish():
                 # create a heading vector - based on input from sensory cues
                 head_vec = shallow
             
-            elif collision_n > 100:
+            elif collision_n > 500:
                 # create a heading vector - based on input from sensory cues
                 head_vec = collision
                     
@@ -812,20 +839,27 @@ class fish():
                     'wave_drag':['{:50}'.format(str(tuple(np.round(wave_drag,2))))],
                     'low_speed':['{:50}'.format(str(tuple(np.round(low_speed,2))))],
                     'place_response':['{:50}'.format(str(tuple(np.round(avoid,2))))],
+                    'schooling':['{:50}'.format(str(tuple(np.round(school,2))))],
+                    'collision':['{:50}'.format(str(tuple(np.round(collision,2))))],
                     'final_heading':[np.round(np.degrees(self.heading),2)]}
         
         arb_df = pd.DataFrame.from_dict(row_dict, orient = 'columns')
-        arb_df.to_hdf(self.hdf,
-                      key = 'arbitrate',
-                      mode = 'a',
-                      format = 'table',
-                      min_itemsize = {'rheotaxis':50,
-                                       'shallow':50,
-                                       'wave_drag':50,
-                                       'low_speed':50,
-                                       'place_response':50},
-                      append = True,
-                      data_columns = True)
+        
+        #TODO sometimes this breaks.... I don't know why
+        try:
+            arb_df.to_hdf(self.hdf,
+                          key = 'arbitrate',
+                          mode = 'a',
+                          format = 'table',
+                          min_itemsize = {'rheotaxis':50,
+                                           'shallow':50,
+                                           'wave_drag':50,
+                                           'low_speed':50,
+                                           'place_response':50},
+                          append = True,
+                          data_columns = True)
+        except:
+            print(arb_df)
         self.hdf.flush()        
 
     def thrust_fun (self):

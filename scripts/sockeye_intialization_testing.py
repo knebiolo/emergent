@@ -19,12 +19,12 @@ from emergent import sockeye
 import os
 
 # identify directories
-model_dir = r"C:\Users\Isha Deo\Documents\Projects\Nuyakuk\simulations\test_ipd_15"
+model_dir = r"C:\Users\Isha Deo\Documents\Projects\Nuyakuk\simulations\test_ipd_21"
 HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p08.hdf'
-model_name = 'test_ipd_15'
+model_name = 'test_ipd_21'
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
@@ -39,8 +39,7 @@ bbox = (550328.25,550510.05,6641500.76,6641600.31)                             #
 n = 50
 
 # how many timesteps in the model?
-ts = 4800
-
+ts = 1000
 # what is the delta t
 dt = 1.
 
