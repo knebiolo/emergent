@@ -59,7 +59,7 @@ class fish():
     behavior.
     '''
     
-    def __init__(self, ID, model_dir, starting_block, water_temp):
+    def __init__(self, ID, model_dir, starting_block, EPSG, water_temp):
         '''initialization function for a sockeye agent.  this function creates
         an agent and parameterizes morphometric parameters from basin specific
         distributions
@@ -145,13 +145,14 @@ class fish():
         self.kcal = 0.
         
         #position the fish within the starting block
+        self.EPSG = EPSG
         x = np.random.uniform(starting_block[0],starting_block[1])
         y = np.random.uniform(starting_block[2],starting_block[3])
         self.pos = (x,y)
         self.prevPos = self.pos
         
         # create agent database and write agent parameters 
-        self.hdf = pd.HDFStore(os.path.join(model_dir,'%s.h5'%('agent_%s.h5'%(ID))))
+        self.hdf = pd.HDFStore(os.path.join(model_dir,'agent_%s.h5'%(ID)))
         self.hdf['agent'] = pd.DataFrame.from_dict({'ID':[self.ID],
                                                     'sex':[self.sex],
                                                     'length':[self.length],
@@ -327,7 +328,7 @@ class fish():
         l = (self.length) * 10.
                 
         # create wedge looking in front of fish 
-        theta = np.radians(np.linspace(-120,120,100))
+        theta = np.radians(np.linspace(-90,90,100))
         arc_x = self.pos[0] + l * np.cos(theta)
         arc_y = self.pos[1] + l * np.sin(theta)
         arc_x = np.insert(arc_x,0,self.pos[0])
@@ -337,7 +338,7 @@ class fish():
         arc_rot = affinity.rotate(arc,np.degrees(self.heading), origin = (self.pos[0],self.pos[1]))    
             
         arc_gdf = gpd.GeoDataFrame(index = [0],
-                                   crs = 'EPSG:3473',
+                                   crs = self.EPSG,
                                    geometry = [arc_rot])
         return arc_rot        
     
@@ -355,9 +356,9 @@ class fish():
         arc = np.column_stack([arc_x, arc_y])
         arc = Polygon(arc)
         arc_rot = affinity.rotate(arc,np.degrees(self.heading), origin = (self.pos[0],self.pos[1]))    
-            
+    
         arc_gdf = gpd.GeoDataFrame(index = [0],
-                                   crs = 'EPSG:3473',
+                                   crs = self.EPSG,
                                    geometry = [arc_rot])
         return arc_rot        
     
@@ -745,7 +746,7 @@ class fish():
                 
                 # unit vector
                 c_hat = -1*c/np.linalg.norm(c)
-                print(c_hat)
+                #print(c_hat)
                 collision_cue = (weight * c_hat)/((closest_fish['distance'].values[0])*1000)
             
                 return collision_cue
@@ -761,10 +762,7 @@ class fish():
         shallow = self.shallow_cue(depth_rast,5000)
         wave_drag = self.wave_drag_cue(depth_rast,8000)
         low_speed = self.vel_cue(vel_mag_rast,9000)
-        avoid = self.already_been_here(depth_rast,6000, t)
-
-        avoid = self.already_been_here(depth_rast,8000, t)
-                
+        avoid = self.already_been_here(depth_rast,6000, t)       
         school = self.school_cue(5000)
         collision = self.collision_cue(10000)
         
@@ -782,7 +780,7 @@ class fish():
                 # create a heading vector - based on input from sensory cues
                 head_vec = shallow
             
-            elif collision_n > 500:
+            elif collision_n > 1000.0:
                 # create a heading vector - based on input from sensory cues
                 head_vec = collision
                     
@@ -790,7 +788,7 @@ class fish():
                 # create a heading vector - based on input from sensory cue
                 head_vec = rheotaxis + avoid
                 
-            elif school_n > 0.0:
+            elif school_n > 1000.0:
                 # create a heading vector - based on input from sensory cue
                 head_vec = rheotaxis + school
             else:
@@ -1556,7 +1554,7 @@ class fish():
                        append = True,)
         self.hdf.flush()      
     
-    def odometer(self):
+    def odometer(self,t):
         '''Created on Thu May 18 20:17:28 2023
     
         @author: KNebiolo
@@ -1591,6 +1589,30 @@ class fish():
         swim_cost = sr_o2_rate + self.wave_drag * (np.exp(np.log(sr_o2_rate) + self.swim_speed * ((np.log(ar_o2_rate) - np.log(sr_o2_rate))/self.ucrit))-sr_o2_rate)
         
         self.kcal = self.kcal + swim_cost
+        
+        #log this!
+        print ('''Fish %s odometer summary: 
+        kcal this ts:    %s
+        total kcal:      %s'''%(self.ID,
+        np.round(swim_cost,4),
+        np.round(self.kcal,4)))
+        
+        odo_dict = {'ID':[self.ID],
+                    'timestep':[t],
+                    'kcal':[np.round(swim_cost,4)],
+                    'total_kcal':[np.round(self.kcal,4)]
+                    }
+
+        
+        odo_df = pd.DataFrame.from_dict(odo_dict)
+        odo_df.to_hdf(self.hdf,
+                      key = 'odometer',
+                      mode = 'a',
+                      format = 'table', 
+                      append = True,
+                      )
+        
+        self.hdf.flush() 
       
 class simulation():
     '''Python class object that implements an Agent Based Model of adult upstream
@@ -1614,7 +1636,7 @@ class simulation():
         self.agents = gpd.GeoDataFrame(columns=['id', 'loc', 'vel', 'dir'], geometry='loc', crs= crs) 
         
         # create an empty hdf file for results
-        self.hdf = pd.HDFStore(os.path.join(self.model_dir,self.model_name,'%s.hdf'%(self.model_name)))
+        self.hdf = pd.HDFStore(os.path.join(self.model_dir,'%s.h5'%(self.model_name)))
         
         
     
@@ -1679,7 +1701,7 @@ class simulation():
             
         self.vel_mag_rast = rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'))
         
-    def HECRAS (self,HECRAS_model):
+    def HECRAS (self,HECRAS_model,resolution):
         '''Function reads 2D HECRAS model and creates environmental surfaces 
 
         Parameters
@@ -1735,8 +1757,8 @@ class simulation():
         
         # interpoate velocity, wsel, and elevation at new xy's
         ## TODO ISHA TO CHECK IF RASTER OUTPUTS LOOK DIFFERENT AT 0.5m vs 1m
-        xint = np.arange(xmin,xmax,1)
-        yint = np.arange(ymax,ymin,-1)
+        xint = np.arange(xmin,xmax,resolution)
+        yint = np.arange(ymax,ymin,resolution * -1.)
         xnew, ynew = np.meshgrid(xint,yint, sparse = True)
         
         print ("Interpolate Velocity East")
@@ -1765,7 +1787,8 @@ class simulation():
         height = elev_new.shape[0]
         count = 1
         crs = self.crs
-        transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
+        #transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
+        transform = Affine.translation(xnew[0][0], ynew[0][0]) * Affine.scale(1,-1)
 
         # write elev raster
         with rasterio.open(os.path.join(self.model_dir,'elev.tif'),
@@ -1865,14 +1888,14 @@ class simulation():
             
         self.vel_y_rast = rasterio.open(os.path.join(self.model_dir,'vel_y.tif'))
         
-    def create_agents(self, numb_agnts, model_dir, starting_box, water_temp):
+    def create_agents(self, numb_agnts, model_dir, starting_box, crs, water_temp):
         '''method that creates a set of agents for simulation'''
         
         agents_list = []
         
         for i in np.arange(0,numb_agnts,1):
             # create a fish
-            fishy = fish(i,model_dir, starting_box, water_temp)
+            fishy = fish(i,model_dir, starting_box, crs, water_temp)
             
             # set initial parameters
             fishy.initial_heading(self.vel_dir_rast)
@@ -1954,7 +1977,7 @@ class simulation():
         plt.ylabel('Northing')
         
         # Update the frames for the movie
-        with writer.saving(fig, os.path.join(self.model_dir,self.model_name,'%s.mp4'%(model_name)), 300):
+        with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
             for i in range(n):
                 for agent in agents:
                     # check the environment 
@@ -1993,7 +2016,7 @@ class simulation():
                         agent.swim(dt, t = i)
                     
                     # calculate mileage
-                    agent.odometer()
+                    agent.odometer(t = i)
                 
                 # write frame
                 agent_pts.set_data(self.agents.geometry.x.values, self.agents.geometry.y.values)
