@@ -20,7 +20,7 @@ import os
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'test_33'
+model_name = 'test_34'
 
 # identify directories
 model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations",model_name)
@@ -38,7 +38,7 @@ crs = 'EPSG:32604'
 bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # starting box right near the falls
 
 # how many agents in the simulation?
-n = 25
+n = 100
 
 # how many timesteps in the model?
 ts = 4800
@@ -54,7 +54,7 @@ sim = sockeye.simulation(model_dir,model_name,crs)
 
 #%% Read environmental data into model
 # read HECRAS model and create environment rasters
-#sim.HECRAS(os.path.join(HECRAS_dir,HECRAS_model),0.5)
+#sim.HECRAS(os.path.join(HECRAS_dir,HECRAS_model),1.0)
 #sim.vel_surf()
 
 # or import from directory

@@ -76,24 +76,41 @@ class fish():
         # initialization methods
         def sex(self, basin):
             '''function simulates a sex for a given basin'''
+            if basin == "Nushagak River":
+                self.sex = np.random.choice(['M','F'], size = 1, p = [0.503,0.497])
             
-        def length(self, basin, sex):
+        def length(self, basin):
             '''function simulates a fish length out of the user provided basin and 
             sex of fish'''
-            
-        def weight(self, basin, sex):
+            # length in mm
+            if basin == "Nushagak River":
+                if self.sex == 'M':
+                    self.length = np.exp(np.random.lognormal(mean = 6.426,sigma = 0.072,size = 1))
+                else:
+                    self.length = np.exp(np.random.lognormal(mean = 6.349,sigma = 0.067,size = 1))
+
+        def weight(self, basin):
             '''function simulates a fish weight out of the user provided basin and 
             sex of fish'''
+            # using a W = a * L^b relationship given in fishbase - weight in kg
+            self.weight = 0.0155 * (self.length/10.0)**3
             
-        def body_depth(self, basin, sex):
+        def body_depth(self, basin):
             '''function simulates a fish body depth out of the user provided basin and 
-            sex of fish'''    
+            sex of fish'''
+            # body depth is in cm
+            if basin == "Nushagak River":
+                if self.sex == 'M':
+                    self.body_depth = np.exp(-1.938 + np.log(self.length) * 1.084 + 0.0435) / 10.
+                else:
+                    self.body_depth = np.exp(-1.938 + np.log(self.length) * 1.084) / 10.
+                    
         # initialize morphometric paramters
         self.ID = ID
-        self.sex = 'F'
-        self.length = 700.                             # mm
-        self.weight = 4.3                              # kg
-        self.body_depth = 15.                          # cm
+        sex("Nushagak River")
+        length("Nushagak River")                             # mm
+        weight("Nushagak River")                             # kg
+        body_depth("Nushagak River")                         # cm
         self.too_shallow = self.body_depth /100. / 2. # m
         self.opt_wat_depth = self.body_depth /100 * 3.0 + self.too_shallow
         
@@ -325,7 +342,7 @@ class fish():
     def schooling_buffer_poly(self):
         
         # create sensory buffer
-        l = (self.length) * 10.
+        l = (self.length) * 5.
                 
         # create wedge looking in front of fish 
         theta = np.radians(np.linspace(-90,90,100))
@@ -348,7 +365,8 @@ class fish():
         l = (self.length) * 1.
                 
         # create wedge looking in front of fish 
-        theta = np.radians(np.linspace(-120,120,100))
+        theta = np.radians(np.linspace(-90,90,100))
+        #TODO there is probably a more elegant way to do this
         arc_x = self.pos[0] + l * np.cos(theta)
         arc_y = self.pos[1] + l * np.sin(theta)
         arc_x = np.insert(arc_x,0,self.pos[0])
@@ -383,20 +401,20 @@ class fish():
         if self.depth < self.too_shallow:
             print ('FISH OUT OF WATER OH SHIT')
             self.time_out_of_water = self.time_out_of_water + 1
-            
+        
+        # find fish within the schooling buffer
         school_buffer_poly = self.schooling_buffer_poly()
         sch_nearbyfish_ser = agents_df.intersection(school_buffer_poly)
         sch_nearbyfish_df = agents_df[~sch_nearbyfish_ser.is_empty]
         sch_nearbyfish_df = sch_nearbyfish_df[sch_nearbyfish_df.id != self.ID]
         self.school_neighbors = sch_nearbyfish_df
         
+        # find fish within the collision barrier
         collision_buffer_poly = self.collision_buffer_poly()
         coll_nearbyfish_ser = agents_df.intersection(collision_buffer_poly)
         coll_nearbyfish_df = agents_df[~coll_nearbyfish_ser.is_empty]
         coll_nearbyfish_df = coll_nearbyfish_df[coll_nearbyfish_df.id != self.ID]
         self.collision_neighbors = coll_nearbyfish_df
-
-
             
     def find_z(self):
         '''Method resolves agent depth.  
@@ -707,7 +725,7 @@ class fish():
         
         if not self.school_neighbors.empty:
             # find average speed and heading of nearby fish
-            self.sog = self.school_neighbors.mean(numeric_only = True)['vel']
+            self.ideal_sog = self.school_neighbors.mean(numeric_only = True)['vel']
             
             # find centroid of nearby fish
             centroid = self.school_neighbors.dissolve().centroid
@@ -758,10 +776,10 @@ class fish():
         
         Depending on overall behavioral mode, fish cares about different inputs'''
                 
-        rheotaxis = self.rheo_cue(vel_dir_rast,10000)
+        rheotaxis = self.rheo_cue(vel_dir_rast,9000)
         shallow = self.shallow_cue(depth_rast,5000)
         wave_drag = self.wave_drag_cue(depth_rast,8000)
-        low_speed = self.vel_cue(vel_mag_rast,9000)
+        low_speed = self.vel_cue(vel_mag_rast,10000)
         avoid = self.already_been_here(depth_rast,6000, t)       
         school = self.school_cue(5000)
         collision = self.collision_cue(10000)
@@ -783,17 +801,18 @@ class fish():
             elif collision_n > 1000.0:
                 # create a heading vector - based on input from sensory cues
                 head_vec = collision
-                    
+                
+            elif school_n > 0.0:
+                # create a heading vector - based on input from sensory cue
+                head_vec = school 
+                
             elif avoid_n > 0.0:
                 # create a heading vector - based on input from sensory cue
                 head_vec = rheotaxis + avoid
                 
-            elif school_n > 1000.0:
-                # create a heading vector - based on input from sensory cue
-                head_vec = rheotaxis + school
             else:
                 # create a heading vector - based on input from sensory cues
-                head_vec = rheotaxis + low_speed + wave_drag + shallow + school
+                head_vec = rheotaxis + low_speed + wave_drag + collision
             
         # else if fish is seeking refugia
         elif self.swim_behav == 'refugia':
@@ -1300,7 +1319,7 @@ class fish():
         # set new position
         self.pos = self.prevPos + fish_vel_1 
         
-        print ('Fish %s is at %s'%(self.ID,np.round(self.pos,3)))
+        print ('Fish %s is at %s at timestep %s'%(self.ID,np.round(self.pos,3),t))
         
     def jump (self,t):
         '''Method that simulates fish jumping using ballistic trajectory.
@@ -1788,7 +1807,8 @@ class simulation():
         count = 1
         crs = self.crs
         #transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
-        transform = Affine.translation(xnew[0][0], ynew[0][0]) * Affine.scale(1,-1)
+        transform = Affine.translation(xnew[0][0] - 0.5 * resolution, ynew[0][0] - 0.5 * resolution)\
+            * Affine.scale(resolution,-1 * resolution)
 
         # write elev raster
         with rasterio.open(os.path.join(self.model_dir,'elev.tif'),
