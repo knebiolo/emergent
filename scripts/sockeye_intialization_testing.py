@@ -20,7 +20,7 @@ import os
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'test_34'
+model_name = 'test_39'
 
 # identify directories
 model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations",model_name)
@@ -41,13 +41,16 @@ bbox = (549505.65,549589.76,6641553.32,6641564.74)                             #
 n = 100
 
 # how many timesteps in the model?
-ts = 4800
+ts = 1200
 
 # what is the delta t
 dt = 1.
 
 # what is the water temp?
 water_temp = 20.
+
+# what is the basin that we are simulating passage in?
+basin = "Nushagak River"
 
 #%% create a simulation object 
 sim = sockeye.simulation(model_dir,model_name,crs)
@@ -67,7 +70,7 @@ sim.enviro_import(os.path.join(model_dir,'vel_dir.tif'),'velocity direction')
 sim.enviro_import(os.path.join(model_dir,'vel_mag.tif'),'velocity magnitude')
 
 #%% Create an array of agents
-fishes = sim.create_agents(n, model_dir, bbox, crs, water_temp) 
+fishes = sim.create_agents(n, model_dir, bbox, crs, basin, water_temp) 
 
 #%% Run the model
 sim.run(model_name, fishes, ts, dt)

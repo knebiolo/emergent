@@ -59,7 +59,7 @@ class fish():
     behavior.
     '''
     
-    def __init__(self, ID, model_dir, starting_block, EPSG, water_temp):
+    def __init__(self, ID, model_dir, starting_block, EPSG, basin, water_temp):
         '''initialization function for a sockeye agent.  this function creates
         an agent and parameterizes morphometric parameters from basin specific
         distributions
@@ -74,45 +74,11 @@ class fish():
         as a tuple (xmin, xmax, ymin, ymax) '''
             
         # initialization methods
-        def sex(self, basin):
-            '''function simulates a sex for a given basin'''
-            if basin == "Nushagak River":
-                self.sex = np.random.choice(['M','F'], size = 1, p = [0.503,0.497])
-            
-        def length(self, basin):
-            '''function simulates a fish length out of the user provided basin and 
-            sex of fish'''
-            # length in mm
-            if basin == "Nushagak River":
-                if self.sex == 'M':
-                    self.length = np.exp(np.random.lognormal(mean = 6.426,sigma = 0.072,size = 1))
-                else:
-                    self.length = np.exp(np.random.lognormal(mean = 6.349,sigma = 0.067,size = 1))
 
-        def weight(self, basin):
-            '''function simulates a fish weight out of the user provided basin and 
-            sex of fish'''
-            # using a W = a * L^b relationship given in fishbase - weight in kg
-            self.weight = 0.0155 * (self.length/10.0)**3
-            
-        def body_depth(self, basin):
-            '''function simulates a fish body depth out of the user provided basin and 
-            sex of fish'''
-            # body depth is in cm
-            if basin == "Nushagak River":
-                if self.sex == 'M':
-                    self.body_depth = np.exp(-1.938 + np.log(self.length) * 1.084 + 0.0435) / 10.
-                else:
-                    self.body_depth = np.exp(-1.938 + np.log(self.length) * 1.084) / 10.
                     
         # initialize morphometric paramters
         self.ID = ID
-        sex("Nushagak River")
-        length("Nushagak River")                             # mm
-        weight("Nushagak River")                             # kg
-        body_depth("Nushagak River")                         # cm
-        self.too_shallow = self.body_depth /100. / 2. # m
-        self.opt_wat_depth = self.body_depth /100 * 3.0 + self.too_shallow
+        self.basin = basin
         
         # initialize environmental states
         self.water_temp = water_temp
@@ -143,19 +109,15 @@ class fish():
         self.a_p = 8.643     # prolonged intercept
         self.b_p = -2.0894   # prolonged slope
         self.a_s = 0.1746    # sprint intercept
-        self.b_s = -0.1806   # spring slope
+        self.b_s = -0.1806   # sprint slope
         
         # initialize movement parameters
-        self.sog = self.length/1000  # sog = speed over ground - assume fish maintain 1 body length per second
-        self.ideal_sog = self.sog
-        self.swim_speed = self.length/1000        # set initial swim speed
         self.drag = 0.               # computed theoretical drag
         self.thrust = 0.             # computed theoretical thrust Lighthill 
         self.Hz = 0.                 # tail beats per second
         self.bout_no = 0.            # bout number - new bout whenever fish recovers
         self.dist_per_bout = 0.      # running counter of the distance travelled per bout
         self.bout_dur = 0.           # running bout timer 
-        self.ucrit = self.sog * 7    # TODO - what is the ucrit for sockeye?
         self.time_of_jump = 0.0   # time since last jump - can't happen every timestep
         
         # initialize the odometer
@@ -170,17 +132,64 @@ class fish():
         
         # create agent database and write agent parameters 
         self.hdf = pd.HDFStore(os.path.join(model_dir,'agent_%s.h5'%(ID)))
+        self.model_dir = model_dir
+        
+        # create an empty map array
+        self.map = None
+        
+    def sex(self):
+        '''function simulates a sex for a given basin'''
+        if self.basin == "Nushagak River":
+            self.sex = np.random.choice(['M','F'], size = 1, p = [0.503,0.497])[0]
+        
+    def length(self):
+        '''function simulates a fish length out of the user provided basin and 
+        sex of fish'''
+        # length in mm
+        if self.basin == "Nushagak River":
+            if self.sex == 'M':
+                self.length = np.random.lognormal(mean = 6.426,sigma = 0.072,size = 1)[0]
+            else:
+                self.length = np.random.lognormal(mean = 6.349,sigma = 0.067,size = 1)[0]
+                
+        self.sog = self.length/1000  # sog = speed over ground - assume fish maintain 1 body length per second
+        self.ideal_sog = self.sog
+        self.swim_speed = self.length/1000        # set initial swim speed
+        self.ucrit = self.sog * 7    # TODO - what is the ucrit for sockeye?
+
+
+    def weight(self):
+        '''function simulates a fish weight out of the user provided basin and 
+        sex of fish'''
+        # using a W = a * L^b relationship given in fishbase - weight in kg
+        self.weight = (0.0155 * (self.length/10.0)**3)/1000.
+        
+    def body_depth(self):
+        '''function simulates a fish body depth out of the user provided basin and 
+        sex of fish'''
+        # body depth is in cm
+        if self.basin == "Nushagak River":
+            if self.sex == 'M':
+                self.body_depth = np.exp(-1.938 + np.log(self.length) * 1.084 + 0.0435) / 10.
+            else:
+                self.body_depth = np.exp(-1.938 + np.log(self.length) * 1.084) / 10.
+                
+        self.too_shallow = self.body_depth /100. / 2. # m
+        self.opt_wat_depth = self.body_depth /100 * 3.0 + self.too_shallow
+                
+    def morphological_parameters(self):
+        self.sex()
+        self.length()                             # mm
+        self.weight()                             # kg
+        self.body_depth()                         # cm
+        # write to database
         self.hdf['agent'] = pd.DataFrame.from_dict({'ID':[self.ID],
                                                     'sex':[self.sex],
                                                     'length':[self.length],
                                                     'weight':[self.weight],
                                                     'body_depth':[self.body_depth]})
         self.hdf.flush()
-        self.model_dir = model_dir
-        
-        # create an empty map array
-        self.map = None
-        
+
     def initial_heading (self,vel_dir):
         '''function that sets the initial heading of a fish, inputs are itself
         and a velocity direction raster.  Use spatial indexing to find direction,
@@ -342,7 +351,7 @@ class fish():
     def schooling_buffer_poly(self):
         
         # create sensory buffer
-        l = (self.length) * 5.
+        l = (self.length)/1000. * 5.
                 
         # create wedge looking in front of fish 
         theta = np.radians(np.linspace(-90,90,100))
@@ -362,7 +371,7 @@ class fish():
     def collision_buffer_poly(self):
         
         # create sensory buffer
-        l = (self.length) * 1.
+        l = (self.length)/1000. * 0.5 
                 
         # create wedge looking in front of fish 
         theta = np.radians(np.linspace(-90,90,100))
@@ -776,12 +785,12 @@ class fish():
         
         Depending on overall behavioral mode, fish cares about different inputs'''
                 
-        rheotaxis = self.rheo_cue(vel_dir_rast,9000)
+        rheotaxis = self.rheo_cue(vel_dir_rast,10000)
         shallow = self.shallow_cue(depth_rast,5000)
         wave_drag = self.wave_drag_cue(depth_rast,8000)
-        low_speed = self.vel_cue(vel_mag_rast,10000)
-        avoid = self.already_been_here(depth_rast,6000, t)       
-        school = self.school_cue(5000)
+        low_speed = self.vel_cue(vel_mag_rast,9900)
+        avoid = self.already_been_here(depth_rast,8000, t)       
+        school = self.school_cue(8000)
         collision = self.collision_cue(10000)
         
         # calculate the norm of some important behavioral cues
@@ -798,13 +807,13 @@ class fish():
                 # create a heading vector - based on input from sensory cues
                 head_vec = shallow
             
-            elif collision_n > 1000.0:
+            elif collision_n > 0.0:
                 # create a heading vector - based on input from sensory cues
                 head_vec = collision
                 
             elif school_n > 0.0:
                 # create a heading vector - based on input from sensory cue
-                head_vec = school 
+                head_vec = school + rheotaxis
                 
             elif avoid_n > 0.0:
                 # create a heading vector - based on input from sensory cue
@@ -812,7 +821,7 @@ class fish():
                 
             else:
                 # create a heading vector - based on input from sensory cues
-                head_vec = rheotaxis + low_speed + wave_drag + collision
+                head_vec = rheotaxis + low_speed + wave_drag
             
         # else if fish is seeking refugia
         elif self.swim_behav == 'refugia':
@@ -1262,14 +1271,14 @@ class fish():
             
         self.sog = np.round(np.linalg.norm(fish_vel_1),6)
         
-        if np.isnan(self.sog):
-            print ('fuck - something aint right, think divide by zero somewhere')
+        # if np.isnan(self.sog):
+        #     print ('fuck - something aint right, think divide by zero somewhere')
             
-        if self.sog > 5:
-           print ('fuck - Im swimming fast, why?')
+        # if self.sog > 5:
+        #    print ('fuck - Im swimming fast, why?')
             
-        if np.linalg.norm(self.thrust) / np.linalg.norm(self.drag) > 10:
-            print ('fuck - holy hell thrust is way bigger than drag - we flying')
+        # if np.linalg.norm(self.thrust) / np.linalg.norm(self.drag) > 10:
+        #     print ('fuck - holy hell thrust is way bigger than drag - we flying')
         
         # start movement
         self.prevPos = self.pos  
@@ -1908,20 +1917,21 @@ class simulation():
             
         self.vel_y_rast = rasterio.open(os.path.join(self.model_dir,'vel_y.tif'))
         
-    def create_agents(self, numb_agnts, model_dir, starting_box, crs, water_temp):
+    def create_agents(self, numb_agnts, model_dir, starting_box, crs, basin, water_temp):
         '''method that creates a set of agents for simulation'''
         
         agents_list = []
         
         for i in np.arange(0,numb_agnts,1):
             # create a fish
-            fishy = fish(i,model_dir, starting_box, crs, water_temp)
+            fishy = fish(i,model_dir, starting_box, crs, basin, water_temp)
             
             # set initial parameters
+            fishy.morphological_parameters()
             fishy.initial_heading(self.vel_dir_rast)
             fishy.initial_swim_speed()
             fishy.mental_map(self.depth_rast)
-            
+
             # add it to the output list
             agents_list.append(fishy)
             
@@ -1991,7 +2001,7 @@ class simulation():
                                           self.depth_rast.bounds[1],
                                           self.depth_rast.bounds[3]])
         
-        agent_pts, = plt.plot([], [], marker = 'o', ms = 2, ls = '', color = 'red')
+        agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
         
         plt.xlabel('Easting')
         plt.ylabel('Northing')
