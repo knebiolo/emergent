@@ -20,7 +20,7 @@ import os
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'test_39'
+model_name = 'test_40'
 
 # identify directories
 model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations",model_name)
@@ -38,7 +38,7 @@ crs = 'EPSG:32604'
 bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # starting box right near the falls
 
 # how many agents in the simulation?
-n = 100
+n = 10
 
 # how many timesteps in the model?
 ts = 1200

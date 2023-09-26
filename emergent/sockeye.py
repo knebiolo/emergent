@@ -371,7 +371,7 @@ class fish():
     def collision_buffer_poly(self):
         
         # create sensory buffer
-        l = (self.length)/1000. * 0.5 
+        l = (self.length)/1000. * 5. 
                 
         # create wedge looking in front of fish 
         theta = np.radians(np.linspace(-90,90,100))
@@ -458,10 +458,10 @@ class fish():
             
         else:
             # create sensory buffer
-            l = (self.length/1000.) * 4.
+            l = (self.length/1000.) * 5.
             
             # create wedge looking in front of fish 
-            theta = np.radians(np.linspace(-15,15,100))
+            theta = np.radians(np.linspace(-45,45,100))
             
         arc_x = self.pos[0] + l * np.cos(theta)
         arc_y = self.pos[1] + l * np.sin(theta)
@@ -525,7 +525,7 @@ class fish():
         v_hat = np.array([np.cos(vel_dir), np.sin(vel_dir)])
         
         # calculate attractive force
-        rheotaxis = (weight * v_hat)/((5 * self.length/1000.)**2)
+        rheotaxis = (weight * v_hat)/((2 * self.length/1000.)**2)
         
         return rheotaxis
         
@@ -598,7 +598,7 @@ class fish():
             
             dx = xi - x
             dy = yi - y
-            return np.linalg.norm([dx,dy])
+            return np.power(np.linalg.norm([dx,dy]),2)
         
         # vectorize 
         v_distance = np.vectorize(distance,excluded = [2,3])
@@ -747,7 +747,7 @@ class fish():
             v = np.array([centroid.x[0], centroid.y[0]]) - np.array([self.pos[0], self.pos[1]])
     
             v_hat = v/np.linalg.norm(v)
-            school_cue = (weight * v_hat)/(cent_dist)
+            school_cue = (weight * v_hat)/(cent_dist**2)
             
             return school_cue
         else:
@@ -774,7 +774,7 @@ class fish():
                 # unit vector
                 c_hat = -1*c/np.linalg.norm(c)
                 #print(c_hat)
-                collision_cue = (weight * c_hat)/((closest_fish['distance'].values[0])*1000)
+                collision_cue = (weight * c_hat)/((closest_fish['distance'].values[0])**2)
             
                 return collision_cue
         else:
@@ -786,42 +786,32 @@ class fish():
         Depending on overall behavioral mode, fish cares about different inputs'''
                 
         rheotaxis = self.rheo_cue(vel_dir_rast,10000)
-        shallow = self.shallow_cue(depth_rast,5000)
+        shallow = self.shallow_cue(depth_rast,9000)
         wave_drag = self.wave_drag_cue(depth_rast,8000)
         low_speed = self.vel_cue(vel_mag_rast,9900)
         avoid = self.already_been_here(depth_rast,8000, t)       
         school = self.school_cue(8000)
         collision = self.collision_cue(10000)
         
-        # calculate the norm of some important behavioral cues
-        shallow_n = np.linalg.norm(shallow)
-        avoid_n = np.linalg.norm(avoid)
-        school_n = np.linalg.norm(school)
-        collision_n = np.linalg.norm(collision)
+        # create dictionary that has order of behavioral cues and their norm
+        order_dict = {0:shallow,
+                      1:collision,
+                      2:avoid,
+                      3:rheotaxis,
+                      4:school,
+                      5:low_speed,
+                      6:wave_drag}
         
         # the fish only has so many fucks - aka prioritized acceleration - Reynolds 1987
         # if fish is actively migrating
         if self.swim_behav == 'migratory':
-            # #most important cue is shallow - we can't hav ea fish out of water
-            if shallow_n > 0.0:
-                # create a heading vector - based on input from sensory cues
-                head_vec = shallow
-            
-            elif collision_n > 0.0:
-                # create a heading vector - based on input from sensory cues
-                head_vec = collision
-                
-            elif school_n > 0.0:
-                # create a heading vector - based on input from sensory cue
-                head_vec = school + rheotaxis
-                
-            elif avoid_n > 0.0:
-                # create a heading vector - based on input from sensory cue
-                head_vec = rheotaxis + avoid
-                
-            else:
-                # create a heading vector - based on input from sensory cues
-                head_vec = rheotaxis + low_speed + wave_drag
+            f4cks = 0
+            head_vec = np.array([0, 0])
+            # this will fail if the amount of f4cks is larger than could be generated
+            while f4cks < 7500: 
+                for key in order_dict:
+                    head_vec = head_vec + order_dict[key]
+                    f4cks = f4cks + np.linalg.norm(order_dict[key])
             
         # else if fish is seeking refugia
         elif self.swim_behav == 'refugia':
