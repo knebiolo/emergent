@@ -758,7 +758,9 @@ class fish():
         if not self.collision_neighbors.empty:
             
             # calculate distance to each nearby fish normalized by self length
-            self.collision_neighbors['distance'] = np.array([Point(self.pos).distance(x)/self.length for x in self.collision_neighbors['loc']])
+            #self.collision_neighbors['distance'] = np.array([Point(self.pos).distance(x)/self.length for x in self.collision_neighbors['loc']])
+            #TODO - QC with Isha - why are we dividing the distance by length?
+            self.collision_neighbors['distance'] = np.array([Point(self.pos).distance(x) for x in self.collision_neighbors['loc']])
             
             if self.collision_neighbors['distance'].min() == 0:
                 print('FISH BOINKED')
@@ -786,12 +788,12 @@ class fish():
         Depending on overall behavioral mode, fish cares about different inputs'''
                 
         rheotaxis = self.rheo_cue(vel_dir_rast,10000)
-        shallow = self.shallow_cue(depth_rast,15000)
+        shallow = self.shallow_cue(depth_rast,8000)
         wave_drag = self.wave_drag_cue(depth_rast,8000)
-        low_speed = self.vel_cue(vel_mag_rast,9900)
+        low_speed = self.vel_cue(vel_mag_rast,11000)
         avoid = self.already_been_here(depth_rast,5000, t)       
         school = self.school_cue(8000)
-        collision = self.collision_cue(7000)
+        collision = self.collision_cue(3000)
         
         # create dictionary that has order of behavioral cues and their norm
         order_dict = {0:shallow,
@@ -820,7 +822,6 @@ class fish():
             # create a heading vector - based on input from sensory cues
             head_vec = shallow + collision + low_speed
 
-        
         # otherwise we are station holding
         else:
             # create a heading vector - based on input from sensory cues
@@ -1951,8 +1952,6 @@ class simulation():
         timestep = pd.DataFrame()
         timestep['ts'] = self.agents['ts']
         timestep['id'] = self.agents['id'].astype(str)
-        #TODO fix location as it is written to hdf - it is rounding to whole meters
-        # fix: vectorize a function that reads the point object and exctracts separate X and Y values
         timestep['E'] = np.round(self.agents['E'],4)
         timestep['N'] = np.round(self.agents['N'],4)
         timestep['loc'] = self.agents['loc'].astype(str)
@@ -2070,6 +2069,7 @@ class simulation():
         self.depth_rast.close()
         self.vel_x_rast.close()
         self.vel_y_rast.close()
+        self.elev_rast.close()
         
 
  
