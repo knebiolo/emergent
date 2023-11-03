@@ -53,7 +53,10 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
 # Set dill as the default pickler for multiprocessing
 #multiprocessing.set_start_method('spawn')  # 'spawn' or 'fork' based on your platform and needs
 
@@ -1466,6 +1469,7 @@ class fish():
         fish_vel_1 = fish_vel_0 + acc * dt
 
         self.sog = np.round(np.linalg.norm(fish_vel_1),6)
+<<<<<<< Updated upstream
 
         # if np.isnan(self.sog):
         #     print ('fuck - something aint right, think divide by zero somewhere')
@@ -1476,6 +1480,9 @@ class fish():
         # if np.linalg.norm(self.thrust) / np.linalg.norm(self.drag) > 10:
         #     print ('fuck - holy hell thrust is way bigger than drag - we flying')
 
+=======
+        
+>>>>>>> Stashed changes
         # start movement
         self.prevPos = self.pos
 
