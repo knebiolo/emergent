@@ -37,7 +37,7 @@ import pandas as pd
 import rasterio
 from rasterio.transform import Affine
 from rasterio.mask import mask
-from shapely import Point, Polygon
+from shapely import Point, Polygon, box
 from shapely import affinity
 from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline
 from scipy.optimize import curve_fit
@@ -675,6 +675,30 @@ class simulation():
             rows = rows.get()
 
         return rows, cols
+    
+    def pixel_to_geo(self, transform, rows, cols):
+        """
+        Convert row, column indices in the raster grid to x, y coordinates.
+    
+        Parameters:
+        - transform: affine transform of the raster
+        - rows: array-like or scalar of row indices
+        - cols: array-like or scalar of column indices
+    
+        Returns:
+        - xs: array of x coordinates
+        - ys: array of y coordinates
+        """
+        xs = transform.c + transform.a * cols
+        ys = transform.f + transform.e * rows
+    
+        # If using CuPy, ensure that the calculation is done on the GPU
+        if self.array_module.__name__ == 'cupy':
+            xs = self.array_module.asnumpy(xs)
+            ys = self.array_module.asnumpy(ys)
+    
+        return xs, ys
+
  
     def sample_environment(self, transform, raster_name):
         """
@@ -821,7 +845,6 @@ class simulation():
         # Construct an index array for advanced indexing
         agent_indices = np.arange(self.num_agents)
         
-
         # create array slice bounds
         buff = 4
         xmin = cols - buff
@@ -881,10 +904,203 @@ class simulation():
         
         return [np.nansum(x_force),np.nansum(y_force)]   
 
+    def environment(self):
+        """
+        Updates environmental parameters for each agent and identifies neighbors within a defined buffer.
+    
+        This function creates a GeoDataFrame from the agents' positions and sets the coordinate reference system (CRS).
+        It then samples environmental data such as depth, x-velocity, and y-velocity at each agent's position.
+        The function also tracks the time each agent spends in shallow water (out of water) and identifies neighboring agents within a specified buffer.
+    
+        Attributes updated:
+            self.depth (np.ndarray): Depth at each agent's position.
+            self.x_vel (np.ndarray): X-component of velocity at each agent's position.
+            self.y_vel (np.ndarray): Y-component of velocity at each agent's position.
+            self.time_out_of_water (np.ndarray): Incremented time that each agent spends in water too shallow for swimming.
+    
+        Returns:
+            agents_within_buffers_dict (dict): A dictionary where each key is an agent index and the value is a list of indices of other agents within that agent's buffer.
+            closest_agent_dict (dict): A dictionary where each key is an agent index and the value is the index of the closest agent within that agent's buffer.
+    
+        Example:
+            # Assuming `self` is an instance with appropriate attributes:
+            self.environment()
+            # After execution, `self.depth`, `self.x_vel`, `self.y_vel`, and `self.time_out_of_water` are updated.
+            # `agents_within_buffers_dict` and `closest_agent_dict` are available for further processing.
+        """
+        # (The rest of your function code follows here...)        
+        # create geodataframe from X and Y points
+        points = [Point(x, y) for x, y in zip(self.X, self.Y)]
+        
+        # Now create a GeoDataFrame
+        gdf = gpd.GeoDataFrame(geometry=points)
+        
+        # If you have an associated CRS (Coordinate Reference System), you can set it like this:
+        gdf.set_crs(epsg=self.crs, inplace=True)
+        
+        # get depth, x_vel, and y_vel at every agent position
+        self.depth = self.sample_environment(self.depth_rast_transform, 'depth')
+        self.x_vel = self.sample_environment(self.vel_x_rast_transform, 'vel_x')
+        self.y_vel = self.sample_environment(self.vel_y_rast_transform, 'vel_y')
+    
+        # Avoid divide by zero by setting zero velocities to a small number
+        self.x_vel[self.x_vel == 0.0] = 0.0001
+        self.y_vel[self.y_vel == 0.0] = 0.0001
+    
+        # keep track of the amount of time a fish spends out of water
+        self.time_out_of_water = np.where(self.depth < self.too_shallow, 
+                                          self.time_out_of_water + 1, 
+                                          self.time_out_of_water)
+    
+        # Create the buffer rectangles (bounding boxes) for each agent
+        gdf['buffer'] = gdf.apply(
+            lambda row: box(
+                row.geometry.x - 1,
+                row.geometry.y - 1,
+                row.geometry.x + 1,
+                row.geometry.y + 1
+            ),
+            axis=1
+        )
+        
+        # Prepare the spatial index on the agents' buffers
+        spatial_index = gdf.sindex
+        
+        # Initialize an empty dictionary to store the results
+        agents_within_buffers_dict = {}
+        closest_agent_dict = {}
+        
+        for index, agent in gdf.iterrows():
+            # Use the spatial index to get the possible matches
+            possible_matches_index = list(spatial_index.intersection(agent['buffer'].bounds))
+            possible_matches = gdf.iloc[possible_matches_index]
+        
+            # Further refine the possible matches by checking if they are actually within the buffer
+            precise_matches = possible_matches[possible_matches.intersects(agent['buffer'])]
+        
+            # Exclude the current agent from the matches
+            precise_matches = precise_matches.drop(index, errors='ignore')
+        
+            # Add the indices of the matching agents to the dictionary
+            agents_within_buffers_dict[index] = list(precise_matches.index)
+        
+            # Calculate distances to all agents within the buffer and find the closest
+            if not precise_matches.empty:
+                distances = precise_matches.distance(agent['geometry'])
+                closest_agent_index = distances.idxmin()
+                closest_agent_dict[index] = closest_agent_index
+            else:
+                closest_agent_dict[index] = None  # Or some placeholder to indicate no agents are close
+        
+        # Now `agents_within_buffers_dict` is a dictionary where each key is an agent index
+        return agents_within_buffers_dict, closest_agent_dict
+
+    def find_z(self):
+        """
+        Calculate the z-coordinate for an agent based on its depth and body depth.
+    
+        This function determines the z-coordinate (vertical position) of an agent.
+        If the depth at the agent's position is less than one-third of its body depth,
+        the z-coordinate is set to the sum of the depth and a predefined shallow water threshold.
+        Otherwise, it is set to one-third of the agent's body depth.
+    
+        Attributes updated:
+            self.z (array-like): The calculated z-coordinate for the agent.
+    
+        Note:
+            The function uses `self.array_module.where` for vectorized conditional operations,
+            which implies that `self.depth`, `self.body_depth`, and `self.too_shallow` should be array-like
+            and support broadcasting if they are not scalar values.
+        """
+        self.z = self.array_module.where(
+            self.depth < self.body_depth * 3 / 100.,
+            self.depth + self.too_shallow,
+            self.body_depth * 3 / 100.)
+
+    def vel_cue (self, weight):
+        """
+        Calculate the velocity cue for each agent based on the surrounding water velocity.
+    
+        This function determines the direction with the lowest water velocity within a specified
+        buffer around each agent. The buffer size is determined by the agent's swim mode:
+        if in 'refugia' mode, the buffer is 15 body lengths; otherwise, it is 5 body lengths.
+        The function then computes a velocity cue that points in the direction of the lowest
+        water velocity within this buffer.
+    
+        Parameters:
+        - weight (float): A weighting factor applied to the velocity cue.
+    
+        Returns:
+        - velocity_min (ndarray): An array of velocity cues for each agent, where each cue
+          is a vector pointing in the direction of the lowest water velocity within the buffer.
+          The magnitude of the cue is scaled by the given weight and the agent's body length.
+    
+        Notes:
+        - The function assumes that the HDF5 dataset 'environment/vel_mag' is accessible and
+          supports numpy-style advanced indexing.
+        - The velocity cue is calculated as a unit vector in the direction of the lowest velocity,
+          scaled by the weight and normalized by the square of 5 body lengths in meters.
+        """
+        # calculate buffer size based on swim mode, if we are in refugia mode buffer is 15 body lengths else 5
+        buff = self.array_module.where(self.swim_mode == 2,15,5)
+        
+        # get the x, y position of the agent 
+        x, y = (self.X, self.Y)
+        
+        # find the row and column in the direction raster
+        rows, cols = self.geo_to_pixel(x, y, self.depth_rast_transform)
+        
+        # Construct an index array for advanced indexing
+        agent_indices = np.arange(self.num_agents)
+        
+        # create array slice bounds
+        xmin = cols - buff
+        xmax = cols + buff + 1  # +1 because slicing is exclusive on the upper bound
+        ymin = rows - buff
+        ymax = rows + buff + 1  # +1 for the same reason
+        
+        # Create slice objects for indexing
+        col_slice = slice(xmin, xmax)
+        row_slice = slice(ymin, ymax)
+        
+        # Construct the indices tuple for advanced indexing
+        indices = (row_slice, col_slice)
+        
+        # Access the velocity dataset from the HDF5 file
+        velocity = self.hdf5['environment/vel_mag']
+        
+        # Use advanced indexing to retrieve the slices of the velocity array
+        # Note: This assumes that the HDF5 dataset supports numpy-style advanced indexing
+        vel_mags = velocity[indices]
+        
+        # get indices where the velocity magnitdues were minimized
+        # Find the indices of the minimum values in each row
+        min_col_indices = np.argmin(vel_mags, axis=1)
+        min_row_indices = np.arange(vel_mags.shape[0])
+        
+        # Now call the pixel_to_geo function
+        min_x, min_y = self.pixel_to_geo(
+            self.vel_mag_rast_transform, 
+            min_row_indices, 
+            min_col_indices)
+
+        # calculate array of position difference vectors
+        v = np.array([min_x,min_y]).T - np.array([self.X,self.Y]).T
+
+        # calculate unit vectors
+        v_hat = v/np.linalg.norm(v)
+
+        # calculate velocity min vectors
+        velocity_min = (weight * v_hat)/((5 * self.length/1000.)**2)
+        
+        return velocity_min
+        
+        
+
+        
 
 
-
-              
+             
     
             
             
@@ -920,374 +1136,3 @@ class simulation():
             
             
             
-            
-        
-        
-    def enviro_import(self,data_dir,surface_type):
-        '''Function imports existing environmental surfaces into new simulation'''
-        if surface_type == 'velocity x':
-            self.vel_x_rast = rasterio.open(data_dir, masked=True)
-        elif surface_type == 'velocity y':
-            self.vel_y_rast = rasterio.open(data_dir, masked=True)
-        elif surface_type == 'depth':
-            self.depth_rast = rasterio.open(data_dir, masked=True)
-        elif surface_type == 'wsel':
-            self.wsel_rast = rasterio.open(data_dir, masked=True)
-        elif surface_type == 'elevation':
-            self.elev_rast = rasterio.open(data_dir, masked=True)
-        elif surface_type == 'velocity direction':
-            self.vel_dir_rast = rasterio.open(data_dir, masked=True)
-        elif surface_type == 'velocity magnitude':
-            self.vel_mag_rast = rasterio.open(data_dir, masked=True)
-                    
-    def HECRAS (self,HECRAS_model,resolution):
-        '''Function reads 2D HECRAS model and creates environmental surfaces 
-
-        Parameters
-        ----------
-        HECRAS_model : TYPE
-            DESCRIPTION.
-
-        Returns
-        -------
-        None.
-        '''
-        # Initialization Part 1: Connect to HECRAS model and import environment
-        hdf = h5py.File(HECRAS_model,'r')
-        
-        # Extract Data from HECRAS HDF model
-        print ("Extracting Model Geometry and Results")
-        
-        pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
-        vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
-        vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
-        wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1]
-        elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
-        
-        # create list of xy tuples
-        geom = list(tuple(zip(pts[:,0],pts[:,1])))
-        
-        # create a dataframe with geom column and observations
-        df = pd.DataFrame.from_dict({'index':np.arange(0,len(pts),1),
-                                     'geom_tup':geom,
-                                     'vel_x':vel_x,
-                                     'vel_y':vel_y,
-                                     'wsel':wsel,
-                                     'elev':elev})
-        
-        # add a geometry column
-        df['geometry'] = df.geom_tup.apply(Point)
-        
-        # convert into a geodataframe
-        gdf = gpd.GeoDataFrame(df,crs = self.crs)
-        
-        print ("Create multidimensional interpolator functions for velocity, wsel, elev")
-        
-        vel_x_interp = LinearNDInterpolator(pts,gdf.vel_x)
-        vel_y_interp = LinearNDInterpolator(pts,gdf.vel_y)
-        wsel_interp = LinearNDInterpolator(pts,gdf.wsel)
-        elev_interp = LinearNDInterpolator(pts,gdf.elev)
-        
-        # first identify extents of image
-        xmin = np.min(pts[:,0])
-        xmax = np.max(pts[:,0])
-        ymin = np.min(pts[:,1])
-        ymax = np.max(pts[:,1])
-        
-        # interpoate velocity, wsel, and elevation at new xy's
-        ## TODO ISHA TO CHECK IF RASTER OUTPUTS LOOK DIFFERENT AT 0.5m vs 1m
-        xint = np.arange(xmin,xmax,resolution)
-        yint = np.arange(ymax,ymin,resolution * -1.)
-        xnew, ynew = np.meshgrid(xint,yint, sparse = True)
-        
-        print ("Interpolate Velocity East")
-        vel_x_new = vel_x_interp(xnew, ynew)
-        print ("Interpolate Velocity North")
-        vel_y_new = vel_y_interp(xnew, ynew)
-        print ("Interpolate WSEL")
-        wsel_new = wsel_interp(xnew, ynew)
-        print ("Interpolate bathymetry")
-        elev_new = elev_interp(xnew, ynew)
-        
-        # create a depth raster
-        depth = wsel_new - elev_new
-        
-        # calculate velocity magnitude
-        vel_mag = np.sqrt((np.power(vel_x_new,2)+np.power(vel_y_new,2)))
-        
-        # calculate velocity direction in radians
-        vel_dir = np.arctan2(vel_y_new,vel_x_new)
-        
-        print ("Exporting Rasters")
-
-        # create raster properties
-        driver = 'GTiff'
-        width = elev_new.shape[1]
-        height = elev_new.shape[0]
-        count = 1
-        crs = self.crs
-        #transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
-        transform = Affine.translation(xnew[0][0] - 0.5 * resolution, ynew[0][0] - 0.5 * resolution)\
-            * Affine.scale(resolution,-1 * resolution)
-
-        # write elev raster
-        with rasterio.open(os.path.join(self.model_dir,'elev.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as elev_rast:
-            elev_rast.write(elev_new,1)
-            
-        self.elev_rast = rasterio.open(os.path.join(self.model_dir,'elev.tif'))
-
-        # write wsel raster
-        with rasterio.open(os.path.join(self.model_dir,'wsel.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as wsel_rast:
-            wsel_rast.write(wsel_new,1)
-            
-        self.wsel_rast = rasterio.open(os.path.join(self.model_dir,'wsel.tif'))
-            
-        # write depth raster
-        with rasterio.open(os.path.join(self.model_dir,'depth.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as depth_rast:
-            depth_rast.write(depth,1)
-            
-        self.depth_rast = rasterio.open(os.path.join(self.model_dir,'depth.tif'))
-
-        # write velocity dir raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_dir_rast:
-            vel_dir_rast.write(vel_dir,1)
-            
-        self.vel_dir_rast = rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'))
-            
-        # write velocity .mag raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_mag_rast:
-            vel_mag_rast.write(vel_mag,1)
-            
-        self.vel_mag_rast = rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'))
-        
-        # write velocity x raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_x.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_x_rast:
-            vel_x_rast.write(vel_x_new,1)
-            
-        self.vel_x_rast = rasterio.open(os.path.join(self.model_dir,'vel_x.tif'))
-            
-        # write velocity y raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_y.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_y_rast:
-            vel_y_rast.write(vel_y_new,1)
-            
-        self.vel_y_rast = rasterio.open(os.path.join(self.model_dir,'vel_y.tif'))
-        
-    def create_agents(self, numb_agnts, model_dir, starting_box, crs, basin, water_temp):
-        '''method that creates a set of agents for simulation'''
-        
-        agents_list = []
-        
-        for i in np.arange(0,numb_agnts,1):
-            # create a fish
-            fishy = fish(i,model_dir, starting_box, crs, basin, water_temp)
-            
-            # set initial parameters
-            fishy.morphological_parameters()
-            fishy.initial_heading(self.vel_dir_rast)
-            fishy.initial_swim_speed()
-            fishy.mental_map(self.depth_rast)
-
-            # add it to the output list
-            agents_list.append(fishy)
-            
-            # create a dataframe for this agent 
-            df = pd.DataFrame.from_dict(data = {'id':[i],
-                                                'loc':[Point(fishy.pos)],
-                                                'E':[np.round(fishy.pos[0],4)],
-                                                'N':[np.round(fishy.pos[1],4)],
-                                                'vel':[fishy.sog],
-                                                'dir':[fishy.heading]},
-                                        orient = 'columns')
-            
-            gdf = gpd.GeoDataFrame(df, geometry='loc', crs= self.crs) 
-            self.agents = pd.concat([self.agents,gdf])
-            
-        return agents_list
-    
-    def ts_log(self, ts):
-        '''method that writes to log at end of timestep and updates agents 
-        geodataframe for next time step'''
-    
-        # first step writes current positions to the project database
-        self.agents['ts'] = np.repeat(ts,len(self.agents))
-        timestep = pd.DataFrame()
-        timestep['ts'] = self.agents['ts']
-        timestep['id'] = self.agents['id'].astype(str)
-        timestep['E'] = np.round(self.agents['E'],4)
-        timestep['N'] = np.round(self.agents['N'],4)
-        timestep['loc'] = self.agents['loc'].astype(str)
-        timestep['vel'] = self.agents['vel']
-        timestep['dir'] = self.agents['dir']
-        timestep.to_hdf(self.hdf,'TS',mode = 'a',format = 'table', append = True)
-        self.hdf.flush()        
-        
-        # second step creates a new agents geo dataframe
-        self.agents = gpd.GeoDataFrame(columns=['id', 'loc', 'vel', 'dir','E','N'],
-                                       geometry='loc',
-                                       crs= self.crs) 
-
-        agent_dict = {'id':[],'loc':[],'E':[],'N':[],'vel':[],'dir':[]}
-        
-        for i in self.agents_list: 
-            agent_dict['id'].append(i.ID)
-            agent_dict['loc'].append(Point(i.pos))
-            agent_dict['E'].append(np.round(i.pos[0],4))
-            agent_dict['N'].append(np.round(i.pos[1],4))
-            agent_dict['vel'].append(i.sog)
-            agent_dict['dir'].append(i.heading)
-            
-        # create an agents dataframe 
-        df = pd.DataFrame.from_dict(agent_dict, orient = 'columns')
-        
-        gdf = gpd.GeoDataFrame(df, geometry='loc', crs= self.crs) 
-        self.agents = pd.concat([self.agents,gdf])
-    
-    def run(self, model_name, agents, n, dt):
-        
-        # define metadata for movie
-        FFMpegWriter = manimation.writers['ffmpeg']
-        metadata = dict(title= model_name, artist='Matplotlib',
-                        comment='emergent model run %s'%(datetime.now()))
-        writer = FFMpegWriter(fps=30, metadata=metadata)
-        
-        self.agents_list = agents
-        
-        # initialize 
-        fig, ax = plt.subplots(figsize = (10,5))
-        
-        background = ax.imshow(self.depth_rast.read(1), 
-                               origin = 'upper',
-                               extent = [self.depth_rast.bounds[0],
-                                          self.depth_rast.bounds[2],
-                                          self.depth_rast.bounds[1],
-                                          self.depth_rast.bounds[3]])
-        
-        agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
-        
-        plt.xlabel('Easting')
-        plt.ylabel('Northing')
-        
-        # Update the frames for the movie
-        with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
-            for i in range(n):
-                for agent in agents:
-                    # check the environment 
-                    agent.mental_map(depth_rast = self.depth_rast, t = i)
-                    agent.environment(depth = self.depth_rast,
-                                      x_vel = self.vel_x_rast,
-                                      y_vel = self.vel_y_rast,
-                                      agents_df = self.agents)
-                    
-                    # take stock of internal states
-                    agent.find_z()
-                    agent.wave_drag_multiplier()
-                    agent.fatigue(t = i)
-                    
-                    # arbitrate behavioral cues
-                    agent.arbitrate(vel_mag_rast = self.vel_mag_rast, 
-                                    depth_rast = self.depth_rast,
-                                    vel_dir_rast = self.vel_dir_rast,
-                                    t = i)
-                    
-                    '''if the ratio to ideal speed over ground to water velocity 
-                    is less than 0.05 
-                    and the agent is travelling against flow
-                    and it's been more than 60 seconds since its last jump
-                    and there is more than 40% remaining in battery'''
-                    if agent.ideal_sog / np.linalg.norm([agent.x_vel,agent.y_vel]) < 0.05 and\
-                        np.sign(agent.heading) != np.sign(np.arctan2(agent.y_vel,agent.x_vel)) and\
-                            i - agent.time_of_jump > 60 and agent.battery > 0.4:
-                                # jump
-                                agent.jump(t = i)
-                    else:
-                        # swim like your life depended on it
-                        agent.drag_fun()
-                        agent.frequency()
-                        agent.thrust_fun()
-                        agent.swim(dt, t = i)
-                    
-                    # calculate mileage
-                    agent.odometer(t = i)
-                
-                # write frame
-                agent_pts.set_data(self.agents.geometry.x.values, self.agents.geometry.y.values)
-                writer.grab_frame() 
-                
-                # log data to hdf
-                self.ts_log(i)
-                
-                print ('Time Step %s complete'%(i))
-            for agent in agents:
-                agent.mental_map_export(self.depth_rast)
-        
-        # clean up
-        writer.finish()
-        self.hdf.flush()
-        self.hdf.close()
-        self.wsel_rast.close()
-        self.vel_dir_rast.close()
-        self.vel_mag_rast.close()
-        self.depth_rast.close()
-        self.vel_x_rast.close()
-        self.vel_y_rast.close()
-        self.elev_rast.close()
-        
-
- 
-    
