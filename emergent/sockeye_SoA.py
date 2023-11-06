@@ -51,7 +51,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-def get_array_module(use_gpu):
+def get_arr(use_gpu):
     '''
     Parameters
     ----------
@@ -160,7 +160,7 @@ class simulation():
          - use_gpu (bool, optional): Whether to use GPU acceleration. Defaults to False.
          
          Attributes:
-         - array_module (module): Module used for array operations (either numpy or cupy).
+         - arr (module): Module used for array operations (either numpy or cupy).
          - model_dir, model_name, crs, basin, etc.: Various parameters and states for the simulation.
          - X, Y, prev_X, prev_Y: Arrays representing the X and Y coordinates of agents.
          - drag, thrust, Hz, etc.: Arrays representing various movement parameters of agents.
@@ -172,7 +172,7 @@ class simulation():
          - It creates a new HDF5 file for the project and writes initial data to it.
          - Agent properties that do not change with time are written to the HDF5 file.
         """        
-        self.array_module = get_array_module(use_gpu)
+        self.arr = get_arr(use_gpu)
         
         # model directory and model name
         self.model_dir = model_dir
@@ -196,15 +196,15 @@ class simulation():
         recover['Seconds'] = recover.Minutes * 60.
         self.recovery = CubicSpline(recover.Seconds, recover.Recovery, extrapolate = True,)
         del recover
-        self.swim_behav = self.array_module.repeat(1, num_agents)               # 1 = migratory , 2 = refugia, 3 = station holding
-        self.swim_mode = self.array_module.repeat('sustained', num_agents)      # 1 = sustained, 2 = prolonged, 3 = sprint
-        self.battery = self.array_module.repeat(1.0, num_agents)
-        self.recover_stopwatch = self.array_module.repeat(0.0, num_agents)
-        self.ttfr = self.array_module.repeat(0.0, num_agents)
-        self.time_out_of_water = self.array_module.repeat(0.0, num_agents)
+        self.swim_behav = self.arr.repeat(1, num_agents)               # 1 = migratory , 2 = refugia, 3 = station holding
+        self.swim_mode = self.arr.repeat('sustained', num_agents)      # 1 = sustained, 2 = prolonged, 3 = sprint
+        self.battery = self.arr.repeat(1.0, num_agents)
+        self.recover_stopwatch = self.arr.repeat(0.0, num_agents)
+        self.ttfr = self.arr.repeat(0.0, num_agents)
+        self.time_out_of_water = self.arr.repeat(0.0, num_agents)
         
-        self.X = self.array_module.random.uniform(starting_box[0], starting_box[1],num_agents)
-        self.Y = self.array_module.random.uniform(starting_box[2], starting_box[3],num_agents)
+        self.X = self.arr.random.uniform(starting_box[0], starting_box[1],num_agents)
+        self.Y = self.arr.random.uniform(starting_box[2], starting_box[3],num_agents)
         self.prev_X = self.X
         self.prev_Y = self.Y
 
@@ -217,16 +217,16 @@ class simulation():
         self.b_s = -0.1806   # sprint slope
         
         # initialize movement parameters
-        self.drag = self.array_module.zeros(num_agents)           # computed theoretical drag
-        self.thrust = self.array_module.zeros(num_agents)         # computed theoretical thrust Lighthill 
-        self.Hz = self.array_module.zeros(num_agents)             # tail beats per second
-        self.bout_no = self.array_module.zeros(num_agents)        # bout number - new bout whenever fish recovers
-        self.dist_per_bout = self.array_module.zeros(num_agents)  # running counter of the distance travelled per bout
-        self.bout_dur = self.array_module.zeros(num_agents)       # running bout timer 
-        self.time_of_jump = self.array_module.zeros(num_agents)   # time since last jump - can't happen every timestep
+        self.drag = self.arr.zeros(num_agents)           # computed theoretical drag
+        self.thrust = self.arr.zeros(num_agents)         # computed theoretical thrust Lighthill 
+        self.Hz = self.arr.zeros(num_agents)             # tail beats per second
+        self.bout_no = self.arr.zeros(num_agents)        # bout number - new bout whenever fish recovers
+        self.dist_per_bout = self.arr.zeros(num_agents)  # running counter of the distance travelled per bout
+        self.bout_dur = self.arr.zeros(num_agents)       # running bout timer 
+        self.time_of_jump = self.arr.zeros(num_agents)   # time since last jump - can't happen every timestep
         
         # initialize odometer
-        self.kcal = self.array_module.zeros(num_agents)           #kilo calorie counter
+        self.kcal = self.arr.zeros(num_agents)           #kilo calorie counter
         
         # create a project database and write initial arrays to HDF
         self.hdf5 = h5py.File(self.db, 'w')
@@ -257,7 +257,7 @@ class simulation():
         - sex (array): Array of size `num_agents` with values 0 (male) or 1 (female) representing the sex of each agent.
         """
         if self.basin == "Nushagak River":
-            self.sex = self.array_module.random.choice([0,1], size = self.num_agents, p = [0.503,0.497])
+            self.sex = self.arr.random.choice([0,1], size = self.num_agents, p = [0.503,0.497])
             
     def sim_length(self):
         """
@@ -282,9 +282,9 @@ class simulation():
         # length in mm
         if self.basin == "Nushagak River":
             if self.sex == 'M':
-                self.length = self.array_module.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents)
+                self.length = self.arr.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents)
             else:
-                self.length = self.array_module.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
+                self.length = self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
         
         # we can also set these arrays that contain parameters that are a function of length
         self.sog = self.length/1000.  # sog = speed over ground - assume fish maintain 1 body length per second
@@ -304,9 +304,9 @@ class simulation():
         # body depth is in cm
         if self.basin == "Nushagak River":
             if self.sex == 'M':
-                self.body_depth = self.array_module.exp(-1.938 + np.log(self.length) * 1.084 + 0.0435) / 10.
+                self.body_depth = self.arr.exp(-1.938 + np.log(self.length) * 1.084 + 0.0435) / 10.
             else:
-                self.body_depth = self.array_module.exp(-1.938 + np.log(self.length) * 1.084) / 10.
+                self.body_depth = self.arr.exp(-1.938 + np.log(self.length) * 1.084) / 10.
                 
         self.too_shallow = self.body_depth /100. / 2. # m
         self.opt_wat_depth = self.body_depth /100 * 3.0 + self.too_shallow
@@ -687,7 +687,7 @@ class simulation():
             map (ndarray): A 3D array representing the mental maps of all agents.
                            Shape: (self.num_agents, self.width, self.height)
         """
-        self.map = self.array_module.zeros((self.num_agents, self.width, self.height))
+        self.map = self.arr.zeros((self.num_agents, self.width, self.height))
                
         # Create groups for organization (optional)
         mem_data = self.hdf5.create_group("memory")
@@ -747,13 +747,13 @@ class simulation():
         values = self.sample_environment(self.vel_dir_rast_transform,'vel_dir')
         
         # set direction 
-        self.heading = self.array_module.where(values < 0, 
-                                               (self.array_module.radians(360) + values) - self.array_module.radians(180), 
-                                               values - self.array_module.radians(180))
+        self.heading = self.arr.where(values < 0, 
+                                               (self.arr.radians(360) + values) - self.arr.radians(180), 
+                                               values - self.arr.radians(180))
 
         # set initial max practical speed over ground as well
-        self.max_practical_sog = self.array_module.array([self.sog * self.array_module.cos(self.heading), 
-                                                          self.sog * self.array_module.sin(self.heading)]) #meters/sec       
+        self.max_practical_sog = self.arr.array([self.sog * self.arr.cos(self.heading), 
+                                                          self.sog * self.arr.sin(self.heading)]) #meters/sec       
 
     def update_mental_map(self, current_timestep):
         """
@@ -773,8 +773,8 @@ class simulation():
         rows, cols = self.geo_to_pixel(self.X, self.Y, self.vel_dir_rast_transform)
     
         # Ensure rows and cols are within the bounds of the mental map
-        rows = self.array_module.clip(rows, 0, self.height - 1)
-        cols = self.array_module.clip(cols, 0, self.width - 1)
+        rows = self.arr.clip(rows, 0, self.height - 1)
+        cols = self.arr.clip(cols, 0, self.width - 1)
     
         # Construct an index array for advanced indexing
         agent_indices = np.arange(self.num_agents)
@@ -1015,11 +1015,11 @@ class simulation():
             self.z (array-like): The calculated z-coordinate for the agent.
     
         Note:
-            The function uses `self.array_module.where` for vectorized conditional operations,
+            The function uses `self.arr.where` for vectorized conditional operations,
             which implies that `self.depth`, `self.body_depth`, and `self.too_shallow` should be array-like
             and support broadcasting if they are not scalar values.
         """
-        self.z = self.array_module.where(
+        self.z = self.arr.where(
             self.depth < self.body_depth * 3 / 100.,
             self.depth + self.too_shallow,
             self.body_depth * 3 / 100.)
@@ -1058,7 +1058,7 @@ class simulation():
         x, y = (self.X, self.Y)
         
         # find the row and column in the direction raster
-        rows, cols = geo_to_pixel(x, y, self.array_module, self.depth_rast_transform)
+        rows, cols = geo_to_pixel(x, y, self.arr, self.depth_rast_transform)
         
         # Access the velocity dataset from the HDF5 file
         velocity = self.hdf5['environment/vel_mag'][:]
@@ -1243,7 +1243,7 @@ class simulation():
         x, y = (self.X, self.Y)
     
         # find the row and column in the direction raster
-        rows, cols = geo_to_pixel(x, y, self.array_module, self.depth_rast_transform)
+        rows, cols = geo_to_pixel(x, y, self.arr, self.depth_rast_transform)
     
         # calculate array slice bounds for each agent
         xmin = cols - buff
@@ -1269,7 +1269,7 @@ class simulation():
                                                   self.body_depth,
                                                   weight,
                                                   depth_array,
-                                                  self.array_module,
+                                                  self.arr,
                                                   self.depth_rast_transform)
 
         return repulsive_forces_array
@@ -1319,7 +1319,7 @@ class simulation():
         # how submerged are these fish - that's how many
         body_depths = self.z / (self.body_depth / 100.)
 
-        self.wave_drag = self.array_module.where(body_depths >=3, 1, wave_drag_fun(body_depths))
+        self.wave_drag = self.arr.where(body_depths >=3, 1, wave_drag_fun(body_depths))
        
     def wave_drag_cue(self, weight):
         """
@@ -1352,7 +1352,7 @@ class simulation():
         x, y = (self.X, self.Y)
     
         # find the row and column in the direction raster
-        rows, cols = geo_to_pixel(x, y, self.array_module, self.depth_rast_transform)
+        rows, cols = geo_to_pixel(x, y, self.arr, self.depth_rast_transform)
     
         # calculate array slice bounds for each agent
         xmin = cols - buff
@@ -1631,20 +1631,734 @@ class simulation():
         
         return collision_cue_array
 
-
-             
+    @np.vectorize
+    def f4ck_allocate(self, swim_behav, order_dict, cue_dict):
+        """
+        Allocates 'f4cks' (a metaphorical currency representing the agent's effort or
+        attention) to generate a steering vector based on the agent's swimming behavior
+        and sensory cues. This function is inspired by Reynolds' 1987 boids model, where
+        agents allocate limited resources to various steering behaviors.
     
+        Parameters
+        ----------
+        agent_idx : int
+            The index of the agent for which to calculate the heading.
+        swim_behav : int
+            The swimming behavior of the agent, where 1 represents active migration,
+            2 represents seeking refugia, and other values represent station holding.
+        order_dict : dict
+            A dictionary of ordered steering vectors from various cues, indexed from 0 to 6.
+        cue_dict : dict
+            A dictionary containing sensory cue vectors, with keys like 'shallow',
+            'collision', and 'low_speed'.
+    
+        Returns
+        -------
+        heading : float
+            The preferred heading for the agent in radians, calculated as the arctangent
+            of the y and x components of the resulting steering vector.
+    
+        Notes
+        -----
+        - The function uses a vectorized approach to apply the allocation logic to each
+          agent based on its behavior.
+        - For active migration (swim_behav == 1), the function iteratively adds cue vectors
+          from `order_dict` until a limit of 'f4cks' (7500) is reached, ensuring that the
+          sum of the norms of the cue vectors does not exceed this limit.
+        - For seeking refugia (swim_behav == 2), the heading vector is a sum of 'shallow',
+          'collision', and 'low_speed' cue vectors from `cue_dict`.
+        - For station holding (all other `swim_behav` values), the heading is determined
+          solely by the 'rheotaxis' cue from `cue_dict`.
+        - The metaphorical 'f4cks' represent a limit on the amount of effort the agent can
+          expend on steering, acting as a constraint on the cumulative influence of the cues.
+    
+        Example
+        -------
+        # Assuming an instance of the class is created and initialized as `agent_model`
+        # and the dictionaries `order_dict` and `cue_dict` are prepared:
+        agent_heading = agent_model.f4ck_allocate(agent_idx=5,
+                                                  swim_behav=1,
+                                                  order_dict=steering_orders,
+                                                  cue_dict=sensory_cues)
+        """
+
+        # create array to store steering vector
+        head_vec = np.array([0, 0])
+        
+        # of fish is currently actively migrating
+        if swim_behav == 1:
+            f4cks = 0
+            ''' this will fail if the amount of f4cks is larger than could be
+            generated by rheotaxis, low speed, and wave drag cues - make sure the
+            f4ck limit is less than the sum of rheotaxis, low speed, and wave drag'''
+            while f4cks < 7500:
+                for i in np.arange(0,7,1):
+                    head_vec = head_vec + order_dict[i]
+                    f4cks = f4cks + np.linalg.norm(order_dict[i])
+
+        # else if fish is seeking refugia
+        elif swim_behav == 2:
+            # create a heading vector - based on input from sensory cues
+            head_vec = cue_dict['shallow'] + cue_dict['collision'] + cue_dict['low_speed']
+
+        # otherwise we are station holding
+        else:
+            # create a heading vector - based on input from sensory cues
+            head_vec = cue_dict['rheotaxis']                    
+    
+        # convert into preferred heading for timestep
+        heading = np.arctan2(head_vec[1],head_vec[0]) 
+
+        return heading          
             
-            
-            
-            
-            
-            
-            
-            
-            
-            
-            
+    def arbitrate(self, t):
+
+        """
+        Arbitrates between different behavioral cues to determine a new heading for each agent.
+        This method considers the agent's behavioral mode and prioritizes different sensory inputs
+        to calculate the most appropriate heading.
+    
+        Parameters
+        ----------
+        t : int
+            The current time step in the simulation, used for cues that depend on historical data.
+    
+        Returns
+        -------
+        None
+            This method updates the agent's heading in place.
+    
+        Notes
+        -----
+        - The method calculates various steering cues with predefined weights, such as rheotaxis,
+          shallow water preference, wave drag, low-speed areas, historical avoidance, schooling behavior,
+          and collision avoidance.
+        - These cues are then organized into two dictionaries: `order_dict` which maintains the order
+          of behavioral cues based on their importance, and `cue_dict` which holds all the steering cues.
+        - The `f4ck_allocate` method is vectorized and called for each agent to allocate a limited
+          amount of 'effort' to these cues, resulting in a new heading based on the agent's current
+          swimming behavior.
+        - The agent's heading is updated in place, reflecting the new direction based on the arbitration
+          of cues.
+    
+        Example
+        -------
+        # Assuming an instance of the class is created and initialized as `agent_model`:
+        agent_model.arbitrate(t=current_time_step)
+        # The agent's heading is updated based on the arbitration of behavioral cues.
+        """
+
+        # calculate behavioral cues
+        rheotaxis = self.rheo_cue(10000)
+        shallow = self.shallow_cue(15000)
+        wave_drag = self.wave_drag_cue( 8000)
+        low_speed = self.vel_cue( 12000)
+        avoid = self.already_been_here(8000, t)
+        school = self.school_cue(8000)
+        collision = self.collision_cue(3000)
+
+        # create dictionary that has order of behavioral cues and their norm
+        order_dict = {0:shallow,
+                      1:collision,
+                      2:avoid,
+                      3:school,
+                      4:rheotaxis,
+                      5:low_speed,
+                      6:wave_drag}     
+        
+        # create dictionary that holds all steering cues
+        cue_dict = {'rheotaxis':rheotaxis,
+                    'shallow':shallow,
+                    'wave_drag':wave_drag,
+                    'low_speed':low_speed,
+                    'avoid':avoid,
+                    'school':school,
+                    'collision':collision}
+        
+        # the agent has only so many f4cks to give - vectorize
+        only_so_many = np.vectorize(self.f4ck_allocate,excluded = [1,2])
+        
+        # calculate heading for all agents over the next time step
+        self.heading = only_so_many(self.swim_behav,order_dict,cue_dict)
+        
+    def thrust_fun(self):
+        """
+        Calculates the thrust for a collection of agents based on Lighthill's elongated-body theory of fish propulsion.
+        
+        This method uses piecewise linear interpolation for the amplitude, wave, and trailing edge
+        as functions of body length and swimming speed. It is designed to work with array operations
+        and can utilize either NumPy or CuPy for calculations to support execution on both CPUs and GPUs.
+        
+        The method assumes a freshwater environment with a density of 1.0 kg/m^3. The thrust calculation
+        uses the agents' lengths, velocities, ideal speeds over ground (SOG), headings, and tail-beat frequencies
+        to compute thrust vectors for each agent.
+        
+        Attributes
+        ----------
+        length : array_like
+            The lengths of the agents in meters.
+        x_vel : array_like
+            The x-components of the water velocity vectors for the agents in m/s.
+        y_vel : array_like
+            The y-components of the water velocity vectors for the agents in m/s.
+        ideal_sog : array_like
+            The ideal speeds over ground for the agents in m/s.
+        heading : array_like
+            The headings of the agents in radians.
+        Hz : array_like
+            The tail-beat frequencies of the agents in Hz.
+        
+        Returns
+        -------
+        thrust : ndarray
+            An array of thrust vectors for each agent, where each vector is a 2D vector
+            representing the thrust in the x and y directions in N/m.
+        
+        Notes
+        -----
+        The function assumes that the input arrays are of equal length, with each index
+        corresponding to a different agent. The thrust calculation is vectorized to handle
+        multiple agents simultaneously.
+        
+        The piecewise linear interpolation is used for the amplitude, wave, and trailing
+        edge based on the provided data points. This approach simplifies the computation and
+        is suitable for scenarios where a small amount of error is acceptable.
+        
+        Examples
+        --------
+        Assuming `agents` is an instance of the simulation class with all necessary properties set as arrays:
+        
+        >>> thrust = agents.thrust_fun()
+        
+        The `thrust` array will contain the thrust vectors for each agent after the function call.
+        """
+
+        # Constants
+        rho = 1.0  # density of freshwater
+        theta = 32.  # theta that produces cos(theta) = 0.85
+        length_cm = self.length / 1000 * 100.
+        
+        # Calculate swim speed
+        water_vel = self.arr.stack((self.x_vel, self.y_vel), axis=-1)
+        ideal_vel_vec = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
+                                            self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+        ideal_swim_speed = self.arr.linalg.norm(ideal_vel_vec - water_vel, axis=-1)
+        swim_speed_cms = ideal_swim_speed * 100.
+    
+        # Data for interpolation
+        length_dat = self.arr.array([5., 10., 15., 20., 25., 30., 40., 50., 60.])
+        speed_dat = self.arr.array([37.4, 58., 75.1, 90.1, 104., 116., 140., 161., 181.])
+        amp_dat = self.arr.array([1.06, 2.01, 3., 4.02, 4.91, 5.64, 6.78, 7.67, 8.4])
+        wave_dat = self.arr.array([53.4361, 82.863, 107.2632, 131.7, 148.125, 166.278, 199.5652, 230.0044, 258.3])
+        edge_dat = self.arr.array([1., 2., 3., 4., 5., 6., 8., 10., 12.])
+    
+        # Interpolation
+        A = self.arr.interp(length_cm, length_dat, amp_dat)
+        V = self.arr.interp(swim_speed_cms, speed_dat, wave_dat)
+        B = self.arr.interp(length_cm, length_dat, edge_dat)
+    
+        # Calculate thrust
+        m = (self.arr.pi * rho * B**2) / 4.
+        W = (self.Hz * A * self.arr.pi) / 1.414
+        w = W * (1 - swim_speed_cms / V)
+    
+        # Thrust calculation
+        thrust_erg_s = m * W * w * swim_speed_cms - (m * w**2 * swim_speed_cms) / (2. * self.arr.cos(self.arr.radians(theta)))
+        thrust_Nm = thrust_erg_s / 10000000.
+        thrust_N = thrust_Nm / (self.length / 1000.)
+    
+        # Convert thrust to vector
+        thrust = self.arr.stack((thrust_N * self.arr.cos(self.heading),
+                                     thrust_N * self.arr.sin(self.heading)), axis=-1)
+    
+        self.thrust = thrust
+        
+    def frequency(self):
+        """
+        Calculates the tailbeat frequency for a collection of agents based on the 
+        balance of propulsive forces and drag, following Lighthill's (1970) 
+        elongated-body theory of fish propulsion.
+    
+        This method applies piecewise linear interpolation to estimate parameters 
+        such as amplitude, propulsive wave velocity, and trailing edge span as 
+        functions of body length and swimming speed. It is designed to work with 
+        array operations, allowing for simultaneous calculations across multiple 
+        agents.
+    
+        The method assumes a freshwater environment with a density of 1.0 kg/m^3 
+        and uses the agents' lengths, velocities, and drag forces to compute the 
+        tailbeat frequency for each agent.
+    
+        Attributes
+        ----------
+        length : array_like
+            The lengths of the agents in meters.
+        x_vel : array_like
+            The x-components of the water velocity vectors for the agents in m/s.
+        y_vel : array_like
+            The y-components of the water velocity vectors for the agents in m/s.
+        ideal_sog : array_like
+            The ideal speeds over ground for the agents in m/s.
+        heading : array_like
+            The headings of the agents in radians.
+        drag : array_like
+            The drag forces experienced by the agents in N.
+        swim_behav : array_like
+            An array indicating the swimming behavior of each agent, where a 
+            specific value (e.g., 3) indicates 'station holding'.
+        
+        Returns
+        -------
+        Hzs : ndarray
+            An array of tailbeat frequencies for each agent in Hz.
+        
+        Notes
+        -----
+        The function assumes that the input arrays are of equal length, with each 
+        index corresponding to a different agent. The tailbeat frequency calculation 
+        is vectorized to handle multiple agents simultaneously.
+    
+        The piecewise linear interpolation is used for the amplitude (A), propulsive 
+        wave velocity (V), and trailing edge span (B) based on the provided data points. 
+        This approach simplifies the computation and is suitable for scenarios 
+        where a small amount of error is acceptable.
+    
+        The function also accounts for different swimming behaviors, assigning a 
+        default frequency for agents that are 'station holding'.
+    
+        Examples
+        --------
+        Assuming `agents` is an instance of the simulation class with all necessary 
+        properties set as arrays:
+        
+        >>> Hzs = agents.frequency()
+        
+        The `Hzs` array will contain the tailbeat frequencies for each agent after 
+        the function call.
+        """
+        # ... function implementation ...
+
+        # Constants
+        rho = 1.0  # density of freshwater
+        theta = 32.  # theta for cos(theta) = 0.85
+    
+        # Convert lengths from meters to centimeters
+        lengths_cm = self.length * 100
+    
+        # Calculate swim speed in cm/s
+        water_velocities = self.arr.stack((self.x_vel, self.y_vel), axis=-1)
+        fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
+                                              self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+        swim_speeds_cms = self.arr.linalg.norm(fish_velocities - water_velocities, axis=-1) * 100
+
+        # sockeye parameters (Webb 1975, Table 20) units in CM!!! 
+        length_dat = self.arr.array([5.,10.,15.,20.,25.,30.,40.,50.,60.])
+        speed_dat = self.arr.array([37.4,58.,75.1,90.1,104.,116.,140.,161.,181.])
+        amp_dat = self.arr.array([1.06,2.01,3.,4.02,4.91,5.64,6.78,7.67,8.4])
+        wave_dat = self.arr.array([53.4361,82.863,107.2632,131.7,148.125,166.278,199.5652,230.0044,258.3])
+        edge_dat = self.arr.array([1.,2.,3.,4.,5.,6.,8.,10.,12.])
+    
+        # Interpolate A, V, B using piecewise linear functions based on provided data
+        # Replace with actual piecewise linear interpolation based on your data
+        A = self.arr.interp(lengths_cm, length_dat, amp_dat, self.arr)
+        V = self.arr.interp(swim_speeds_cms, speed_dat, wave_dat, self.arr)
+        B = self.arr.interp(lengths_cm, length_dat, edge_dat, self.arr)
+    
+        # Convert drag to erg/s
+        drags_erg_s = self.drag * self.length * 10000000
+    
+        # Solve for Hz
+        Hzs = self.arr.where(self.swim_behav == 3,
+                             1.0,
+                             self.arr.sqrt(drags_erg_s * V**2 * \
+                                           self.arr.cos(self.arr.radians(theta)) \
+                                               /(A**2 * B**2 * swim_speeds_cms * \
+                                                 self.arr.pi**3 * rho * (swim_speeds_cms - V)\
+                                                     * (-0.062518880701972 * swim_speeds_cms \
+                                                        - 0.125037761403944 * V * \
+                                                            self.arr.cos(self.arr.radians(theta))\
+                                                                + 0.062518880701972 * V))))
+    
+        self.Hz = Hzs
+         
+    def kin_visc(self, temp):
+        """
+        Calculates the kinematic viscosity of water at a given temperature using
+        interpolation from a predefined dataset.
+    
+        Parameters
+        ----------
+        temp : float
+            The temperature of the water in degrees Celsius for which the kinematic
+            viscosity is to be calculated.
+    
+        Returns
+        -------
+        float
+            The kinematic viscosity of water at the specified temperature in m^2/s.
+    
+        Notes
+        -----
+        The function uses a dataset of kinematic viscosity values at various
+        temperatures sourced from the Engineering Toolbox. It employs linear
+        interpolation to estimate the kinematic viscosity at the input temperature.
+    
+        Examples
+        --------
+        >>> kin_viscosity = kin_visc(20)
+        >>> print(f"The kinematic viscosity at 20°C is {kin_viscosity} m^2/s")
+    
+        This will output the kinematic viscosity at 20 degrees Celsius.
+        """
+        # Dataset for kinematic viscosity (m^2/s) at various temperatures (°C)
+        kin_temp = self.arr.array([0.01, 10., 20., 25., 30., 40., 50., 60., 70., 80.,
+                             90., 100., 110., 120., 140., 160., 180., 200.,
+                             220., 240., 260., 280., 300., 320., 340., 360.])
+    
+        kin_visc = self.arr.array([0.00000179180, 0.00000130650, 0.00000100350,
+                             0.00000089270, 0.00000080070, 0.00000065790,
+                             0.00000055310, 0.00000047400, 0.00000041270,
+                             0.00000036430, 0.00000032550, 0.00000029380,
+                             0.00000026770, 0.00000024600, 0.00000021230,
+                             0.00000018780, 0.00000016950, 0.00000015560,
+                             0.00000014490, 0.00000013650, 0.00000012990,
+                             0.00000012470, 0.00000012060, 0.00000011740,
+                             0.00000011520, 0.00000011430])
+    
+        # Interpolate kinematic viscosity based on the temperature
+        f_kinvisc = self.arr.interp(temp, kin_temp, kin_visc)
+    
+        return f_kinvisc
+
+    def wat_dens(self, temp):
+        """
+        Calculates the density of water at a given temperature using interpolation
+        from a predefined dataset.
+    
+        Parameters
+        ----------
+        temp : float
+            The temperature of the water in degrees Celsius for which the density
+            is to be calculated.
+    
+        Returns
+        -------
+        float
+            The density of water at the specified temperature in g/cm^3.
+    
+        Notes
+        -----
+        The function uses a dataset of water density values at various temperatures
+        sourced from reliable references. It employs linear interpolation to estimate
+        the water density at the input temperature.
+    
+        Examples
+        --------
+        >>> water_density = wat_dens(20)
+        >>> print(f"The density of water at 20°C is {water_density} g/cm^3")
+    
+        This will output the density of water at 20 degrees Celsius.
+        """
+        # Dataset for water density (g/cm^3) at various temperatures (°C)
+        dens_temp = self.arr.array([0.1, 1., 4., 10., 15., 20., 25., 30., 35., 40.,
+                              45., 50., 55., 60., 65., 70., 75., 80., 85., 90.,
+                              95., 100., 110., 120., 140., 160., 180., 200.,
+                              220., 240., 260., 280., 300., 320., 340., 360.,
+                              373.946])
+    
+        density = self.arr.array([0.9998495, 0.9999017, 0.9999749, 0.9997, 0.9991026,
+                            0.9982067, 0.997047, 0.9956488, 0.9940326, 0.9922152,
+                            0.99021, 0.98804, 0.98569, 0.9832, 0.98055, 0.97776,
+                            0.97484, 0.97179, 0.96861, 0.96531, 0.96189, 0.95835,
+                            0.95095, 0.94311, 0.92613, 0.90745, 0.887, 0.86466,
+                            0.84022, 0.81337, 0.78363, 0.75028, 0.71214, 0.66709,
+                            0.61067, 0.52759, 0.322])
+    
+        # Interpolate water density based on the temperature
+        f_density = self.arr.interp(temp, dens_temp, density)
+    
+        return f_density
+
+    def calc_Reynolds(self, visc, water_vel):
+        """
+        Calculates the Reynolds number for each fish in an array based on their lengths,
+        the kinematic viscosity of the water, and the velocity of the water.
+    
+        The Reynolds number is a dimensionless quantity that predicts flow patterns in
+        fluid flow situations. It is the ratio of inertial forces to viscous forces and
+        is used to determine whether a flow will be laminar or turbulent.
+    
+        This function is designed to work with libraries that support NumPy-like array
+        operations, such as NumPy or CuPy, allowing for efficient computation on either
+        CPUs or GPUs.
+    
+        Parameters
+        ----------
+        visc : float
+            The kinematic viscosity of the water in m^2/s.
+        water_vel : float
+            The velocity of the water in m/s.
+    
+        Returns
+        -------
+        array_like
+            An array of Reynolds numbers, one for each fish.
+    
+        Examples
+        --------
+        >>> lengths = self.arr.array([200, 250, 300])
+        >>> visc = 1e-6
+        >>> water_vel = 0.5
+        >>> reynolds_numbers = calc_Reynolds(lengths, visc, water_vel)
+        >>> print(f"The Reynolds numbers are {reynolds_numbers}")
+    
+        This will output the Reynolds numbers for fish of lengths 200 mm, 250 mm, and 300 mm
+        in water with a velocity of 0.5 m/s and a kinematic viscosity of 1e-6 m^2/s.
+        """
+        # Convert length from millimeters to meters
+        length_m = self.length / 1000.
+    
+        # Calculate the Reynolds number for each fish
+        reynolds_numbers = water_vel * length_m / visc
+    
+        return reynolds_numbers
+ 
+    def calc_surface_area(self):
+        """
+        Calculates the surface area of each fish in an array based on their lengths.
+        
+        The surface area is determined using a power-law relationship, which is a common
+        empirical model in biological studies to relate the size of an organism to some
+        physiological or ecological property, in this case, the surface area.
+    
+        This function is designed to work with libraries that support NumPy-like array
+        operations, such as NumPy or CuPy, allowing for efficient computation on either
+        CPUs or GPUs.
+    
+        Atrributes
+        ----------
+        length : array_like
+            An array of fish lengths in millimeters.
+    
+        Returns
+        -------
+        array_like
+            An array of surface areas, one for each fish.
+    
+        Notes
+        -----
+        The power-law relationship used here is given by the formula:
+        SA = 10 ** (a + b * log10(length))
+        where `a` and `b` are empirically derived constants.
+    
+        Examples
+        --------
+        >>> lengths = self.arr.array([200, 250, 300])
+        >>> surface_areas = calc_surface_area(lengths)
+        >>> print(f"The surface areas are {surface_areas}")
+    
+        This will output the surface areas for fish of lengths 200 mm, 250 mm, and 300 mm
+        using the power-law relationship with constants a = -0.143 and b = 1.881.
+        """
+        # Constants for the power-law relationship
+        a = -0.143
+        b = 1.881
+    
+        # Calculate the surface area for each fish
+        surface_areas = 10 ** (a + b * self.arr.log10(self.length))
+    
+        return surface_areas
+
+    def drag_coeff(self, reynolds):
+        """
+        Calculates the drag coefficient for each value in an array of Reynolds numbers.
+        
+        The relationship between drag coefficient and Reynolds number is modeled using
+        a logarithmic fit. This function is designed to work with libraries that support
+        NumPy-like array operations, such as NumPy or CuPy, allowing for efficient
+        computation on either CPUs or GPUs.
+    
+        Parameters
+        ----------
+        reynolds : array_like
+            An array of Reynolds numbers.
+        arr : module, optional
+            The array library to use for calculations (default is NumPy).
+    
+        Returns
+        -------
+        array_like
+            An array of drag coefficients corresponding to the input Reynolds numbers.
+    
+        Examples
+        --------
+        >>> reynolds_numbers = arr.array([2.5e4, 5.0e4, 7.4e4])
+        >>> drag_coeffs = drag_coeff(reynolds_numbers)
+        >>> print(f"The drag coefficients are {drag_coeffs}")
+        """
+        # Coefficients from the dataframe, converted to arrays for vectorized operations
+        reynolds_data = self.arr.array([2.5e4, 5.0e4, 7.4e4, 9.9e4, 1.2e5, 1.5e5, 1.7e5, 2.0e5])
+        drag_data = self.arr.array([0.23, 0.19, 0.15, 0.14, 0.12, 0.12, 0.11, 0.10])
+    
+        # Fit the logarithmic model to the data
+        def fit_dragcoeffs(reynolds, a, b):
+            return self.arr.log(reynolds) * a + b
+    
+        dragf_popt, _ = curve_fit(fit_dragcoeffs, reynolds_data, drag_data)
+    
+        # Calculate the drag coefficient for the input Reynolds numbers
+        drag_coefficients = self.arr.abs(fit_dragcoeffs(reynolds, *dragf_popt))
+    
+        return drag_coefficients
+
+    def drag_fun(self):
+        """
+        Calculate the drag force on a sockeye salmon swimming upstream.
+    
+        This function computes the drag force experienced by a sockeye salmon as it
+        swims against the current. It takes into account the fish's velocity, the
+        water velocity, and the water temperature to determine the kinematic
+        viscosity and density of the water. The drag force is calculated using the
+        drag equation from fluid dynamics, which incorporates the Reynolds number,
+        the surface area of the fish, and the drag coefficient.
+    
+        Attributes:
+            sog (array): Speed over ground of the fish in m/s.
+            heading (array): Heading of the fish in radians.
+            x_vel, y_vel (array): Water velocity components in m/s.
+            water_temp (array): Water temperature in degrees Celsius.
+            length (array): Length of the fish in meters.
+            wave_drag (array): Additional drag factor due to wave-making.
+    
+        Returns:
+            ndarray: An array of drag force vectors for each fish, where each vector
+            is a 2D vector representing the drag force in the x and y directions in N.
+    
+        Notes:
+            - The function assumes that the input arrays are structured as arrays of
+              values, with each index across the arrays corresponding to a different
+              fish.
+            - The drag force is computed in a vectorized manner, allowing for
+              efficient calculations over multiple fish simultaneously.
+            - The function uses np.stack and np.newaxis to ensure proper alignment
+              and broadcasting of array operations.
+            - The drag is calculated in SI units (N).
+    
+        Examples:
+            >>> # Assuming all properties are set in the class
+            >>> drags = self.drag_fun()
+            >>> print(drags)
+            # Output: array of drag force vectors for each fish
+        """
+
+        # Calculate fish velocities
+        fish_velocities = np.stack((self.sog * np.cos(self.heading), self.sog * np.sin(self.heading)), axis=-1)
+        water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
+    
+        # Ensure non-zero fish velocity for calculation
+        fish_speeds = np.linalg.norm(fish_velocities, axis=1)
+        fish_speeds[fish_speeds == 0.0] = 0.0001
+        fish_velocities[fish_speeds == 0.0] = [0.0001, 0.0001]
+    
+        # Calculate kinematic viscosity and density based on water temperature
+        viscosities = self.kin_visc(self.water_temp)
+        densities = self.wat_dens(self.water_temp)
+
+        # Calculate Reynolds numbers
+        reynolds_numbers = self.calc_Reynolds(self.length, viscosities, np.linalg.norm(water_velocities, axis=1))
+    
+        # Calculate surface areas
+        surface_areas = self.calc_surface_area((self.length / 1000.) * 100.)
+    
+        # Calculate drag coefficients
+        drag_coeffs = self.drag_coeff(reynolds_numbers)
+    
+        # Calculate relative velocities and their norms
+        relative_velocities = fish_velocities - water_velocities
+        relative_speeds_squared = np.linalg.norm(relative_velocities, axis=1)**2
+    
+        # Calculate unit vectors for fish velocities
+        unit_fish_velocities = fish_velocities / self.arr.linalg.norm(fish_velocities, axis=1)[:, np.newaxis]
+    
+        # Calculate drag forces
+        drags = -0.5 * (densities * 1000) * (surface_areas / 100**2) * drag_coeffs * relative_speeds_squared[:, self.arr.newaxis] \
+            * unit_fish_velocities * self.wave_drag[:, self.arr.newaxis]
+    
+        self.drag = drags
+
+def ideal_drag_fun(self):
+    """
+    Calculate the ideal drag force on multiple sockeye salmon swimming upstream.
+    
+    This function computes the ideal drag force for each fish based on its length,
+    water velocity, fish velocity, and water temperature. The drag force is computed
+    using the drag equation from fluid dynamics, incorporating the Reynolds number,
+    surface area, and drag coefficient.
+    
+    Attributes:
+        x_vel, y_vel (array): Water velocity components in m/s for each fish.
+        ideal_sog (array): Ideal speed over ground in m/s for each fish.
+        heading (array): Heading in radians for each fish.
+        water_temp (array): Water temperature in degrees Celsius for each fish.
+        length (array): Length of each fish in meters.
+        swim_behav (array): Swimming behavior for each fish.
+        max_s_U (array): Maximum sustainable swimming speed in m/s for each fish.
+        wave_drag (array): Additional drag factor due to wave-making for each fish.
+    
+    Returns:
+        ndarray: An array of ideal drag force vectors for each fish, where each vector
+        is a 2D vector representing the drag force in the x and y directions in N.
+    
+    Notes:
+        - The function assumes that the input arrays are structured as arrays of
+          values, with each index across the arrays corresponding to a different
+          fish.
+        - The drag force is computed in a vectorized manner, allowing for
+          efficient calculations over multiple fish simultaneously.
+        - The function adjusts the fish velocity if it exceeds the maximum
+          sustainable speed based on the fish's behavior.
+    """
+    # Vector components of water velocity and speed over ground for each fish
+    water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
+    fish_velocities = np.stack((self.ideal_sog * np.cos(self.heading),
+                                self.ideal_sog * np.sin(self.heading)), axis=-1)
+
+    # Calculate ideal swim speeds and adjust based on max sustainable speed
+    ideal_swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=1)
+    mask = (self.swim_behav == 2) | (self.swim_behav == 3)
+    mask &= (ideal_swim_speeds > self.max_s_U)
+    fish_velocities[mask] *= (self.max_s_U / ideal_swim_speeds[mask])[:, np.newaxis]
+
+    # Calculate the maximum practical speed over ground
+    self.max_practical_sog = np.where(mask[:, np.newaxis],
+                                      fish_velocities + water_velocities,
+                                      fish_velocities)
+    self.max_practical_sog[np.linalg.norm(self.max_practical_sog, axis=1) == 0.0] = [0.0001, 0.0001]
+
+    # Kinematic viscosity and density based on water temperature for each fish
+    viscosities = self.kin_visc(self.water_temp)
+    densities = self.wat_dens(self.water_temp)
+
+    # Reynolds numbers for each fish
+    reynolds_numbers = self.calc_Reynolds(self.length, viscosities, np.linalg.norm(water_velocities, axis=1))
+
+    # Surface areas for each fish
+    surface_areas = self.calc_surface_area(self.length)
+
+    # Drag coefficients for each fish
+    drag_coeffs = self.drag_coeff(reynolds_numbers)
+
+    # Calculate ideal drag forces
+    relative_velocities = self.max_practical_sog - water_velocities
+    relative_speeds_squared = np.linalg.norm(relative_velocities, axis=1)**2
+    unit_max_practical_sog = self.max_practical_sog / np.linalg.norm(self.max_practical_sog, axis=1)[:, np.newaxis]
+
+    # Ideal drag calculation
+    ideal_drags = -0.5 * (densities * 1000) * (surface_areas / 100**2) * drag_coeffs \
+                  * relative_speeds_squared[:, np.newaxis] * unit_max_practical_sog \
+                  * self.wave_drag[:, np.newaxis]
+
+    self.ideal_drag = ideal_drags
             
             
             
