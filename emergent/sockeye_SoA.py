@@ -29,7 +29,7 @@ Therefore their tail beat per minute rate is dependent on the amount of drag
 and swimming mode.   
 """
 # import dependencies
-import cupy as cp
+#import cupy as cp
 import h5py
 import geopandas as gpd
 import numpy as np
@@ -46,7 +46,7 @@ from scipy.constants import g
 import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
 from datetime import datetime
-from joblib import Parallel, delayed
+import time
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -177,7 +177,7 @@ class simulation():
         # model directory and model name
         self.model_dir = model_dir
         self.model_name = model_name
-        self.db = os.path.join(self.model_dir,'%s.hf'%(self.model_name))
+        self.db = os.path.join(self.model_dir,'%s.h5'%(self.model_name))
                 
         # coordinate reference system for the model
         self.crs = crs
@@ -331,7 +331,7 @@ class simulation():
         agent_data.create_dataset("Y", (self.num_timesteps, self.num_agents), dtype='f4')
         agent_data.create_dataset("Z", (self.num_timesteps, self.num_agents), dtype='f4')
         agent_data.create_dataset("prev_X", (self.num_timesteps, self.num_agents), dtype='f4')
-        agent_data.create_dataset("prev_X", (self.num_timesteps, self.num_agents), dtype='f4')            
+        agent_data.create_dataset("prev_Y", (self.num_timesteps, self.num_agents), dtype='f4')            
         agent_data.create_dataset("heading", (self.num_timesteps, self.num_agents), dtype='f4')
         agent_data.create_dataset("sog", (self.num_timesteps, self.num_agents), dtype='f4')
         agent_data.create_dataset("ideal_sog", (self.num_timesteps, self.num_agents), dtype='f4')
@@ -416,7 +416,10 @@ class simulation():
         """
        
         # Create groups for organization (optional)
-        env_data = self.hdf5.create_group("environment")
+        if 'environment' not in self.hdf5:
+            env_data = self.hdf5.create_group("environment")
+        else:
+            env_data = self.hdf5['environment']
         
         # get raster properties
         src = rasterio.open(data_dir)
@@ -482,8 +485,8 @@ class simulation():
             self.vel_mag_rast_transform = transform
             
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_dir", (height, width), dtype='f4')
-            self.hdf5['environment/vel_dir'][:, :] = src.read(1)  
+            env_data.create_dataset("vel_mag", (height, width), dtype='f4')
+            self.hdf5['environment/vel_mag'][:, :] = src.read(1)  
             
         self.width = width
         self.height = height
@@ -911,6 +914,8 @@ class simulation():
         
         return repulsive_forces_per_agent
 
+
+
     def environment(self):
         """
         Updates environmental parameters for each agent and identifies neighbors within a defined buffer.
@@ -1000,7 +1005,8 @@ class simulation():
                 closest_agent_dict[index] = None  # Or some placeholder to indicate no agents are close
         
         # Now `agents_within_buffers_dict` is a dictionary where each key is an agent index
-        return agents_within_buffers_dict, closest_agent_dict
+        self.agents_within_buffers_dict = agents_within_buffers_dict
+        self.closest_agent_dict = closest_agent_dict
 
     def find_z(self):
         """
@@ -1458,7 +1464,7 @@ class simulation():
     
         return school_cue
 
-    def school_cue(self, weight, agents_within_buffers_dict):
+    def school_cue(self, weight):
         """
         Calculate the attractive force towards the centroid of the school for 
         each agent.
@@ -1501,7 +1507,7 @@ class simulation():
                                   self.X,
                                   self.Y,
                                   weight, 
-                                  agents_within_buffers_dict,
+                                  self.agents_within_buffers_dict,
                                   self.X,
                                   self.Y)
         
@@ -1581,7 +1587,7 @@ class simulation():
         
         return collision_cue
     
-    def collision_cue(self, weight, closest_agent_dict):
+    def collision_cue(self, weight):
         """
         Generates an array of repulsive force vectors for each agent to avoid collisions,
         based on the positions of their nearest neighbors. This function leverages
@@ -1625,7 +1631,7 @@ class simulation():
                                         self.X,
                                         self.Y,
                                         weight,
-                                        closest_agent_dict,
+                                        self.closest_agent_dict,
                                         self.X,
                                         self.Y)
         
@@ -2286,90 +2292,538 @@ class simulation():
     
         self.drag = drags
 
-def ideal_drag_fun(self):
-    """
-    Calculate the ideal drag force on multiple sockeye salmon swimming upstream.
+    def ideal_drag_fun(self):
+        """
+        Calculate the ideal drag force on multiple sockeye salmon swimming upstream.
+        
+        This function computes the ideal drag force for each fish based on its length,
+        water velocity, fish velocity, and water temperature. The drag force is computed
+        using the drag equation from fluid dynamics, incorporating the Reynolds number,
+        surface area, and drag coefficient.
+        
+        Attributes:
+            x_vel, y_vel (array): Water velocity components in m/s for each fish.
+            ideal_sog (array): Ideal speed over ground in m/s for each fish.
+            heading (array): Heading in radians for each fish.
+            water_temp (array): Water temperature in degrees Celsius for each fish.
+            length (array): Length of each fish in meters.
+            swim_behav (array): Swimming behavior for each fish.
+            max_s_U (array): Maximum sustainable swimming speed in m/s for each fish.
+            wave_drag (array): Additional drag factor due to wave-making for each fish.
+        
+        Returns:
+            ndarray: An array of ideal drag force vectors for each fish, where each vector
+            is a 2D vector representing the drag force in the x and y directions in N.
+        
+        Notes:
+            - The function assumes that the input arrays are structured as arrays of
+              values, with each index across the arrays corresponding to a different
+              fish.
+            - The drag force is computed in a vectorized manner, allowing for
+              efficient calculations over multiple fish simultaneously.
+            - The function adjusts the fish velocity if it exceeds the maximum
+              sustainable speed based on the fish's behavior.
+        """
+        # Vector components of water velocity and speed over ground for each fish
+        water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
+        fish_velocities = np.stack((self.ideal_sog * np.cos(self.heading),
+                                    self.ideal_sog * np.sin(self.heading)), axis=-1)
     
-    This function computes the ideal drag force for each fish based on its length,
-    water velocity, fish velocity, and water temperature. The drag force is computed
-    using the drag equation from fluid dynamics, incorporating the Reynolds number,
-    surface area, and drag coefficient.
+        # Calculate ideal swim speeds and adjust based on max sustainable speed
+        ideal_swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=1)
+        mask = (self.swim_behav == 2) | (self.swim_behav == 3)
+        mask &= (ideal_swim_speeds > self.max_s_U)
+        fish_velocities[mask] *= (self.max_s_U / ideal_swim_speeds[mask])[:, np.newaxis]
     
-    Attributes:
+        # Calculate the maximum practical speed over ground
+        self.max_practical_sog = np.where(mask[:, np.newaxis],
+                                          fish_velocities + water_velocities,
+                                          fish_velocities)
+        self.max_practical_sog[np.linalg.norm(self.max_practical_sog, axis=1) == 0.0] = [0.0001, 0.0001]
+    
+        # Kinematic viscosity and density based on water temperature for each fish
+        viscosities = self.kin_visc(self.water_temp)
+        densities = self.wat_dens(self.water_temp)
+    
+        # Reynolds numbers for each fish
+        reynolds_numbers = self.calc_Reynolds(self.length, viscosities, np.linalg.norm(water_velocities, axis=1))
+    
+        # Surface areas for each fish
+        surface_areas = self.calc_surface_area(self.length)
+    
+        # Drag coefficients for each fish
+        drag_coeffs = self.drag_coeff(reynolds_numbers)
+    
+        # Calculate ideal drag forces
+        relative_velocities = self.max_practical_sog - water_velocities
+        relative_speeds_squared = np.linalg.norm(relative_velocities, axis=1)**2
+        unit_max_practical_sog = self.max_practical_sog / np.linalg.norm(self.max_practical_sog, axis=1)[:, np.newaxis]
+    
+        # Ideal drag calculation
+        ideal_drags = -0.5 * (densities * 1000) * (surface_areas / 100**2) * drag_coeffs \
+                      * relative_speeds_squared[:, np.newaxis] * unit_max_practical_sog \
+                      * self.wave_drag[:, np.newaxis]
+    
+        self.ideal_drag = ideal_drags
+            
+    def fatigue(self, t):
+        """
+        Method tracks battery levels and assigns swimming modes for multiple fish.
+    
+        Parameters:
+        t (float): The current time step.
+    
+        Attributes:
         x_vel, y_vel (array): Water velocity components in m/s for each fish.
-        ideal_sog (array): Ideal speed over ground in m/s for each fish.
+        sog (array): Speed over ground in m/s for each fish.
         heading (array): Heading in radians for each fish.
-        water_temp (array): Water temperature in degrees Celsius for each fish.
-        length (array): Length of each fish in meters.
+        pos (array): Current position for each fish.
+        prevPos (array): Previous position for each fish.
         swim_behav (array): Swimming behavior for each fish.
-        max_s_U (array): Maximum sustainable swimming speed in m/s for each fish.
+        swim_mode (array): Swimming mode for each fish.
+        battery (array): Battery level for each fish.
+        recover_stopwatch (array): Recovery stopwatch for each fish.
+        bout_dur (array): Duration of current swimming bout for each fish.
+        dist_per_bout (array): Distance travelled in the current bout for each fish.
+        a_p, b_p, a_s, b_s (array): Parameters for calculating time to fatigue.
+        max_s_U, max_p_U (array): Maximum sustainable and prolonged swimming speeds for each fish.
+        length (array): Length of each fish in meters.
         wave_drag (array): Additional drag factor due to wave-making for each fish.
     
-    Returns:
-        ndarray: An array of ideal drag force vectors for each fish, where each vector
-        is a 2D vector representing the drag force in the x and y directions in N.
-    
-    Notes:
+        Notes:
         - The function assumes that the input arrays are structured as arrays of
           values, with each index across the arrays corresponding to a different
           fish.
-        - The drag force is computed in a vectorized manner, allowing for
-          efficient calculations over multiple fish simultaneously.
-        - The function adjusts the fish velocity if it exceeds the maximum
-          sustainable speed based on the fish's behavior.
-    """
-    # Vector components of water velocity and speed over ground for each fish
-    water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
-    fish_velocities = np.stack((self.ideal_sog * np.cos(self.heading),
-                                self.ideal_sog * np.sin(self.heading)), axis=-1)
+        - The function adjusts the fish's swimming mode and behavior based on its
+          energy expenditure and recovery.
+        """
+        dt = 1.0  # Time step duration
+    
+        # Vector components of water velocity and speed over ground for each fish
+        water_velocities = self.arr.stack((self.x_vel, self.y_vel), axis=-1)
+        fish_velocities = self.arr.stack((self.sog * self.arr.cos(self.heading),
+                                    self.sog * self.arr.sin(self.heading)), axis=-1)
+    
+        # Calculate swim speeds for each fish
+        swim_speeds = self.arr.linalg.norm(fish_velocities - water_velocities, axis=1)
+    
+        # Calculate distances travelled and update bout odometer and duration
+        dist_travelled = self.arr.linalg.norm(self.pos - self.prevPos, axis=1)
+        self.dist_per_bout += dist_travelled
+        self.bout_dur += dt
+    
+        # Initialize time to fatigue (ttf) array
+        ttf = self.arr.full_like(swim_speeds, self.arr.nan)
+    
+        # Calculate ttf for prolonged and sprint swimming modes
+        mask_prolonged = (self.max_s_U < swim_speeds) & (swim_speeds <= self.max_p_U)
+        mask_sprint = swim_speeds > self.max_p_U
+        ttf[mask_prolonged] = 10. ** (self.a_p[mask_prolonged] + swim_speeds[mask_prolonged] * self.b_p[mask_prolonged]) * 60.
+        ttf[mask_sprint] = 10. ** (self.a_s[mask_sprint] + swim_speeds[mask_sprint] * self.b_s[mask_sprint]) * 60.
+    
+        # Set swimming modes based on swim speeds
+        self.swim_mode = self.arr.where(mask_prolonged, 'prolonged', self.swim_mode)
+        self.swim_mode = self.arr.where(mask_sprint, 'sprint', self.swim_mode)
+        self.swim_mode = self.arr.where(~(mask_prolonged | mask_sprint), 'sustained', self.swim_mode)
+    
+        # Calculate recovery at the beginning and end of the time step
+        rec0 = self.recovery(self.recover_stopwatch) / 100.
+        rec0[rec0 < 0.0] = 0.0
+        rec1 = self.recovery(self.recover_stopwatch + dt) / 100.
+        rec1[rec1 > 1.0] = 1.0
+        per_rec = rec1 - rec0
+    
+        # Update battery levels for sustained swimming mode
+        mask_sustained = self.swim_mode == 'sustained'
+        self.battery[mask_sustained] += per_rec[mask_sustained]
+        self.battery[self.battery > 1.0] = 1.0
+    
+        # Update battery levels for non-sustained swimming modes
+        mask_non_sustained = ~mask_sustained
+        ttf0 = ttf[mask_non_sustained] * self.battery[mask_non_sustained]
+        ttf1 = ttf0 - dt
+        self.battery[mask_non_sustained] *= ttf1 / ttf0
+        self.battery[self.battery < 0.0] = 0.0
+    
+        # Set swimming behavior based on battery level
+        mask_low_battery = self.battery <= 0.1
+        mask_mid_battery = (self.battery > 0.1) & (self.battery <= 0.3)
+        mask_high_battery = self.battery > 0.3
+    
+        self.swim_behav = self.arr.where(mask_low_battery, 3, self.swim_behav)
+        self.swim_behav = self.arr.where(mask_mid_battery, 2, self.swim_behav)
+        self.swim_behav = self.arr.where(mask_high_battery, 1, self.swim_behav)
+    
+        # Set ideal speed over ground based on battery level
+        self.ideal_sog[mask_low_battery] = 0.0
+        self.ideal_sog[mask_mid_battery] = 0.02
+        ideal_bls = 0.0075 * self.arr.exp(4.89 * self.battery[mask_high_battery])
+        self.ideal_sog[mask_high_battery] = self.arr.round(ideal_bls * (self.length[mask_high_battery] / 1000.), 2)
+    
+        # Check if the fish should switch to station holding based on bout duration and distance
+        mask_bout_check = (self.bout_dur > 300) & (self.dist_per_bout / self.bout_dur < 0.1)
+        self.swim_behav[mask_bout_check] = 3
+        self.swim_mode[mask_bout_check] = 1
+        self.ideal_sog[mask_bout_check] = 0.0
+    
+        # Recovery for fish that are station holding
+        mask_station_holding = self.swim_behav == 3
+        self.bout_dur[mask_station_holding] = 0.0
+        self.dist_per_bout[mask_station_holding] = 0.0
+        self.battery[mask_station_holding] += per_rec[mask_station_holding]
+        self.recover_stopwatch[mask_station_holding] += dt
+    
+        # Fish ready to start moving again after recovery
+        mask_ready_to_move = self.battery >= 0.85
+        self.recover_stopwatch[mask_ready_to_move] = 0.0
+        self.swim_behav[mask_ready_to_move] = 1
+        self.swim_mode[mask_ready_to_move] = 1
+            
+    def initial_swim_speed(self):
+        """
+        Calculates the initial swim speed required for each fish to overcome
+        current water velocities and maintain their ideal speed over ground (SOG).
+    
+        Attributes:
+        x_vel, y_vel (array): Water velocity components in m/s for each fish.
+        ideal_sog (array): Ideal speed over ground in m/s for each fish.
+        heading (array): Heading in radians for each fish.
+        swim_speed (array): Calculated swim speed for each fish to maintain ideal SOG.
+    
+        Notes:
+        - The function assumes that the input attributes are structured as arrays of
+          values, with each index across the arrays corresponding to a different fish.
+        - The function updates the swim_speed attribute for each fish based on the
+          calculated swim speed necessary to maintain the ideal SOG against water currents.
+        """
+    
+        # Vector components of water velocity for each fish
+        water_velocities = np.sqrt(self.x_vel**2 + self.y_vel**2)
+    
+        # Vector components of ideal velocity for each fish
+        ideal_velocities = np.stack((self.ideal_sog * np.cos(self.heading),
+                                     self.ideal_sog * np.sin(self.heading)), axis=-1)
+    
+        # Calculate swim speed for each fish
+        # Subtracting the scalar water velocity from the vector ideal velocity
+        # requires broadcasting the water_velocities array to match the shape of ideal_velocities
+        self.swim_speed = np.linalg.norm(ideal_velocities - water_velocities[:, np.newaxis], axis=1)
+            
+    def swim(self, dt):
+        """
+        Propels each fish forward based on their thrust, drag, and weight.
+    
+        Parameters:
+        dt (float): The time step over which to advance the simulation.
+    
+        Attributes:
+        sog (array): Speed over ground for each fish in m/s.
+        heading (array): Heading for each fish in radians.
+        thrust (array): Thrust force for each fish in Newtons.
+        drag (array): Drag force for each fish in Newtons.
+        weight (array): Weight of each fish in kilograms.
+        pos (array): Current position of each fish in meters.
+        prevPos (array): Previous position of each fish in meters.
+    
+        Notes:
+        - The function assumes that the input attributes are structured as arrays of
+          values, with each index across the arrays corresponding to a different fish.
+        - The function updates the position and speed over ground (sog) for each fish
+          based on the calculated surge and acceleration.
+        """
+    
+        # Calculate fish velocity components for each fish
+        fish_vel_0_x = self.sog * np.cos(self.heading)
+        fish_vel_0_y = self.sog * np.sin(self.heading)
+    
+        # Calculate surge for each fish
+        surge_x = np.round(self.thrust, 2) + np.round(self.drag, 2)
+        surge_y = np.round(self.thrust, 2) + np.round(self.drag, 2)  # Assuming thrust and drag have y components
+    
+        # Calculate acceleration for each fish
+        acc_x = np.round(surge_x / self.weight, 2)
+        acc_y = np.round(surge_y / self.weight, 2)
+    
+        # Calculate the magnitude of acceleration and apply dampening for each fish
+        acc_mag = np.sqrt(acc_x**2 + acc_y**2)
+        damp = np.where(acc_mag > 0, (-0.067 * np.log(acc_mag) + 0.3718), 0.0000001)
+        damp = np.clip(damp, a_min=0, a_max=None)  # Ensure dampening is not negative
+    
+        # Apply dampening to acceleration
+        acc_x *= damp
+        acc_y *= damp
+    
+        # Calculate new velocity at the end of the time step for each fish
+        fish_vel_1_x = fish_vel_0_x + acc_x * dt
+        fish_vel_1_y = fish_vel_0_y + acc_y * dt
+    
+        # Update speed over ground for each fish
+        self.sog = np.round(np.sqrt(fish_vel_1_x**2 + fish_vel_1_y**2), 6)
+    
+        # Update positions for each fish
+        self.prevPos_x = self.pos_x
+        self.prevPos_y = self.pos_y
+        self.pos_x += fish_vel_1_x * dt
+        self.pos_y += fish_vel_1_y * dt
+       
+    def jump(self, t, g):
+        """
+        Simulates each fish jumping using a ballistic trajectory.
+    
+        Parameters:
+        t (float): The current time in the simulation.
+        g (float): The acceleration due to gravity.
+    
+        Attributes:
+        time_of_jump (array): The time each fish jumps.
+        ucrit (array): Critical swimming speed for each fish.
+        sog (array): Speed over ground for each fish.
+        heading (array): Heading for each fish.
+        y_vel (array): Y-component of water velocity.
+        x_vel (array): X-component of water velocity.
+        pos_x (array): X-coordinate of the current position of each fish.
+        pos_y (array): Y-coordinate of the current position of each fish.
+    
+        Notes:
+        - The function assumes that the input attributes are structured as arrays of
+          values, with each index across the arrays corresponding to a different fish.
+        - The function updates the position and speed over ground (sog) for each fish
+          based on their jump.
+        """
+    
+        # Reset jump time for each fish
+        self.time_of_jump = t
+    
+        # Get jump angle for each fish
+        jump_angles = self.arr.random.choice([self.arr.radians(45), self.arr.radians(60)], size=self.ucrit.shape)
+    
+        # Calculate time airborne for each fish
+        time_airborne = (2 * self.ucrit * self.arr.sin(jump_angles)) / g
+    
+        # Calculate displacement for each fish
+        displacement = self.ucrit * time_airborne * self.arr.cos(jump_angles)
+    
+        # Set speed over ground to ucrit for each fish
+        self.sog = self.ucrit
+    
+        # Calculate new heading angle for each fish based solely on flow direction
+        self.heading = self.arr.arctan2(self.y_vel, self.x_vel) - self.arr.radians(180)
+    
+        # Calculate the new position for each fish
+        self.pos_x += displacement * self.arr.cos(self.heading)
+        self.pos_y += displacement * self.arr.sin(self.heading)
+            
+    def odometer(self, t):
+        """
+        Updates the running counter of the amount of kCal consumed by each fish during a simulation timestep.
+    
+        Parameters:
+        t (float): The current time in the simulation.
+    
+        Attributes:
+        water_temp (array): Water temperature experienced by each fish.
+        weight (array): Weight of each fish.
+        wave_drag (array): Wave drag acting on each fish.
+        swim_speed (array): Swimming speed of each fish.
+        ucrit (array): Critical swimming speed for each fish.
+        kcal (array): Cumulative kilocalories burned by each fish.
+    
+        Notes:
+        - The function assumes that the input attributes are structured as arrays of
+          values, with each index across the arrays corresponding to a different fish.
+        - The function updates the kcal attribute for each fish based on their oxygen
+          consumption converted to calories using metabolic equations from Brett (1964)
+          and Brett and Glass (1973).
+        """
+    
+        # Calculate active and standard metabolic rate using equations from Brett and Glass (1973)
+        # O2_rate in units of mg O2/hr
+        sr_o2_rate = self.arr.where(
+            self.water_temp <= 5.3,
+            self.arr.exp(0.0565 * np.power(self.arr.log(self.weight * 1000), 0.9141)),
+            self.arr.where(
+                self.water_temp <= 15,
+                self.arr.exp(0.1498 * self.arr.power(self.arr.log(self.weight * 1000), 0.8465)),
+                self.arr.exp(0.1987 * self.arr.power(self.arr.log(self.weight * 1000), 0.8844))
+            )
+        )
+    
+        ar_o2_rate = self.arr.where(
+            self.water_temp <= 5.3,
+            self.arr.exp(0.4667 * self.arr.power(self.arr.log(self.weight * 1000), 0.9989)),
+            self.arr.where(
+                self.water_temp <= 15,
+                self.arr.exp(0.9513 * self.arr.power(self.arr.log(self.weight * 1000), 0.9632)),
+                self.arr.exp(0.8237 * self.arr.power(self.arr.log(self.weight * 1000), 0.9947))
+            )
+        )
+    
+        # Calculate total metabolic rate
+        swim_cost = sr_o2_rate + self.wave_drag * (
+            self.arr.exp(np.log(sr_o2_rate) + self.swim_speed * (
+                (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
+            )) - sr_o2_rate
+        )
+    
+        # Update kilocalories burned
+        self.kcal += swim_cost
+            
+    def timestep(self, t, dt):
+        """
+        Simulates a single time step for all fish in the simulation.
+    
+        Parameters:
+        - t: Current simulation time.
+        - dt: Time step duration.
+    
+        The method performs the following operations for each fish:
+        1. Updates the mental map based on the current time.
+        2. Senses the environment to gather necessary data.
+        3. Optimizes vertical position within the water column.
+        4. Calculates the wave drag multiplier based on environmental conditions.
+        5. Assesses fatigue levels to determine energy reserves and swimming capabilities.
+        6. Arbitrates among behavioral cues to decide on actions.
+        7. Decides whether each fish should jump or swim based on their speed, heading, and energy levels.
+        8. Calculates the energy expenditure for the time step.
+        9. Logs the simulation data for the current time step.
+        """
+    
+        # Assess mental map
+        self.update_mental_map(t)
+        
+        # Sense the environment
+        self.environment()
+            
+        # Optimize vertical position
+        self.find_z()
+        
+        # Get wave drag multiplier
+        self.wave_drag_multiplier()
+        
+        # Assess fatigue
+        self.fatigue(t)
+        
+        # Arbitrate amongst behavioral cues
+        self.arbitrate(t)
+        
+        # Calculate the ratio of ideal speed over ground to the magnitude of water velocity
+        sog_to_water_vel_ratio = self.ideal_sog / self.arr.linalg.norm([self.x_vel, self.y_vel], axis=0)
+        
+        # Calculate the sign of the heading and the water flow direction
+        heading_sign = np.sign(self.heading)
+        water_flow_direction_sign = self.arr.sign(self.arr.arctan2(self.y_vel, self.x_vel))
+        
+        # Calculate the time since the last jump
+        time_since_jump = t - self.time_of_jump
+        
+        # Create a boolean mask for the fish that should jump
+        should_jump = (sog_to_water_vel_ratio < 0.05) & (heading_sign != water_flow_direction_sign) & \
+                      (time_since_jump > 180) & (self.battery > 0.4)
+        
+        # Apply the jump or swim functions based on the condition
+        # For each fish that should jump
+        self.jump(t=t, mask=should_jump)
+        
+        # For each fish that should swim
+        self.drag_fun(mask=~should_jump)
+        self.frequency(mask=~should_jump)
+        self.thrust_fun(mask=~should_jump)
+        self.swim(dt, t=t, mask=~should_jump)
+        
+        # Calculate mileage
+        self.odometer(t=t)  
+        
+        # Log the timestep data
+        self.timestep_flush(t)
 
-    # Calculate ideal swim speeds and adjust based on max sustainable speed
-    ideal_swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=1)
-    mask = (self.swim_behav == 2) | (self.swim_behav == 3)
-    mask &= (ideal_swim_speeds > self.max_s_U)
-    fish_velocities[mask] *= (self.max_s_U / ideal_swim_speeds[mask])[:, np.newaxis]
+            
+    def run(self, model_name, n, dt):
+        """
+        Executes the simulation model over a specified number of time steps and generates a movie of the simulation.
+    
+        Parameters:
+        - model_name: A string representing the name of the model, used for titling the output movie.
+        - agents: A list of agent objects that will be simulated.
+        - n: An integer representing the number of time steps to simulate.
+        - dt: The duration of each time step.
+    
+        The function performs the following operations:
+        1. Initializes the depth raster from the HDF5 dataset.
+        2. Sets up the movie writer with metadata.
+        3. Initializes the plot for the simulation visualization.
+        4. Iterates over the specified number of time steps, updating the agents and capturing each frame.
+        5. Cleans up resources and finalizes the movie file.
+    
+        The simulation uses raster data for depth and agent positions to visualize the movement of agents in the environment. The output is a movie file that shows the progression of the simulation over time.
+    
+        Note:
+        - The function assumes that the HDF5 dataset, coordinate reference system (CRS), and depth raster transformation are already set as attributes of the class instance.
+        - The function prints the completion of each time step to the console.
+        - The movie is saved in the directory specified by `self.model_dir`.
+    
+        Returns:
+        None. The result of the function is the creation of a movie file visualizing the simulation.
+        """        
+        t0 = time.time()
+        # get depth raster
+        depth_arr = self.hdf5['environment/depth'][:]
+        depth = rasterio.MemoryFile()
+        height = depth_arr.shape[0]
+        width = depth_arr.shape[1]
 
-    # Calculate the maximum practical speed over ground
-    self.max_practical_sog = np.where(mask[:, np.newaxis],
-                                      fish_velocities + water_velocities,
-                                      fish_velocities)
-    self.max_practical_sog[np.linalg.norm(self.max_practical_sog, axis=1) == 0.0] = [0.0001, 0.0001]
+        with depth.open(
+            driver ='GTiff',
+            height = depth_arr.shape[0],
+            width = depth_arr.shape[1],
+            count =1,
+            dtype ='float32',
+            crs = self.crs,
+            transform = self.depth_rast_transform
+        ) as dataset:
+            dataset.write(depth_arr, 1)
 
-    # Kinematic viscosity and density based on water temperature for each fish
-    viscosities = self.kin_visc(self.water_temp)
-    densities = self.wat_dens(self.water_temp)
+            # define metadata for movie
+            FFMpegWriter = manimation.writers['ffmpeg']
+            metadata = dict(title= model_name, artist='Matplotlib',
+                            comment='emergent model run %s'%(datetime.now()))
+            writer = FFMpegWriter(fps=30, metadata=metadata)
 
-    # Reynolds numbers for each fish
-    reynolds_numbers = self.calc_Reynolds(self.length, viscosities, np.linalg.norm(water_velocities, axis=1))
+            #initialize plot
+            fig, ax = plt.subplots(figsize = (10,5))
 
-    # Surface areas for each fish
-    surface_areas = self.calc_surface_area(self.length)
+            background = ax.imshow(dataset.read(1),
+                                   origin = 'upper',
+                                   extent = [dataset.bounds[0],
+                                              dataset.bounds[2],
+                                              dataset.bounds[1],
+                                              dataset.bounds[3]])
 
-    # Drag coefficients for each fish
-    drag_coeffs = self.drag_coeff(reynolds_numbers)
+            agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
 
-    # Calculate ideal drag forces
-    relative_velocities = self.max_practical_sog - water_velocities
-    relative_speeds_squared = np.linalg.norm(relative_velocities, axis=1)**2
-    unit_max_practical_sog = self.max_practical_sog / np.linalg.norm(self.max_practical_sog, axis=1)[:, np.newaxis]
+            plt.xlabel('Easting')
+            plt.ylabel('Northing')
 
-    # Ideal drag calculation
-    ideal_drags = -0.5 * (densities * 1000) * (surface_areas / 100**2) * drag_coeffs \
-                  * relative_speeds_squared[:, np.newaxis] * unit_max_practical_sog \
-                  * self.wave_drag[:, np.newaxis]
+            # Update the frames for the movie
+            with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
+                for i in range(n):
+                    self.timestep(i,1)
 
-    self.ideal_drag = ideal_drags
-            
-            
-            
-            
-            
-            
-            
-            
-            
-            
-            
+                    # write frame
+                    agent_pts.set_data(self.X,
+                                       self.Y)
+                    writer.grab_frame()
+
+                    print ('Time Step %s complete'%(i))
+
+
+        # clean up
+        writer.finish()
+        self.hdf.flush()
+        self.hdf.close()
+        depth.close()
+        t1 = time.time()     
+        
+        print ('ABM took %s to compile'%(t1-t0))
             
             
             
