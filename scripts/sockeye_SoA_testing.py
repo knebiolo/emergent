@@ -30,7 +30,7 @@ HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
-crs = 'EPSG:32604'
+crs = 32604
 
 # create a starting box - aka where are all the fish starting from?
 # W,E,S,N
@@ -60,14 +60,7 @@ sim = sockeye.simulation(model_dir,model_name,crs,basin,water_temp,bbox,ts,n,use
 #sim.HECRAS(os.path.join(HECRAS_dir,HECRAS_model),1.0)
 #sim.vel_surf()
 
-# or import from directory
-sim.enviro_import(os.path.join(model_dir,'vel_x.tif'),'velocity x')
-sim.enviro_import(os.path.join(model_dir,'vel_y.tif'),'velocity y')
-sim.enviro_import(os.path.join(model_dir,'depth.tif'),'depth')
-sim.enviro_import(os.path.join(model_dir,'wsel.tif'),'wsel')
-sim.enviro_import(os.path.join(model_dir,'elev.tif'),'elevation')
-sim.enviro_import(os.path.join(model_dir,'vel_dir.tif'),'velocity direction')
-sim.enviro_import(os.path.join(model_dir,'vel_mag.tif'),'velocity magnitude')
+ 
 
 #%% Run the model
 sim.run(model_name, n = ts, dt = dt)

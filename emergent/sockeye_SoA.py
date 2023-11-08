@@ -97,9 +97,9 @@ def geo_to_pixel(X, Y, arr_type, transform):
     rows = arr_type.round(rows).astype(arr_type.int32)
 
     # If using CuPy, transfer indices to CPU as NumPy arrays for HDF5 operations
-    if isinstance(cols, arr_type.ndarray):
-        cols = cols.get()
-        rows = rows.get()
+    # if isinstance(cols, arr_type.ndarray):
+    #     cols = cols.get()
+    #     rows = rows.get()
 
     return rows, cols
 
@@ -192,7 +192,7 @@ class simulation():
         self.sim_length()
         self.sim_weight()
         self.sim_body_depth()
-        recover = pd.read_csv("../data/recovery.csv")
+        recover = pd.read_csv(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")
         recover['Seconds'] = recover.Minutes * 60.
         self.recovery = CubicSpline(recover.Seconds, recover.Recovery, extrapolate = True,)
         del recover
@@ -240,6 +240,25 @@ class simulation():
         self.hdf5["agent_data/body_depth"][:] = self.body_depth
         self.hdf5["agent_data/too_shallow"][:] = self.too_shallow
         self.hdf5["agent_data/opt_wat_depth"][:] = self.sex
+        
+        # import environment
+        self.enviro_import(os.path.join(model_dir,'vel_x.tif'),'velocity x')
+        self.enviro_import(os.path.join(model_dir,'vel_y.tif'),'velocity y')
+        self.enviro_import(os.path.join(model_dir,'depth.tif'),'depth')
+        self.enviro_import(os.path.join(model_dir,'wsel.tif'),'wsel')
+        self.enviro_import(os.path.join(model_dir,'elev.tif'),'elevation')
+        self.enviro_import(os.path.join(model_dir,'vel_dir.tif'),'velocity direction')
+        self.enviro_import(os.path.join(model_dir,'vel_mag.tif'),'velocity magnitude') 
+
+        # initialize mental map
+        self.initialize_mental_map()
+        
+        # initialize heading
+        self.initial_heading()
+        
+        # initialize swim speed
+        self.initial_swim_speed()    
+
         self.hdf5.flush()
         
    
@@ -313,7 +332,6 @@ class simulation():
         
     def initialize_hdf5(self):
         '''Initialize an HDF5 database for a simulation'''
-        
         # Create groups for organization (optional)
         agent_data = self.hdf5.create_group("agent_data")
         
@@ -358,9 +376,11 @@ class simulation():
         self.hdf5.attrs['basin'] = self.basin
         self.hdf5.attrs['crs'] = self.crs
         
+        
     def timestep_flush(self, timestep):
         '''function writes to the open hdf5 file '''
         
+        self.hdf5 = h5py.File(self.db, 'w')
         # write time step data to hdf
         self.hdf5['agent_data/X'][:, timestep] = self.X
         self.hdf5['agent_data/Y'][:, timestep] = self.Y
@@ -384,10 +404,11 @@ class simulation():
         self.hdf5['agent_data/dist_per_bout'][:, timestep] = self.dist_per_bout
         self.hdf5['agent_data/bout_dur'][:, timestep] = self.bout_dur
         self.hdf5['agent_data/time_of_jump'][:, timestep] = self.time_of_jump
+        self.hdf5.flush()
 
-        # Periodically flush data to ensure it's written to disk
-        if timestep % 100 == 0:  # Adjust this value based on your needs
-            self.hdf5.flush()
+        # # Periodically flush data to ensure it's written to disk
+        # if timestep % 100 == 0:  # Adjust this value based on your needs
+            
 
     def enviro_import(self, data_dir, surface_type):
         """
@@ -415,11 +436,7 @@ class simulation():
         - ValueError: If the provided surface_type is not recognized.
         """
        
-        # Create groups for organization (optional)
-        if 'environment' not in self.hdf5:
-            env_data = self.hdf5.create_group("environment")
-        else:
-            env_data = self.hdf5['environment']
+
         
         # get raster properties
         src = rasterio.open(data_dir)
@@ -428,6 +445,14 @@ class simulation():
         height = src.height
         dtype = np.float32
         transform = src.transform
+        
+        # Create groups for organization (optional)
+        if 'environment' not in self.hdf5:
+            env_data = self.hdf5.create_group("environment")
+            self.width = width
+            self.height = height
+        else:
+            env_data = self.hdf5['environment']
 
         shape = (num_bands, height, width)
         #shape = (num_bands, width, height)
@@ -437,7 +462,7 @@ class simulation():
             self.vel_x_rast_transform = transform
             
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_x", (height, width), dtype='f4')
+            env_data.create_dataset("vel_x", (height, width), dtype='f4', data = src.read(1))
             self.hdf5['environment/vel_x'][:, :] = src.read(1)
 
         elif surface_type == 'velocity y':
@@ -690,13 +715,13 @@ class simulation():
             map (ndarray): A 3D array representing the mental maps of all agents.
                            Shape: (self.num_agents, self.width, self.height)
         """
-        self.map = self.arr.zeros((self.num_agents, self.width, self.height))
+        self.map = self.arr.zeros((self.num_agents, self.height, self.width))
                
         # Create groups for organization (optional)
         mem_data = self.hdf5.create_group("memory")
         
         # create a memory map array
-        mem_data.create_dataset('maps', (self.height, self.width), dtype = 'f4')
+        mem_data.create_dataset('maps', (self.num_agents, self.height, self.width), dtype = 'f4')
         
         # write it to the hdf5
         self.hdf5['memory/maps'][:, :] = self.map
@@ -715,18 +740,19 @@ class simulation():
         Returns:
         - values: array of sampled raster values
         """
-
         # Get the row, col indices for the coordinates
-        rows, cols = self.geo_to_pixel(self.X, self.Y, transform)
+        rows, cols = geo_to_pixel(self.X, self.Y, self.arr, transform)
 
         # Use the already open HDF5 file object to read the specified raster dataset
-        raster_dataset = self.hdf5['environment'][raster_name]  # Adjust the path as needed
+        raster_dataset = self.hdf5['environment/%s'%(raster_name)][:]  # Adjust the path as needed
         # Sample the raster values using the row, col indices
         # Ensure that the indices are within the bounds of the raster data
         rows = np.clip(rows, 0, raster_dataset.shape[0] - 1)
         cols = np.clip(cols, 0, raster_dataset.shape[1] - 1)
         values = raster_dataset[rows, cols]
-
+        #self.hdf5['environment/%s'%(raster_name)] = raster_dataset
+        self.hdf5.flush()
+        
         return values  
      
     def initial_heading (self):
@@ -744,7 +770,7 @@ class simulation():
         - self.max_practical_sog: The maximum practical speed over ground for each agent as a 2D vector (m/s).
         """
         # get the x, y position of the agent 
-        row, col = self.geo_to_pixel(self.x, self.y, self.vel_dir_rast_transform)
+        row, col = geo_to_pixel(self.X, self.Y, self.arr, self.vel_dir_rast_transform)
             
         # get the initial heading values
         values = self.sample_environment(self.vel_dir_rast_transform,'vel_dir')
@@ -771,9 +797,8 @@ class simulation():
     
         The mental map is stored in an HDF5 dataset with shape (num_agents, width, height), where each 'slice' corresponds to an agent's mental map.
         """
-    
         # Convert geographic coordinates to pixel coordinates for each agent
-        rows, cols = self.geo_to_pixel(self.X, self.Y, self.vel_dir_rast_transform)
+        rows, cols = geo_to_pixel(self.X, self.Y, self.arr, self.vel_dir_rast_transform)
     
         # Ensure rows and cols are within the bounds of the mental map
         rows = self.arr.clip(rows, 0, self.height - 1)
@@ -784,11 +809,14 @@ class simulation():
         indices = (agent_indices, rows, cols)
     
         # Update the mental map for all agents in the HDF5 dataset at once
-        mental_map_dataset = self.hdf5['memory/maps']
+        mental_map_dataset = self.hdf5['memory/maps'][:]
             
         # Use advanced indexing to update the mental map
         # Note: This assumes that the HDF5 dataset supports numpy-style advanced indexing
         mental_map_dataset[indices] = current_timestep
+        
+        self.hdf5['memory/maps'][:, :] = mental_map_dataset
+        self.hdf5.flush()
 
     def already_been_here(self, weight, t):
         """
@@ -843,7 +871,7 @@ class simulation():
         x, y = (self.X, self.Y)
         
         # find the row and column in the direction raster
-        rows, cols = self.geo_to_pixel(x, y, self.depth_rast_transform)
+        rows, cols = geo_to_pixel(x, y, self.arr, self.depth_rast_transform)
         
         # Construct an index array for advanced indexing
         agent_indices = np.arange(self.num_agents)
@@ -860,10 +888,10 @@ class simulation():
         row_slice = slice(ymin, ymax)
         
         # Construct the indices tuple for advanced indexing
-        indices = (agent_indices, row_slice, col_slice)
+        indices = (agent_indices, np.floor(row_slice), np.floor(col_slice))
         
         # Access the mental map dataset from the HDF5 file
-        mental_map_dataset = self.hdf5['memory/maps']
+        mental_map_dataset = self.hdf5['memory/maps'][:]
         
         # Use advanced indexing to retrieve the slices of the mental map
         # Note: This assumes that the HDF5 dataset supports numpy-style advanced indexing
@@ -1029,6 +1057,47 @@ class simulation():
             self.depth < self.body_depth * 3 / 100.,
             self.depth + self.too_shallow,
             self.body_depth * 3 / 100.)
+        
+    def velocity_slice(self, agent_idx, x, y, columns, rows, buffer, excluded):
+        #excluded = {0:arr_type,1:transform,2:velocity}
+        weight = excluded[0]
+        arr_type = excluded[1]
+        transform = excluded[2]
+        velocity = excluded[3]
+        print ('analyzing agent %s'%(agent_idx))
+        # calculate array slice bounds
+        xmin = max(0, columns - buffer)
+        xmax = min(velocity.shape[1], columns + buffer + 1)  # +1 because slicing is exclusive on the upper bound
+        ymin = max(0, rows - buffer)
+        ymax = min(velocity.shape[0], rows + buffer + 1)  # +1 for the same reason
+        
+        # Retrieve the slice of the velocity array for this agent
+        vel_slice = velocity[ymin:ymax, xmin:xmax]
+        
+        # Find the indices of the minimum velocity within the slice
+        min_idx = np.unravel_index(np.argmin(vel_slice, axis=None), vel_slice.shape)
+        
+        # Convert indices to projected coordinates
+        min_x, min_y = pixel_to_geo(arr_type,
+            transform, 
+            min_idx[0] + ymin, 
+            min_idx[1] + xmin
+        )
+        
+        # Calculate the direction vector to the minimum velocity cell
+        diff_x = min_x - x
+        diff_y = min_y - y
+        
+        # Normalize the direction vector
+        magnitude = np.sqrt(diff_x**2 + diff_y**2)
+        if magnitude > 0:
+            velocity_min = [diff_x / magnitude, diff_y / magnitude]
+            # Scale the velocity cues by the weight and normalize by the square of 5 body lengths in meters
+            velocity_min *= np.array(weight / ((5 * magnitude / 1000) ** 2))
+        else:
+            velocity_min = np.array([0, 0]) # No movement if the minimum velocity is at the agent's position
+            
+        return velocity_min
 
     def vel_cue(self, weight):
         """
@@ -1055,7 +1124,7 @@ class simulation():
           scaled by the weight and normalized by the square of 5 body lengths in meters.
         """
         # Convert self.length to a NumPy array if it's a CuPy array
-        length_numpy = self.length.get() if isinstance(self.length, cp.ndarray) else self.length
+        length_numpy = self.length#.get() if isinstance(self.length, cp.ndarray) else self.length
         
         # calculate buffer size based on swim mode, if we are in refugia mode buffer is 15 body lengths else 5
         buff = np.where(self.swim_mode == 2, 15 * length_numpy, 5 * length_numpy)
@@ -1073,40 +1142,29 @@ class simulation():
         velocity_min = np.zeros((self.num_agents, 2), dtype=float)
         
         for i in range(self.num_agents):
-            # calculate array slice bounds
-            xmin = max(0, cols[i] - buff[i])
-            xmax = min(velocity.shape[1], cols[i] + buff[i] + 1)  # +1 because slicing is exclusive on the upper bound
-            ymin = max(0, rows[i] - buff[i])
-            ymax = min(velocity.shape[0], rows[i] + buff[i] + 1)  # +1 for the same reason
+            # Define the slice bounds for the current agent
+            xmin = int(cols[i] - buff[i])
+            xmax = int(cols[i] + buff[i] + 1)
+            ymin = int(rows[i] - buff[i])
+            ymax = int(rows[i] + buff[i] + 1)
             
-            # Retrieve the slice of the velocity array for this agent
-            vel_slice = velocity[ymin:ymax, xmin:xmax]
+            # Retrieve the slice of the velocity array for the current agent
+            vel_slice = self.hdf5['environment/vel_mag'][:][ymin:ymax, xmin:xmax]
             
-            # Find the indices of the minimum velocity within the slice
-            min_idx = np.unravel_index(np.argmin(vel_slice, axis=None), vel_slice.shape)
+            # Find the index of the minimum velocity within the slice
+            min_idx = np.unravel_index(np.argmin(vel_slice), vel_slice.shape)
             
-            # Convert indices to projected coordinates
-            min_x, min_y = pixel_to_geo(
-                self.depth_rast_transform, 
-                min_idx[0] + ymin, 
-                min_idx[1] + xmin
-            )
+            # Convert the index back to geographical coordinates
+            min_x, min_y = pixel_to_geo(self.arr, self.vel_mag_rast_transform, min_idx[0] + ymin, min_idx[1] + xmin)
             
-            # Calculate the direction vector to the minimum velocity cell
-            diff_x = min_x - x[i]
-            diff_y = min_y - y[i]
-            
-            # Normalize the direction vector
-            magnitude = np.sqrt(diff_x**2 + diff_y**2)
-            if magnitude > 0:
-                velocity_min[i] = [diff_x / magnitude, diff_y / magnitude]
-            else:
-                velocity_min[i] = [0, 0]  # No movement if the minimum velocity is at the agent's position
+            velocity_min[i] = min_x, min_y
         
-        # Scale the velocity cues by the weight and normalize by the square of 5 body lengths in meters
-        velocity_min *= weight / ((5 * length_numpy / 1000) ** 2)
-        
-        return velocity_min
+        diff = velocity_min - np.vstack((self.X, self.Y)).T
+        squared = diff**2
+        dist = np.sqrt(squared)
+
+        repulsive = (weight * diff/dist) / dist
+        return repulsive
 
     def rheo_cue(self, weight):
         """
@@ -1133,7 +1191,7 @@ class simulation():
         - If `self.length` is a CuPy array, it is converted to a NumPy array for computation.
         """
         # Convert self.length to a NumPy array if it's a CuPy array
-        length_numpy = self.length.get() if isinstance(self.length, cp.ndarray) else self.length
+        length_numpy = self.length#.get() if isinstance(self.length, cp.ndarray) else self.length
     
         # Sample the environment to get the velocity direction and adjust to point upstream
         vel_dir = self.sample_environment(self.vel_dir_rast_transform, 'vel_dir') - np.radians(180)
@@ -1147,8 +1205,8 @@ class simulation():
         return rheotaxis
     
     #create a function that returns a total force vector in x and y for each agent
-    @np.vectorize
-    def calculate_shallow_repulsive_force(agent_idx, x, y, xmin, xmax, ymin, ymax, body_depth, weight, depth_array, arr_type, depth_rast_transform):
+    #@np.vectorize
+    def calculate_shallow_repulsive_force(self, agent_idx, x, y, xmin, xmax, ymin, ymax, body_depth, excluded):
         """
         Calculate the total repulsive force vector for a single agent based on the surrounding shallow water cells.
     
@@ -1176,7 +1234,12 @@ class simulation():
         - The repulsive force is calculated as a vector normalized by the magnitude of the distance to each shallow cell, scaled by the weight.
         - The function returns the total repulsive force vector, which is the sum of the individual forces from all shallow cells within the buffer.
         """        
-        # Calculate max depth - body depth in cm - make sure we divide by 100.
+        weight = excluded[0]
+        depth_array = excluded[1] 
+        arr_type = excluded[2] 
+        depth_rast_transform = excluded[3] # Calculate max depth - body depth in cm - make sure we divide by 100.
+        
+        #
         min_depth = (body_depth * 1.1) / 100.# Use advanced indexing to create a boolean mask for the slices
         
         # calculate a force multiplier
@@ -1184,42 +1247,46 @@ class simulation():
         
         # create a mask for this agent
         mask = np.zeros_like(depth_array, dtype=bool)
-        mask[int(ymin[agent_idx]):int(ymax[agent_idx]), int(xmin[agent_idx]):int(xmax[agent_idx])] = True
+        mask[int(ymin):int(ymax), int(xmin):int(xmax)] = True
     
         # Find the indices of cells with value 1 for this agent
-        agent_multiplier = multiplier[mask]
+        agent_multiplier = multiplier * mask
         row_indices, col_indices = np.where(agent_multiplier == 1)
+        
+        if len(row_indices) > 0:
     
-        # Convert indices to projected coordinates
-        projected_x, projected_y = pixel_to_geo(arr_type,
-            depth_rast_transform, 
-            row_indices, 
-            col_indices
-        )
-    
-        # Calculate the difference vectors
-        diff_x = projected_x - x[agent_idx]
-        diff_y = projected_y - y[agent_idx]
-        diff_vectors = np.stack((diff_x, diff_y), axis=-1)
-    
-        # Calculate the magnitude of each vector
-        magnitudes = np.linalg.norm(diff_vectors, axis=1)
-    
-        # Avoid division by zero
-        magnitudes[magnitudes == 0] = np.finfo(float).eps
-    
-        # Normalize each vector to get the unit direction vectors
-        direction_vectors = diff_vectors / magnitudes[:, np.newaxis]
-    
-        # Calculate repulsive force in X and Y directions for this agent
-        x_force = (weight * direction_vectors[:, 0]) / magnitudes
-        y_force = (weight * direction_vectors[:, 1]) / magnitudes
-    
-        # Sum the forces for this agent
-        total_x_force = np.nansum(x_force)
-        total_y_force = np.nansum(y_force)
-    
-        return total_x_force, total_y_force
+            # Convert indices to projected coordinates
+            projected_x, projected_y = pixel_to_geo(arr_type,
+                depth_rast_transform, 
+                row_indices, 
+                col_indices
+            )
+        
+            # Calculate the difference vectors
+            diff_x = projected_x - x[agent_idx]
+            diff_y = projected_y - y[agent_idx]
+            diff_vectors = np.stack((diff_x, diff_y), axis=-1)
+        
+            # Calculate the magnitude of each vector
+            magnitudes = np.linalg.norm(diff_vectors, axis=1)
+        
+            # Avoid division by zero
+            magnitudes[magnitudes == 0] = np.finfo(float).eps
+        
+            # Normalize each vector to get the unit direction vectors
+            direction_vectors = diff_vectors / magnitudes[:, np.newaxis]
+        
+            # Calculate repulsive force in X and Y directions for this agent
+            x_force = (weight * direction_vectors[:, 0]) / magnitudes
+            y_force = (weight * direction_vectors[:, 1]) / magnitudes
+        
+            # Sum the forces for this agent
+            total_x_force = np.nansum(x_force)
+            total_y_force = np.nansum(y_force)
+        
+            return total_x_force, total_y_force
+        else:
+            return np.array([0]), np.array([0])
 
     def shallow_cue(self, weight):
         """
@@ -1263,9 +1330,11 @@ class simulation():
         # Initialize an array to hold the repulsive forces for each agent
         repulsive_forces = np.zeros((self.num_agents, 2), dtype=float)
     
-        repulsive_forces = np.vectorize(self.calculate_shallow_repulsive_force, excluded = [8,9,10,11])
+        repulsive_forces = np.vectorize(self.calculate_shallow_repulsive_force, excluded = [8])
         
-        repulsive_forces_array = repulsive_forces(np.arange(0,1,len(self.num_agents)),
+        excluded = (weight, depth_array, self.arr, self.depth_rast_transform)
+        
+        repulsive_forces_array = repulsive_forces(np.arange(0,1,self.num_agents + 1),
                                                   self.X,
                                                   self.Y,
                                                   xmin,
@@ -1273,10 +1342,7 @@ class simulation():
                                                   ymin,
                                                   ymax,
                                                   self.body_depth,
-                                                  weight,
-                                                  depth_array,
-                                                  self.arr,
-                                                  self.depth_rast_transform)
+                                                  excluded)
 
         return repulsive_forces_array
 
@@ -1369,6 +1435,7 @@ class simulation():
         # Initialize an array to hold the direction vectors for each agent
         direction_vectors = np.zeros((len(x), 2), dtype=float)
         
+        #TODO vectorize this - why over agents?
         # Iterate over each agent to calculate direction vectors
         for i in range(len(x)):
             # Create a mask for the buffer area around the agent
@@ -1384,7 +1451,7 @@ class simulation():
             row_idx, col_idx = np.unravel_index(idx_min_diff, buffered_depths.shape)
             
             # Convert indices to projected coordinates
-            projected_x, projected_y = pixel_to_geo(
+            projected_x, projected_y = pixel_to_geo(self.arr,
                 self.depth_rast_transform, 
                 row_idx, 
                 col_idx
@@ -2408,7 +2475,7 @@ class simulation():
         swim_speeds = self.arr.linalg.norm(fish_velocities - water_velocities, axis=1)
     
         # Calculate distances travelled and update bout odometer and duration
-        dist_travelled = self.arr.linalg.norm(self.pos - self.prevPos, axis=1)
+        dist_travelled = self.arr.sqrt((self.prev_X - self.X)**2 + (self.prev_Y - self.Y)**2)
         self.dist_per_bout += dist_travelled
         self.bout_dur += dt
     
@@ -2418,8 +2485,8 @@ class simulation():
         # Calculate ttf for prolonged and sprint swimming modes
         mask_prolonged = (self.max_s_U < swim_speeds) & (swim_speeds <= self.max_p_U)
         mask_sprint = swim_speeds > self.max_p_U
-        ttf[mask_prolonged] = 10. ** (self.a_p[mask_prolonged] + swim_speeds[mask_prolonged] * self.b_p[mask_prolonged]) * 60.
-        ttf[mask_sprint] = 10. ** (self.a_s[mask_sprint] + swim_speeds[mask_sprint] * self.b_s[mask_sprint]) * 60.
+        ttf[mask_prolonged] = 10. ** (self.a_p + swim_speeds[mask_prolonged] * self.b_p) * 60.
+        ttf[mask_sprint] = 10. ** (self.a_s + swim_speeds[mask_sprint] * self.b_s) * 60.
     
         # Set swimming modes based on swim speeds
         self.swim_mode = self.arr.where(mask_prolonged, 'prolonged', self.swim_mode)
@@ -2496,7 +2563,10 @@ class simulation():
         - The function updates the swim_speed attribute for each fish based on the
           calculated swim speed necessary to maintain the ideal SOG against water currents.
         """
-    
+
+        self.x_vel = self.sample_environment(self.vel_x_rast_transform, 'vel_x')
+        self.y_vel = self.sample_environment(self.vel_y_rast_transform, 'vel_y')
+        
         # Vector components of water velocity for each fish
         water_velocities = np.sqrt(self.x_vel**2 + self.y_vel**2)
     
@@ -2770,7 +2840,7 @@ class simulation():
         depth = rasterio.MemoryFile()
         height = depth_arr.shape[0]
         width = depth_arr.shape[1]
-
+        
         with depth.open(
             driver ='GTiff',
             height = depth_arr.shape[0],
