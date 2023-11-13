@@ -1262,8 +1262,6 @@ class simulation():
         
 
         # get depth raster per agent
-
-
         depths = np.stack([standardize_shape(self.hdf5['environment/depth'][sl[-2:]]) for sl in slices])        
         x_coords = np.stack([standardize_shape(self.hdf5['x_coords'][sl[-2:]]) for sl in slices]) 
         y_coords = np.stack([standardize_shape(self.hdf5['y_coords'][sl[-2:]]) for sl in slices])       
@@ -1297,8 +1295,8 @@ class simulation():
     
         repulsive_forces =  np.array([total_x_force, total_y_force]).T
         
-        if np.any(x_force != 0.0):
-            print ('fuck')
+        # if np.any(x_force != 0.0):
+        #     print ('fuck')
         
         return repulsive_forces
 
@@ -1637,13 +1635,13 @@ class simulation():
         """
 
         # calculate behavioral cues
-        rheotaxis = self.rheo_cue(10000)
-        shallow = self.shallow_cue(15000)
-        wave_drag = self.wave_drag_cue(8000)
-        low_speed = self.vel_cue(12000)
+        rheotaxis = self.rheo_cue(15000)
+        shallow = self.shallow_cue(50000)
+        wave_drag = self.wave_drag_cue(5000)
+        low_speed = self.vel_cue(8000)
         avoid = self.already_been_here(8000, t)
         school = self.school_cue(8000)
-        collision = self.collision_cue(3000)
+        collision = self.collision_cue(50)
         
         # Create dictionary that has order of behavioral cues
         order_dict = {0: shallow, 

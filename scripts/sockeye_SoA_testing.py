@@ -34,14 +34,14 @@ crs = 32604
 
 # create a starting box - aka where are all the fish starting from?
 # W,E,S,N
-#bbox = (550328.25,550510.05,6641500.76,6641600.31)                             # starting box way downstream
+#bbox = (550328.25,550510.05,6641500.76,6641550.31)                             # starting box way downstream
 bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # starting box right near the falls
 
 # how many agents in the simulation?
-n = 1000
+n = 100
 
 # how many timesteps in the model?
-ts = 100
+ts = 3600
 
 # what is the delta t
 dt = 1.
