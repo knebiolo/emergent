@@ -1256,23 +1256,11 @@ class fish():
             react.  Until I figure this out - we are applying a massive dampener''' 
 
             acc = acc * damp 
-            
-            # if np.linalg.norm(acc) > 5.0:
-            #     print ('fuck') 
         
         # what will velocity be at end of time step
         fish_vel_1 = fish_vel_0 + acc * dt
             
         self.sog = np.round(np.linalg.norm(fish_vel_1),6)
-        
-        # if np.isnan(self.sog):
-        #     print ('fuck - something aint right, think divide by zero somewhere')
-            
-        # if self.sog > 5:
-        #    print ('fuck - Im swimming fast, why?')
-            
-        # if np.linalg.norm(self.thrust) / np.linalg.norm(self.drag) > 10:
-        #     print ('fuck - holy hell thrust is way bigger than drag - we flying')
         
         # start movement
         self.prevPos = self.pos  

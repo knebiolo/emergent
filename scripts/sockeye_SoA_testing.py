@@ -38,10 +38,10 @@ crs = 32604
 bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # starting box right near the falls
 
 # how many agents in the simulation?
-n = 30
+n = 1000
 
 # how many timesteps in the model?
-ts = 3600
+ts = 100
 
 # what is the delta t
 dt = 1.

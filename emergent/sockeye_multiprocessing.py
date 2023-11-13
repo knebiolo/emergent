@@ -53,10 +53,6 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-<<<<<<< Updated upstream
-
-=======
->>>>>>> Stashed changes
 # Set dill as the default pickler for multiprocessing
 #multiprocessing.set_start_method('spawn')  # 'spawn' or 'fork' based on your platform and needs
 
@@ -463,7 +459,7 @@ class fish():
     def schooling_buffer_poly(self):
 
         # create sensory buffer
-        l = (self.length)/1000. * 5.
+        l = (self.length/1000.) * 5.
 
         # create wedge looking in front of fish
         theta = np.radians(np.linspace(-90,90,100))
@@ -478,12 +474,12 @@ class fish():
         arc_gdf = gpd.GeoDataFrame(index = [0],
                                    crs = self.EPSG,
                                    geometry = [arc_rot])
-        return arc_rot
+        return arc_gdf
 
     def collision_buffer_poly(self):
 
         # create sensory buffer
-        l = (self.length)/1000. * 27.
+        l = (self.length/1000.)* 27.
 
         # create wedge looking in front of fish
         theta = np.radians(np.linspace(-90,90,100))
@@ -1106,7 +1102,7 @@ class fish():
         ideal_swim_speed = np.linalg.norm(ideal_vel_vec - water_vel)
         swim_speed_cms = ideal_swim_speed * 100.
 
-        # sockeye parameters (Webb 1975, Table 20) units in CM!!! FUCK
+        # sockeye parameters (Webb 1975, Table 20) units in CM!!! 
         length_dat = np.array([5.,10.,15.,20.,25.,30.,40.,50.,60.])
         speed_dat = np.array([37.4,58.,75.1,90.1,104.,116.,140.,161.,181.])
         amp_dat = np.array([1.06,2.01,3.,4.02,4.91,5.64,6.78,7.67,8.4])
@@ -1469,20 +1465,7 @@ class fish():
         fish_vel_1 = fish_vel_0 + acc * dt
 
         self.sog = np.round(np.linalg.norm(fish_vel_1),6)
-<<<<<<< Updated upstream
 
-        # if np.isnan(self.sog):
-        #     print ('fuck - something aint right, think divide by zero somewhere')
-
-        # if self.sog > 5:
-        #    print ('fuck - Im swimming fast, why?')
-
-        # if np.linalg.norm(self.thrust) / np.linalg.norm(self.drag) > 10:
-        #     print ('fuck - holy hell thrust is way bigger than drag - we flying')
-
-=======
-        
->>>>>>> Stashed changes
         # start movement
         self.prevPos = self.pos
 
