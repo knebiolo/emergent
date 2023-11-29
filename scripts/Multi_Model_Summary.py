@@ -1,16 +1,13 @@
+# -*- coding: utf-8 -*-
 """
-Created on Tue August 15 09:13:30 2023
+Created on Tue Nov 27 14:31:15 2023
 
 @author: EMuhlestein
 
-Script intent: Organize the .h5 files into a list to seperate the .h5 files from the hdf file.
-Create histograms of the agents length, weight, and body depths as well as the maximum, minimum,
-and standard deviation of all the lengths, weight, and body depths of all agents. Bout_no and Bout_durations
-are calculated as well as plots of agent locations, individual agent locations, agent jump locations, 
-and heat maps of agent locations and agent jump locations.
-
+Script intent: Multi model summary is to be used to summarize multiple models at once. Once a model
+has finished running, this script will take said model as well as others and complete the summarization
+without having to run the class Summarization on multiple occasions.
 """
-
 #Import Dependencies
 import os
 import pandas as pd
@@ -27,10 +24,29 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 
 #Identify the directory path
-directory_path = r"J:\2819\005\Calcs\ABM\Output\test_29"
-hdf_path = r"J:\2819\005\Calcs\ABM\Output\test_29\test_29.hdf"
-tif_path=r'J:\2819\005\Calcs\ABM\Data\elev.tif'
-Data_output=r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_29'
+directory_path = [
+    r"J:\2819\005\Calcs\ABM\Output\test_29",
+    r"J:\2819\005\Calcs\ABM\Output\test_43",
+    r"J:\2819\005\Calcs\ABM\Output\test_55"
+]
+    
+    
+hdf_path = [
+    r"J:\2819\005\Calcs\ABM\Output\test_29\test_29.hdf",
+    r"J:\2819\005\Calcs\ABM\Output\test_43\test_43.h5",
+    r"J:\2819\005\Calcs\ABM\Output\test_55\test_55.h5"
+]
+ 
+ 
+tif_path=[
+    r'J:\2819\005\Calcs\ABM\Data\elev.tif',
+]
+
+Data_output=[
+    r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_29',
+    r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_43',
+    r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_55'
+]
 
 
 
@@ -47,7 +63,14 @@ class Summarization:
         self.data_list = []  # Initialize data_list
         self.bout_duration_list = []  # Initialize bout_duration_list
         self.ids_in_rectangle = set()
-       
+        
+        
+
+
+
+    
+
+        
 
     def h5_agent_list(self):
         # Create an empty list to store the .h5 files
@@ -191,9 +214,12 @@ class Summarization:
             print(f"Results written to: {pdf_filepath}")
         else:
             print("No 'length' values found for plotting")
+            
     # Calculate Statistics
     def length_statistics(self):
-        length_stats_file_path = os.path.join(Data_output, 'length_statistics_results.txt')
+        length_stats_file_path = os.path.join(self.Data_output, 'length_statistics_results.txt')
+
+        print(f"Attempting to write results to: {length_stats_file_path}")
 
         with open(length_stats_file_path, 'w') as output_file:
             if self.lengths:
@@ -212,7 +238,6 @@ class Summarization:
                 output_file.write(result_line)
 
         print(f"Results written to: {length_stats_file_path}")
-
 
 
     # class weights
@@ -255,7 +280,7 @@ class Summarization:
 
     # Calculate Statistics
     def weight_statistics(self):
-        weight_stats_file_path = os.path.join(Data_output, 'weight_statistics_results.txt')
+        weight_stats_file_path = os.path.join(self.Data_output, 'weight_statistics_results.txt')
 
         with open(weight_stats_file_path, 'w') as output_file:
             if self.weights:
@@ -313,7 +338,7 @@ class Summarization:
 
     # Calculate Statistics
     def body_depth_statistics(self):
-        body_depth_stats_file_path = os.path.join(Data_output, 'body_depth_statistics_results.txt')
+        body_depth_stats_file_path = os.path.join(self.Data_output, 'body_depth_statistics_results.txt')
 
         with open(body_depth_stats_file_path, 'w') as output_file:
             if self.body_depths:
@@ -337,7 +362,9 @@ class Summarization:
         
     # Find max bout duration
     def max_bout_duration(self):
-        max_bout_file_path = os.path.join(Data_output, 'max_bout_duration_results.txt')
+        max_bout_file_path = os.path.join(self.Data_output, 'max_bout_duration_results.txt')
+
+        print(f"Attempting to write results to: {max_bout_file_path}")
 
         with open(max_bout_file_path, 'w') as output_file:
             for filename in self.h5_files:
@@ -353,15 +380,17 @@ class Summarization:
                             result_line = f"Column 'bout_duration' not found in '/battery' key for file {filename}.\n"
                             output_file.write(result_line)
                     else:
-                        result_line = f"Key '/battery' not found in file {filename}.\n"
-                        output_file.write(result_line)
+                            result_line = f"Key '/battery' not found in file {filename}.\n"
+                            output_file.write(result_line)
 
         print(f"Results written to: {max_bout_file_path}")
 
 
             
     def max_bout_no(self):
-        max_bout_no_file_path = os.path.join(Data_output, 'max_bout_no_results.txt')
+        max_bout_no_file_path = os.path.join(self.Data_output, 'max_bout_no_results.txt')
+
+        print(f"Attempting to write results to: {max_bout_no_file_path}")
 
         with open(max_bout_no_file_path, 'w') as output_file:
             for filename in self.h5_files:
@@ -385,6 +414,8 @@ class Summarization:
 
 
     def max_bout_noduration(self):
+        data_list = []  # Initialize the 'data_list' to store results
+
         for filename in self.h5_files:
             full_path = os.path.join(self.directory_path, filename)
             with pd.HDFStore(full_path, mode='r') as store:
@@ -393,15 +424,18 @@ class Summarization:
                     if 'bout_no' in battery_data.columns and 'bout_duration' in battery_data.columns and 'ID' in battery_data.columns:
                         max_values = battery_data.groupby('ID')[['bout_no', 'bout_duration']].max().reset_index()
                         for index, row in max_values.iterrows():
-                            self.data_list.append({'ID': row['ID'], 'max_bout_no': row['bout_no'], 'max_bout_duration': row['bout_duration']})
+                            data_list.append({'ID': row['ID'], 'max_bout_no': row['bout_no'], 'max_bout_duration': row['bout_duration']})
+                        else:
+                            print(f"Columns 'ID', 'bout_no', or 'bout_duration' not found in '/battery' key for file {filename}.")
                     else:
-                        print(f"Columns 'ID', 'bout_no', or 'bout_duration' not found in '/battery' key for file {filename}.")
-                else:
-                    print(f"Key '/battery' not found in file {filename}.")
-        return pd.DataFrame(self.data_list)
+                        print(f"Key '/battery' not found in file {filename}.")
+
+        return pd.DataFrame(data_list)
     
     
     def agent_bout_df(self):
+        bout_duration_list = []  # Initialize the 'bout_duration_list' to store results
+
         for filename in self.h5_files:
             full_path = os.path.join(self.directory_path, filename)
             with pd.HDFStore(full_path, mode='r') as store:
@@ -409,13 +443,15 @@ class Summarization:
                     battery_data = pd.read_hdf(full_path, '/battery')
                     if 'bout_no' in battery_data.columns and 'bout_duration' in battery_data.columns and 'ID' in battery_data.columns:
                         extracted_data = battery_data[['ID', 'bout_no', 'bout_duration']]
-                        self.bout_duration_list.extend(extracted_data.to_dict(orient='records'))
+                        bout_duration_list.extend(extracted_data.to_dict(orient='records'))
                     else:
                         print(f"Columns 'ID', 'bout_no', or 'bout_duration' not found in '/battery' key for file {filename}.")
                 else:
                     print(f"Key '/battery' not found in file {filename}.")
 
-        return pd.DataFrame(self.bout_duration_list)
+        return pd.DataFrame(bout_duration_list)
+
+
 
     # Plot Agent w/ Rectangle
     def Agent_Plot_Rectangle(self):
@@ -1026,7 +1062,7 @@ class Summarization:
             # Add labels and a title
             plt.xlabel('X Coordinate')
             plt.ylabel('Y Coordinate')
-            plt.title('Heatmap of Agent Jump Locations')
+            plt.title('Heatmap of Agent Locations')
 
             # Add a colorbar to the heatmap
             colorbar = plt.colorbar()
@@ -1037,42 +1073,92 @@ class Summarization:
             plt.close()
 
         print(f"Results written to: {pdf_filepath}")
+        
+    
+    #Reset the summarization class so other models can run
+    def reset_state(self):
+        self.lengths = []
+        self.weights = []
+        self.body_depths = []
+        self.data_list = []  # Initialize data_list
+        self.bout_duration_list = []  # Initialize bout_duration_list
+        self.ids_in_rectangle = set()
+        self.length_statistics()
+        self.weight_statistics()
+        self.body_depth_statistics()
 
-#Use these to run code
 
-summarization=Summarization(directory_path, hdf_path, tif_path, Data_output)
-#summarization.h5_agent_list()
-#summarization.list_keys_h5_files()
-#summarization.unique_h5_index()
-#summarization.process_hdf5_data()
-#summarization.process_h5_battery()
-tiff_image, tiff_extent = summarization.load_tiff_image()
-#summarization.read_ts_loc_data()
-#h5_files = summarization.find_h5_files()
-summarization.length_values()
-summarization.plot_lengths()
-summarization.length_statistics()
-summarization.collect_weights()
-summarization.plot_weights()
-summarization.weight_statistics()
-summarization.collect_body_depths()
-summarization.plot_body_depths()
-summarization.body_depth_statistics()
-summarization.max_bout_duration()
-summarization.max_bout_no()
-#result_df = summarization.max_bout_noduration()
-#bout_duration_df = summarization.agent_bout_df()
-summarization.Agent_Plot_Rectangle()
-summarization.plot_agent_locations()
-summarization.plot_agent_locations_on_tiff()
-summarization.plot_agent_timestep_locations_on_tiff()
-summarization.plot_agent_timestep_locations()
-summarization.plot_individual_agent_timestep_locations_on_tiff()
-summarization.read_jump_data()
-summarization.plot_agent_location_jump()
-summarization.plot_agent_locations_with_colors()
-summarization.plot_agent_jump_locations_tif()
-summarization.read_jump_data_1()
-summarization.calculate_statistics()
-summarization.plot_agent_timestep_heatmap()
-summarization.plot_agent_jump_heatmap()
+class MultiModelSummarize:
+    def __init__(self, model_configurations):
+        self.model_configurations = model_configurations
+
+    def process_all_models(self):
+        for config in self.model_configurations:
+            dir_path, hdf_path, tif_path, data_output = config
+            print(f"\nProcessing model in directory: {dir_path}")
+            
+            summarization = Summarization(dir_path, hdf_path, tif_path, data_output)
+            summarization.reset_state()
+            
+            tiff_image, tiff_extent = summarization.load_tiff_image()
+            summarization.length_values()
+            summarization.plot_lengths()
+            summarization.length_statistics()
+            summarization.collect_weights()
+            summarization.plot_weights()
+            summarization.weight_statistics()
+            summarization.collect_body_depths()
+            summarization.plot_body_depths()
+            summarization.body_depth_statistics()
+            summarization.max_bout_duration()
+            summarization.max_bout_no()
+            summarization.Agent_Plot_Rectangle()
+            summarization.plot_agent_locations()
+            summarization.plot_agent_locations_on_tiff()
+            summarization.plot_agent_timestep_locations_on_tiff()
+            summarization.plot_agent_timestep_locations()
+            summarization.plot_individual_agent_timestep_locations_on_tiff()
+            summarization.read_jump_data()
+            summarization.plot_agent_location_jump()
+            summarization.plot_agent_locations_with_colors()
+            summarization.plot_agent_jump_locations_tif()
+            summarization.read_jump_data_1()
+            summarization.calculate_statistics()
+            summarization.plot_agent_timestep_heatmap()
+            summarization.plot_agent_jump_heatmap()
+            
+            
+            
+            # Explicitly delete the summarization instance to ensure a clean state for the next iteration
+            del summarization
+
+
+model_configurations = [
+    (
+        r"J:\2819\005\Calcs\ABM\Output\test_29",
+        r"J:\2819\005\Calcs\ABM\Output\test_29\test_29.hdf",
+        r'J:\2819\005\Calcs\ABM\Data\elev.tif',
+        r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_29'
+    ),
+    (
+        r"J:\2819\005\Calcs\ABM\Output\test_43",
+        r"J:\2819\005\Calcs\ABM\Output\test_43\test_43.h5",
+        r'J:\2819\005\Calcs\ABM\Data\elev.tif',
+        r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_43'
+    ),
+    (
+        r"J:\2819\005\Calcs\ABM\Output\test_55",
+        r"J:\2819\005\Calcs\ABM\Output\test_55\test_55.h5",
+        r'J:\2819\005\Calcs\ABM\Data\elev.tif',
+        r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_55'
+    )
+]
+
+multi_model_summarizer = MultiModelSummarize(model_configurations)
+multi_model_summarizer.process_all_models()
+
+
+
+
+
+
