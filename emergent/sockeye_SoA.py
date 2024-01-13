@@ -49,6 +49,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import time
 import warnings
+import sys
 warnings.filterwarnings("ignore")
 
 np.set_printoptions(suppress=True)
@@ -208,7 +209,7 @@ class simulation():
                  crs, 
                  basin, 
                  water_temp, 
-                 starting_box, 
+                 starting_box,
                  num_timesteps = 100, 
                  num_agents = 100, 
                  use_gpu = False,
@@ -262,7 +263,7 @@ class simulation():
         self.sim_length()
         self.sim_weight()
         self.sim_body_depth()
-        recover = pd.read_csv(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")
+        recover = pd.read_csv(r"C:\Users\AYoder\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")
         recover['Seconds'] = recover.Minutes * 60.
         self.recovery = CubicSpline(recover.Seconds, recover.Recovery, extrapolate = True,)
         del recover
@@ -334,7 +335,10 @@ class simulation():
         self.initial_heading()
         
         # initialize swim speed
-        self.initial_swim_speed()    
+        self.initial_swim_speed() 
+        
+        # error array
+        self.error_array = np.array([])
 
     def sim_sex(self):
         """
@@ -1769,13 +1773,20 @@ class simulation():
         """
 
         # calculate behavioral cues
-        rheotaxis = self.rheo_cue(10000)
-        shallow = self.shallow_cue(10000)
-        wave_drag = self.wave_drag_cue(5000)
-        low_speed = self.vel_cue(8000)
-        avoid = self.already_been_here(3000, t)
-        school = self.school_cue(9000)
-        collision = self.collision_cue(2500)
+        # rheotaxis = self.rheo_cue(10000)
+        # shallow = self.shallow_cue(10000)
+        # wave_drag = self.wave_drag_cue(5000)
+        # low_speed = self.vel_cue(8000)
+        # avoid = self.already_been_here(3000, t)
+        # school = self.school_cue(9000)
+        # collision = self.collision_cue(2500)
+        rheotaxis = self.rheo_cue(50000)
+        shallow = self.shallow_cue(1)
+        wave_drag = self.wave_drag_cue(1)
+        low_speed = self.vel_cue(1)
+        avoid = self.already_been_here(1, t)
+        school = self.school_cue(1)
+        collision = self.collision_cue(1)
         
         # Create dictionary that has order of behavioral cues
         order_dict = {0: shallow, 
@@ -2492,6 +2503,7 @@ class simulation():
         self.swim_mode = self.arr.where(mask_prolonged, 2, self.swim_mode)
         self.swim_mode = self.arr.where(mask_sprint, 3, self.swim_mode)
         self.swim_mode = self.arr.where(~(mask_prolonged | mask_sprint), 1, self.swim_mode)
+        print(f'swim mode: {self.swim_mode[0]}')
     
         # Calculate recovery at the beginning and end of the time step
         rec0 = self.recovery(self.recover_stopwatch) / 100.
@@ -2531,6 +2543,7 @@ class simulation():
         self.swim_behav = self.arr.where(mask_low_battery, 3, self.swim_behav)
         self.swim_behav = self.arr.where(mask_mid_battery, 2, self.swim_behav)
         self.swim_behav = self.arr.where(mask_high_battery, 1, self.swim_behav)
+        print(f'swim behavior: {self.swim_behav[0]}')
     
         # Set ideal speed over ground based on battery level
         self.ideal_sog[mask_low_battery] = 0.0
@@ -2557,8 +2570,8 @@ class simulation():
         self.swim_behav[mask_ready_to_move] = 1
         self.swim_mode[mask_ready_to_move] = 1
         
-        if np.any(self.battery != 1):
-            print ('debug battery change QC')
+        # if np.any(self.battery != 1):
+        #     print ('debug battery change QC')
     def initial_swim_speed(self):
         """
         Calculates the initial swim speed required for each fish to overcome
@@ -2636,16 +2649,25 @@ class simulation():
         
         # Step 4: Update velocity for each fish
         fish_vel_1_ini = fish_vel_0.flatten() + acc_ini.flatten() * dt  
-        
+        6
         new_sog = np.linalg.norm(fish_vel_1_ini, axis = -1)
 
         # Step 5: Thrust feedback PID controller 
         error = np.where(mask, 
                          np.round(self.ideal_sog - new_sog,8),
                          0.)
-
+        
+        self.error = error
+        
         # Adjust Hzs using the PID controller (vectorized)
         pid_adjustment = pid_controller.update(error)
+        print (f'error: {error}')
+        
+        self.error_array = np.append(self.error_array, error[0])
+        
+        if np.isnan(error):
+            print('nan in error')
+            sys.exit()
         
         # add adjustment to the magnitude of thrust
         thrust_mag_0 = np.linalg.norm(self.thrust, axis = -1)
@@ -2686,8 +2708,8 @@ class simulation():
         # Step 8: Update velocity for each fish
         fish_vel_1 = fish_vel_0.flatten() + acc_final.flatten() * dt  # X component of new velocity   
         
-        if np.any(error != 0.):
-            print ('debug controller error QC')
+        # if np.any(error != 0.):
+        #     print ('debug controller error QC')
         
         # Step 6: Update sog for each fish
         self.sog = np.array([np.linalg.norm(fish_vel_1, axis = -1)])
@@ -2709,11 +2731,14 @@ class simulation():
         if np.any(np.isnan(self.X)):
             print ('debug check point - are any new points NaN?')
         
-        if np.any(self.X > self.prev_X):
-            print ('debug checkpoint is the fish moving backwards - major movement is east to west')
+        # if np.any(self.X > self.prev_X):
+        #     print ('debug checkpoint is the fish moving backwards - major movement is east to west')
             
         if np.any(self.sog > 2):
             print ('moving too fast debug')
+            
+        print(f'thrust: {self.thrust}')
+        print(f'drag: {self.drag}')
                         
     def jump(self, t, g, mask):
         """
@@ -2883,7 +2908,7 @@ class simulation():
         
         # Create a boolean mask for the fish that should jump
         should_jump = (sog_to_water_vel_ratio < 0.05) & (heading_sign != water_flow_direction_sign) & \
-                      (time_since_jump > 180) & (self.battery > 0.4)
+                      (time_since_jump > 180) & (self.battery > 0.9999) # default value battery 0.4
         
         # Apply the jump or swim functions based on the condition
         # For each fish that should jump
@@ -2902,7 +2927,7 @@ class simulation():
         self.timestep_flush(t)
 
             
-    def run(self, model_name, n, dt):
+    def run(self, model_name, k_p, k_i, k_d, n, dt):
         """
         Executes the simulation model over a specified number of time steps and generates a movie of the simulation.
     
@@ -2971,9 +2996,9 @@ class simulation():
             # Update the frames for the movie
             with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
                 # set up PID controller
-                k_p = 20.   
-                k_i = 1.0
-                k_d = 1.0   
+                #k_p = 50.   
+                #k_i = 1.0
+                #k_d = 1.0   
                 
                 pid_controller = PID_controller(k_p, 
                                                 k_i, 

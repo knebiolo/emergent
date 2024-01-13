@@ -9,21 +9,24 @@ Script Intent: test out simulation intialization methods
 #%% Import emergent
 # software directory
 import sys
-sys.path.append(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent")
+#sys.path.append(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent")
 #sys.path.append(r"C:\Users\Isha Deo\OneDrive - Kleinschmidt Associates, Inc\GitHub\emergent\emergent")
+sys.path.append(r"C:\Users\AYoder\OneDrive - Kleinschmidt Associates, Inc\Software\emergent")
 
 
 #%% Import dpeendencies
 # import dependencies
 from emergent import sockeye_SoA as sockeye
 import os
+# import ga optimization script
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
 model_name = 'soa_01'
 
 # identify directories
-model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations",model_name)
+#model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations",model_name)
+model_dir = os.path.join(r"C:\Users\AYoder\Desktop\simulations",model_name)
 HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 
@@ -37,10 +40,12 @@ crs = 32604
 #bbox = (550328.25,550410.05,6641500.76,6641550.31)                             # starting box way downstream
 #bbox = (549800,550115,6641332,6641407)
 bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # starting box right near the falls
-pid_tuning_start = (549488.29, 6641611.84)
+pid_tuning_start = (549488.29, 6641611.84) # original
+#pid_tuning_start = (549225.63, 6641906.52) # high flow speed
+#pid_tuning_start = (550370.39, 6641528.46) # low flow speed
 
 # how many agents in the simulation?
-n = 100
+n = 1
 
 # how many timesteps in the model?
 ts = 1000
@@ -64,7 +69,10 @@ sim = sockeye.simulation(model_dir,
                          ts,
                          n,
                          use_gpu = False,
-                         pid_tuning = False)
+                         pid_tuning = True)
+
+# magnitude, length of array
+# minimize magnitude, maximize length
 
 #%% Read environmental data into model
 # read HECRAS model and create environment rasters
