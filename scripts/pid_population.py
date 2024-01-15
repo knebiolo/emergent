@@ -15,11 +15,10 @@ TO DO:
 
 """
 import sys
-sys.path.append(r"C:\Users\AYoder\OneDrive - Kleinschmidt Associates, Inc\Software\emergent")
+sys.path.append(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent")
 import numpy as np
 import pandas as pd
 import os
-
 from emergent import sockeye_SoA as sockeye
 import pid_solution as pid
 
@@ -28,7 +27,7 @@ import pid_solution as pid
 # set input values
 genes = 3               # three values (P,I,D)
 min_gene_value = 5     # min value of P/I/D
-max_gene_value = 25     # max value of P/I/D
+max_gene_value = 30     # max value of P/I/D
 
 # number of generations to run the algorithm
 generations = 10
@@ -45,7 +44,7 @@ pid_solution = pid.solution(genes,
 population = pid_solution.genes
 
 # create a population of individuals
-pop_size = 25
+pop_size = 20
 pid_solution.pop_size = pop_size
 if pop_size > 1:
     for i in range(pop_size-1):
@@ -58,11 +57,11 @@ if pop_size > 1:
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'soa_01'
+model_name = 'high_vel_650'
 
 # identify directories
-#model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations",model_name)
-model_dir = os.path.join(r"C:\Users\AYoder\Desktop\simulations",model_name)
+model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations\PID_optimization",model_name)
+#model_dir = os.path.join(r"C:\Users\AYoder\Desktop\simulations",model_name)
 HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # identify the coordinate reference system for the model
@@ -73,15 +72,17 @@ crs = 32604
 #bbox = (550328.25,550410.05,6641500.76,6641550.31)                             # starting box way downstream
 #bbox = (549800,550115,6641332,6641407)
 bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # starting box right near the falls
-#pid_tuning_start = (549488.29, 6641611.84) # original
+#pid_tuning_start = (549488.29, 6641611.84) # below falls
 pid_tuning_start = (549497.93, 6641719.70) # high flow speed
+#pid_tuning_start = (549400.43, 6641759.13) # d/s of chute
+#pid_tuning_start = (549420.07, 6641762.23) # in chute
 #pid_tuning_start = (550370.39, 6641528.46) # low flow speed
 
 # how many agents in the simulation?
 n = 1
 
 # how many timesteps in the model?
-ts = 1000
+ts = 500
 
 # what is the delta t
 dt = 0.2
@@ -99,10 +100,11 @@ for generation in range(generations):
     # keep track of the timesteps before error (length of error array),
     # also used to calc magnitude of errors
     pop_error_array = []
+    pop_avg_vel_array = []
 
     for i in range(len(population)):
     
-        print(f'\nrunning individual {i+1} of generation {generation+1}...')
+        print(f'\running individual {i+1} of generation {generation+1}...')
         
         # useful to have these in pid_solution
         pid_solution.p[i] = population[i][0]
@@ -113,7 +115,7 @@ for generation in range(generations):
         
         # set up the simulation
         sim = sockeye.simulation(model_dir,
-                                 'soa_' + str(i),
+                                 'solution',
                                  crs,
                                  basin,
                                  water_temp,
@@ -127,7 +129,7 @@ for generation in range(generations):
         # run the model and append the error array
         try:
             
-            sim.run('soa_' + str(i),
+            sim.run('solution',
                     pid_solution.p[i], # k_p
                     pid_solution.i[i], # k_i
                     pid_solution.d[i], # k_d
@@ -138,6 +140,9 @@ for generation in range(generations):
             print(f'failed --> P: {pid_solution.p[i]:0.3f}, I: {pid_solution.i[i]:0.3f}, D: {pid_solution.d[i]:0.3f}\n')
             pop_error_array.append(sim.error_array)
             pid_solution.errors[i] = sim.error_array
+            pid_solution.velocities[i] = np.sqrt(np.power(sim.vel_x_array,2) + np.power(sim.vel_y_array,2))
+            sim.close()
+
             continue
 
     # run the fitness function -> output is a df
@@ -159,15 +164,17 @@ for generation in range(generations):
     
     print(f'completed generation {generation+1}.... ')
     
+
+    
 # export record results to excel via pandas
 
 # Create an Excel writer object
-output_excel = model_dir + 'output.xlsx'
+output_excel = os.path.join(model_dir,'output.xlsx')
 with pd.ExcelWriter(output_excel) as writer:
     # Iterate through the dictionary and write each DataFrame to a sheet
     for generation_name, df in records.items():
         df.to_excel(writer,
-                    sheet_name = 'gen' + str(generation_name+1),
+                    sheet_name = 'gen' + str(generation_name),
                     index=False)
         
 

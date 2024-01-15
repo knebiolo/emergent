@@ -263,7 +263,7 @@ class simulation():
         self.sim_length()
         self.sim_weight()
         self.sim_body_depth()
-        recover = pd.read_csv(r"C:\Users\AYoder\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")
+        recover = pd.read_csv(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")
         recover['Seconds'] = recover.Minutes * 60.
         self.recovery = CubicSpline(recover.Seconds, recover.Recovery, extrapolate = True,)
         del recover
@@ -304,8 +304,12 @@ class simulation():
         self.kcal = self.arr.zeros(num_agents)           #kilo calorie counter
         
         # iniitalize project database - except for PID tuning
-        self.pid_tuning = pid_tuning
-            # create a project database and write initial arrays to HDF
+        if pid_tuning:
+            self.pid_tuning = pid_tuning
+            self.vel_x_array = np.array([])
+            self.vel_y_array = np.array([])
+        
+        # create a project database and write initial arrays to HDF
         self.hdf5 = h5py.File(self.db, 'w')
         self.initialize_hdf5()
             
@@ -2503,6 +2507,11 @@ class simulation():
         self.swim_mode = self.arr.where(mask_prolonged, 2, self.swim_mode)
         self.swim_mode = self.arr.where(mask_sprint, 3, self.swim_mode)
         self.swim_mode = self.arr.where(~(mask_prolonged | mask_sprint), 1, self.swim_mode)
+        if self.pid_tuning == True:
+            if np.any(self.swim_mode == 3):
+                print('error no longer counts, fatigued')
+                sys.exit()
+                
         print(f'swim mode: {self.swim_mode[0]}')
     
         # Calculate recovery at the beginning and end of the time step
@@ -2510,6 +2519,7 @@ class simulation():
         rec0[rec0 < 0.0] = 0.0
         rec1 = self.recovery(self.recover_stopwatch + dt) / 100.
         rec1[rec1 > 1.0] = 1.0
+        rec1[rec1 < 0.] = 0.0
         per_rec = rec1 - rec0
     
         # Update battery levels for sustained swimming mode
@@ -2649,8 +2659,9 @@ class simulation():
         
         # Step 4: Update velocity for each fish
         fish_vel_1_ini = fish_vel_0.flatten() + acc_ini.flatten() * dt  
-        6
+        
         new_sog = np.linalg.norm(fish_vel_1_ini, axis = -1)
+
 
         # Step 5: Thrust feedback PID controller 
         error = np.where(mask, 
@@ -2659,11 +2670,18 @@ class simulation():
         
         self.error = error
         
+    
         # Adjust Hzs using the PID controller (vectorized)
         pid_adjustment = pid_controller.update(error)
-        print (f'error: {error}')
-        
-        self.error_array = np.append(self.error_array, error[0])
+
+        if self.pid_tuning == True:
+            print (f'error: {error}')
+            curr_vel = np.round(np.sqrt(np.power(self.x_vel,2) + np.power(self.y_vel,2)),2)
+            print (f'current velocity: {curr_vel}')
+            self.error_array = np.append(self.error_array, error[0])
+            self.vel_x_array = np.append(self.vel_x_array, self.x_vel)
+            self.vel_y_array = np.append(self.vel_y_array, self.y_vel)
+
         
         if np.isnan(error):
             print('nan in error')
@@ -2737,8 +2755,9 @@ class simulation():
         if np.any(self.sog > 2):
             print ('moving too fast debug')
             
-        print(f'thrust: {self.thrust}')
-        print(f'drag: {self.drag}')
+        print(f'thrust: {np.round(self.thrust,2)}')
+        print(f'drag: {np.round(self.drag,2)}')
+        print(f'sog: {np.round(self.sog,4)}')
                         
     def jump(self, t, g, mask):
         """
@@ -3013,16 +3032,23 @@ class simulation():
                     writer.grab_frame()
 
                     print ('Time Step %s complete'%(i))
+                    
+                    if self.pid_tuning == True:
+                        if i == range(n)[-1]:
+                            sys.exit()
 
 
         # clean up
         writer.finish()
         self.hdf5.flush()
         self.hdf5.close()
-        depth.close()
+        depth.close()     
         t1 = time.time()     
         
         print ('ABM took %s to compile'%(t1-t0))
+        
+    def close(self):
+        self.hdf5.close()
             
             
             

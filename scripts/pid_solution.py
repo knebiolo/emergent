@@ -41,7 +41,7 @@ class solution():
         ## for non-uniform range across p/i/d values
         self.p_component = np.random.uniform(self.min_gene_value, self.max_gene_value, size=1)
         self.i_component = np.random.uniform(0, 1, size=1)
-        self.d_component = np.random.uniform(5, 15, size=1)
+        self.d_component = np.random.uniform(0.1, 15, size=1)
         self.genes = np.concatenate((self.p_component, self.i_component, self.d_component), axis=None)
         
         self.cross_ratio = 0.9 # controls % of offspring that are crossover vs mutation
@@ -51,6 +51,7 @@ class solution():
         self.i = {}
         self.d = {}
         self.errors = {}
+        self.velocities = {}
         
     def fitness(self):
         """
@@ -69,6 +70,7 @@ class solution():
                                          'd',
                                          'magnitude',
                                          'array_length',
+                                         'avg_velocity',
                                          'rank'])
 
         for i in range(self.pop_size):
@@ -88,6 +90,7 @@ class solution():
                 'd': self.d[i],
                 'magnitude': magnitude,
                 'array_length': len(filtered_array),
+                'avg_velocity': np.average(self.velocities[i]),
                 'rank': rank}
 
             # append as a new row to df
