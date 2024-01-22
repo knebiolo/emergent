@@ -44,7 +44,7 @@ pid_solution = pid.solution(genes,
 population = pid_solution.genes
 
 # create a population of individuals
-pop_size = 25
+pop_size = 10
 pid_solution.pop_size = pop_size
 if pop_size > 1:
     for i in range(pop_size-1):
@@ -122,7 +122,7 @@ for generation in range(generations):
                                  pid_tuning_start,
                                  ts,
                                  n,
-                                 use_gpu = True,
+                                 use_gpu = False,
                                  pid_tuning = True)
         
         

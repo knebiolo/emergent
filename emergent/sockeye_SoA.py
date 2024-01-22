@@ -2756,7 +2756,8 @@ class simulation():
             
         if np.any(self.sog > 2):
             print ('moving too fast debug')
-            
+        
+        print(f'Hz: {self.Hz}')
         print(f'thrust: {np.round(self.thrust,2)}')
         print(f'drag: {np.round(self.drag,2)}')
         print(f'sog: {np.round(self.sog,4)}')
