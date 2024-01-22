@@ -71,7 +71,6 @@ class solution():
                                          'magnitude',
                                          'array_length',
                                          'avg_velocity',
-                                         'score',
                                          'rank'])
 
         for i in range(self.pop_size):
@@ -79,8 +78,7 @@ class solution():
             filtered_array = self.errors[i][:-1]
             # calculate magnitude of errors - lower is better
             magnitude = np.sum(np.power(filtered_array,2))
-            score = magnitude / len(filtered_array)
-            
+                        
             row_data = {
                 'individual': i + 1,
                 'p': self.p[i],
@@ -88,15 +86,34 @@ class solution():
                 'd': self.d[i],
                 'magnitude': magnitude,
                 'array_length': len(filtered_array),
-                'avg_velocity': np.average(self.velocities[i]),
-                'score': score}
+                'avg_velocity': np.average(self.velocities[i])}
 
             # append as a new row to df
-            error_df = error_df.append(row_data, ignore_index=True)
-            error_df['rank'] = error_df['score'].rank(method = 'first')
-            error_df = error_df.sort_values('rank')
-            
-            # logging fitness here???
+            error_df = error_df.append(row_data, ignore_index =True)
+        
+        # Normalize the criteria
+        # array length 1 (maximize): higher values are better
+        # magnitude 2 (minimize): lower values are better
+        error_df['array_length'] = (error_df['array_length'] - \
+                                    error_df['array_length'].min()) / (error_df['array_length'].max() - error_df['array_length'].min())
+        error_df['magnitude'] = (error_df['magnitude'].max() - \
+                                 error_df['magnitude']) / (error_df['magnitude'].max() - error_df['magnitude'].min())
+        
+        # Compute pairwise preference matrix
+        n = len(error_df)
+        preference_matrix = np.zeros((n, n))
+        
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    preference_matrix[i, j] = np.sum(error_df.iloc[i, 1:] > error_df.iloc[j, 1:])
+        
+        # Aggregate preferences
+        final_scores = np.sum(preference_matrix, axis=1)
+        
+        # Ranking the alternatives
+        error_df['rank'] = final_scores
+        error_df.sort_values(by='rank', ascending=False, inplace=True)
             
         return error_df
     
