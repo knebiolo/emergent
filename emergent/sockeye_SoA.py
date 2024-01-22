@@ -72,7 +72,7 @@ def get_arr(use_gpu):
         try:
             import cupy as cp
             return cp
-        except ImportError:
+        except:
             print("CuPy not found. Falling back to Numpy.")
             import numpy as np
             return np
@@ -381,7 +381,7 @@ class simulation():
         - ValueError: If the `sex` attribute is not recognized.
         """
         # length in mm
-        self.length = np.repeat(650.,self.num_agents)
+        self.length = np.repeat(750.,self.num_agents)
         
         # if self.basin == "Nushagak River":
         #     if self.sex == 'M':
@@ -2507,10 +2507,7 @@ class simulation():
         self.swim_mode = self.arr.where(mask_prolonged, 2, self.swim_mode)
         self.swim_mode = self.arr.where(mask_sprint, 3, self.swim_mode)
         self.swim_mode = self.arr.where(~(mask_prolonged | mask_sprint), 1, self.swim_mode)
-        if self.pid_tuning == True:
-            if np.any(self.swim_mode == 3):
-                print('error no longer counts, fatigued')
-                sys.exit()
+
                 
         print(f'swim mode: {self.swim_mode[0]}')
     
@@ -2579,6 +2576,11 @@ class simulation():
         self.recover_stopwatch[mask_ready_to_move] = 0.0
         self.swim_behav[mask_ready_to_move] = 1
         self.swim_mode[mask_ready_to_move] = 1
+        
+        if self.pid_tuning == True:
+            if np.any(self.swim_behav == 3):
+                print('error no longer counts, fatigued')
+                sys.exit()
         
         # if np.any(self.battery != 1):
         #     print ('debug battery change QC')

@@ -26,11 +26,11 @@ import pid_solution as pid
 
 # set input values
 genes = 3               # three values (P,I,D)
-min_gene_value = 5     # min value of P/I/D
-max_gene_value = 30     # max value of P/I/D
+min_gene_value = 0.1     # min value of P/I/D
+max_gene_value = 50     # max value of P/I/D
 
 # number of generations to run the algorithm
-generations = 10
+generations = 20
 
 # dictionary will store error dataframe for each generation, with generation number as key
 # stores pid values, magnitude, array length, and rank in dataframe
@@ -44,7 +44,7 @@ pid_solution = pid.solution(genes,
 population = pid_solution.genes
 
 # create a population of individuals
-pop_size = 20
+pop_size = 25
 pid_solution.pop_size = pop_size
 if pop_size > 1:
     for i in range(pop_size-1):
@@ -57,7 +57,7 @@ if pop_size > 1:
 
 # identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'high_vel_650'
+model_name = 'below_falls_750_2'
 
 # identify directories
 model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations\PID_optimization",model_name)
@@ -72,8 +72,8 @@ crs = 32604
 #bbox = (550328.25,550410.05,6641500.76,6641550.31)                             # starting box way downstream
 #bbox = (549800,550115,6641332,6641407)
 bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # starting box right near the falls
-#pid_tuning_start = (549488.29, 6641611.84) # below falls
-pid_tuning_start = (549497.93, 6641719.70) # high flow speed
+pid_tuning_start = (549488.29, 6641611.84) # below falls
+#pid_tuning_start = (549397.33, 6641816.50) # high flow speed
 #pid_tuning_start = (549400.43, 6641759.13) # d/s of chute
 #pid_tuning_start = (549420.07, 6641762.23) # in chute
 #pid_tuning_start = (550370.39, 6641528.46) # low flow speed

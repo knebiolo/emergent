@@ -41,7 +41,7 @@ class solution():
         ## for non-uniform range across p/i/d values
         self.p_component = np.random.uniform(self.min_gene_value, self.max_gene_value, size=1)
         self.i_component = np.random.uniform(0, 1, size=1)
-        self.d_component = np.random.uniform(0.1, 15, size=1)
+        self.d_component = np.random.uniform(0.1, 30, size=1)
         self.genes = np.concatenate((self.p_component, self.i_component, self.d_component), axis=None)
         
         self.cross_ratio = 0.9 # controls % of offspring that are crossover vs mutation
@@ -80,8 +80,10 @@ class solution():
             magnitude = np.linalg.norm(filtered_array)
             # calculate rank - minimize magnitude & maximize steps before failure
             # lower is better
-            rank = magnitude / len(filtered_array)**2
+            #rank = magnitude / len(filtered_array)**2
             #rank = magnitude + (1/len(filtered_array))
+            # maximize length
+            score = len(filtered_array)
             
             row_data = {
                 'individual': i + 1,
@@ -91,11 +93,11 @@ class solution():
                 'magnitude': magnitude,
                 'array_length': len(filtered_array),
                 'avg_velocity': np.average(self.velocities[i]),
-                'rank': rank}
+                'score': score}
 
             # append as a new row to df
             error_df = error_df.append(row_data, ignore_index=True)
-            error_df['pd_rank'] = error_df['rank'].rank()
+            error_df['rank'] = error_df['score'].rank(method = 'first', ascending = False)
             error_df = error_df.sort_values('rank')
             
             # logging fitness here???
