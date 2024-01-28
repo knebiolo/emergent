@@ -40,8 +40,8 @@ class solution():
         
         ## for non-uniform range across p/i/d values
         self.p_component = np.random.uniform(self.min_gene_value, self.max_gene_value, size=1)
-        self.i_component = np.random.uniform(0, 1, size=1)
-        self.d_component = np.random.uniform(0.1, 4, size=1)
+        self.i_component = np.random.uniform(0, 0.05, size=1)
+        self.d_component = np.random.uniform(0.1, 10, size=1)
         self.genes = np.concatenate((self.p_component, self.i_component, self.d_component), axis=None)
         
         self.cross_ratio = 0.9 # controls % of offspring that are crossover vs mutation
@@ -102,8 +102,8 @@ class solution():
             / (error_df['magnitude'].max() - error_df['magnitude'].min())
         error_df.set_index('individual', inplace = True)
         
-        array_len_weight = 0.75
-        magnitude_weight = 1 - array_len_weight
+        array_len_weight = 0.80
+        magnitude_weight = 1. - array_len_weight
         # Compute pairwise preference matrix
         n = len(error_df)
         preference_matrix = np.zeros((n, n))

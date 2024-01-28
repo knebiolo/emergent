@@ -4,6 +4,7 @@ Created on Thu Dec 21 14:16:34 2023
 
 @author: AYoder
 
+
 Creates a population of errors for optimizing PID controller values using a
 genetic algorithm. Random values are assigned to the P, I, and D values for an 
 individual then run through sockeye. Errors arrays are collected from sockeye
@@ -44,7 +45,7 @@ pid_solution = pid.solution(genes,
 population = pid_solution.genes
 
 # create a population of individuals
-pop_size = 10
+pop_size = 20
 pid_solution.pop_size = pop_size
 if pop_size > 1:
     for i in range(pop_size-1):
@@ -56,8 +57,8 @@ if pop_size > 1:
 #%% sockeye model parameters
 
 # identify input and output model names
-HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'below_falls_750_2'
+HECRAS_model = 'NuyakukABM2D.p45.hdf'
+model_name = '11619'
 
 # identify directories
 model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations\PID_optimization",model_name)
@@ -72,8 +73,8 @@ crs = 32604
 #bbox = (550328.25,550410.05,6641500.76,6641550.31)                             # starting box way downstream
 #bbox = (549800,550115,6641332,6641407)
 bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # starting box right near the falls
-pid_tuning_start = (549488.29, 6641611.84) # below falls
-#pid_tuning_start = (549397.33, 6641816.50) # high flow speed
+#pid_tuning_start = (549488.29, 6641611.84) # below falls
+pid_tuning_start = (549397.33, 6641816.50) # high flow speed
 #pid_tuning_start = (549400.43, 6641759.13) # d/s of chute
 #pid_tuning_start = (549420.07, 6641762.23) # in chute
 #pid_tuning_start = (550370.39, 6641528.46) # low flow speed
