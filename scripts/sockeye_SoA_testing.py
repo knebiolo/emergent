@@ -59,6 +59,9 @@ water_temp = 20.
 # what is the basin that we are simulating passage in?
 basin = "Nushagak River"
 
+# What is the length of the fish (mm)?
+fish_length = 750
+
 #%% create a simulation object 
 sim = sockeye.simulation(model_dir,
                          model_name,
@@ -66,6 +69,7 @@ sim = sockeye.simulation(model_dir,
                          basin,
                          water_temp,
                          bbox,
+                         fish_length,
                          ts,
                          n,
                          use_gpu = False,

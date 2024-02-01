@@ -14,23 +14,67 @@ import numpy as np
 import pandas as pd
 from scipy.stats import beta
 import random
+import os
+
+
+def output_excel(records, model_dir, model_name):
+    """
+    Export the records of errors and rankings to an excel file.
+    
+    Parameters:
+    - records (dict): keys are generation iteration and values are the generation's
+                      dataframe of errors and rankings.
+    - model_dir: path to simulation output.
+    - model_name (str): name of the model to help name the output excel file.
+    
+    """
+    # export record results to excel via pandas
+    print('\nexporting records to excel...')
+    
+    # Create an Excel writer object
+    output_excel = os.path.join(model_dir,f'output_{model_name}.xlsx')
+    with pd.ExcelWriter(output_excel) as writer:
+        # iterate through the dictionary and write each dataframe to a sheet
+        for generation_name, df in records.items():
+            df.to_excel(writer,
+                        sheet_name = 'gen' + str(generation_name),
+                        index=False)
+    
+    print('records exported. check output excel file.')
+    
 
 class solution():
-    '''Python class object for a solution of one individual. 
+    '''
+    Python class object for a solution of one individual. 
     '''
     def __init__(self,
-                 num_genes,
-                 min_gene_value,
-                 max_gene_value):
+                 pop_size,
+                 generations,
+                 min_p_value,
+                 max_p_value,
+                 min_i_value,
+                 max_i_value,
+                 min_d_value,
+                 max_d_value):
         """
         Initializes an individual's genetic traits.
     
         """
         
         # set parameters for P,I,D
-        self.num_genes = num_genes
-        self.min_gene_value = min_gene_value
-        self.max_gene_value = max_gene_value
+        self.num_genes = 3
+        self.min_p_value = min_p_value
+        self.max_p_value = max_p_value
+        self.min_i_value = min_i_value
+        self.max_i_value = max_i_value
+        self.min_d_value = min_d_value
+        self.max_d_value = max_d_value
+        
+        # population size, number of individuals to create
+        self.pop_size = pop_size
+        
+        # number of generations to run the alogrithm for
+        self.generations = generations
         
         ## for uniform range across p/i/d values
         # self.genes = np.random.uniform(
@@ -39,19 +83,19 @@ class solution():
         #     size = self.num_genes)
         
         ## for non-uniform range across p/i/d values
-        self.p_component = np.random.uniform(self.min_gene_value, self.max_gene_value, size=1)
-        self.i_component = np.random.uniform(0, 1, size=1)
-        self.d_component = np.random.uniform(0.1, 4, size=1)
+        self.p_component = np.random.uniform(self.min_p_value, self.max_p_value, size=1)
+        self.i_component = np.random.uniform(self.min_i_value, self.max_i_value, size=1)
+        self.d_component = np.random.uniform(self.min_d_value, self.max_d_value, size=1)
         self.genes = np.concatenate((self.p_component, self.i_component, self.d_component), axis=None)
         
-        self.cross_ratio = 0.9 # controls % of offspring that are crossover vs mutation
-        self.pop_size = 0 # dummy value, will be overwritten
+        self.cross_ratio = 0.9 # percent of offspring that are crossover vs mutation
         self.mutation_count = 0 # dummy value, will be overwritten
         self.p = {}
         self.i = {}
         self.d = {}
         self.errors = {}
         self.velocities = {}
+        
         
     def fitness(self):
         """
@@ -102,7 +146,7 @@ class solution():
             / (error_df['magnitude'].max() - error_df['magnitude'].min())
         error_df.set_index('individual', inplace = True)
         
-        array_len_weight = 0.75
+        array_len_weight = 0.8
         magnitude_weight = 1 - array_len_weight
         # Compute pairwise preference matrix
         n = len(error_df)
@@ -122,6 +166,7 @@ class solution():
         error_df.sort_values(by='rank', ascending = False, inplace = True)
             
         return error_df
+    
     
     def selection(self, error_df):
         """
@@ -161,7 +206,6 @@ class solution():
         beta_values = beta.pdf(np.linspace(0, 0.5, len(pairs_parents)), a, b)
         
         # scale values to number of offspring desired
-        #offspring = 1000
         offspring = self.cross_ratio * self.pop_size # generate XX% of offspring as crossover
         scaled_values = offspring * beta_values / sum(beta_values)
         scaled_values = np.round(scaled_values).astype(int)
@@ -172,6 +216,7 @@ class solution():
         
         return pairs_parents
         
+    
     def crossover(self, pairs_parents):
         """
         Generate new genes for offspring based on existing parent genes. Number of offspring
@@ -190,7 +235,6 @@ class solution():
             parent1 = i[:1]
             parent2 = i[1:]
             num_offspring = parent1.iloc[0]['offspring_weight'].astype(int)
-            # blend_ratio = 0.8
             
             for j in range(num_offspring):
                 p = random.uniform(parent1.iloc[0]['p'], parent2.iloc[0]['p'])
@@ -203,6 +247,7 @@ class solution():
         self.mutation_count = self.pop_size - len(offspring)
         
         return offspring
+
 
     def mutation(self):
         """
@@ -227,9 +272,9 @@ class solution():
         for i in range(self.mutation_count):
             # individual = [random.uniform(self.min_gene_value, self.max_gene_value) for _ in range(self.num_genes)]
             
-            self.p_component = np.random.uniform(self.min_gene_value, self.max_gene_value, size=1)
-            self.i_component = np.random.uniform(0, 1, size=1)
-            self.d_component = np.random.uniform(0, 25, size=1)
+            self.p_component = np.random.uniform(self.min_p_value, self.max_p_value, size=1)
+            self.i_component = np.random.uniform(self.min_i_value, self.max_i_value, size=1)
+            self.d_component = np.random.uniform(self.min_d_value, self.max_d_value, size=1)
             individual = np.concatenate((self.p_component, self.i_component, self.d_component), axis=None)
             
             population.append(individual)
@@ -237,25 +282,157 @@ class solution():
         return population
 
 
-        # modify one value
+    def population_create(self):
+        """
+        Generate the population of individuals.
+        
+        Attributes set:
+        - genes
+        - pop_size
+        - num_genes
+        - min_gene_value
+        - max_gene_value
+                                
+        Returns: array of population p/i/d values, one set for each individual.
+        
+        """
+        # population = self.genes
+        # if self.pop_size > 1:
+        #     for i in range(self.pop_size-1):
+        #         # create another individual
+        #         #individual = solution(self.num_genes, self.min_gene_value, self.max_gene_value, self.pop_size, self.generations)
+        #         individual = solution(self.pop_size,
+        #                               self.generations,
+        #                               self.min_p_value,
+        #                               self.max_p_value,
+        #                               self.min_i_value,
+        #                               self.max_i_value,
+        #                               self.min_d_value,
+        #                               self.max_d_value)
+        #         # add it to the population
+        #         population = np.vstack((population, individual.genes))
+        
+        population = []
 
+        for _ in range(self.pop_size):
+        # create a new instance of the solution class for each individual
+            individual = solution(self.pop_size,
+                              self.generations,
+                              self.min_p_value,
+                              self.max_p_value,
+                              self.min_i_value,
+                              self.max_i_value,
+                              self.min_d_value,
+                              self.max_d_value)
+            population.append(individual.genes)
 
+        return population
+    
+    
+    def run(self, population, sockeye, model_dir, crs, basin, water_temp, pid_tuning_start, fish_length, ts, n, dt):
+        """
+        Run the genetic algorithm.
+        
+        Parameters:
+        - population (array): collection of solutions (population of individuals)
+        - sockeye: sockeye model
+        - model_dir (str): Directory where the model data will be stored.
+        - crs (str): Coordinate reference system for the model.
+        - basin (str): Name or identifier of the basin.
+        - water_temp (float): Water temperature in degrees Celsius.
+        - pid_tuning_start (tuple): A tuple of two values (x, y) defining the point where agents start.
+        - ts (int, optional): Number of timesteps for the simulation. Defaults to 100.
+        - n (int, optional): Number of agents in the simulation. Defaults to 100.
+        - dt (float): The duration of each time step.
+        
+        Attributes:
+        - generations
+        - pop_size
+        - p
+        - i
+        - d
+        - errors
+        - velocities
+        
+        Returns:
+        - records (dict): dictionary holding each generation's errors and rankings
+        
+        
+        """
+        # Create a dictionary that will store the error dataframe for each generation,
+        # We will use the generation number as key. Stores pid values, magnitude, array length,
+        # and rank in each dataframe.
+        records = {}
+        
+        for generation in range(self.generations):
+            
+            # keep track of the timesteps before error (length of error array),
+            # also used to calc magnitude of errors
+            pop_error_array = []
 
+            #for i in range(len(self.population)):
+            for i in range(self.pop_size):
+            
+                print(f'\nrunning individual {i+1} of generation {generation+1}...')
+                
+                # useful to have these in pid_solution
+                self.p[i] = population[i][0]
+                self.i[i] = population[i][1]
+                self.d[i] = population[i][2]
+                
+                print(f'P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}')
+                
+                # set up the simulation
+                sim = sockeye.simulation(model_dir,
+                                         'solution',
+                                         crs,
+                                         basin,
+                                         water_temp,
+                                         pid_tuning_start,
+                                         fish_length,
+                                         ts,
+                                         n,
+                                         use_gpu = False,
+                                         pid_tuning = True)
+                
+                
+                # run the model and append the error array
+                try:
+                    sim.run('solution',
+                            self.p[i], # k_p
+                            self.i[i], # k_i
+                            self.d[i], # k_d
+                            n = ts,
+                            dt = dt)
+                    
+                except:
+                    print(f'failed --> P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}\n')
+                    pop_error_array.append(sim.error_array)
+                    self.errors[i] = sim.error_array
+                    self.velocities[i] = np.sqrt(np.power(sim.vel_x_array,2) + np.power(sim.vel_y_array,2))
+                    sim.close()
 
+                    continue
 
+            # run the fitness function -> output is a df
+            error_df = self.fitness()
+            # print(f'Generation {generation+1}: {error_df.head()}')
+            
+            # update logging dictionary
+            records[generation] = error_df
 
+            # selection -> output is list of paired parents dfs
+            selected_parents = solution.selection(self, error_df)
 
+            # crossover -> output is list of crossover pid values
+            cross_offspring = solution.crossover(self, selected_parents)
 
+            # mutation -> output is list of muation pid values
+            mutated_offspring = solution.mutation(self)
 
-
-
-
-
-
-
-
-
-
-
-
-
+            # combine crossover and mutation offspring to get next generation
+            population = cross_offspring + mutated_offspring
+            
+            print(f'completed generation {generation+1}.... ')
+            
+        return records
