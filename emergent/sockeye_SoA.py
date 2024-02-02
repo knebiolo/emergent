@@ -518,6 +518,8 @@ class simulation():
             self.hdf5['agent_data/bout_no'][..., timestep] = self.bout_no.astype('float32')
             self.hdf5['agent_data/dist_per_bout'][..., timestep] = self.dist_per_bout.astype('float32')
             self.hdf5['agent_data/bout_dur'][..., timestep] = self.bout_dur.astype('float32')
+            self.hdf5['agent_data/kcal'][..., timestep] = self.kcal.astype('float32')
+
             #self.hdf5['agent_data/time_of_jump'][..., timestep] = self.time_of_jump.astype('float32')
     
     
