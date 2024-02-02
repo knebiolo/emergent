@@ -53,11 +53,8 @@ population = pid_solution.population_create()
 
 # Identify input and output model names
 HECRAS_model = 'NuyakukABM2D.p02.hdf'
-model_name = 'soa_belowfalls_550mm_20i20g'
 
 # Identify directories
-#model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations\PID_optimization",model_name)
-model_dir = os.path.join(r"C:\Users\AYoder\Desktop\simulations",model_name)
 HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 
 # Identify the coordinate reference system for the model
@@ -80,18 +77,17 @@ start_locations = {
     'high_flow_speed': (549397.33, 6641816.50),
     'ds_of_chute': (549400.43, 6641759.13),
     'in_chute': (549420.07, 6641762.23),
-    'low_flow_speed': (550370.39, 6641528.46)
+    'low_flow_speed': (550370.39, 6641528.46),
+    'low_flow_speed2': (550147.74, 6641476.45),
+    'low_flow_speed3': (549485.93, 6641527.83),
+    'low_flow_speed4': (550565.14, 6641496.90)
     }
-
-# three(?) more sites
-# locations with slower flow, an eddy
-# double check high flow 
 
 # How many agents in the simulation?
 n = 1
 
 # How many timesteps in the model?
-ts = 400
+ts = 250
 
 # What is the delta t?
 dt = 0.25

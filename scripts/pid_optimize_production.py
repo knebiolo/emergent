@@ -66,7 +66,10 @@ start_locations = {
     'high_flow_speed': (549397.33, 6641816.50),
     'ds_of_chute': (549400.43, 6641759.13),
     'in_chute': (549420.07, 6641762.23),
-    'low_flow_speed': (550370.39, 6641528.46)
+    'low_flow_speed': (550370.39, 6641528.46),
+    'low_flow_speed2': (550147.74, 6641476.45),
+    'low_flow_speed3': (549485.93, 6641527.83),
+    'low_flow_speed4': (550565.14, 6641496.90)
     }
 
 # three(?) more sites
@@ -93,7 +96,6 @@ basin = "Nushagak River"
 fish_length = 550
 
 # length stats for production loop: (min, 25%, 50%, 75%, max)
-#fish_lengths = (468, 570, 598, 626, 698)
 fish_lengths = (468, 570, 598, 626, 698)
 
 #%% loop
