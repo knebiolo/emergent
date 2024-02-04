@@ -203,6 +203,191 @@ def output_excel(records, model_dir, model_name):
                         index=False)
     
     print('records exported. check output excel file.')
+    
+def HECRAS (HECRAS_dir, model_dir, resolution, crs):
+    """
+    Import environment data from a HECRAS model and generate raster files.
+    
+    This method extracts data from a HECRAS model stored in HDF format and 
+    interpolates the data to generate raster files for various environmental 
+    parameters such as velocity, water surface elevation, and bathymetry.
+    
+    Parameters:
+    - HECRAS_model (str): Path to the HECRAS model in HDF format.
+    - resolution (float): Desired resolution for the interpolated rasters.
+    
+    Attributes set:
+    
+    Notes:
+    - The method reads data from the HECRAS model, interpolates the data to the 
+      desired resolution, and then writes the interpolated data to raster files.
+    - The generated raster files are saved in the model directory with names corresponding 
+      to the environmental parameter they represent (e.g., 'elev.tif', 'wsel.tif').
+    - The method uses LinearNDInterpolator for interpolation and rasterio for raster 
+      generation and manipulation.
+    """
+    # Initialization Part 1: Connect to HECRAS model and import environment
+    hdf = h5py.File(HECRAS_dir,'r')
+    
+    # Extract Data from HECRAS HDF model
+    print ("Extracting Model Geometry and Results")
+    
+    pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
+    vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
+    vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
+    wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1]
+    elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
+    
+    # create list of xy tuples
+    geom = list(tuple(zip(pts[:,0],pts[:,1])))
+    
+    # create a dataframe with geom column and observations
+    df = pd.DataFrame.from_dict({'index':np.arange(0,len(pts),1),
+                                 'geom_tup':geom,
+                                 'vel_x':vel_x,
+                                 'vel_y':vel_y,
+                                 'wsel':wsel,
+                                 'elev':elev})
+    
+    # add a geometry column
+    df['geometry'] = df.geom_tup.apply(Point)
+    
+    # convert into a geodataframe
+    gdf = gpd.GeoDataFrame(df,crs = crs)
+    
+    print ("Create multidimensional interpolator functions for velocity, wsel, elev")
+    
+    vel_x_interp = LinearNDInterpolator(pts,gdf.vel_x)
+    vel_y_interp = LinearNDInterpolator(pts,gdf.vel_y)
+    wsel_interp = LinearNDInterpolator(pts,gdf.wsel)
+    elev_interp = LinearNDInterpolator(pts,gdf.elev)
+    
+    # first identify extents of image
+    xmin = np.min(pts[:,0])
+    xmax = np.max(pts[:,0])
+    ymin = np.min(pts[:,1])
+    ymax = np.max(pts[:,1])
+    
+    # interpoate velocity, wsel, and elevation at new xy's
+    ## TODO ISHA TO CHECK IF RASTER OUTPUTS LOOK DIFFERENT AT 0.5m vs 1m
+    xint = np.arange(xmin,xmax,resolution)
+    yint = np.arange(ymax,ymin,resolution * -1.)
+    xnew, ynew = np.meshgrid(xint,yint, sparse = True)
+    
+    print ("Interpolate Velocity East")
+    vel_x_new = vel_x_interp(xnew, ynew)
+    print ("Interpolate Velocity North")
+    vel_y_new = vel_y_interp(xnew, ynew)
+    print ("Interpolate WSEL")
+    wsel_new = wsel_interp(xnew, ynew)
+    print ("Interpolate bathymetry")
+    elev_new = elev_interp(xnew, ynew)
+    
+    # create a depth raster
+    depth = wsel_new - elev_new
+    
+    # calculate velocity magnitude
+    vel_mag = np.sqrt((np.power(vel_x_new,2)+np.power(vel_y_new,2)))
+    
+    # calculate velocity direction in radians
+    vel_dir = np.arctan2(vel_y_new,vel_x_new)
+    
+    print ("Exporting Rasters")
+
+    # create raster properties
+    driver = 'GTiff'
+    width = elev_new.shape[1]
+    height = elev_new.shape[0]
+    count = 1
+    crs = crs
+    #transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
+    transform = Affine.translation(xnew[0][0] - 0.5 * resolution, ynew[0][0] - 0.5 * resolution)\
+        * Affine.scale(resolution,-1 * resolution)
+
+    # write elev raster
+    with rasterio.open(os.path.join(model_dir,'elev.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as elev_rast:
+        elev_rast.write(elev_new,1)
+    
+    # write wsel raster
+    with rasterio.open(os.path.join(model_dir,'wsel.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as wsel_rast:
+        wsel_rast.write(wsel_new,1)
+                    
+    # write depth raster
+    with rasterio.open(os.path.join(model_dir,'depth.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as depth_rast:
+        depth_rast.write(depth,1)
+        
+    # write velocity dir raster
+    with rasterio.open(os.path.join(model_dir,'vel_dir.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as vel_dir_rast:
+        vel_dir_rast.write(vel_dir,1)
+                    
+    # write velocity .mag raster
+    with rasterio.open(os.path.join(model_dir,'vel_mag.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as vel_mag_rast:
+        vel_mag_rast.write(vel_mag,1)
+                
+    # write velocity x raster
+    with rasterio.open(os.path.join(model_dir,'vel_x.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as vel_x_rast:
+        vel_x_rast.write(vel_x_new,1)
+                    
+    # write velocity y raster
+    with rasterio.open(os.path.join(model_dir,'vel_y.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as vel_y_rast:
+        vel_y_rast.write(vel_y_new,1)
+
 
 class PID_controller:
     def __init__(self, k_p, k_i, k_d, n_agents):
@@ -272,6 +457,12 @@ class simulation():
         """        
         self.arr = get_arr(use_gpu)
         
+        # If we are tuning the PID controller, special settings used
+        if pid_tuning:
+            self.pid_tuning = pid_tuning
+            self.vel_x_array = np.array([])
+            self.vel_y_array = np.array([])
+        
         # model directory and model name
         self.model_dir = model_dir
         self.model_name = model_name
@@ -291,8 +482,8 @@ class simulation():
         self.sim_length(fish_length)
         self.sim_weight()
         self.sim_body_depth()
-        #recover = pd.read_csv(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")        
-        recover = pd.read_csv(r"C:\Users\AYoder\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")
+        recover = pd.read_csv(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")        
+        #recover = pd.read_csv(r"C:\Users\AYoder\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")
         recover['Seconds'] = recover.Minutes * 60.
         self.recovery = CubicSpline(recover.Seconds, recover.Recovery, extrapolate = True,)
         del recover
@@ -331,13 +522,7 @@ class simulation():
         
         # initialize odometer
         self.kcal = self.arr.zeros(num_agents)           #kilo calorie counter
-        
-        # iniitalize project database - except for PID tuning
-        if pid_tuning:
-            self.pid_tuning = pid_tuning
-            self.vel_x_array = np.array([])
-            self.vel_y_array = np.array([])
-        
+    
         # create a project database and write initial arrays to HDF
         self.hdf5 = h5py.File(self.db, 'w')
         self.initialize_hdf5()
@@ -410,14 +595,15 @@ class simulation():
         - ValueError: If the `sex` attribute is not recognized.
         """
         # length in mm
-        #self.length = np.repeat(750.,self.num_agents) # to specify length here
-        self.length = np.repeat(fish_length,self.num_agents) # testing
+        if self.pid_tuning == True:
+            self.length = np.repeat(fish_length,self.num_agents) # testing
         
-        # if self.basin == "Nushagak River":
-        #     if self.sex == 'M':
-        #         self.length = self.arr.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents)
-        #     else:
-        #         self.length = self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
+        else:
+            if self.basin == "Nushagak River":
+                if self.sex == 'M':
+                    self.length = self.arr.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents)
+                else:
+                    self.length = self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
         
         # we can also set these arrays that contain parameters that are a function of length
         self.sog = self.length/1000.  # sog = speed over ground - assume fish maintain 1 body length per second
@@ -657,189 +843,6 @@ class simulation():
         self.hdf5.flush()
         src.close()
 
-    def HECRAS (self,HECRAS_model,resolution):
-        """
-        Import environment data from a HECRAS model and generate raster files.
-        
-        This method extracts data from a HECRAS model stored in HDF format and 
-        interpolates the data to generate raster files for various environmental 
-        parameters such as velocity, water surface elevation, and bathymetry.
-        
-        Parameters:
-        - HECRAS_model (str): Path to the HECRAS model in HDF format.
-        - resolution (float): Desired resolution for the interpolated rasters.
-        
-        Attributes set:
-        
-        Notes:
-        - The method reads data from the HECRAS model, interpolates the data to the 
-          desired resolution, and then writes the interpolated data to raster files.
-        - The generated raster files are saved in the model directory with names corresponding 
-          to the environmental parameter they represent (e.g., 'elev.tif', 'wsel.tif').
-        - The method uses LinearNDInterpolator for interpolation and rasterio for raster 
-          generation and manipulation.
-        """
-        # Initialization Part 1: Connect to HECRAS model and import environment
-        hdf = h5py.File(HECRAS_model,'r')
-        
-        # Extract Data from HECRAS HDF model
-        print ("Extracting Model Geometry and Results")
-        
-        pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
-        vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
-        vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
-        wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1]
-        elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
-        
-        # create list of xy tuples
-        geom = list(tuple(zip(pts[:,0],pts[:,1])))
-        
-        # create a dataframe with geom column and observations
-        df = pd.DataFrame.from_dict({'index':np.arange(0,len(pts),1),
-                                     'geom_tup':geom,
-                                     'vel_x':vel_x,
-                                     'vel_y':vel_y,
-                                     'wsel':wsel,
-                                     'elev':elev})
-        
-        # add a geometry column
-        df['geometry'] = df.geom_tup.apply(Point)
-        
-        # convert into a geodataframe
-        gdf = gpd.GeoDataFrame(df,crs = self.crs)
-        
-        print ("Create multidimensional interpolator functions for velocity, wsel, elev")
-        
-        vel_x_interp = LinearNDInterpolator(pts,gdf.vel_x)
-        vel_y_interp = LinearNDInterpolator(pts,gdf.vel_y)
-        wsel_interp = LinearNDInterpolator(pts,gdf.wsel)
-        elev_interp = LinearNDInterpolator(pts,gdf.elev)
-        
-        # first identify extents of image
-        xmin = np.min(pts[:,0])
-        xmax = np.max(pts[:,0])
-        ymin = np.min(pts[:,1])
-        ymax = np.max(pts[:,1])
-        
-        # interpoate velocity, wsel, and elevation at new xy's
-        ## TODO ISHA TO CHECK IF RASTER OUTPUTS LOOK DIFFERENT AT 0.5m vs 1m
-        xint = np.arange(xmin,xmax,resolution)
-        yint = np.arange(ymax,ymin,resolution * -1.)
-        xnew, ynew = np.meshgrid(xint,yint, sparse = True)
-        
-        print ("Interpolate Velocity East")
-        vel_x_new = vel_x_interp(xnew, ynew)
-        print ("Interpolate Velocity North")
-        vel_y_new = vel_y_interp(xnew, ynew)
-        print ("Interpolate WSEL")
-        wsel_new = wsel_interp(xnew, ynew)
-        print ("Interpolate bathymetry")
-        elev_new = elev_interp(xnew, ynew)
-        
-        # create a depth raster
-        depth = wsel_new - elev_new
-        
-        # calculate velocity magnitude
-        vel_mag = np.sqrt((np.power(vel_x_new,2)+np.power(vel_y_new,2)))
-        
-        # calculate velocity direction in radians
-        vel_dir = np.arctan2(vel_y_new,vel_x_new)
-        
-        print ("Exporting Rasters")
-
-        # create raster properties
-        driver = 'GTiff'
-        width = elev_new.shape[1]
-        height = elev_new.shape[0]
-        count = 1
-        crs = self.crs
-        #transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
-        transform = Affine.translation(xnew[0][0] - 0.5 * resolution, ynew[0][0] - 0.5 * resolution)\
-            * Affine.scale(resolution,-1 * resolution)
-
-        # write elev raster
-        with rasterio.open(os.path.join(self.model_dir,'elev.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as elev_rast:
-            elev_rast.write(elev_new,1)
-        
-        # write wsel raster
-        with rasterio.open(os.path.join(self.model_dir,'wsel.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as wsel_rast:
-            wsel_rast.write(wsel_new,1)
-                        
-        # write depth raster
-        with rasterio.open(os.path.join(self.model_dir,'depth.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as depth_rast:
-            depth_rast.write(depth,1)
-            
-        # write velocity dir raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_dir_rast:
-            vel_dir_rast.write(vel_dir,1)
-                        
-        # write velocity .mag raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_mag_rast:
-            vel_mag_rast.write(vel_mag,1)
-                    
-        # write velocity x raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_x.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_x_rast:
-            vel_x_rast.write(vel_x_new,1)
-                        
-        # write velocity y raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_y.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_y_rast:
-            vel_y_rast.write(vel_y_new,1)
             
     def initialize_mental_map(self):
         """
@@ -1134,9 +1137,6 @@ class simulation():
         self.time_out_of_water = np.where(self.depth < self.too_shallow, 
                                           self.time_out_of_water + 1, 
                                           self.time_out_of_water)
-        
-        if np.any(self.time_out_of_water > 30.):
-            print ('debug check point this fish has been out of water too long')
     
         positions = np.vstack([self.X.flatten(),self.Y.flatten()]).T
         # Creating a KDTree for efficient spatial queries
@@ -1334,9 +1334,6 @@ class simulation():
         
         # Calculate the rheotactic cue
         rheotaxis = (weight * v_hat)/(2**2)
-        
-        if np.any(np.isnan(rheotaxis)):
-            print ('debug statement - rheotaxis NaNs - QC please')
         
         return rheotaxis
 
@@ -1864,10 +1861,11 @@ class simulation():
         else: 
             self.heading = np.arctan2(head_vec[:, 0, 1], head_vec[:, 0, 0])        
         
-        if np.any(np.isnan(self.heading)):
-            print ('debug check point Nans in headings')
-
-        
+        if self.pid_tuning == True:
+            if np.any(np.isnan(self.heading)):
+                print ('debug check point Nans in headings')
+                sys.exit()
+    
     def thrust_fun(self, mask, fish_velocities = None):
         """
         Calculates the thrust for a collection of agents based on Lighthill's elongated-body theory of fish propulsion.
@@ -1964,12 +1962,6 @@ class simulation():
         # Convert thrust to vector
         thrust = np.where(mask,[thrust_N * np.cos(self.heading),
                                 thrust_N * np.sin(self.heading)],0)
-        
-        if np.any(np.isnan(thrust)):
-            print ('debug check point Nans in thrust')
-            
-        if np.any(np.linalg.norm(thrust.T, axis = -1) > 200):
-            print ('debug - super high thrust - why?')
             
         self.thrust = thrust.T
         
@@ -2057,9 +2049,6 @@ class simulation():
                                )
                               )
                       )
-        
-        if np.any(np.isnan(Hz)):
-            print ('debug check point NaNs in Hzs')
 
         self.Hz = Hz
          
@@ -2376,11 +2365,6 @@ class simulation():
         # drags = np.where(mask, -0.5 * (densities * 1000) * (surface_areas / 100**2) * drag_coeffs * relative_speeds_squared \
         #     * self.arr.linalg.norm(fish_velocities, axis = 1) * self.wave_drag,0)
         
-        if np.any(np.isnan(drags)):
-            print ('debug check point - NaNs in drags')
-            
-        if np.any(np.linalg.norm(self.drag, axis = -1) > 200):
-            print ('debug - super high drag - why?')
         self.drag = drags
 
     def ideal_drag_fun(self, fish_velocities = None):
@@ -2539,9 +2523,6 @@ class simulation():
         self.swim_mode = self.arr.where(mask_prolonged, 2, self.swim_mode)
         self.swim_mode = self.arr.where(mask_sprint, 3, self.swim_mode)
         self.swim_mode = self.arr.where(~(mask_prolonged | mask_sprint), 1, self.swim_mode)
-
-                
-        print(f'swim mode: {self.swim_mode[0]}')
     
         # Calculate recovery at the beginning and end of the time step
         rec0 = self.recovery(self.recover_stopwatch) / 100.
@@ -2582,7 +2563,6 @@ class simulation():
         self.swim_behav = self.arr.where(mask_low_battery, 3, self.swim_behav)
         self.swim_behav = self.arr.where(mask_mid_battery, 2, self.swim_behav)
         self.swim_behav = self.arr.where(mask_high_battery, 1, self.swim_behav)
-        print(f'swim behavior: {self.swim_behav[0]}')
     
         # Set ideal speed over ground based on battery level
         self.ideal_sog[mask_low_battery] = 0.0
@@ -2610,6 +2590,10 @@ class simulation():
         self.swim_mode[mask_ready_to_move] = 1
         
         if self.pid_tuning == True:
+            print(f'battery: {np.round(self.battery,4)}')
+            print(f'swim behavior: {self.swim_behav[0]}')
+            print(f'swim mode: {self.swim_mode[0]}')
+
             if np.any(self.swim_behav == 3):
                 print('error no longer counts, fatigued')
                 sys.exit()
@@ -2709,17 +2693,23 @@ class simulation():
         pid_adjustment = pid_controller.update(error)
 
         if self.pid_tuning == True:
-            print (f'error: {error}')
-            curr_vel = np.round(np.sqrt(np.power(self.x_vel,2) + np.power(self.y_vel,2)),2)
-            print (f'current velocity: {curr_vel}')
             self.error_array = np.append(self.error_array, error[0])
             self.vel_x_array = np.append(self.vel_x_array, self.x_vel)
             self.vel_y_array = np.append(self.vel_y_array, self.y_vel)
+            
+            curr_vel = np.round(np.sqrt(np.power(self.x_vel,2) + np.power(self.y_vel,2)),2)
+            
+            print (f'error: {error}')
+            print (f'current velocity: {curr_vel}')
+            print(f'Hz: {self.Hz}')
+            print(f'thrust: {np.round(self.thrust,2)}')
+            print(f'drag: {np.round(self.drag,2)}')
+            print(f'sog: {np.round(self.sog,4)}')
 
         
-        if np.isnan(error):
-            print('nan in error')
-            sys.exit()
+            if np.isnan(error):
+                print('nan in error')
+                sys.exit()
         
         # add adjustment to the magnitude of thrust
         thrust_mag_0 = np.linalg.norm(self.thrust, axis = -1)
@@ -2760,14 +2750,8 @@ class simulation():
         # Step 8: Update velocity for each fish
         fish_vel_1 = fish_vel_0.flatten() + acc_final.flatten() * dt  # X component of new velocity   
         
-        # if np.any(error != 0.):
-        #     print ('debug controller error QC')
-        
         # Step 6: Update sog for each fish
         self.sog = np.array([np.linalg.norm(fish_vel_1, axis = -1)])
-        
-        if np.any(np.isnan(self.sog)):
-            print ('debug - we got nans')
         
         # Step 7: Prepare for position update
         # Note: Actual position update should be done in the main simulation loop
@@ -2779,20 +2763,6 @@ class simulation():
         else:
             self.X = np.where(mask, self.X + fish_vel_1[0] * dt, self.X)
             self.Y = np.where(mask, self.Y + fish_vel_1[1] * dt, self.Y)
-            
-        if np.any(np.isnan(self.X)):
-            print ('debug check point - are any new points NaN?')
-        
-        # if np.any(self.X > self.prev_X):
-        #     print ('debug checkpoint is the fish moving backwards - major movement is east to west')
-            
-        if np.any(self.sog > 2):
-            print ('moving too fast debug')
-        
-        print(f'Hz: {self.Hz}')
-        print(f'thrust: {np.round(self.thrust,2)}')
-        print(f'drag: {np.round(self.drag,2)}')
-        print(f'sog: {np.round(self.sog,4)}')
                         
     def jump(self, t, g, mask):
         """
@@ -2848,8 +2818,7 @@ class simulation():
         else:
             self.X += displacement.flatten() * self.arr.cos(self.heading.flatten())
             self.Y += displacement.flatten() * self.arr.sin(self.heading.flatten())        
-        if np.sum(mask) > 0:
-            print ('debug point to QC jump')
+
             
     def odometer(self, t):
         """
@@ -3049,11 +3018,8 @@ class simulation():
 
             # Update the frames for the movie
             with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
-                # set up PID controller
-                #k_p = 50.   
-                #k_i = 1.0
-                #k_d = 1.0   
-                
+                # set up PID controller 
+                #TODO make PID controller a function of length and water velocity
                 pid_controller = PID_controller(k_p, 
                                                 k_i, 
                                                 k_d, 
@@ -3085,7 +3051,7 @@ class simulation():
     def close(self):
         self.hdf5.close()
             
-class solution():
+class PID_optimization():
     '''
     Python class object for solving a genetic algorithm to optimize PID controller values. 
     '''
@@ -3166,7 +3132,6 @@ class solution():
                 'd': self.d[i],
                 'magnitude': magnitude,
                 'array_length': len(filtered_array),
-                #'avg_velocity': np.average(self.velocities[i])}
                 'avg_velocity': np.nanmean(self.velocities[i])}
 
             # append as a new row to df
@@ -3331,14 +3296,14 @@ class solution():
 
         for _ in range(self.pop_size):
         # create a new instance of the solution class for each individual
-            individual = solution(self.pop_size,
-                              self.generations,
-                              self.min_p_value,
-                              self.max_p_value,
-                              self.min_i_value,
-                              self.max_i_value,
-                              self.min_d_value,
-                              self.max_d_value)
+            individual = PID_optimization(self.pop_size,
+                                          self.generations,
+                                          self.min_p_value,
+                                          self.max_p_value,
+                                          self.min_i_value,
+                                          self.max_i_value,
+                                          self.min_d_value,
+                                          self.max_d_value)
             population.append(individual.genes)
 
         return population
@@ -3406,7 +3371,6 @@ class solution():
                                          use_gpu = False,
                                          pid_tuning = True)
                 
-                
                 # run the model and append the error array
                 try:
                     sim.run('solution',
@@ -3433,13 +3397,13 @@ class solution():
             records[generation] = error_df
 
             # selection -> output is list of paired parents dfs
-            selected_parents = solution.selection(self, error_df)
+            selected_parents = PID_optimization.selection(self, error_df)
 
             # crossover -> output is list of crossover pid values
-            cross_offspring = solution.crossover(self, selected_parents)
+            cross_offspring = PID_optimization.crossover(self, selected_parents)
 
             # mutation -> output is list of muation pid values
-            mutated_offspring = solution.mutation(self)
+            mutated_offspring = PID_optimization.mutation(self)
 
             # combine crossover and mutation offspring to get next generation
             population = cross_offspring + mutated_offspring
