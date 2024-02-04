@@ -2683,7 +2683,7 @@ class simulation():
 
         # Step 5: Thrust feedback PID controller 
         error = np.where(mask, 
-                         np.round(self.ideal_sog - new_sog,8),
+                         np.round(self.ideal_sog - new_sog,12),
                          0.)
         
         self.error = error
@@ -3027,21 +3027,22 @@ class simulation():
                 for i in range(n):
                     self.timestep(i, dt, g, pid_controller)
 
-                    # write frame
-                    agent_pts.set_data(self.X,
-                                       self.Y)
-                    writer.grab_frame()
-
-                    print ('Time Step %s complete'%(i))
-                    
                     if self.pid_tuning == True:
                         if i == range(n)[-1]:
                             sys.exit()
+                    else:
+                        # write frame
+                        agent_pts.set_data(self.X,
+                                           self.Y)
+                        writer.grab_frame()
+                        
+                    print ('Time Step %s complete'%(i))
 
 
         # clean up
         writer.finish()
-        self.hdf5.flush()
+        if self.pid_tuning == False:
+            self.hdf5.flush()
         self.hdf5.close()
         depth.close()     
         t1 = time.time()     
@@ -3146,7 +3147,7 @@ class PID_optimization():
             / (error_df['magnitude'].max() - error_df['magnitude'].min())
         error_df.set_index('individual', inplace = True)
         
-        array_len_weight = 0.7
+        array_len_weight = 0.8
         magnitude_weight = 1 - array_len_weight
         # Compute pairwise preference matrix
         n = len(error_df)

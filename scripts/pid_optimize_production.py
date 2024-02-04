@@ -22,7 +22,7 @@ from emergent import sockeye_SoA as sockeye
 #%% Genetic algorithm parameters
 
 # number of individuals in the population/gene pool per generation. use >= 4 individuals
-pop_size = 25
+pop_size = 40
 # number of generations to run the algorithm
 generations = 20
 
@@ -61,7 +61,7 @@ HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 crs = 32604
 
 # group starting locations for production loop
-start_locations = {'low_flow_speed': (550370.39, 6641528.46)}
+start_locations = {'high_flow_speed': (549397.33, 6641816.50)}
 
 # start_locations = {
 #     'below_falls': (549488.29, 6641611.84),
@@ -100,7 +100,7 @@ fish_length = 550
 
 # length stats for production loop: (min, 25%, 50%, 75%, max)
 #fish_lengths = (468, 570, 598, 626, 698)
-fish_lengths = [570]
+fish_lengths = [598]
 
 #%% loop
 # Run the algorithm for all fish sizes and starting locations.
