@@ -2978,76 +2978,86 @@ class simulation():
         None. The result of the function is the creation of a movie file visualizing the simulation.
         """        
         t0 = time.time()
-        # get depth raster
-        depth_arr = self.hdf5['environment/depth'][:]
-        depth = rasterio.MemoryFile()
-        height = depth_arr.shape[0]
-        width = depth_arr.shape[1]
-        
-        with depth.open(
-            driver ='GTiff',
-            height = depth_arr.shape[0],
-            width = depth_arr.shape[1],
-            count =1,
-            dtype ='float32',
-            crs = self.crs,
-            transform = self.depth_rast_transform
-        ) as dataset:
-            dataset.write(depth_arr, 1)
-
-            # define metadata for movie
-            FFMpegWriter = manimation.writers['ffmpeg']
-            metadata = dict(title= model_name, artist='Matplotlib',
-                            comment='emergent model run %s'%(datetime.now()))
-            writer = FFMpegWriter(fps=30, metadata=metadata)
-
-            #initialize plot
-            fig, ax = plt.subplots(figsize = (10,5))
-
-            background = ax.imshow(dataset.read(1),
-                                   origin = 'upper',
-                                   extent = [dataset.bounds[0],
-                                              dataset.bounds[2],
-                                              dataset.bounds[1],
-                                              dataset.bounds[3]])
-
-            agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
-
-            plt.xlabel('Easting')
-            plt.ylabel('Northing')
-
-            # Update the frames for the movie
-            with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
-                # set up PID controller 
-                #TODO make PID controller a function of length and water velocity
-                pid_controller = PID_controller(k_p, 
-                                                k_i, 
-                                                k_d, 
-                                                self.num_agents)
-                for i in range(n):
-                    self.timestep(i, dt, g, pid_controller)
-
-                    if self.pid_tuning == True:
-                        if i == range(n)[-1]:
-                            sys.exit()
-                    else:
+        if self.pid_tuning == False:
+            # get depth raster
+            depth_arr = self.hdf5['environment/depth'][:]
+            depth = rasterio.MemoryFile()
+            height = depth_arr.shape[0]
+            width = depth_arr.shape[1]
+            
+            with depth.open(
+                driver ='GTiff',
+                height = depth_arr.shape[0],
+                width = depth_arr.shape[1],
+                count =1,
+                dtype ='float32',
+                crs = self.crs,
+                transform = self.depth_rast_transform
+            ) as dataset:
+                dataset.write(depth_arr, 1)
+    
+                # define metadata for movie
+                FFMpegWriter = manimation.writers['ffmpeg']
+                metadata = dict(title= model_name, artist='Matplotlib',
+                                comment='emergent model run %s'%(datetime.now()))
+                writer = FFMpegWriter(fps=30, metadata=metadata)
+    
+                #initialize plot
+                fig, ax = plt.subplots(figsize = (10,5))
+    
+                background = ax.imshow(dataset.read(1),
+                                       origin = 'upper',
+                                       extent = [dataset.bounds[0],
+                                                  dataset.bounds[2],
+                                                  dataset.bounds[1],
+                                                  dataset.bounds[3]])
+    
+                agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
+    
+                plt.xlabel('Easting')
+                plt.ylabel('Northing')
+    
+                # Update the frames for the movie
+                with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
+                    # set up PID controller 
+                    #TODO make PID controller a function of length and water velocity
+                    pid_controller = PID_controller(k_p, 
+                                                    k_i, 
+                                                    k_d, 
+                                                    self.num_agents)
+                    for i in range(n):
+                        self.timestep(i, dt, g, pid_controller)
+    
                         # write frame
                         agent_pts.set_data(self.X,
                                            self.Y)
                         writer.grab_frame()
-                        
-                    print ('Time Step %s complete'%(i))
-
-
-        # clean up
-        writer.finish()
-        if self.pid_tuning == False:
+                            
+                        print ('Time Step %s complete'%(i))
+    
+    
+            # clean up
+            writer.finish()
             self.hdf5.flush()
-        self.hdf5.close()
-        depth.close()     
-        t1 = time.time()     
-        
+            self.hdf5.close()
+            depth.close()     
+            t1 = time.time()     
+                    
+        else:
+            pid_controller = PID_controller(k_p, 
+                                            k_i, 
+                                            k_d, 
+                                            self.num_agents)
+            for i in range(n):
+                self.timestep(i, dt, g, pid_controller)
+                
+                print ('Time Step %s %s %s %s %s %s complete'%(i,i,i,i,i,i))
+                
+                if i == range(n)[-1]:
+                    sys.exit()
+            
         print ('ABM took %s to compile'%(t1-t0))
+
         
     def close(self):
         self.hdf5.close()
@@ -3147,7 +3157,7 @@ class PID_optimization():
             / (error_df['magnitude'].max() - error_df['magnitude'].min())
         error_df.set_index('individual', inplace = True)
         
-        array_len_weight = 0.8
+        array_len_weight = 0.70
         magnitude_weight = 1 - array_len_weight
         # Compute pairwise preference matrix
         n = len(error_df)
@@ -3247,7 +3257,7 @@ class PID_optimization():
         
         return offspring
 
-    def mutation(self):
+    def mutation(self, error_df):
         """
         Generate new genes for offspring independent of parent genes. Uses the min/max
         gene values set in the first generation population.
@@ -3269,11 +3279,11 @@ class PID_optimization():
 
         for i in range(self.mutation_count):
             # individual = [random.uniform(self.min_gene_value, self.max_gene_value) for _ in range(self.num_genes)]
+            P = np.abs(error_df.loc[i]['p'] + np.random.uniform(-4.0,4.0,1)[0])
+            I = np.abs(error_df.loc[i]['i'] + np.random.uniform(-0.1,0.1,1)[0])
+            D = np.abs(error_df.loc[i]['d'] + np.random.uniform(-1.0,1.0,1)[0])
             
-            self.p_component = np.random.uniform(self.min_p_value, self.max_p_value, size=1)
-            self.i_component = np.random.uniform(self.min_i_value, self.max_i_value, size=1)
-            self.d_component = np.random.uniform(self.min_d_value, self.max_d_value, size=1)
-            individual = np.concatenate((self.p_component, self.i_component, self.d_component), axis=None)
+            individual = np.concatenate((P, I, D), axis=None)
             
             population.append(individual)
    
@@ -3350,7 +3360,7 @@ class PID_optimization():
             #for i in range(len(self.population)):
             for i in range(self.pop_size):
             
-                print(f'\nrunning individual {i+1} of generation {generation+1}...')
+                print(f'\nrunning individual {i+1} of generation {generation+1}, {generation+1}, {generation+1}, {generation+1}, {generation+1}...')
                 
                 # useful to have these in pid_solution
                 self.p[i] = population[i][0]
@@ -3404,8 +3414,7 @@ class PID_optimization():
             cross_offspring = PID_optimization.crossover(self, selected_parents)
 
             # mutation -> output is list of muation pid values
-            mutated_offspring = PID_optimization.mutation(self)
-
+            mutated_offspring = PID_optimization.mutation(self, error_df)
             # combine crossover and mutation offspring to get next generation
             population = cross_offspring + mutated_offspring
             

@@ -22,16 +22,16 @@ from emergent import sockeye_SoA as sockeye
 #%% Genetic algorithm parameters
 
 # number of individuals in the population/gene pool per generation. use >= 4 individuals
-pop_size = 40
+pop_size = 200
 # number of generations to run the algorithm
 generations = 20
 
 # P
-min_p_value = 0     # min value of P
-max_p_value = 100    # max value of P
+min_p_value = 0.1     # min value of P
+max_p_value = 50    # max value of P
 # I
-min_i_value = 0     # min value of I
-max_i_value = 0.1   # max value of I
+min_i_value = 0.001     # min value of I
+max_i_value = 1.   # max value of I
 # D
 min_d_value = 0.1   # min value of D
 max_d_value = 20     # max value of D
