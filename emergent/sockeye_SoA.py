@@ -3157,7 +3157,7 @@ class PID_optimization():
             / (error_df['magnitude'].max() - error_df['magnitude'].min())
         error_df.set_index('individual', inplace = True)
         
-        array_len_weight = 0.70
+        array_len_weight = 0.90
         magnitude_weight = 1 - array_len_weight
         # Compute pairwise preference matrix
         n = len(error_df)
