@@ -3279,9 +3279,9 @@ class PID_optimization():
 
         for i in range(self.mutation_count):
             # individual = [random.uniform(self.min_gene_value, self.max_gene_value) for _ in range(self.num_genes)]
-            P = np.abs(error_df.loc[i]['p'] + np.random.uniform(-4.0,4.0,1)[0])
-            I = np.abs(error_df.loc[i]['i'] + np.random.uniform(-0.1,0.1,1)[0])
-            D = np.abs(error_df.loc[i]['d'] + np.random.uniform(-1.0,1.0,1)[0])
+            P = np.abs(error_df.iloc[i]['p'] + np.random.uniform(-4.0,4.0,1)[0])
+            I = np.abs(error_df.iloc[i]['i'] + np.random.uniform(-0.1,0.1,1)[0])
+            D = np.abs(error_df.iloc[i]['d'] + np.random.uniform(-1.0,1.0,1)[0])
             
             individual = np.concatenate((P, I, D), axis=None)
             
@@ -3419,6 +3419,9 @@ class PID_optimization():
             population = cross_offspring + mutated_offspring
             
             print(f'completed generation {generation+1}.... ')
+            
+            if np.all(error_df.magnitude.values == 0):
+                return records
             
         return records
             
