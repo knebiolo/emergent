@@ -22,9 +22,9 @@ from emergent import sockeye_SoA as sockeye
 #%% Genetic algorithm parameters
 
 # number of individuals in the population/gene pool per generation. use >= 4 individuals
-pop_size = 200
+pop_size = 100 
 # number of generations to run the algorithm
-generations = 20
+generations = 30
 
 # P
 min_p_value = 0.1     # min value of P
@@ -61,20 +61,22 @@ HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS 6.3.1"
 crs = 32604
 
 # group starting locations for production loop
-start_locations = {'high_flow_speed': (549397.33, 6641816.50)}
+#start_locations = {'below_falls': (549488.29, 6641611.84)}
 
-# start_locations = {
-#     'below_falls': (549488.29, 6641611.84),
-#     'high_flow_speed': (549397.33, 6641816.50),
-#     'ds_of_chute': (549400.43, 6641759.13),
-#     'in_chute': (549420.07, 6641762.23),
-#     'low_flow_speed': (550370.39, 6641528.46),
-#     'low_flow_speed2': (550147.74, 6641476.45),
-#     'low_flow_speed3': (549485.93, 6641527.83),
-#     'low_flow_speed4': (550565.14, 6641496.90)
-#     }
-
-
+start_locations = {
+    'below_falls': (549488.29, 6641611.84),
+    'high_flow_speed': (549397.33, 6641816.50),
+    'ds_of_chute': (549400.43, 6641759.13),
+    'in_chute': (549420.07, 6641762.23),
+    'mid_river':(549624.73, 6641522.95),
+    'above_first_falls':(549478.47, 6641735.36),
+    'up_top':(549478.47, 6641735.36),
+    'side_channel':(549361.15, 6641955.00), 
+    'low_flow_speed': (550370.39, 6641528.46),
+    'low_flow_speed2': (550147.74, 6641476.45),
+    'low_flow_speed3': (549485.93, 6641527.83),
+    'low_flow_speed4': (550565.14, 6641496.90)}
+    
 # three(?) more sites
 # locations with slower flow, an eddy
 # double check high flow 
@@ -86,7 +88,7 @@ n = 1
 ts = 100
 
 # What is the delta t?
-dt = 0.25
+dt = 0.20
 # limit ts in low velocity areas
 
 # What is the water temp?
@@ -99,8 +101,7 @@ basin = "Nushagak River"
 fish_length = 550
 
 # length stats for production loop: (min, 25%, 50%, 75%, max)
-#fish_lengths = (468, 570, 598, 626, 698)
-fish_lengths = [598]
+fish_lengths = (698, 626, 598, 570, 468)
 
 #%% loop
 # Run the algorithm for all fish sizes and starting locations.

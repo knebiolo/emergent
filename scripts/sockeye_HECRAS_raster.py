@@ -21,12 +21,12 @@ import os
 # import ga optimization script
 
 # identify input and output model names
-HECRAS_model = 'NuyakukABM2D.p34.hdf'
-model_name = '18099'
+HECRAS_model = 'NuyakukABM2D.p45.hdf'
+model_name = '11619_1m'
 
 # identify directories
 #model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations",model_name)
-model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations\PID_optimization",model_name)
+model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations",model_name)
 HECRAS_dir = r"J:\2819\276\Calcs\HEC-RAS Results for Kevin\20240122"
 
 
@@ -37,5 +37,8 @@ crs = 32604
 
 #%% Read environmental data into model
 # read HECRAS model and create environment rasters
-sockeye.HECRAS(model_dir,os.path.join(HECRAS_dir,HECRAS_model),crs,0.5)
+sockeye.HECRAS(model_dir,
+               os.path.join(HECRAS_dir,HECRAS_model),
+               1.0,
+               crs)
 

@@ -40,7 +40,7 @@ from rasterio.transform import Affine
 from rasterio.mask import mask
 from shapely import Point, Polygon, box
 from shapely import affinity
-from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline
+from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline, RectBivariateSpline
 from scipy.optimize import curve_fit
 from scipy.constants import g
 from scipy.spatial import cKDTree
@@ -204,7 +204,7 @@ def output_excel(records, model_dir, model_name):
     
     print('records exported. check output excel file.')
     
-def HECRAS (HECRAS_dir, model_dir, resolution, crs):
+def HECRAS (model_dir, HECRAS_dir, resolution, crs):
     """
     Import environment data from a HECRAS model and generate raster files.
     
@@ -237,6 +237,8 @@ def HECRAS (HECRAS_dir, model_dir, resolution, crs):
     vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
     wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1]
     elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
+    
+    hdf.close()
     
     # create list of xy tuples
     geom = list(tuple(zip(pts[:,0],pts[:,1])))
@@ -390,12 +392,13 @@ def HECRAS (HECRAS_dir, model_dir, resolution, crs):
 
 
 class PID_controller:
-    def __init__(self, k_p, k_i, k_d, n_agents):
+    def __init__(self, n_agents, k_p = 0., k_i = 0., k_d = 0.):
         self.k_p = k_p
         self.k_i = k_i
         self.k_d = k_d
         self.integral = np.zeros(n_agents)
         self.previous_error = np.zeros(n_agents)
+
 
     def update(self, error):
         self.integral += error.flatten()
@@ -407,6 +410,65 @@ class PID_controller:
         d_term = self.k_d * derivative
 
         return p_term + i_term + d_term
+    
+    def interp_PID(self,data_ws):
+        '''
+        Parameters
+        ----------
+        data_ws : file directory.
+
+        Returns
+        -------
+        tuple consisting of (P,I,D).
+        '''
+        # get data
+        df = pd.read_csv(r'C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\pid_optimize_Nushagak.csv')
+        
+        # get data arrays
+        length = df.loc[:, 'fish_length'].values
+        velocity = df.loc[:, 'avg_water_velocity'].values
+        P = df.loc[:, 'p'].values
+        I = df.loc[:, 'i'].values
+        D = df.loc[:, 'd'].values
+        
+        # Plane model function
+        def plane_model(coords, a, b, c):
+            length, velocity = coords
+            return a * length + b * velocity + c
+        
+        # fit plane for P, I, and D values
+        self.P_params, _ = curve_fit(plane_model, (length, velocity), P)
+        
+        self.I_params, _ = curve_fit(plane_model, (length, velocity), I)
+        
+        self.D_params, _ = curve_fit(plane_model, (length, velocity), D)
+    
+    def PID_func(self, velocity, length):
+        '''
+        
+        '''
+        # P plane parameters
+        a_P = self.P_params[0]
+        b_P = self.P_params[1]
+        c_P = self.P_params[2]
+        
+        # I plane parameters
+        a_I = self.P_params[0]
+        b_I = self.P_params[1]
+        c_I = self.P_params[2]
+        
+        # D plane parameters
+        a_D = self.P_params[0]
+        b_D = self.P_params[1]
+        c_D = self.P_params[2]        
+        
+        P = a_P * length + b_P * velocity + c_P
+        I = a_I * length + b_I * velocity + c_I
+        D = a_D * length + b_D * velocity + c_D 
+        
+        return P, I, D
+    
+    
       
 class simulation():
     '''Python class object that implements an Agent Based Model of adult upstream
@@ -422,7 +484,7 @@ class simulation():
                  basin, 
                  water_temp, 
                  starting_box,
-                 fish_length,
+                 fish_length = None,
                  num_timesteps = 100, 
                  num_agents = 100, 
                  use_gpu = False,
@@ -462,6 +524,9 @@ class simulation():
             self.pid_tuning = pid_tuning
             self.vel_x_array = np.array([])
             self.vel_y_array = np.array([])
+            
+        else:
+            self.pid_tuning = False
         
         # model directory and model name
         self.model_dir = model_dir
@@ -504,12 +569,18 @@ class simulation():
         self.prev_Y = self.Y
 
         # Time to Fatigue values for Sockeye digitized from Bret 1964
-        self.max_s_U = 2.77  # maximum sustained swim speed
+        #TODO - we need to scale these numbers by size, way too big for tiny fish
+        self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43  # maximum prolonged swim speed
         self.a_p = 8.643     # prolonged intercept
         self.b_p = -2.0894   # prolonged slope
         self.a_s = 0.1746    # sprint intercept
         self.b_s = -0.1806   # sprint slope
+        
+        # Time to Fatigue from Kathapodis 2016 Salmonids
+        self.K = 3.5825
+        self.b = -0.2621
+        self.a = 1.276
         
         # initialize movement parameters
         self.drag = self.arr.zeros(num_agents)           # computed theoretical drag
@@ -574,7 +645,7 @@ class simulation():
         if self.basin == "Nushagak River":
             self.sex = self.arr.random.choice([0,1], size = self.num_agents, p = [0.503,0.497])
             
-    def sim_length(self, fish_length):
+    def sim_length(self, fish_length = None):
         """
         Simulate the length distribution of agents based on the basin and their sex.
     
@@ -608,7 +679,7 @@ class simulation():
         # we can also set these arrays that contain parameters that are a function of length
         self.sog = self.length/1000.  # sog = speed over ground - assume fish maintain 1 body length per second
         self.ideal_sog = self.sog
-        self.swim_speed = self.length/1000.        # set initial swim speed
+       # self.swim_speed = self.length/1000.        # set initial swim speed
         self.ucrit = self.sog * 7.    # TODO - what is the ucrit for sockeye?
         
     def sim_weight(self):
@@ -2500,6 +2571,7 @@ class simulation():
     
         # Calculate swim speeds for each fish
         swim_speeds = self.arr.linalg.norm(fish_velocities - water_velocities, axis=-1)
+        bl_s = swim_speeds / (self.length/1000.)
     
         # Calculate distances travelled and update bout odometer and duration
         dist_travelled = self.arr.sqrt((self.prev_X - self.X)**2 + (self.prev_Y - self.Y)**2)
@@ -2510,14 +2582,40 @@ class simulation():
 
         self.bout_dur += dt
     
-        # Initialize time to fatigue (ttf) array
+        # # Initialize time to fatigue (ttf) array
         ttf = self.arr.full_like(swim_speeds, self.arr.nan)
     
-        # Calculate ttf for prolonged and sprint swimming modes
-        mask_prolonged = (self.max_s_U < swim_speeds) & (swim_speeds <= self.max_p_U)
-        mask_sprint = swim_speeds > self.max_p_U
-        ttf[mask_prolonged] = 10. ** (self.a_p + swim_speeds[mask_prolonged] * self.b_p) * 60.
-        ttf[mask_sprint] = 10. ** (self.a_s + swim_speeds[mask_sprint] * self.b_s) * 60.
+        # # Calculate ttf for prolonged and sprint swimming modes
+        mask_prolonged = np.where((self.max_s_U < bl_s) & (bl_s <= self.max_p_U),True,False)
+        mask_sprint = np.where(bl_s > self.max_p_U,True,False)
+        ttf = np.where(mask_prolonged, np.exp((self.a_p + swim_speeds/self.length * self.b_p)),ttf)
+        ttf = np.where(mask_sprint, np.exp((self.a_s + swim_speeds/self.length * self.b_s)),ttf)
+                
+        # def time_to_fatigue(U, l, a, b):
+        #     """
+        #     Calculate time to fatigue for a given swim speed.
+        
+        #     Parameters:
+        #     U (float): Swim speed of the fish in m/s.
+        #     K (float): Fatigue curve parameter.
+        #     b (float): Fatigue curve exponent.
+        #     l (float): Characteristic length in meters.
+            
+        #     Returns:
+        #     float: Time to fatigue in seconds.
+        #     """
+        #     g = 9.81  # acceleration due to gravity in m/s^2
+        #     # Calculate the dimensionless time to fatigue
+        #     #t_s = (K * np.sqrt(g * l) / U) ** (1 / b)
+        #     #t_s = (K / U)**(1/b)
+        #     t_s = np.exp(np.log(U) * np.sqrt(g * l) - a)/b
+            
+        #     # Convert the dimensionless time to actual time to fatigue
+        #     t = t_s * np.sqrt(l / g)
+        #     return t
+        
+        # ttf_f = np.vectorize(time_to_fatigue, excluded = (2,3))
+        # ttf2 = ttf_f(swim_speeds,self.length/1000.,self.a,self.b)
     
         # Set swimming modes based on swim speeds
         self.swim_mode = self.arr.where(mask_prolonged, 2, self.swim_mode)
@@ -2533,7 +2631,7 @@ class simulation():
         per_rec = rec1 - rec0
     
         # Update battery levels for sustained swimming mode
-        mask_sustained = self.swim_mode == 1
+        mask_sustained = swim_speeds <= self.max_s_U * (self.length/1000.)
         if self.num_agents > 1:
             self.battery[mask_sustained] += per_rec[mask_sustained]
         else:
@@ -2554,7 +2652,11 @@ class simulation():
             self.battery[mask_non_sustained.flatten()] *= ttf1.flatten() / ttf0.flatten()
 
         self.battery[self.battery < 0.0] = 0.0
-    
+        
+        if self.pid_tuning == True:
+            if np.isnan(self.battery):
+                sys.exit()   
+                
         # Set swimming behavior based on battery level
         mask_low_battery = self.battery <= 0.1
         mask_mid_battery = (self.battery > 0.1) & (self.battery <= 0.3)
@@ -2631,7 +2733,8 @@ class simulation():
         # Calculate swim speed for each fish
         # Subtracting the scalar water velocity from the vector ideal velocity
         # requires broadcasting the water_velocities array to match the shape of ideal_velocities
-        self.swim_speed = np.linalg.norm(ideal_velocities - water_velocities[:, np.newaxis], axis=1)
+        #self.swim_speed = np.linalg.norm(ideal_velocities - water_velocities[:, np.newaxis], axis=1)
+        self.swim_speed = np.linalg.norm(ideal_velocities[0] - np.array([self.x_vel,self.y_vel]).T)
             
 
     def swim(self, dt, pid_controller, mask):
@@ -2687,10 +2790,6 @@ class simulation():
                          0.)
         
         self.error = error
-        
-    
-        # Adjust Hzs using the PID controller (vectorized)
-        pid_adjustment = pid_controller.update(error)
 
         if self.pid_tuning == True:
             self.error_array = np.append(self.error_array, error[0])
@@ -2710,6 +2809,16 @@ class simulation():
             if np.isnan(error):
                 print('nan in error')
                 sys.exit()
+                
+        else:
+            k_p, k_i, k_d = pid_controller.PID_func(np.sqrt(np.power(self.x_vel,2) + np.power(self.y_vel,2)),
+                                                    self.length)
+            pid_controller.k_p = k_p
+            pid_controller.k_i= k_i
+            pid_controller.k_d = k_d
+            
+            # Adjust Hzs using the PID controller (vectorized)
+            pid_adjustment = pid_controller.update(error)
         
         # add adjustment to the magnitude of thrust
         thrust_mag_0 = np.linalg.norm(self.thrust, axis = -1)
@@ -2742,7 +2851,7 @@ class simulation():
         self.thrust_fun(mask = mask, fish_velocities = fish_vel_1_adj)
         
         # Step 12: calculate final surge and acceleration
-        surge_final = np.where(mask, self.thrust + self.drag, surge_ini)
+        surge_final = np.where(mask[:,np.newaxis], self.thrust + self.drag, surge_ini)
         
         # Step 7: Calculate acceleration for each fish
         acc_final = np.round(surge_final / self.weight[:,np.newaxis], 2)  
@@ -2950,7 +3059,7 @@ class simulation():
         self.timestep_flush(t)
 
             
-    def run(self, model_name, k_p, k_i, k_d, n, dt):
+    def run(self, model_name, n, dt, k_p = None, k_i = None, k_d = None):
         """
         Executes the simulation model over a specified number of time steps and generates a movie of the simulation.
     
@@ -3021,10 +3130,12 @@ class simulation():
                 with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
                     # set up PID controller 
                     #TODO make PID controller a function of length and water velocity
-                    pid_controller = PID_controller(k_p, 
+                    pid_controller = PID_controller(self.num_agents,
+                                                    k_p, 
                                                     k_i, 
-                                                    k_d, 
-                                                    self.num_agents)
+                                                    k_d)
+                    
+                    pid_controller.interp_PID(r'C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\pid_optimize_Nushagak.csv')
                     for i in range(n):
                         self.timestep(i, dt, g, pid_controller)
     
@@ -3356,6 +3467,8 @@ class PID_optimization():
             # keep track of the timesteps before error (length of error array),
             # also used to calc magnitude of errors
             pop_error_array = []
+            
+            prev_error_sum = np.zeros(1)
 
             #for i in range(len(self.population)):
             for i in range(self.pop_size):
@@ -3422,7 +3535,7 @@ class PID_optimization():
             
             if np.all(error_df.magnitude.values == 0):
                 return records
-            
+                        
         return records
             
             

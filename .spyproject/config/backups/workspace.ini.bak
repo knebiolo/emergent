@@ -4,7 +4,7 @@ save_data_on_exit = True
 save_history = True
 save_non_project_files = False
 project_type = 'empty-project-type'
-recent_files = ['scripts\\pid_solution.py', 'scripts\\pid_population.py', 'emergent\\sockeye_SoA.py', 'Q:\\Client_Data\\Other\\PSH_FeasibilityAnalysis_PA\\02_Calcs\\PSHF\\Program\\suitable_topo_backup_KPN.py']
+recent_files = ['emergent\\sockeye_SoA.py', 'scripts\\sockeye_validation.py']
 
 [main]
 version = 0.2.0
