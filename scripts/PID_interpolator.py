@@ -29,24 +29,24 @@ def plane_model(coords, a, b, c):
     return a * length + b * velocity + c
 
 # Curve fitting
-P_params, _ = curve_fit(plane_model, (length, velocity), P)
-a, b, c = P_params
+D_params, _ = curve_fit(plane_model, (length, velocity), D)
+a, b, c = D_params
 
 # Generating a meshgrid for the plane
 len_range = np.linspace(length.min(), length.max(), 100)
 vel_range = np.linspace(velocity.min(), velocity.max(), 100)
 len_mesh, vel_mesh = np.meshgrid(len_range, vel_range)
-P_mesh = a * len_mesh + b * vel_mesh + c
+D_mesh = a * len_mesh + b * vel_mesh + c
 
 # Plotting
 fig = plt.figure(figsize=(10, 7))
 ax = fig.add_subplot(111, projection='3d')
 
 # Original data points
-ax.scatter(length, velocity, P, color='r', label='Original Data')
+ax.scatter(length, velocity, D, color='r', label='Original Data')
 
 # Fitted plane
-ax.plot_surface(len_mesh, vel_mesh, P_mesh, color='b', alpha=0.5, rstride=100, cstride=100, label='Fitted Plane')
+ax.plot_surface(len_mesh, vel_mesh, D_mesh, color='b', alpha=0.5, rstride=100, cstride=100, label='Fitted Plane')
 
 # Labels and title
 ax.set_xlabel('length')

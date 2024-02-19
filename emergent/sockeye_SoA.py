@@ -393,21 +393,20 @@ def HECRAS (model_dir, HECRAS_dir, resolution, crs):
 
 class PID_controller:
     def __init__(self, n_agents, k_p = 0., k_i = 0., k_d = 0.):
-        self.k_p = k_p
-        self.k_i = k_i
-        self.k_d = k_d
-        self.integral = np.zeros(n_agents)
-        self.previous_error = np.zeros(n_agents)
-
+        self.k_p = np.array([k_p])
+        self.k_i = np.array([k_i])
+        self.k_d = np.array([k_d])
+        self.integral = np.zeros((np.round(n_agents,0).astype(np.int32),2))
+        self.previous_error = np.zeros((np.round(n_agents,0).astype(np.int32),2))
 
     def update(self, error):
-        self.integral += error.flatten()
-        derivative = error.flatten() - self.previous_error
-        self.previous_error = error.flatten()
+        self.integral += error
+        derivative = error - self.previous_error
+        self.previous_error = error
 
-        p_term = self.k_p * error.flatten()
-        i_term = self.k_i * self.integral
-        d_term = self.k_d * derivative
+        p_term = self.k_p[:,np.newaxis] * error
+        i_term = self.k_i[:,np.newaxis] * self.integral
+        d_term = self.k_d[:,np.newaxis] * derivative
 
         return p_term + i_term + d_term
     
@@ -453,14 +452,14 @@ class PID_controller:
         c_P = self.P_params[2]
         
         # I plane parameters
-        a_I = self.P_params[0]
-        b_I = self.P_params[1]
-        c_I = self.P_params[2]
+        a_I = self.I_params[0]
+        b_I = self.I_params[1]
+        c_I = self.I_params[2]
         
         # D plane parameters
-        a_D = self.P_params[0]
-        b_D = self.P_params[1]
-        c_D = self.P_params[2]        
+        a_D = self.D_params[0]
+        b_D = self.D_params[1]
+        c_D = self.D_params[2]        
         
         P = a_P * length + b_P * velocity + c_P
         I = a_I * length + b_I * velocity + c_I
@@ -1214,7 +1213,7 @@ class simulation():
         tree = cKDTree(positions)
         
         # Radius for nearest neighbors search
-        radius = 2
+        radius = 2.
         
         # Find agents within the specified radius for each agent
         agents_within_radius = tree.query_ball_tree(tree, r=radius)
@@ -1876,66 +1875,69 @@ class simulation():
         # The agent's heading is updated based on the arbitration of behavioral cues.
         """
 
-        # calculate behavioral cues
-        # rheotaxis = self.rheo_cue(10000)
-        # shallow = self.shallow_cue(10000)
-        # wave_drag = self.wave_drag_cue(5000)
-        # low_speed = self.vel_cue(8000)
-        # avoid = self.already_been_here(3000, t)
-        # school = self.school_cue(9000)
-        # collision = self.collision_cue(2500)
-        rheotaxis = self.rheo_cue(50000)
-        shallow = self.shallow_cue(1)
-        wave_drag = self.wave_drag_cue(1)
-        low_speed = self.vel_cue(1)
-        avoid = self.already_been_here(1, t)
-        school = self.school_cue(1)
-        collision = self.collision_cue(1)
-        
-        # Create dictionary that has order of behavioral cues
-        order_dict = {0: shallow, 
-                      1: collision, 
-                      2: avoid, 
-                      3: school, 
-                      4: rheotaxis, 
-                      5: low_speed.T, 
-                      6: wave_drag.T}
-        
-        # Create dictionary that holds all steering cues
-        cue_dict = {'rheotaxis': rheotaxis, 
-                    'shallow': shallow, 
-                    'wave_drag': wave_drag.T, 
-                    'low_speed': low_speed.T, 
-                    'avoid': avoid, 
-                    'school': school, 
-                    'collision': collision}
-        
-        head_vec = np.zeros_like(rheotaxis)
-        
-        # Arbitrate between different behaviors
-        head_vec = np.where(self.swim_behav[:,np.newaxis] == 1,
-                            sum([np.where(np.linalg.norm(head_vec, axis=1, keepdims=True) >= 7500, 
-                                          head_vec, 
-                                          head_vec + cue) for cue in order_dict.values()]),
-                            head_vec)
-        
-        head_vec = np.where(self.swim_behav[:,np.newaxis] == 2, 
-                            cue_dict['shallow'] + cue_dict['collision'] + cue_dict['low_speed'],
-                            head_vec)
-        head_vec = np.where(self.swim_behav[:,np.newaxis] == 3, 
-                            cue_dict['rheotaxis'], 
-                            head_vec)
-        
-        # Calculate heading for each agent
-        if len(head_vec.shape) == 2:
-            self.heading = np.arctan2(head_vec[:, 1], head_vec[:, 0])
-        else: 
-            self.heading = np.arctan2(head_vec[:, 0, 1], head_vec[:, 0, 0])        
-        
-        if self.pid_tuning == True:
-            if np.any(np.isnan(self.heading)):
-                print ('debug check point Nans in headings')
-                sys.exit()
+        if t % 5 == 0 or t == 0:
+            # calculate behavioral cues
+            if self.pid_tuning == True:
+                rheotaxis = self.rheo_cue(50000)
+                shallow = self.shallow_cue(1)
+                wave_drag = self.wave_drag_cue(1)
+                low_speed = self.vel_cue(1)
+                avoid = self.already_been_here(1, t)
+                school = self.school_cue(1)
+                collision = self.collision_cue(1)
+            else:
+                rheotaxis = self.rheo_cue(10000)       # 10000
+                shallow = self.shallow_cue(1)      # 10000
+                wave_drag = self.wave_drag_cue(1)   # 5000
+                low_speed = self.vel_cue(1)         # 8000 
+                avoid = self.already_been_here(1, t)# 3000
+                school = self.school_cue(1)         # 9000
+                collision = self.collision_cue(1)   # 2500         
+            
+            # Create dictionary that has order of behavioral cues
+            order_dict = {0: shallow, 
+                          1: collision, 
+                          2: avoid, 
+                          3: school, 
+                          4: rheotaxis, 
+                          5: low_speed.T, 
+                          6: wave_drag.T}
+            
+            # Create dictionary that holds all steering cues
+            cue_dict = {'rheotaxis': rheotaxis, 
+                        'shallow': shallow, 
+                        'wave_drag': wave_drag.T, 
+                        'low_speed': low_speed.T, 
+                        'avoid': avoid, 
+                        'school': school, 
+                        'collision': collision}
+            
+            head_vec = np.zeros_like(rheotaxis)
+            
+            # Arbitrate between different behaviors
+            head_vec = np.where(self.swim_behav[:,np.newaxis] == 1,
+                                sum([np.where(np.linalg.norm(head_vec, axis=1, keepdims=True) >= 7500, 
+                                              head_vec, 
+                                              head_vec + cue) for cue in order_dict.values()]),
+                                head_vec)
+            
+            head_vec = np.where(self.swim_behav[:,np.newaxis] == 2, 
+                                cue_dict['shallow'] + cue_dict['collision'] + cue_dict['low_speed'],
+                                head_vec)
+            head_vec = np.where(self.swim_behav[:,np.newaxis] == 3, 
+                                cue_dict['rheotaxis'], 
+                                head_vec)
+            
+            # Calculate heading for each agent
+            if len(head_vec.shape) == 2:
+                self.heading = np.arctan2(head_vec[:, 1], head_vec[:, 0])
+            else: 
+                self.heading = np.arctan2(head_vec[:, 0, 1], head_vec[:, 0, 0])        
+            
+            if self.pid_tuning == True:
+                if np.any(np.isnan(self.heading)):
+                    print ('debug check point Nans in headings')
+                    sys.exit()
     
     def thrust_fun(self, mask, fish_velocities = None):
         """
@@ -2082,7 +2084,7 @@ class simulation():
                                                   self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
             alternate = False
         
-        swim_speeds_cms = self.arr.linalg.norm(fish_velocities - water_velocities, axis=-1) * 100
+        swim_speeds_cms = self.arr.linalg.norm(fish_velocities - water_velocities, axis=-1) * 100 + 0.00001
 
         # sockeye parameters (Webb 1975, Table 20) units in CM!!! 
         length_dat = self.arr.array([5.,10.,15.,20.,25.,30.,40.,50.,60.])
@@ -2110,7 +2112,7 @@ class simulation():
         drags_erg_s = np.where(mask,np.linalg.norm(ideal_drag, axis = -1) * self.length/1000 * 10000000,0)
     
         # Solve for Hz
-        Hz = np.where(self.swim_behav == 3, 1.0,
+        Hz = np.where(self.swim_behav == 3, 5.0,
                       np.sqrt(drags_erg_s * V**2 * np.cos(np.radians(theta))/\
                               (A**2 * B**2 * swim_speeds_cms * np.pi**3 * rho * \
                               (swim_speeds_cms - V) * \
@@ -2120,7 +2122,10 @@ class simulation():
                                )
                               )
                       )
-
+            
+        if np.any(np.isnan(Hz)):
+            print ('fuck')
+            
         self.Hz = Hz
          
     def kin_visc(self, temp):
@@ -2347,7 +2352,7 @@ class simulation():
     
         return drag_coefficients
 
-    def drag_fun(self, mask):
+    def drag_fun(self, mask, fish_velocities = None):
         """
         Calculate the drag force on a sockeye salmon swimming upstream.
     
@@ -2388,7 +2393,9 @@ class simulation():
         """
 
         # Calculate fish velocities
-        fish_velocities = np.stack((self.sog * np.cos(self.heading), self.sog * np.sin(self.heading)), axis=-1)
+        if fish_velocities is None:
+            fish_velocities = np.stack((self.sog * np.cos(self.heading), self.sog * np.sin(self.heading)), axis=-1)
+
         water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
     
         # Ensure non-zero fish velocity for calculation
@@ -2632,6 +2639,8 @@ class simulation():
     
         # Update battery levels for sustained swimming mode
         mask_sustained = swim_speeds <= self.max_s_U * (self.length/1000.)
+        if mask_sustained.ndim == 2:
+            mask_sustained = mask_sustained.squeeze()
         if self.num_agents > 1:
             self.battery[mask_sustained] += per_rec[mask_sustained]
         else:
@@ -2641,17 +2650,20 @@ class simulation():
         # Update battery levels for non-sustained swimming modes
         mask_non_sustained = ~mask_sustained
         if self.num_agents > 1:
-            ttf0 = ttf[mask_non_sustained] * self.battery[mask_non_sustained]
+             ttf0 = ttf[mask_non_sustained] * self.battery[mask_non_sustained]
         else:
             ttf0 = ttf[mask_non_sustained.flatten()] * self.battery[mask_non_sustained.flatten()]
 
         ttf1 = ttf0 - dt
         if self.num_agents > 1:
-            self.battery[mask_non_sustained] *= ttf1 / ttf0
+            self.battery[mask_non_sustained] *= np.nan_to_num(ttf1 / ttf0)
         else:
             self.battery[mask_non_sustained.flatten()] *= ttf1.flatten() / ttf0.flatten()
 
         self.battery[self.battery < 0.0] = 0.0
+        
+        if np.any(np.isnan(self.battery)):
+            print ('fuck')
         
         if self.pid_tuning == True:
             if np.isnan(self.battery):
@@ -2772,6 +2784,11 @@ class simulation():
         
         fish_vel_0 = np.stack((fish_vel_0_x, fish_vel_0_y)).T
         
+        ideal_vel_x = np.where(mask, self.sog * np.cos(self.heading),0) 
+        ideal_vel_y = np.where(mask, self.sog * np.sin(self.heading),0)  
+        
+        ideal_vel = np.stack((ideal_vel_x, ideal_vel_y)).T
+        
         # Step 2: Calculate surge for each fish
         surge_ini = self.thrust + self.drag
         
@@ -2779,14 +2796,12 @@ class simulation():
         acc_ini = np.round(surge_ini / self.weight[:,np.newaxis], 2)  
         
         # Step 4: Update velocity for each fish
-        fish_vel_1_ini = fish_vel_0.flatten() + acc_ini.flatten() * dt  
-        
+        fish_vel_1_ini = fish_vel_0 + acc_ini * dt
         new_sog = np.linalg.norm(fish_vel_1_ini, axis = -1)
-
-
+            
         # Step 5: Thrust feedback PID controller 
-        error = np.where(mask, 
-                         np.round(self.ideal_sog - new_sog,12),
+        error = np.where(mask[:,np.newaxis], 
+                         np.round(ideal_vel - fish_vel_1_ini,12),
                          0.)
         
         self.error = error
@@ -2806,7 +2821,7 @@ class simulation():
             print(f'sog: {np.round(self.sog,4)}')
 
         
-            if np.isnan(error):
+            if np.any(np.isnan(error)):
                 print('nan in error')
                 sys.exit()
                 
@@ -2815,63 +2830,103 @@ class simulation():
                                                     self.length)
             pid_controller.k_p = k_p
             pid_controller.k_i= k_i
-            pid_controller.k_d = k_d
+            pid_controller.k_d = np.abs(k_d) + 1.
             
-            # Adjust Hzs using the PID controller (vectorized)
-            pid_adjustment = pid_controller.update(error)
+        # Adjust Hzs using the PID controller (vectorized)
+        pid_adjustment = pid_controller.update(error)
         
         # add adjustment to the magnitude of thrust
-        thrust_mag_0 = np.linalg.norm(self.thrust, axis = -1)
-        thrust_mag_1 = thrust_mag_0 + pid_adjustment
-        if self.num_agents > 1:
-            self.thrust = self.thrust * (thrust_mag_1[:,np.newaxis]/thrust_mag_0[:,np.newaxis])
-        else:
-            self.thrust = self.thrust * (thrust_mag_1/thrust_mag_0)
+        new_thrust = self.thrust + pid_adjustment
+        
+        # Use the mask to set negative values to 0
+            
+        # if self.num_agents > 1:
+        #     self.thrust = self.thrust * np.nan_to_num((thrust_mag_1/thrust_mag_0)[:,np.newaxis])
+        # else:
+        #     self.thrust = self.thrust * np.nan_to_num((thrust_mag_1/thrust_mag_0))
 
         # Step 6: Calculate adjusted surge for each fish
-        surge_adj = self.thrust + self.drag
+        surge_final = new_thrust + self.drag
         
         # Step 7: Calculate acceleration for each fish
-        acc_adj = np.round(surge_adj / self.weight[:,np.newaxis], 2)  
+        acc_final = surge_final / self.weight[:,np.newaxis]  
         
-        # Step 8: Update velocity for each fish
-        if self.num_agents > 1:
-            fish_vel_1_adj = fish_vel_0 + acc_adj * dt  
+        # # Step 8: Update velocity for each fish
+        # if self.num_agents > 1:
+        #     fish_vel_1_adj = fish_vel_0 + acc_adj * dt
+        # else:
+        #     fish_vel_1_adj = fish_vel_0.flatten() + acc_adj.flatten() * dt  
+        
+        # fish_vel_1_adj = np.where(thrust_mag_1[:,np.newaxis] == 0, 
+        #                           np.vstack((self.x_vel, self.y_vel)).T,
+        #                           fish_vel_1_adj)
+            
+        # if np.any(np.linalg.norm(fish_vel_1_adj, axis = -1) > 10.):
+        #     print ('fish is swimming way too fast')
+        
+        # # Step 9: calculate tailbeat frequency at the new velocity
+        # prev_Hz = self.Hz
+        # self.frequency(mask, fish_vel_1_adj)
+        
+        # # Step 10: if any adjusted frequencies are less than 0 or greater than 20, adjust
+        # self.Hz = np.where(mask, np.clip(self.Hz, 0, 20),self.Hz)
+        
+        # if np.any(np.isnan(self.Hz)):
+        #     print ('Hz is nan')
+        # if np.any(self.Hz / prev_Hz > 1.5):
+        #     print ('fuck - this fish is accelerating way too fast')
+            
+        # self.Hz[negmask] = 1.
+        
+        # # Step 11: calculate thrust - again, this in case
+        # self.thrust_fun(mask = mask, fish_velocities = fish_vel_1_adj)
+        # self.drag_fun(mask = mask, fish_velocities = fish_vel_1_adj)
+                             
+        
+        # # Step 12: calculate final surge and acceleration
+        # surge_final = np.where(mask[:,np.newaxis], self.thrust + self.drag, surge_ini)
+        # # surge_final = np.where(negmask[:,np.newaxis], self.drag, surge_final)
+        
+        # # Step 13: Calculate acceleration for each fish
+        # acc_final = np.round(surge_final / self.weight[:,np.newaxis], 2)  
+        
+        # Step 14: Update velocity for each fish
+        fish_vel_1 = fish_vel_0 + acc_final * dt  # X component of new velocity 
+            # if np.any(np.linalg.norm(fish_vel_1, axis = -1) > 2.):
+            #     print ('fuck')
+            # self.sog = np.linalg.norm(fish_vel_1, axis = -1)
 
-        else:
-            fish_vel_1_adj = fish_vel_0.flatten() + acc_adj.flatten() * dt  
         
-        # Step 9: calculate tailbeat frequency at the new velocity
-        self.frequency(mask, fish_vel_1_adj)
-        
-        # Step 10: if any adjusted frequencies are less than 0 or greater than 20, adjust
-        self.Hz = np.where(mask, np.clip(self.Hz, 0, 20),self.Hz)
-        
-        # Step 11: calculate thrust - again, this in case
-        self.thrust_fun(mask = mask, fish_velocities = fish_vel_1_adj)
-        
-        # Step 12: calculate final surge and acceleration
-        surge_final = np.where(mask[:,np.newaxis], self.thrust + self.drag, surge_ini)
-        
-        # Step 7: Calculate acceleration for each fish
-        acc_final = np.round(surge_final / self.weight[:,np.newaxis], 2)  
-        
-        # Step 8: Update velocity for each fish
-        fish_vel_1 = fish_vel_0.flatten() + acc_final.flatten() * dt  # X component of new velocity   
-        
-        # Step 6: Update sog for each fish
-        self.sog = np.array([np.linalg.norm(fish_vel_1, axis = -1)])
-        
+        # if np.any(np.sign(fish_vel_1) == np.sign(np.sqrt(np.power(self.x_vel,2)+np.power(self.y_vel,2)))):
+        #     print ('fish swimming backwards')
+                  
+        if np.any(error != 0):
+            print ('error is not zero - using PID adjustment')
+            
+        if np.any(np.round(self.sog,2) != np.round(self.ideal_sog,2)):
+            print ('speed over ground is not equal to ideal speed over ground')
+            
         # Step 7: Prepare for position update
         # Note: Actual position update should be done in the main simulation loop
         self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
         self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
-        if self.num_agents > 1:
-            self.X = np.where(mask, self.X + fish_vel_1[:,0] * dt, self.X)
-            self.Y = np.where(mask, self.Y + fish_vel_1[:,1] * dt, self.Y)
-        else:
-            self.X = np.where(mask, self.X + fish_vel_1[0] * dt, self.X)
-            self.Y = np.where(mask, self.Y + fish_vel_1[1] * dt, self.Y)
+
+        self.X = np.where(mask, self.X + fish_vel_1[:,0] * dt, self.X)
+        self.Y = np.where(mask, self.Y + fish_vel_1[:,1] * dt, self.Y)
+    
+        # if np.any(np.isnan(self.X)):
+        #     print ('fuck - fish flew off ')
+        #     self.hdf5.close()
+        #     sys.exit()
+            
+        # if np.any(np.logical_and(np.sqrt((self.prev_X - self.X)**2 + (self.prev_Y - self.Y)**2) / dt > self.ideal_sog * 50.,
+        #                          self.swim_behav != 3)):
+        #     print ('swimming too fast - why')
+            
+        self.sog = np.sqrt((self.prev_X - self.X)**2 + (self.prev_Y - self.Y)**2) / dt
+        
+        # if np.any(np.isnan(self.sog)):
+        #     print ('fuck - fish flew off - why?')         
                         
     def jump(self, t, g, mask):
         """
@@ -2909,9 +2964,12 @@ class simulation():
     
         # Calculate displacement for each fish
         displacement = self.ucrit * time_airborne * self.arr.cos(jump_angles)
+        
+        if np.any(displacement > 0.):
+            print ('check jump parameters')
     
         # Set speed over ground to ucrit for each fish
-        self.sog = np.where(mask, self.ucrit, self.sog)
+        #self.sog = np.where(mask, self.ucrit, self.sog)
     
         # Calculate new heading angle for each fish based solely on flow direction
         self.heading = np.where(mask,
@@ -3039,8 +3097,9 @@ class simulation():
         time_since_jump = t - self.time_of_jump
         
         # Create a boolean mask for the fish that should jump
-        should_jump = (sog_to_water_vel_ratio < 0.05) & (heading_sign != water_flow_direction_sign) & \
-                      (time_since_jump > 180) & (self.battery > 0.9999) # default value battery 0.4
+        should_jump = (sog_to_water_vel_ratio < 0.1) & \
+            (heading_sign != water_flow_direction_sign) & \
+                      (time_since_jump > 120) & (self.battery > 0.4) # default value battery 0.4
         
         # Apply the jump or swim functions based on the condition
         # For each fish that should jump
@@ -3109,7 +3168,7 @@ class simulation():
                 FFMpegWriter = manimation.writers['ffmpeg']
                 metadata = dict(title= model_name, artist='Matplotlib',
                                 comment='emergent model run %s'%(datetime.now()))
-                writer = FFMpegWriter(fps=30, metadata=metadata)
+                writer = FFMpegWriter(fps = np.round(30/dt,0), metadata=metadata)
     
                 #initialize plot
                 fig, ax = plt.subplots(figsize = (10,5))
@@ -3127,7 +3186,9 @@ class simulation():
                 plt.ylabel('Northing')
     
                 # Update the frames for the movie
-                with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
+                with writer.saving(fig, 
+                                   os.path.join(self.model_dir,'%s.mp4'%(model_name)), 
+                                   dpi = 300):
                     # set up PID controller 
                     #TODO make PID controller a function of length and water velocity
                     pid_controller = PID_controller(self.num_agents,
@@ -3136,7 +3197,7 @@ class simulation():
                                                     k_d)
                     
                     pid_controller.interp_PID(r'C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\pid_optimize_Nushagak.csv')
-                    for i in range(n):
+                    for i in range(int(n)):
                         self.timestep(i, dt, g, pid_controller)
     
                         # write frame
@@ -3155,10 +3216,10 @@ class simulation():
             t1 = time.time()     
                     
         else:
-            pid_controller = PID_controller(k_p, 
+            pid_controller = PID_controller(self.num_agents,
+                                            k_p, 
                                             k_i, 
-                                            k_d, 
-                                            self.num_agents)
+                                            k_d)
             for i in range(n):
                 self.timestep(i, dt, g, pid_controller)
                 
@@ -3217,36 +3278,113 @@ class PID_optimization():
         self.d = {}
         self.errors = {}
         self.velocities = {}
+        self.batteries = {}
         
+
     def fitness(self):
-        """
-        Rank the population using error timestep magnitude and array length.
+        '''
+        Overview
+
+        This fitness function is designed to evaluate a population of individuals 
+        based on three key criteria: error magnitude, array length, and battery life. 
+        The function ranks each individual by combining these criteria into a single 
+        score, with the goal of minimizing error magnitude, maximizing array length, 
+        and maximizing battery life.
         
-        Attributes set:
-        - pop_size (int): number of indidivduals in population
-        - errors (dict): dictionary of indidivduals (key) and sockeye error
-                         array (value)
-                         
-        Returns: dataframe with individual parameters and ranking, sorted by rank.
-        """
-        error_df = pd.DataFrame(columns=['individual',
-                                         'p',
-                                         'i',
-                                         'd',
+        Attributes
+        
+            pop_size (int): The number of individuals in the population. Each 
+            individual's performance is evaluated against the set criteria.
+            errors (dict): A dictionary where keys are individual identifiers and 
+            values are arrays representing the error magnitude for each timestep.
+            p, i, d (arrays): Parameters associated with each individual, potentially 
+            relevant to the context of the evaluation (e.g., PID controller parameters).
+            velocities (array): An array containing the average velocities for each 
+            individual, which might be relevant for certain analyses.
+            batteries (array): An array containing the battery life values for each 
+            individual. Higher values indicate better performance.
+        
+        Returns
+        
+            error_df (DataFrame): A pandas DataFrame containing the following 
+            columns for each individual:
+                individual: The identifier for the individual.
+                p, i, d: The PID controller parameters or other relevant parameters 
+                for the individual.
+                magnitude: The sum of squared errors, representing the error magnitude. 
+                Lower values are better.
+                array_length: The length of the error array, indicative of the operational 
+                duration. Higher values are better.
+                avg_velocity: The average velocity for the individual. Included for 
+                contextual information.
+                battery: The battery life of the individual. Higher values are better.
+                arr_len_score: Normalized score based on array_length. Higher scores are better.
+                mag_score: Normalized score based on magnitude. Higher scores are better (inverted).
+                battery_score: Normalized score based on battery. Higher scores are better.
+                rank: The final ranking score, calculated by combining arr_len_score, mag_score, 
+                and battery_score according to their respective weights.
+        
+        Methodology
+        
+            Data Preparation: The function iterates through each individual in 
+            the population, calculating the magnitude of errors and extracting 
+            other relevant parameters. It then appends this information to error_df.
+        
+            Normalization: Each criterion (array length, magnitude, and battery) 
+            is normalized to a [0, 1] scale. For array length and battery, higher 
+            values result in higher scores. For magnitude, the normalization is 
+            inverted so that lower values result in higher scores.
+        
+            Weighting and Preference Matrix: The criteria are weighted according 
+            to their perceived importance to the overall fitness. A pairwise 
+            preference matrix is constructed based on these weighted scores, 
+            comparing each individual against every other individual.
+        
+            Ranking: The final rank for each individual is determined by summing 
+            up their preferences in the preference matrix. The DataFrame is then 
+            sorted by these ranks in descending order, with higher ranks indicating 
+            better overall fitness according to the defined criteria.
+        
+        Customization
+        
+            The weights assigned to each criterion (array_len_weight, 
+                                                    magnitude_weight, 
+                                                    battery_weight) can be adjusted 
+            to reflect their relative importance in the specific context of use. The 
+            default weights are set based on a balanced assumption but should be 
+            tailored to the specific requirements of the evaluation.
+            Additional criteria can be incorporated into the evaluation by extending 
+            the DataFrame to include new columns, normalizing these new criteria,
+            and adjusting the preference matrix calculation to account for these 
+            criteria.
+        
+        Usage
+        
+        To use this function, instantiate the class with the relevant data 
+        (errors, parameters, velocities, and batteries) and call the fitness method. 
+        The method returns a ranked DataFrame, which can be used to select the 
+        top-performing individuals for further analysis or operations.
+                
+                
+                
+        '''
+        error_df = pd.DataFrame(columns=['individual', 
+                                         'p', 
+                                         'i', 
+                                         'd', 
                                          'magnitude',
                                          'array_length',
                                          'avg_velocity',
+                                         'battery',
                                          'arr_len_score',
                                          'mag_score',
+                                         'battery_score',
                                          'rank'])
 
         for i in range(self.pop_size):
-            # remove nan from end of error array
             filtered_array = self.errors[i][:-1]
-            # calculate magnitude of errors - lower is better
-            magnitude = np.sum(np.power(filtered_array,2))
-            magnitude = np.nansum(np.power(filtered_array,2))
-                        
+            magnitude = np.nansum(np.power(filtered_array, 2))
+
             row_data = {
                 'individual': i,
                 'p': self.p[i],
@@ -3254,39 +3392,39 @@ class PID_optimization():
                 'd': self.d[i],
                 'magnitude': magnitude,
                 'array_length': len(filtered_array),
-                'avg_velocity': np.nanmean(self.velocities[i])}
+                'avg_velocity': np.nanmean(self.velocities[i]),
+                'battery': self.batteries[i]  # Assuming you have battery data in self.batteries
+            }
 
-            # append as a new row to df
-            error_df = error_df.append(row_data, ignore_index =True)
-        
+            error_df = error_df.append(row_data, ignore_index=True)
+
         # Normalize the criteria
-        # array length 1 (maximize): higher values are better
-        # magnitude 2 (minimize): lower values are better
-        error_df['arr_len_score'] = (error_df['array_length'] - error_df['array_length'].min()) \
-            / (error_df['array_length'].max() - error_df['array_length'].min())
-        error_df['mag_score'] = (error_df['magnitude'].max() - error_df['magnitude']) \
-            / (error_df['magnitude'].max() - error_df['magnitude'].min())
-        error_df.set_index('individual', inplace = True)
-        
-        array_len_weight = 0.90
-        magnitude_weight = 1 - array_len_weight
-        # Compute pairwise preference matrix
+        error_df['arr_len_score'] = (error_df['array_length'] - error_df['array_length'].min()) / (error_df['array_length'].max() - error_df['array_length'].min())
+        error_df['mag_score'] = (error_df['magnitude'].max() - error_df['magnitude']) / (error_df['magnitude'].max() - error_df['magnitude'].min())
+        error_df['battery_score'] = (error_df['battery'] - error_df['battery'].min()) / (error_df['battery'].max() - error_df['battery'].min())
+
+        error_df.set_index('individual', inplace=True)
+
+        # Update weights to include battery
+        array_len_weight = 0.45
+        magnitude_weight = 0.35
+        battery_weight = 1 - array_len_weight - magnitude_weight
+
         n = len(error_df)
         preference_matrix = np.zeros((n, n))
-        
+
         for i in range(n):
             for j in range(n):
                 if i != j:
                     preference_matrix[i, j] = (array_len_weight * (error_df.at[i, 'arr_len_score'] > error_df.at[j, 'arr_len_score'])) + \
-                        (magnitude_weight * (error_df.at[i, 'mag_score'] > error_df.at[j, 'mag_score']))        
-        # Aggregate preferences
+                                              (magnitude_weight * (error_df.at[i, 'mag_score'] > error_df.at[j, 'mag_score'])) + \
+                                              (battery_weight * (error_df.at[i, 'battery_score'] > error_df.at[j, 'battery_score']))
+
         final_scores = np.sum(preference_matrix, axis=1)
-        
-        # Ranking the alternatives
         error_df['rank'] = final_scores
-        error_df.reset_index(drop = False, inplace = True)
-        error_df.sort_values(by='rank', ascending = False, inplace = True)
-            
+        error_df.reset_index(drop=False, inplace=True)
+        error_df.sort_values(by='rank', ascending=False, inplace=True)
+
         return error_df
     
     def selection(self, error_df):
@@ -3496,19 +3634,22 @@ class PID_optimization():
                                          pid_tuning = True)
                 
                 # run the model and append the error array
+
                 try:
                     sim.run('solution',
-                            self.p[i], # k_p
-                            self.i[i], # k_i
-                            self.d[i], # k_d
                             n = ts,
-                            dt = dt)
+                            dt = dt,
+                            k_p = self.p[i], # k_p
+                            k_i = self.i[i], # k_i
+                            k_d = self.d[i], # k_d
+                            )
                     
                 except:
                     print(f'failed --> P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}\n')
                     pop_error_array.append(sim.error_array)
                     self.errors[i] = sim.error_array
                     self.velocities[i] = np.sqrt(np.power(sim.vel_x_array,2) + np.power(sim.vel_y_array,2))
+                    self.batteries[i] = sim.battery[-1]
                     sim.close()
 
                     continue

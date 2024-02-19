@@ -22,7 +22,7 @@ from emergent import sockeye_SoA as sockeye
 #%% Genetic algorithm parameters
 
 # number of individuals in the population/gene pool per generation. use >= 4 individuals
-pop_size = 100 
+pop_size = 50 
 # number of generations to run the algorithm
 generations = 30
 
@@ -113,10 +113,10 @@ for size in fish_lengths:
         
         # create a new folder for the scenario
         model_name = f"soa_{location}_{size}mm_production"
-        model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\simulations\PID_optimization", model_name)
+        model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\abm_simulations\PID_optimization", model_name)
         
         # copy required surfaces files
-        sockeye_surfaces = r"C:\Users\knebiolo\Desktop\simulations\background"
+        sockeye_surfaces = r"C:\Users\knebiolo\Desktop\abm_simulations\background"
         shutil.copytree(sockeye_surfaces, model_dir)
         
         pid_tuning_start = start_locations[location]

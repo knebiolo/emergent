@@ -36,13 +36,13 @@ crs = 32604
 bbox = (549466.69,549520.48,6641583.35,6641625.48)                             # starting box right near the falls
 
 # how many agents in the simulation?
-n = 1000
-
-# how many timesteps in the model?
-ts = 1000
+n = 100
 
 # what is the delta t
 dt = 0.2
+
+# how many timesteps in the model?
+ts = 7200 /0.2
 
 # what is the water temp?
 water_temp = 20.
