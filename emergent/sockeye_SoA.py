@@ -407,6 +407,9 @@ class PID_controller:
         p_term = self.k_p[:,np.newaxis] * error
         i_term = self.k_i[:,np.newaxis] * self.integral
         d_term = self.k_d[:,np.newaxis] * derivative
+        
+        if np.any(np.linalg.norm(p_term + i_term + d_term,axis = -1) > 2):
+            print ('p_term out of whack, why?')
 
         return p_term + i_term + d_term
     
@@ -1887,18 +1890,18 @@ class simulation():
                 collision = self.collision_cue(1)
             else:
                 rheotaxis = self.rheo_cue(10000)       # 10000
-                shallow = self.shallow_cue(1)      # 10000
-                wave_drag = self.wave_drag_cue(1)   # 5000
-                low_speed = self.vel_cue(1)         # 8000 
-                avoid = self.already_been_here(1, t)# 3000
-                school = self.school_cue(1)         # 9000
-                collision = self.collision_cue(1)   # 2500         
+                shallow = self.shallow_cue(10000)      # 10000
+                wave_drag = self.wave_drag_cue(8000)   # 5000
+                low_speed = self.vel_cue(7500)         # 8000 
+                avoid = self.already_been_here(3000, t)# 3000
+                school = self.school_cue(9000)         # 9000
+                collision = self.collision_cue(2500)   # 2500         
             
             # Create dictionary that has order of behavioral cues
             order_dict = {0: shallow, 
                           1: collision, 
-                          2: avoid, 
-                          3: school, 
+                          2: school, 
+                          3: avoid, 
                           4: rheotaxis, 
                           5: low_speed.T, 
                           6: wave_drag.T}
@@ -2638,7 +2641,7 @@ class simulation():
         per_rec = rec1 - rec0
     
         # Update battery levels for sustained swimming mode
-        mask_sustained = swim_speeds <= self.max_s_U * (self.length/1000.)
+        mask_sustained = bl_s <= self.max_s_U 
         if mask_sustained.ndim == 2:
             mask_sustained = mask_sustained.squeeze()
         if self.num_agents > 1:
@@ -2746,7 +2749,7 @@ class simulation():
         # Subtracting the scalar water velocity from the vector ideal velocity
         # requires broadcasting the water_velocities array to match the shape of ideal_velocities
         #self.swim_speed = np.linalg.norm(ideal_velocities - water_velocities[:, np.newaxis], axis=1)
-        self.swim_speed = np.linalg.norm(ideal_velocities[0] - np.array([self.x_vel,self.y_vel]).T)
+        self.swim_speed = np.linalg.norm(ideal_velocities - np.array([self.x_vel,self.y_vel]).T)
             
 
     def swim(self, dt, pid_controller, mask):
@@ -2820,7 +2823,6 @@ class simulation():
             print(f'drag: {np.round(self.drag,2)}')
             print(f'sog: {np.round(self.sog,4)}')
 
-        
             if np.any(np.isnan(error)):
                 print('nan in error')
                 sys.exit()
@@ -2828,22 +2830,17 @@ class simulation():
         else:
             k_p, k_i, k_d = pid_controller.PID_func(np.sqrt(np.power(self.x_vel,2) + np.power(self.y_vel,2)),
                                                     self.length)
-            pid_controller.k_p = k_p
-            pid_controller.k_i= k_i
-            pid_controller.k_d = np.abs(k_d) + 1.
+            pid_controller.k_p = k_p # np.array([5.5])
+            pid_controller.k_i = k_i #np.array([0.01])
+            pid_controller.k_d = k_d #np.array([1.1])
             
         # Adjust Hzs using the PID controller (vectorized)
         pid_adjustment = pid_controller.update(error)
         
         # add adjustment to the magnitude of thrust
         new_thrust = self.thrust + pid_adjustment
-        
-        # Use the mask to set negative values to 0
-            
-        # if self.num_agents > 1:
-        #     self.thrust = self.thrust * np.nan_to_num((thrust_mag_1/thrust_mag_0)[:,np.newaxis])
-        # else:
-        #     self.thrust = self.thrust * np.nan_to_num((thrust_mag_1/thrust_mag_0))
+                                                                                            
+        #new_thrust = np.clip(new_thrust/self.thrust,-2,2)
 
         # Step 6: Calculate adjusted surge for each fish
         surge_final = new_thrust + self.drag
@@ -2851,54 +2848,8 @@ class simulation():
         # Step 7: Calculate acceleration for each fish
         acc_final = surge_final / self.weight[:,np.newaxis]  
         
-        # # Step 8: Update velocity for each fish
-        # if self.num_agents > 1:
-        #     fish_vel_1_adj = fish_vel_0 + acc_adj * dt
-        # else:
-        #     fish_vel_1_adj = fish_vel_0.flatten() + acc_adj.flatten() * dt  
-        
-        # fish_vel_1_adj = np.where(thrust_mag_1[:,np.newaxis] == 0, 
-        #                           np.vstack((self.x_vel, self.y_vel)).T,
-        #                           fish_vel_1_adj)
-            
-        # if np.any(np.linalg.norm(fish_vel_1_adj, axis = -1) > 10.):
-        #     print ('fish is swimming way too fast')
-        
-        # # Step 9: calculate tailbeat frequency at the new velocity
-        # prev_Hz = self.Hz
-        # self.frequency(mask, fish_vel_1_adj)
-        
-        # # Step 10: if any adjusted frequencies are less than 0 or greater than 20, adjust
-        # self.Hz = np.where(mask, np.clip(self.Hz, 0, 20),self.Hz)
-        
-        # if np.any(np.isnan(self.Hz)):
-        #     print ('Hz is nan')
-        # if np.any(self.Hz / prev_Hz > 1.5):
-        #     print ('fuck - this fish is accelerating way too fast')
-            
-        # self.Hz[negmask] = 1.
-        
-        # # Step 11: calculate thrust - again, this in case
-        # self.thrust_fun(mask = mask, fish_velocities = fish_vel_1_adj)
-        # self.drag_fun(mask = mask, fish_velocities = fish_vel_1_adj)
-                             
-        
-        # # Step 12: calculate final surge and acceleration
-        # surge_final = np.where(mask[:,np.newaxis], self.thrust + self.drag, surge_ini)
-        # # surge_final = np.where(negmask[:,np.newaxis], self.drag, surge_final)
-        
-        # # Step 13: Calculate acceleration for each fish
-        # acc_final = np.round(surge_final / self.weight[:,np.newaxis], 2)  
-        
         # Step 14: Update velocity for each fish
         fish_vel_1 = fish_vel_0 + acc_final * dt  # X component of new velocity 
-            # if np.any(np.linalg.norm(fish_vel_1, axis = -1) > 2.):
-            #     print ('fuck')
-            # self.sog = np.linalg.norm(fish_vel_1, axis = -1)
-
-        
-        # if np.any(np.sign(fish_vel_1) == np.sign(np.sqrt(np.power(self.x_vel,2)+np.power(self.y_vel,2)))):
-        #     print ('fish swimming backwards')
                   
         if np.any(error != 0):
             print ('error is not zero - using PID adjustment')
@@ -2908,22 +2859,25 @@ class simulation():
             
         # Step 7: Prepare for position update
         # Note: Actual position update should be done in the main simulation loop
-        self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
-        self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
-
-        self.X = np.where(mask, self.X + fish_vel_1[:,0] * dt, self.X)
-        self.Y = np.where(mask, self.Y + fish_vel_1[:,1] * dt, self.Y)
+        # self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
+        # self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
+        
+        dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
+        
+        if np.any(np.linalg.norm(dxdy, axis = -1) > 4.):
+            print ('large change in position - why?')
+        
+        return dxdy
+        
+        # self.X = np.where(mask, self.X + fish_vel_1[:,0] * dt, self.X)
+        # self.Y = np.where(mask, self.Y + fish_vel_1[:,1] * dt, self.Y)
     
-        # if np.any(np.isnan(self.X)):
+        # if np.isnan(dy) or np.isnan(dx):
         #     print ('fuck - fish flew off ')
         #     self.hdf5.close()
         #     sys.exit()
             
-        # if np.any(np.logical_and(np.sqrt((self.prev_X - self.X)**2 + (self.prev_Y - self.Y)**2) / dt > self.ideal_sog * 50.,
-        #                          self.swim_behav != 3)):
-        #     print ('swimming too fast - why')
-            
-        self.sog = np.sqrt((self.prev_X - self.X)**2 + (self.prev_Y - self.Y)**2) / dt
+        #self.sog = np.sqrt((self.prev_X - self.X)**2 + (self.prev_Y - self.Y)**2) / dt
         
         # if np.any(np.isnan(self.sog)):
         #     print ('fuck - fish flew off - why?')         
@@ -2979,15 +2933,13 @@ class simulation():
                                 )
     
         # Calculate the new position for each fish
-        if self.num_agents > 1:
-            self.X += displacement * self.arr.cos(self.heading)
-            self.Y += displacement * self.arr.sin(self.heading)
-        else:
-            self.X += displacement.flatten() * self.arr.cos(self.heading.flatten())
-            self.Y += displacement.flatten() * self.arr.sin(self.heading.flatten())        
+        dx = displacement * self.arr.cos(self.heading)
+        dy = displacement * self.arr.sin(self.heading)
+       
+        return np.stack((dx,dy)).T
 
             
-    def odometer(self, t):
+    def odometer(self, t, dt):
         """
         Updates the running counter of the amount of kCal consumed by each fish during a simulation timestep.
     
@@ -3045,8 +2997,15 @@ class simulation():
                     (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
                 )) - sr_o2_rate
             )
+        # swim cost is expressed in mg O2 _kg _hr.  convert to mg O2 _ kg
+        hours = dt * (1./3600.)
+        per_capita_swim_cost = swim_cost * hours
+        mg_O2 = per_capita_swim_cost * self.weight
+        # Brett (1973) used a mean oxycalorific equivalent of 3.36 cal/ mg O2 (RQ = 0.8) 
+        kcal = mg_O2 * (3.36 / 1000)
+            
         # Update kilocalories burned
-        self.kcal += swim_cost
+        self.kcal += kcal
             
     def timestep(self, t, dt, g, pid_controller):
         """
@@ -3097,28 +3056,35 @@ class simulation():
         time_since_jump = t - self.time_of_jump
         
         # Create a boolean mask for the fish that should jump
-        should_jump = (sog_to_water_vel_ratio < 0.1) & \
+        should_jump = (sog_to_water_vel_ratio <= 0.2) & \
             (heading_sign != water_flow_direction_sign) & \
-                      (time_since_jump > 120) & (self.battery > 0.4) # default value battery 0.4
+                      (time_since_jump > 120) & (self.battery >= 0.4) # default value battery 0.4
         
         # Apply the jump or swim functions based on the condition
         # For each fish that should jump
-        self.jump(t=t, g = g, mask=should_jump)
+        dxdy_jump = self.jump(t=t, g = g, mask=should_jump)
         
         # For each fish that should swim
         self.drag_fun(mask=~should_jump)
         self.frequency(mask=~should_jump)
         self.thrust_fun(mask=~should_jump)
-        self.swim(dt, pid_controller = pid_controller, mask=~should_jump)
+        dxdy_swim = self.swim(dt, pid_controller = pid_controller, mask=~should_jump)
         
+        # move
+        self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
+        self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
+        
+        self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
+        self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
+
         # Calculate mileage
-        self.odometer(t=t)  
+        self.odometer(t=t, dt = dt)  
         
         # Log the timestep data
         self.timestep_flush(t)
 
             
-    def run(self, model_name, n, dt, k_p = None, k_i = None, k_d = None):
+    def run(self, model_name, n, dt, video = True, k_p = None, k_i = None, k_d = None):
         """
         Executes the simulation model over a specified number of time steps and generates a movie of the simulation.
     
@@ -3147,73 +3113,90 @@ class simulation():
         """        
         t0 = time.time()
         if self.pid_tuning == False:
-            # get depth raster
-            depth_arr = self.hdf5['environment/depth'][:]
-            depth = rasterio.MemoryFile()
-            height = depth_arr.shape[0]
-            width = depth_arr.shape[1]
+            if video == True:
+                # get depth raster
+                depth_arr = self.hdf5['environment/depth'][:]
+                depth = rasterio.MemoryFile()
+                height = depth_arr.shape[0]
+                width = depth_arr.shape[1]
+                
+                with depth.open(
+                    driver ='GTiff',
+                    height = depth_arr.shape[0],
+                    width = depth_arr.shape[1],
+                    count =1,
+                    dtype ='float32',
+                    crs = self.crs,
+                    transform = self.depth_rast_transform
+                ) as dataset:
+                    dataset.write(depth_arr, 1)
+        
+                    # define metadata for movie
+                    FFMpegWriter = manimation.writers['ffmpeg']
+                    metadata = dict(title= model_name, artist='Matplotlib',
+                                    comment='emergent model run %s'%(datetime.now()))
+                    writer = FFMpegWriter(fps = np.round(30/dt,0), metadata=metadata)
+        
+                    #initialize plot
+                    fig, ax = plt.subplots(figsize = (10,5))
+        
+                    background = ax.imshow(dataset.read(1),
+                                           origin = 'upper',
+                                           extent = [dataset.bounds[0],
+                                                      dataset.bounds[2],
+                                                      dataset.bounds[1],
+                                                      dataset.bounds[3]])
+        
+                    agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
+        
+                    plt.xlabel('Easting')
+                    plt.ylabel('Northing')
+        
+                    # Update the frames for the movie
+                    with writer.saving(fig, 
+                                       os.path.join(self.model_dir,'%s.mp4'%(model_name)), 
+                                       dpi = 300):
+                        # set up PID controller 
+                        #TODO make PID controller a function of length and water velocity
+                        pid_controller = PID_controller(self.num_agents,
+                                                        k_p, 
+                                                        k_i, 
+                                                        k_d)
+                        
+                        pid_controller.interp_PID(r'C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\pid_optimize_Nushagak.csv')
+                        for i in range(int(n)):
+                            self.timestep(i, dt, g, pid_controller)
+        
+                            # write frame
+                            agent_pts.set_data(self.X,
+                                               self.Y)
+                            writer.grab_frame()
+                                
+                            print ('Time Step %s complete'%(i))
+    
+                # clean up
+                writer.finish()
+                self.hdf5.flush()
+                self.hdf5.close()
+                depth.close()     
+                t1 = time.time() 
             
-            with depth.open(
-                driver ='GTiff',
-                height = depth_arr.shape[0],
-                width = depth_arr.shape[1],
-                count =1,
-                dtype ='float32',
-                crs = self.crs,
-                transform = self.depth_rast_transform
-            ) as dataset:
-                dataset.write(depth_arr, 1)
-    
-                # define metadata for movie
-                FFMpegWriter = manimation.writers['ffmpeg']
-                metadata = dict(title= model_name, artist='Matplotlib',
-                                comment='emergent model run %s'%(datetime.now()))
-                writer = FFMpegWriter(fps = np.round(30/dt,0), metadata=metadata)
-    
-                #initialize plot
-                fig, ax = plt.subplots(figsize = (10,5))
-    
-                background = ax.imshow(dataset.read(1),
-                                       origin = 'upper',
-                                       extent = [dataset.bounds[0],
-                                                  dataset.bounds[2],
-                                                  dataset.bounds[1],
-                                                  dataset.bounds[3]])
-    
-                agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
-    
-                plt.xlabel('Easting')
-                plt.ylabel('Northing')
-    
-                # Update the frames for the movie
-                with writer.saving(fig, 
-                                   os.path.join(self.model_dir,'%s.mp4'%(model_name)), 
-                                   dpi = 300):
-                    # set up PID controller 
-                    #TODO make PID controller a function of length and water velocity
-                    pid_controller = PID_controller(self.num_agents,
-                                                    k_p, 
-                                                    k_i, 
-                                                    k_d)
+            else:
+                #TODO make PID controller a function of length and water velocity
+                pid_controller = PID_controller(self.num_agents,
+                                                k_p, 
+                                                k_i, 
+                                                k_d)
+                
+                pid_controller.interp_PID(r'C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\pid_optimize_Nushagak.csv')
+                for i in range(int(n)):
+                    self.timestep(i, dt, g, pid_controller)
+                        
+                    print ('Time Step %s complete'%(i))
                     
-                    pid_controller.interp_PID(r'C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\pid_optimize_Nushagak.csv')
-                    for i in range(int(n)):
-                        self.timestep(i, dt, g, pid_controller)
-    
-                        # write frame
-                        agent_pts.set_data(self.X,
-                                           self.Y)
-                        writer.grab_frame()
-                            
-                        print ('Time Step %s complete'%(i))
-    
-    
-            # clean up
-            writer.finish()
-            self.hdf5.flush()
-            self.hdf5.close()
-            depth.close()     
-            t1 = time.time()     
+                self.hdf5.flush()
+                self.hdf5.close()
+                t1 = time.time() 
                     
         else:
             pid_controller = PID_controller(self.num_agents,
@@ -3226,6 +3209,7 @@ class simulation():
                 print ('Time Step %s %s %s %s %s %s complete'%(i,i,i,i,i,i))
                 
                 if i == range(n)[-1]:
+                    self.hdf5.close()
                     sys.exit()
             
         print ('ABM took %s to compile'%(t1-t0))
@@ -3406,8 +3390,8 @@ class PID_optimization():
         error_df.set_index('individual', inplace=True)
 
         # Update weights to include battery
-        array_len_weight = 0.45
-        magnitude_weight = 0.35
+        array_len_weight = 0.35
+        magnitude_weight = 0.40
         battery_weight = 1 - array_len_weight - magnitude_weight
 
         n = len(error_df)
