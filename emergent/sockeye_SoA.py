@@ -408,8 +408,8 @@ class PID_controller:
         i_term = self.k_i[:,np.newaxis] * self.integral
         d_term = self.k_d[:,np.newaxis] * derivative
         
-        if np.any(np.linalg.norm(p_term + i_term + d_term,axis = -1) > 2):
-            print ('p_term out of whack, why?')
+        # if np.any(np.linalg.norm(p_term + i_term + d_term,axis = -1) > 2):
+        #     print ('p_term out of whack, why?')
 
         return p_term + i_term + d_term
     
@@ -1032,7 +1032,6 @@ class simulation():
                 self.hdf5['memory/%s'%(i)][:, :] = single_arr
 
 
-    
         # # Update the mental map for all agents in the HDF5 dataset at once
         # mental_map_dataset = self.hdf5['memory/maps'][:]
             
@@ -1890,12 +1889,12 @@ class simulation():
                 collision = self.collision_cue(1)
             else:
                 rheotaxis = self.rheo_cue(10000)       # 10000
-                shallow = self.shallow_cue(10000)      # 10000
-                wave_drag = self.wave_drag_cue(8000)   # 5000
-                low_speed = self.vel_cue(7500)         # 8000 
-                avoid = self.already_been_here(3000, t)# 3000
-                school = self.school_cue(9000)         # 9000
-                collision = self.collision_cue(2500)   # 2500         
+                shallow = self.shallow_cue(1)      # 10000
+                wave_drag = self.wave_drag_cue(1)   # 5000
+                low_speed = self.vel_cue(1)         # 8000 
+                avoid = self.already_been_here(1, t)# 3000
+                school = self.school_cue(1)         # 9000
+                collision = self.collision_cue(1)   # 2500         
             
             # Create dictionary that has order of behavioral cues
             order_dict = {0: shallow, 
@@ -2397,7 +2396,9 @@ class simulation():
 
         # Calculate fish velocities
         if fish_velocities is None:
-            fish_velocities = np.stack((self.sog * np.cos(self.heading), self.sog * np.sin(self.heading)), axis=-1)
+            fish_velocities = np.stack((self.sog * np.cos(self.heading), 
+                                        self.sog * np.sin(self.heading)), 
+                                       axis=-1)
 
         water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
     
@@ -2435,7 +2436,7 @@ class simulation():
         relative_speeds_squared = np.linalg.norm(relative_velocities, axis=1)**2
     
         # Calculate unit vectors for fish velocities
-        unit_fish_velocities = fish_velocities / self.arr.linalg.norm(fish_velocities, axis=1)[:,self.arr.newaxis]
+        unit_fish_velocities = np.nan_to_num(fish_velocities / self.arr.linalg.norm(fish_velocities, axis=1)[:,self.arr.newaxis])
     
         # Calculate drag forces
         drags = np.where(mask[:,np.newaxis],
@@ -2445,6 +2446,9 @@ class simulation():
 
         # drags = np.where(mask, -0.5 * (densities * 1000) * (surface_areas / 100**2) * drag_coeffs * relative_speeds_squared \
         #     * self.arr.linalg.norm(fish_velocities, axis = 1) * self.wave_drag,0)
+        
+        if np.any(np.isnan(drags)):
+            print ('nan in drags - why?')
         
         self.drag = drags
 
@@ -2800,7 +2804,6 @@ class simulation():
         
         # Step 4: Update velocity for each fish
         fish_vel_1_ini = fish_vel_0 + acc_ini * dt
-        new_sog = np.linalg.norm(fish_vel_1_ini, axis = -1)
             
         # Step 5: Thrust feedback PID controller 
         error = np.where(mask[:,np.newaxis], 
@@ -2858,29 +2861,16 @@ class simulation():
             print ('speed over ground is not equal to ideal speed over ground')
             
         # Step 7: Prepare for position update
-        # Note: Actual position update should be done in the main simulation loop
-        # self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
-        # self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
-        
         dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
         
         if np.any(np.linalg.norm(dxdy, axis = -1) > 4.):
             print ('large change in position - why?')
+            
+        if np.any(np.isnan(dxdy)):
+            print ('nan in dxdy - why?')
+            
         
         return dxdy
-        
-        # self.X = np.where(mask, self.X + fish_vel_1[:,0] * dt, self.X)
-        # self.Y = np.where(mask, self.Y + fish_vel_1[:,1] * dt, self.Y)
-    
-        # if np.isnan(dy) or np.isnan(dx):
-        #     print ('fuck - fish flew off ')
-        #     self.hdf5.close()
-        #     sys.exit()
-            
-        #self.sog = np.sqrt((self.prev_X - self.X)**2 + (self.prev_Y - self.Y)**2) / dt
-        
-        # if np.any(np.isnan(self.sog)):
-        #     print ('fuck - fish flew off - why?')         
                         
     def jump(self, t, g, mask):
         """
@@ -3058,7 +3048,7 @@ class simulation():
         # Create a boolean mask for the fish that should jump
         should_jump = (sog_to_water_vel_ratio <= 0.2) & \
             (heading_sign != water_flow_direction_sign) & \
-                      (time_since_jump > 120) & (self.battery >= 0.4) # default value battery 0.4
+                      (time_since_jump > 120) & (self.battery >= 0.999999999) # default value battery 0.4
         
         # Apply the jump or swim functions based on the condition
         # For each fish that should jump
@@ -3074,8 +3064,13 @@ class simulation():
         self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
         self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
         
-        self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
-        self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
+        self.X = self.X + dxdy_swim[:,0]# + dxdy_jump[:,0]
+        self.Y = self.Y + dxdy_swim[:,1]# + dxdy_jump[:,1]
+        
+        if np.any(np.isnan(self.X)):
+            print ("fish off map")
+            self.hdf5.close()
+            sys.exit()
 
         # Calculate mileage
         self.odometer(t=t, dt = dt)  
@@ -3189,11 +3184,13 @@ class simulation():
                                                 k_d)
                 
                 pid_controller.interp_PID(r'C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\pid_optimize_Nushagak.csv')
+                
+                # iterate over timesteps 
                 for i in range(int(n)):
                     self.timestep(i, dt, g, pid_controller)
-                        
                     print ('Time Step %s complete'%(i))
                     
+                # close and cleanup
                 self.hdf5.flush()
                 self.hdf5.close()
                 t1 = time.time() 
