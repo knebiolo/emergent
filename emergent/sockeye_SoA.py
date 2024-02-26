@@ -56,6 +56,9 @@ warnings.filterwarnings("ignore")
 
 np.set_printoptions(suppress=True)
 
+# Get the directory of the current script
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
 def get_arr(use_gpu):
     '''
     Parameters
@@ -413,7 +416,7 @@ class PID_controller:
 
         return p_term + i_term + d_term
     
-    def interp_PID(self,data_ws):
+    def interp_PID(self):
         '''
         Parameters
         ----------
@@ -423,8 +426,9 @@ class PID_controller:
         -------
         tuple consisting of (P,I,D).
         '''
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/pid_optimize_Nushagak.csv')
         # get data
-        df = pd.read_csv(r'C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\pid_optimize_Nushagak.csv')
+        df = pd.read_csv(data_dir)
         
         # get data arrays
         length = df.loc[:, 'fish_length'].values
@@ -549,8 +553,8 @@ class simulation():
         self.sim_length(fish_length)
         self.sim_weight()
         self.sim_body_depth()
-        recover = pd.read_csv(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")        
-        #recover = pd.read_csv(r"C:\Users\AYoder\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/recovery.csv')
+        recover = pd.read_csv(data_dir)        
         recover['Seconds'] = recover.Minutes * 60.
         self.recovery = CubicSpline(recover.Seconds, recover.Recovery, extrapolate = True,)
         del recover
@@ -1430,7 +1434,7 @@ class simulation():
         - The vectorized approach is expected to improve performance by reducing the overhead of Python loops.
         """
 
-        buff = 4.  # 2 meters
+        buff = 2.  # 2 meters
     
         # get the x, y position of the agent 
         x, y = (self.X, self.Y)
@@ -1539,7 +1543,9 @@ class simulation():
         """
 
         # get data
-        hughes = pd.read_csv(r'../data/wave_drag_huges_2004_fig3.csv')
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/wave_drag_huges_2004_fig3.csv')
+
+        hughes = pd.read_csv(data_dir)
 
         hughes.sort_values(by = 'body_depths_submerged',
                            ascending = True,
@@ -3158,7 +3164,7 @@ class simulation():
                                                         k_i, 
                                                         k_d)
                         
-                        pid_controller.interp_PID(r'C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\pid_optimize_Nushagak.csv')
+                        pid_controller.interp_PID()
                         for i in range(int(n)):
                             self.timestep(i, dt, g, pid_controller)
         
@@ -3183,7 +3189,7 @@ class simulation():
                                                 k_i, 
                                                 k_d)
                 
-                pid_controller.interp_PID(r'C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\pid_optimize_Nushagak.csv')
+                pid_controller.interp_PID()
                 
                 # iterate over timesteps 
                 for i in range(int(n)):
