@@ -207,6 +207,75 @@ def output_excel(records, model_dir, model_name):
     
     print('records exported. check output excel file.')
     
+def movie_maker(directory, model_name, crs, dt, depth_rast_transform):
+    # connect to model
+    model_directory = os.path.join(directory,'%s.h5'%(model_name))
+    hdf5 = h5py.File(model_directory, 'r')
+    X_arr = hdf5['agent_data/X'][:]
+    Y_arr = hdf5['agent_data/Y'][:]
+    
+    # calculate important things, like the number of columns which should equal the number of timesteps
+    shape = X_arr.shape
+
+    # Number of columns is the second element of the 'shape' tuple
+    num_columns = shape[1]
+
+    # get depth raster
+    depth_arr = hdf5['environment/depth'][:]
+    depth = rasterio.MemoryFile()
+    height = depth_arr.shape[0]
+    width = depth_arr.shape[1]
+    
+    with depth.open(
+        driver ='GTiff',
+        height = depth_arr.shape[0],
+        width = depth_arr.shape[1],
+        count =1,
+        dtype ='float32',
+        crs = crs,
+        transform = depth_rast_transform
+    ) as dataset:
+        dataset.write(depth_arr, 1)
+
+        # define metadata for movie
+        FFMpegWriter = manimation.writers['ffmpeg']
+        metadata = dict(title= model_name, artist='Matplotlib',
+                        comment='emergent model run %s'%(datetime.now()))
+        writer = FFMpegWriter(fps = np.round(30/dt,0), metadata=metadata)
+
+        #initialize plot
+        fig, ax = plt.subplots(figsize = (10,5))
+
+        background = ax.imshow(dataset.read(1),
+                               origin = 'upper',
+                               extent = [dataset.bounds[0],
+                                          dataset.bounds[2],
+                                          dataset.bounds[1],
+                                          dataset.bounds[3]])
+
+        agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
+
+        plt.xlabel('Easting')
+        plt.ylabel('Northing')
+
+        # Update the frames for the movie
+        with writer.saving(fig, 
+                           os.path.join(directory,'%s.mp4'%(model_name)), 
+                           dpi = 300):
+
+            for i in range(int(num_columns)):
+
+
+                # write frame
+                agent_pts.set_data(X_arr[:, i],
+                                   Y_arr[:, i])
+                writer.grab_frame()
+                    
+                print ('Time Step %s complete'%(i))
+
+    # clean up
+    writer.finish()
+    
 def HECRAS (model_dir, HECRAS_dir, resolution, crs):
     """
     Import environment data from a HECRAS model and generate raster files.
@@ -634,6 +703,9 @@ class simulation():
         
         # error array
         self.error_array = np.array([])
+        
+        # initialize cumulative time
+        self.cumulative_time = 0.
 
     def sim_sex(self):
         """
@@ -1479,8 +1551,11 @@ class simulation():
         depth_multiplier = np.where(depths < min_depth[:,np.newaxis,np.newaxis], 1, 0)
 
         # Calculate the difference vectors
-        delta_x = x_coords - self.X[:,np.newaxis,np.newaxis]
-        delta_y = y_coords - self.Y[:,np.newaxis,np.newaxis]
+        # delta_x = x_coords - self.X[:,np.newaxis,np.newaxis]
+        # delta_y = y_coords - self.Y[:,np.newaxis,np.newaxis]
+        
+        delta_x =  self.X[:,np.newaxis,np.newaxis] - x_coords
+        delta_y =  self.Y[:,np.newaxis,np.newaxis] - y_coords
         
         # Calculate the magnitude of each vector
         magnitudes = np.sqrt(np.power(delta_x,2) + np.power(delta_x,2))
@@ -1503,6 +1578,9 @@ class simulation():
         else:
             total_x_force = np.nansum(x_force)#, axis = (1, 2))#, axis = (0))
             total_y_force = np.nansum(y_force)#, axis = (1, 2))
+            
+        if np.any(x_force > 0.):
+            print ('check repulsive force')
     
         repulsive_forces =  np.array([total_x_force, total_y_force]).T
         
@@ -1882,70 +1960,64 @@ class simulation():
         agent_model.arbitrate(t=current_time_step)
         # The agent's heading is updated based on the arbitration of behavioral cues.
         """
-
-        if t % 5 == 0 or t == 0:
-            # calculate behavioral cues
-            if self.pid_tuning == True:
-                rheotaxis = self.rheo_cue(50000)
-                shallow = self.shallow_cue(1)
-                wave_drag = self.wave_drag_cue(1)
-                low_speed = self.vel_cue(1)
-                avoid = self.already_been_here(1, t)
-                school = self.school_cue(1)
-                collision = self.collision_cue(1)
-            else:
-                rheotaxis = self.rheo_cue(10000)       # 10000
-                shallow = self.shallow_cue(1)      # 10000
-                wave_drag = self.wave_drag_cue(1)   # 5000
-                low_speed = self.vel_cue(1)         # 8000 
-                avoid = self.already_been_here(1, t)# 3000
-                school = self.school_cue(1)         # 9000
-                collision = self.collision_cue(1)   # 2500         
-            
-            # Create dictionary that has order of behavioral cues
-            order_dict = {0: shallow, 
-                          1: collision, 
-                          2: school, 
-                          3: avoid, 
-                          4: rheotaxis, 
-                          5: low_speed.T, 
-                          6: wave_drag.T}
-            
-            # Create dictionary that holds all steering cues
-            cue_dict = {'rheotaxis': rheotaxis, 
-                        'shallow': shallow, 
-                        'wave_drag': wave_drag.T, 
-                        'low_speed': low_speed.T, 
-                        'avoid': avoid, 
-                        'school': school, 
-                        'collision': collision}
-            
-            head_vec = np.zeros_like(rheotaxis)
-            
-            # Arbitrate between different behaviors
-            head_vec = np.where(self.swim_behav[:,np.newaxis] == 1,
-                                sum([np.where(np.linalg.norm(head_vec, axis=1, keepdims=True) >= 7500, 
-                                              head_vec, 
-                                              head_vec + cue) for cue in order_dict.values()]),
-                                head_vec)
-            
-            head_vec = np.where(self.swim_behav[:,np.newaxis] == 2, 
-                                cue_dict['shallow'] + cue_dict['collision'] + cue_dict['low_speed'],
-                                head_vec)
-            head_vec = np.where(self.swim_behav[:,np.newaxis] == 3, 
-                                cue_dict['rheotaxis'], 
-                                head_vec)
-            
-            # Calculate heading for each agent
-            if len(head_vec.shape) == 2:
-                self.heading = np.arctan2(head_vec[:, 1], head_vec[:, 0])
-            else: 
-                self.heading = np.arctan2(head_vec[:, 0, 1], head_vec[:, 0, 0])        
-            
-            if self.pid_tuning == True:
-                if np.any(np.isnan(self.heading)):
-                    print ('debug check point Nans in headings')
-                    sys.exit()
+        
+        # calculate behavioral cues
+        if self.pid_tuning == True:
+            rheotaxis = self.rheo_cue(50000)
+            shallow = self.shallow_cue(1)
+            wave_drag = self.wave_drag_cue(1)
+            low_speed = self.vel_cue(1)
+            avoid = self.already_been_here(1, t)
+            school = self.school_cue(1)
+            collision = self.collision_cue(1)
+        else:
+            rheotaxis = self.rheo_cue(8000)       # 10000
+            shallow = self.shallow_cue(15000)      # 10000
+            wave_drag = self.wave_drag_cue(5000)   # 5000
+            low_speed = self.vel_cue(10000)         # 8000 
+            avoid = self.already_been_here(3000, t)# 3000
+            school = self.school_cue(9000)         # 9000
+            collision = self.collision_cue(2500)   # 2500         
+        
+        # Create dictionary that has order of behavioral cues
+        order_dict = {0: shallow, 
+                      1: collision, 
+                      2: school, 
+                      3: avoid, 
+                      4: rheotaxis, 
+                      5: low_speed.T, 
+                      6: wave_drag.T}
+        
+        # Create dictionary that holds all steering cues
+        cue_dict = {'rheotaxis': rheotaxis, 
+                    'shallow': shallow, 
+                    'wave_drag': wave_drag.T, 
+                    'low_speed': low_speed.T, 
+                    'avoid': avoid, 
+                    'school': school, 
+                    'collision': collision}
+        
+        head_vec = np.zeros_like(rheotaxis)
+        
+        # Arbitrate between different behaviors
+        head_vec = np.where(self.swim_behav[:,np.newaxis] == 1,
+                            sum([np.where(np.linalg.norm(head_vec, axis=1, keepdims=True) >= 8000, 
+                                          head_vec, 
+                                          head_vec + cue) for cue in order_dict.values()]),
+                            head_vec)
+        
+        head_vec = np.where(self.swim_behav[:,np.newaxis] == 2, 
+                            cue_dict['shallow'] + cue_dict['collision'] + cue_dict['low_speed'],
+                            head_vec)
+        head_vec = np.where(self.swim_behav[:,np.newaxis] == 3, 
+                            cue_dict['rheotaxis'], 
+                            head_vec)
+        
+        # Calculate heading for each agent
+        if len(head_vec.shape) == 2:
+            self.heading = np.arctan2(head_vec[:, 1], head_vec[:, 0])
+        else: 
+            self.heading = np.arctan2(head_vec[:, 0, 1], head_vec[:, 0, 0])        
     
     def thrust_fun(self, mask, fish_velocities = None):
         """
@@ -3039,7 +3111,9 @@ class simulation():
         self.fatigue(t, dt)
         
         # Arbitrate amongst behavioral cues
-        self.arbitrate(t)
+        tolerance = 0.1  # A small tolerance level to account for floating-point arithmetic issues
+        if abs(self.cumulative_time % 1) < tolerance or abs(self.cumulative_time % 1 - 1) < tolerance:
+            self.arbitrate(t)
         
         # Calculate the ratio of ideal speed over ground to the magnitude of water velocity
         sog_to_water_vel_ratio = self.ideal_sog / self.arr.linalg.norm([self.x_vel, self.y_vel], axis=0)
@@ -3054,7 +3128,7 @@ class simulation():
         # Create a boolean mask for the fish that should jump
         should_jump = (sog_to_water_vel_ratio <= 0.2) & \
             (heading_sign != water_flow_direction_sign) & \
-                      (time_since_jump > 120) & (self.battery >= 0.999999999) # default value battery 0.4
+                      (time_since_jump > 120) & (self.battery >= 0.4) # default value battery 0.4
         
         # Apply the jump or swim functions based on the condition
         # For each fish that should jump
@@ -3070,22 +3144,28 @@ class simulation():
         self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
         self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
         
-        self.X = self.X + dxdy_swim[:,0]# + dxdy_jump[:,0]
-        self.Y = self.Y + dxdy_swim[:,1]# + dxdy_jump[:,1]
+        self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
+        self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
         
         if np.any(np.isnan(self.X)):
             print ("fish off map")
             self.hdf5.close()
             sys.exit()
-
+            
+        if np.any(dxdy_jump != 0.):
+            print ('check jump movement')
+            
         # Calculate mileage
         self.odometer(t=t, dt = dt)  
         
         # Log the timestep data
         self.timestep_flush(t)
+        
+        # accumulate time
+        self.cumulative_time = self.cumulative_time + dt
 
             
-    def run(self, model_name, n, dt, video = True, k_p = None, k_i = None, k_d = None):
+    def run(self, model_name, n, dt, video = False, k_p = None, k_i = None, k_d = None):
         """
         Executes the simulation model over a specified number of time steps and generates a movie of the simulation.
     
