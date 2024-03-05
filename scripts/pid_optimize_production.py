@@ -22,7 +22,7 @@ from emergent import sockeye_SoA as sockeye
 #%% Genetic algorithm parameters
 
 # number of individuals in the population/gene pool per generation. use >= 4 individuals
-pop_size = 50 
+pop_size = 20 
 # number of generations to run the algorithm
 generations = 20
 
@@ -110,7 +110,7 @@ fish_length = 550
 
 # length stats for production loop: (min, 25%, 50%, 75%, max)
 #fish_lengths = (698, 626, 598, 570, 468)
-fish_lengths = (598, 570, 468)
+fish_lengths = (698, 626, 598, 570, 468)
 
 #%% loop
 # Run the algorithm for all fish sizes and starting locations.

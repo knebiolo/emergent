@@ -20,7 +20,7 @@ import os
 
 
 # identify input and output model names
-model_name = 'val_06'
+model_name = 'val_09'
 
 # identify directories
 model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\abm_simulations\simulations",model_name)
@@ -31,18 +31,18 @@ crs = 32604
 
 # create a starting box - aka where are all the fish starting from?
 # W,E,S,N
-#bbox = (550328.25,550510.05,6641500.76,6641600.31)                             # starting box way downstream
-bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # kinda near the falls
+bbox = (550402.28,550533.22,6641508.09,6641584.47)                             # starting box way downstream
+#bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # kinda near the falls
 #bbox = (549466.69,549520.48,6641583.35,6641625.48)                             # starting box right near the falls
 
 # how many agents in the simulation?
 n = 100
 
 # what is the delta t
-dt = 0.2
+dt = 0.5
 
 # how many timesteps in the model?
-hours = 0.5
+hours = 2
 ts = 3600. * hours / dt
 #ts = 2000
 

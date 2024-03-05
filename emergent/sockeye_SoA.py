@@ -464,27 +464,66 @@ def HECRAS (model_dir, HECRAS_dir, resolution, crs):
 
 
 class PID_controller:
-    def __init__(self, n_agents, k_p = 0., k_i = 0., k_d = 0.):
+    def __init__(self, n_agents, k_p = 0., k_i = 0., k_d = 0., tau_d = 1):
         self.k_p = np.array([k_p])
         self.k_i = np.array([k_i])
         self.k_d = np.array([k_d])
+        self.tau_d = tau_d
         self.integral = np.zeros((np.round(n_agents,0).astype(np.int32),2))
         self.previous_error = np.zeros((np.round(n_agents,0).astype(np.int32),2))
+        self.derivative_filtered = np.zeros((np.round(n_agents,0).astype(np.int32),2))
 
-    def update(self, error):
-        self.integral += error
+    def update(self, error, dt, status):
+        # create a mask - if this fish is fatigued, this doesn't matter
+        mask = np.where(status == 3,True,False)
+        
+        self.integral = np.where(~mask, self.integral + error, self.integral)
         derivative = error - self.previous_error
         self.previous_error = error
-
-        p_term = self.k_p[:,np.newaxis] * error
-        i_term = self.k_i[:,np.newaxis] * self.integral
-        d_term = self.k_d[:,np.newaxis] * derivative
-        
-        # if np.any(np.linalg.norm(p_term + i_term + d_term,axis = -1) > 2):
-        #     print ('p_term out of whack, why?')
-
-        return p_term + i_term + d_term
     
+        p_term = self.k_p[:, np.newaxis] * error
+        i_term = self.k_i[:, np.newaxis] * self.integral
+        d_term = self.k_d[:, np.newaxis] * derivative
+        
+        # # calculate unsaturated output
+        # unsaturated_output = p_term + i_term + d_term
+
+        # # Apply limits
+        # max_limit = [[20.,20.]]
+        # min_limit = [[-20.,-20.]]
+        
+        # actual_output = np.clip(unsaturated_output, min_limit, max_limit)
+        
+        # # Back-calculation if necessary
+        # if np.any(actual_output != unsaturated_output):
+        #     excess = unsaturated_output - actual_output
+        #     excess_mask = np.where(excess != 0., True, False)
+        #     integral_adjustment = np.where(~mask,
+        #                                    excess / self.k_i[:, np.newaxis],
+        #                                    [[0., 0.]])
+            
+        #     print ('initial integral \n %s'%(self.integral))
+            
+        #     self.integral = np.where(~excess_mask,
+        #                              self.integral + integral_adjustment,
+        #                              [[0., 0.]])
+            
+        #     i_term = self.k_i[:, np.newaxis] * self.integral
+        #     print ('i term: \n %s'%(i_term))
+        #     print ('new integral \n %s'%(self.integral))
+            
+        
+        # # Apply low-pass filter to derivative
+        # self.derivative_filtered += (dt / (self.tau_d + dt)) * (derivative - self.derivative_filtered)
+    
+        # # Update for next iteration
+        # self.previous_measurement = error
+    
+        # # Calculate D term with filtered derivative
+        # d_term = -self.k_d[:, np.newaxis] * self.derivative_filtered
+    
+        return np.where(~mask,p_term + i_term + d_term,0.0) #+ i_term + d_term
+        
     def interp_PID(self):
         '''
         Parameters
@@ -755,6 +794,7 @@ class simulation():
                     self.length = self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
         
         # we can also set these arrays that contain parameters that are a function of length
+        self.length = np.where(self.length < 475.,475.,self.length)
         self.sog = self.length/1000.  # sog = speed over ground - assume fish maintain 1 body length per second
         self.ideal_sog = self.sog
        # self.swim_speed = self.length/1000.        # set initial swim speed
@@ -1205,7 +1245,7 @@ class simulation():
         
         t_since = mmap - t
         
-        multiplier = np.where(np.logical_and(t_since > 600, t_since < 3600),1,0)
+        multiplier = np.where(np.logical_and(t_since > 30, t_since < 3600),1,0)
 
         # Calculate the difference vectors
         delta_x = self.X[:,np.newaxis,np.newaxis] - x_coords
@@ -1579,8 +1619,8 @@ class simulation():
             total_x_force = np.nansum(x_force)#, axis = (1, 2))#, axis = (0))
             total_y_force = np.nansum(y_force)#, axis = (1, 2))
             
-        if np.any(x_force > 0.):
-            print ('check repulsive force')
+        # if np.any(x_force > 0.):
+        #     print ('check repulsive force')
     
         repulsive_forces =  np.array([total_x_force, total_y_force]).T
         
@@ -1971,13 +2011,21 @@ class simulation():
             school = self.school_cue(1)
             collision = self.collision_cue(1)
         else:
-            rheotaxis = self.rheo_cue(8000)       # 10000
+            rheotaxis = self.rheo_cue(7000)       # 10000
             shallow = self.shallow_cue(15000)      # 10000
-            wave_drag = self.wave_drag_cue(5000)   # 5000
+            wave_drag = self.wave_drag_cue(10000)   # 5000
             low_speed = self.vel_cue(10000)         # 8000 
-            avoid = self.already_been_here(3000, t)# 3000
-            school = self.school_cue(9000)         # 9000
-            collision = self.collision_cue(2500)   # 2500         
+            avoid = self.already_been_here(5000, t)# 3000
+            school = self.school_cue(12000)         # 9000
+            collision = self.collision_cue(2500)   # 2500 
+            
+            # rheotaxis = self.rheo_cue(10000)       # 10000
+            # shallow = self.shallow_cue(1)      # 10000
+            # wave_drag = self.wave_drag_cue(1)   # 5000
+            # low_speed = self.vel_cue(1)         # 8000 
+            # avoid = self.already_been_here(1, t)# 3000
+            # school = self.school_cue(1)         # 9000
+            # collision = self.collision_cue(1)   # 2500         
         
         # Create dictionary that has order of behavioral cues
         order_dict = {0: shallow, 
@@ -2001,7 +2049,7 @@ class simulation():
         
         # Arbitrate between different behaviors
         head_vec = np.where(self.swim_behav[:,np.newaxis] == 1,
-                            sum([np.where(np.linalg.norm(head_vec, axis=1, keepdims=True) >= 8000, 
+                            sum([np.where(np.linalg.norm(head_vec, axis=1, keepdims=True) >= 7000, 
                                           head_vec, 
                                           head_vec + cue) for cue in order_dict.values()]),
                             head_vec)
@@ -2010,16 +2058,16 @@ class simulation():
                             cue_dict['shallow'] + cue_dict['collision'] + cue_dict['low_speed'],
                             head_vec)
         head_vec = np.where(self.swim_behav[:,np.newaxis] == 3, 
-                            cue_dict['rheotaxis'], 
+                            cue_dict['low_speed'], 
                             head_vec)
         
-        # Calculate heading for each agent
         if len(head_vec.shape) == 2:
-            self.heading = np.arctan2(head_vec[:, 1], head_vec[:, 0])
-        else: 
-            self.heading = np.arctan2(head_vec[:, 0, 1], head_vec[:, 0, 0])        
+            return np.arctan2(head_vec[:, 1], head_vec[:, 0])
+        else:
+            return np.arctan2(head_vec[:, 0, 1], head_vec[:, 0, 0])
+       
     
-    def thrust_fun(self, mask, fish_velocities = None):
+    def thrust_fun(self, mask, t, dt, fish_velocities = None):
         """
         Calculates the thrust for a collection of agents based on Lighthill's elongated-body theory of fish propulsion.
         
@@ -2079,8 +2127,16 @@ class simulation():
         # Calculate swim speed
         water_vel = self.arr.stack((self.x_vel, self.y_vel), axis=-1)
         if fish_velocities is None:
-            fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
-                                                self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+            if t == 0:
+                fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
+                                                    self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+            else:
+                fish_x_vel = (self.X - self.prev_X)/dt
+                fish_y_vel = (self.Y - self.prev_Y)/dt
+                fish_dir = np.arctan2(fish_y_vel,fish_x_vel)
+                
+                fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(fish_dir),
+                                                    self.ideal_sog * self.arr.sin(fish_dir)), axis=-1)
             
         ideal_swim_speed = np.linalg.norm(fish_velocities - water_vel, axis=-1)
 
@@ -2118,7 +2174,7 @@ class simulation():
             
         self.thrust = thrust.T
         
-    def frequency(self, mask, fish_velocities = None):
+    def frequency(self, mask, t, dt, fish_velocities = None):
         ''' Calculate tailbeat frequencies for a collection of agents in a vectorized manner.
         
             This method computes tailbeat frequencies based on Lighthill's elongated-body theory,
@@ -2160,8 +2216,14 @@ class simulation():
         alternate = True
         
         if fish_velocities is None:
-            fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
-                                                  self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+            if t == 0:
+                fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
+                                                    self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+            else:
+                fish_x_vel = (self.X - self.prev_X)/dt
+                fish_y_vel = (self.Y - self.prev_Y)/dt
+                fish_velocities = np.stack((fish_x_vel,fish_y_vel)).T
+            
             alternate = False
         
         swim_speeds_cms = self.arr.linalg.norm(fish_velocities - water_velocities, axis=-1) * 100 + 0.00001
@@ -2192,7 +2254,7 @@ class simulation():
         drags_erg_s = np.where(mask,np.linalg.norm(ideal_drag, axis = -1) * self.length/1000 * 10000000,0)
     
         # Solve for Hz
-        Hz = np.where(self.swim_behav == 3, 5.0,
+        Hz = np.where(self.swim_behav == 3, 7.0,
                       np.sqrt(drags_erg_s * V**2 * np.cos(np.radians(theta))/\
                               (A**2 * B**2 * swim_speeds_cms * np.pi**3 * rho * \
                               (swim_speeds_cms - V) * \
@@ -2203,10 +2265,13 @@ class simulation():
                               )
                       )
             
-        if np.any(np.isnan(Hz)):
-            print ('fuck')
-            
-        self.Hz = Hz
+        # if np.any(np.isnan(Hz)):
+        #     print ('fuck')
+        self.prev_Hz = self.Hz   
+        self.Hz = np.where(Hz > 20, 20, Hz)
+        
+        # if np.any(np.abs(self.prev_Hz/self.Hz) > 1.5):
+        #     print ('big change in tail beat frequency - why')
          
     def kin_visc(self, temp):
         """
@@ -2432,7 +2497,7 @@ class simulation():
     
         return drag_coefficients
 
-    def drag_fun(self, mask, fish_velocities = None):
+    def drag_fun(self, mask, t, dt, fish_velocities = None):
         """
         Calculate the drag force on a sockeye salmon swimming upstream.
     
@@ -2474,9 +2539,13 @@ class simulation():
 
         # Calculate fish velocities
         if fish_velocities is None:
-            fish_velocities = np.stack((self.sog * np.cos(self.heading), 
-                                        self.sog * np.sin(self.heading)), 
-                                       axis=-1)
+            if t == 0:
+                fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
+                                                    self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+            else:
+                fish_x_vel = (self.X - self.prev_X)/dt
+                fish_y_vel = (self.Y - self.prev_Y)/dt
+                fish_velocities = np.stack((fish_x_vel,fish_y_vel)).T
 
         water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
     
@@ -2511,23 +2580,36 @@ class simulation():
     
         # Calculate relative velocities and their norms
         relative_velocities = fish_velocities - water_velocities
-        relative_speeds_squared = np.linalg.norm(relative_velocities, axis=1)**2
+        relative_speeds_squared = np.linalg.norm(relative_velocities, axis=-1)**2
     
         # Calculate unit vectors for fish velocities
-        unit_fish_velocities = np.nan_to_num(fish_velocities / self.arr.linalg.norm(fish_velocities, axis=1)[:,self.arr.newaxis])
-    
+        unit_relative_vector= np.nan_to_num(relative_velocities / self.arr.linalg.norm(relative_velocities, axis=1)[:,self.arr.newaxis])
+
         # Calculate drag forces
         drags = np.where(mask[:,np.newaxis],
                          -0.5 * (density * 1000) * (surface_areas[:,np.newaxis] / 100**2) \
                                        * drag_coeffs[:,self.arr.newaxis] * relative_speeds_squared[:, np.newaxis] \
-                                           * unit_fish_velocities * self.wave_drag[:, np.newaxis],0)
+                                           * unit_relative_vector * self.wave_drag[:, np.newaxis],0)
+            
+        max_drag_magnitude = 5.  # Set a reasonable limit based on your system's physical reality
 
-        # drags = np.where(mask, -0.5 * (densities * 1000) * (surface_areas / 100**2) * drag_coeffs * relative_speeds_squared \
-        #     * self.arr.linalg.norm(fish_velocities, axis = 1) * self.wave_drag,0)
+        # Calculate the magnitude of each drag force vector
+        drag_magnitudes = np.linalg.norm(drags, axis=1)
         
-        if np.any(np.isnan(drags)):
-            print ('nan in drags - why?')
-        
+        # Find where the drag exceeds the maximum and scale it down
+        excessive_drag_indices = np.where(np.logical_and( self.swim_behav == 3, drag_magnitudes > max_drag_magnitude),True,False)
+        drags[excessive_drag_indices] = (drags[excessive_drag_indices].T * (max_drag_magnitude / drag_magnitudes[excessive_drag_indices])).T
+            
+        # if np.any(self.swim_behav == 3):
+        #     print ('check drags calc if fish has forward momentum it should still generate drag, \n but if fish is moving with flow, drag should be minimal')
+        #     print ('fish status: \n %s'%(self.swim_behav))
+        #     print ('fish velocities: \n %s'%(fish_velocities))
+        #     print ('water velocities: \n %s'%(water_velocities))
+        #     print ('relative velocities: \n %s'%(relative_velocities))
+        #     print ('drags: \n %s'%(drags))
+        #     print ('thrust from last t-step, we can only gen 1 Hz: \n %s'%(self.thrust))
+        #     print ('shit')
+            
         self.drag = drags
 
     def ideal_drag_fun(self, fish_velocities = None):
@@ -2564,7 +2646,7 @@ class simulation():
         """
         # Vector components of water velocity and speed over ground for each fish
         water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
-        avg_sog = (self.ideal_sog + self.school_sog)/2.
+        
         if fish_velocities is None:
             fish_velocities = np.stack((self.ideal_sog * np.cos(self.heading),
                                         self.ideal_sog * np.sin(self.heading)), axis=-1)
@@ -2747,8 +2829,8 @@ class simulation():
 
         self.battery[self.battery < 0.0] = 0.0
         
-        if np.any(np.isnan(self.battery)):
-            print ('fuck')
+        # if np.any(np.isnan(self.battery)):
+        #     print ('fuck')
         
         if self.pid_tuning == True:
             if np.isnan(self.battery):
@@ -2834,7 +2916,7 @@ class simulation():
         self.swim_speed = np.linalg.norm(ideal_velocities - np.array([self.x_vel,self.y_vel]).T)
             
 
-    def swim(self, dt, pid_controller, mask):
+    def swim(self, t, dt, pid_controller, mask):
         """
         Method propels each fish agent forward by calculating its new speed over ground 
         (sog) and updating its position.
@@ -2864,13 +2946,19 @@ class simulation():
         """
         
         # Step 1: Calculate fish velocity in vector form for each fish
-        fish_vel_0_x = np.where(mask, self.sog * np.cos(self.heading),0) 
-        fish_vel_0_y = np.where(mask, self.sog * np.sin(self.heading),0)  
+        if t == 0:
+            fish_vel_0_x = np.where(mask, self.sog * np.cos(self.heading),0) 
+            fish_vel_0_y = np.where(mask, self.sog * np.sin(self.heading),0)  
+            fish_vel_0 = np.stack((fish_vel_0_x, fish_vel_0_y)).T
+        else:
+            fish_vel_0_x = (self.X - self.prev_X)/dt
+            fish_vel_0_y = (self.Y - self.prev_Y)/dt
+            fish_vel_0 = np.stack((fish_vel_0_x,fish_vel_0_y)).T
         
-        fish_vel_0 = np.stack((fish_vel_0_x, fish_vel_0_y)).T
+
         
-        ideal_vel_x = np.where(mask, self.sog * np.cos(self.heading),0) 
-        ideal_vel_y = np.where(mask, self.sog * np.sin(self.heading),0)  
+        ideal_vel_x = np.where(mask, self.ideal_sog * np.cos(self.heading),0) 
+        ideal_vel_y = np.where(mask, self.ideal_sog * np.sin(self.heading),0)  
         
         ideal_vel = np.stack((ideal_vel_x, ideal_vel_y)).T
         
@@ -2889,7 +2977,15 @@ class simulation():
                          0.)
         
         self.error = error
-
+        
+        if np.any(np.isnan(error)):
+            print ('nan in error print integral')
+            print ('%s'%(self.integral))
+            print ('pid adjustment:')
+            print ('%s'%(self.pid_adjustment))
+            print ('shit')
+            sys.exit()
+            
         if self.pid_tuning == True:
             self.error_array = np.append(self.error_array, error[0])
             self.vel_x_array = np.append(self.vel_x_array, self.x_vel)
@@ -2899,10 +2995,10 @@ class simulation():
             
             print (f'error: {error}')
             print (f'current velocity: {curr_vel}')
-            print(f'Hz: {self.Hz}')
-            print(f'thrust: {np.round(self.thrust,2)}')
-            print(f'drag: {np.round(self.drag,2)}')
-            print(f'sog: {np.round(self.sog,4)}')
+            print (f'Hz: {self.Hz}')
+            print (f'thrust: {np.round(self.thrust,2)}')
+            print (f'drag: {np.round(self.drag,2)}')
+            print (f'sog: {np.round(self.sog,4)}')
 
             if np.any(np.isnan(error)):
                 print('nan in error')
@@ -2911,41 +3007,60 @@ class simulation():
         else:
             k_p, k_i, k_d = pid_controller.PID_func(np.sqrt(np.power(self.x_vel,2) + np.power(self.y_vel,2)),
                                                     self.length)
-            pid_controller.k_p = k_p # np.array([5.5])
-            pid_controller.k_i = k_i #np.array([0.01])
-            pid_controller.k_d = k_d #np.array([1.1])
+            pid_controller.k_p = np.array([1.])
+            pid_controller.k_i = np.array([0.])
+            pid_controller.k_d = np.array([0.])
             
         # Adjust Hzs using the PID controller (vectorized)
-        pid_adjustment = pid_controller.update(error)
+        pid_adjustment = pid_controller.update(error, dt, None)
+        self.integral = pid_controller.integral
+        self.pid_adjustment = pid_adjustment
+        #TODO at what integral amount does the simulation fail?
+        
+        # if np.any(np.linalg.norm(pid_adjustment, axis = -1) > 5.):
+        #     print ('check adjustment - why you so big?')
         
         # add adjustment to the magnitude of thrust
-        new_thrust = self.thrust + pid_adjustment
+        tired_mask = np.where(self.swim_behav == 3,True,False)
+        
+        #TODO - dampened the pid adjustment just a little bit
+        #new_thrust = np.where(~tired_mask[:,np.newaxis],self.thrust + pid_adjustment * 0.99 ,self.thrust)
                                                                                             
         #new_thrust = np.clip(new_thrust/self.thrust,-2,2)
 
         # Step 6: Calculate adjusted surge for each fish
-        surge_final = new_thrust + self.drag
+        # surge_final = new_thrust + self.drag
         
         # Step 7: Calculate acceleration for each fish
-        acc_final = surge_final / self.weight[:,np.newaxis]  
+        # acc_final = surge_final / self.weight[:,np.newaxis]  
         
         # Step 14: Update velocity for each fish
-        fish_vel_1 = fish_vel_0 + acc_final * dt  # X component of new velocity 
-                  
-        if np.any(error != 0):
-            print ('error is not zero - using PID adjustment')
+        #fish_vel_1 = fish_vel_0 + acc_final * dt  # X component of new velocity 
+        fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
+                              fish_vel_0 + acc_ini * dt + pid_adjustment,
+                              fish_vel_0 + acc_ini * dt)
+        #np.stack((self.x_vel,self.y_vel)).T)
+        
+        # if np.any(tired_mask == True):
+        #     print ('check adjustments')
             
-        if np.any(np.round(self.sog,2) != np.round(self.ideal_sog,2)):
-            print ('speed over ground is not equal to ideal speed over ground')
+        # if np.any(error != 0):
+        #     print ('error is not zero - using PID adjustment')
+            
+        # if np.any(np.round(self.sog,2) != np.round(self.ideal_sog,2)):
+        #     print ('speed over ground is not equal to ideal speed over ground')
             
         # Step 7: Prepare for position update
         dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
         
-        if np.any(np.linalg.norm(dxdy, axis = -1) > 4.):
-            print ('large change in position - why?')
+        # if np.any(self.swim_behav == 3):
+        #     print ('check swimming parameters, we have fatigued fish, should not be generating thrust')
+        
+        # if np.any(np.linalg.norm(dxdy, axis = -1) > 1.):
+        #     print ('large change in position - why?')
             
-        if np.any(np.isnan(dxdy)):
-            print ('nan in dxdy - why?')
+        # if np.any(np.isnan(dxdy)):
+        #     print ('nan in dxdy - why?')
             
         
         return dxdy
@@ -2985,20 +3100,20 @@ class simulation():
         time_airborne = np.where(mask,(2 * self.ucrit * self.arr.sin(jump_angles)) / g, 0)
     
         # Calculate displacement for each fish
-        displacement = self.ucrit * time_airborne * self.arr.cos(jump_angles)
+        displacement = self.ucrit * 0.5 * time_airborne * self.arr.cos(jump_angles)
         
-        if np.any(displacement > 0.):
-            print ('check jump parameters')
+        # if np.any(displacement > 0.):
+        #     print ('check jump parameters')
     
         # Set speed over ground to ucrit for each fish
         #self.sog = np.where(mask, self.ucrit, self.sog)
     
         # Calculate new heading angle for each fish based solely on flow direction
-        self.heading = np.where(mask,
-                                self.arr.arctan2(self.y_vel.flatten(), 
-                                                 self.x_vel.flatten()) - self.arr.radians(180),
-                                self.heading
-                                )
+        # self.heading = np.where(mask,
+        #                         self.arr.arctan2(self.y_vel.flatten(), 
+        #                                          self.x_vel.flatten()) - self.arr.radians(180),
+        #                         self.heading
+        #                         )
     
         # Calculate the new position for each fish
         dx = displacement * self.arr.cos(self.heading)
@@ -3110,11 +3225,6 @@ class simulation():
         # Assess fatigue
         self.fatigue(t, dt)
         
-        # Arbitrate amongst behavioral cues
-        tolerance = 0.1  # A small tolerance level to account for floating-point arithmetic issues
-        if abs(self.cumulative_time % 1) < tolerance or abs(self.cumulative_time % 1 - 1) < tolerance:
-            self.arbitrate(t)
-        
         # Calculate the ratio of ideal speed over ground to the magnitude of water velocity
         sog_to_water_vel_ratio = self.ideal_sog / self.arr.linalg.norm([self.x_vel, self.y_vel], axis=0)
         
@@ -3135,11 +3245,16 @@ class simulation():
         dxdy_jump = self.jump(t=t, g = g, mask=should_jump)
         
         # For each fish that should swim
-        self.drag_fun(mask=~should_jump)
-        self.frequency(mask=~should_jump)
-        self.thrust_fun(mask=~should_jump)
-        dxdy_swim = self.swim(dt, pid_controller = pid_controller, mask=~should_jump)
+        self.drag_fun(mask=~should_jump, t = t, dt = dt)
+        self.frequency(mask=~should_jump, t = t, dt = dt)
+        self.thrust_fun(mask=~should_jump, t = t, dt = dt)
+        dxdy_swim = self.swim(t, dt, pid_controller = pid_controller, mask=~should_jump)
         
+        # Arbitrate amongst behavioral cues
+        tolerance = 0.1  # A small tolerance level to account for floating-point arithmetic issues
+        if abs(self.cumulative_time % 1) < tolerance or abs(self.cumulative_time % 1 - 1) < tolerance:
+            self.heading = self.arbitrate(t)
+            
         # move
         self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
         self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
@@ -3147,13 +3262,20 @@ class simulation():
         self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
         self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
         
+        self.sog = np.where(should_jump,
+                            self.ideal_sog,
+                            np.sqrt(np.power(self.X - self.prev_X,2)+ np.power(self.Y - self.prev_Y,2)) / dt)
+        
+        # if np.any(self.sog > self.ideal_sog * 2.):
+        #     print ('speed over ground way out of whack')
+        
         if np.any(np.isnan(self.X)):
             print ("fish off map")
             self.hdf5.close()
             sys.exit()
-            
-        if np.any(dxdy_jump != 0.):
-            print ('check jump movement')
+               
+        # if np.any(dxdy_jump != 0.):
+        #     print ('check jump movement')
             
         # Calculate mileage
         self.odometer(t=t, dt = dt)  
