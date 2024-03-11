@@ -795,8 +795,9 @@ class simulation():
         
         # we can also set these arrays that contain parameters that are a function of length
         self.length = np.where(self.length < 475.,475.,self.length)
-        self.sog = self.length/1000.  # sog = speed over ground - assume fish maintain 1 body length per second
+        self.sog = self.length/1000. * 0.8  # sog = speed over ground - assume fish maintain 1 body length per second
         self.ideal_sog = self.sog
+        self.opt_sog = self.length/1000. * 0.8
        # self.swim_speed = self.length/1000.        # set initial swim speed
         self.ucrit = self.sog * 7.    # TODO - what is the ucrit for sockeye?
         
@@ -1245,7 +1246,9 @@ class simulation():
         
         t_since = mmap - t
         
-        multiplier = np.where(np.logical_and(t_since > 30, t_since < 3600),1,0)
+        multiplier = np.where(np.logical_and(t_since > 10, t_since < 7200),
+                              1 - (t_since - 5) / (7200 - 5),
+                              0)
 
         # Calculate the difference vectors
         delta_x = self.X[:,np.newaxis,np.newaxis] - x_coords
@@ -1266,14 +1269,9 @@ class simulation():
         y_force = ((weight * unit_vector_y) / magnitudes) * multiplier
     
         # Sum the forces for this agent
-        if self.num_agents > 1:
-            total_x_force = np.nansum(x_force, axis = (1,2))
-            total_y_force = np.nansum(y_force, axis = (1,2))
-        else:
-            total_x_force = np.array([np.nansum(x_force)])
-            total_y_force = np.array([np.nansum(y_force)])
+        total_x_force = np.nansum(x_force, axis = (1,2))
+        total_y_force = np.nansum(y_force, axis = (1,2))
 
-    
         repulsive_forces =  np.array([total_x_force, total_y_force]).T
              
         return repulsive_forces
@@ -1473,8 +1471,10 @@ class simulation():
                                     min_row_indices + ymin, 
                                     min_col_indices + xmin)
         
-        delta_x = self.X - min_x
-        delta_y = self.Y - min_y
+        # delta_x = self.X - min_x
+        # delta_y = self.Y - min_y
+        delta_x = min_x - self.X
+        delta_y = min_y - self.Y
         delta_x_sq = np.power(delta_x,2)
         delta_y_sq = np.power(delta_y,2)
         dist = np.sqrt(delta_x_sq + delta_y_sq)
@@ -1482,9 +1482,10 @@ class simulation():
         # Initialize an array to hold the velocity cues for each agent
         velocity_min = np.zeros((self.num_agents, 2), dtype=float)
 
-        attract_x = (weight * delta_x/dist) / np.power(buff,2)
-        attract_y = (weight * delta_y/dist) / np.power(buff,2)
-        
+        # attract_x = (weight * delta_x/dist) / np.power(buff,2)
+        # attract_y = (weight * delta_y/dist) / np.power(buff,2)
+        attract_x = weight * delta_x
+        attract_y = weight * delta_y
         return np.array([attract_x,attract_y])
 
     def rheo_cue(self, weight):
@@ -1516,12 +1517,16 @@ class simulation():
     
         # Sample the environment to get the velocity direction and adjust to point upstream
         vel_dir = self.sample_environment(self.vel_dir_rast_transform, 'vel_dir') - np.radians(180)
+        #vel_dir = self.sample_environment(self.vel_dir_rast_transform, 'vel_dir')
+
         
         # Calculate the unit vector in the upstream direction
         v_hat = np.vstack([np.cos(vel_dir), np.sin(vel_dir)]).T
         
         # Calculate the rheotactic cue
-        rheotaxis = (weight * v_hat)/(2**2)
+        #rheotaxis = (weight * v_hat)/(2**2)
+        rheotaxis = weight * v_hat
+
         
         return rheotaxis
 
@@ -1546,7 +1551,7 @@ class simulation():
         - The vectorized approach is expected to improve performance by reducing the overhead of Python loops.
         """
 
-        buff = 2.  # 2 meters
+        buff = 2 #* self.length / 1000.  # 2 meters
     
         # get the x, y position of the agent 
         x, y = (self.X, self.Y)
@@ -1591,14 +1596,14 @@ class simulation():
         depth_multiplier = np.where(depths < min_depth[:,np.newaxis,np.newaxis], 1, 0)
 
         # Calculate the difference vectors
-        # delta_x = x_coords - self.X[:,np.newaxis,np.newaxis]
-        # delta_y = y_coords - self.Y[:,np.newaxis,np.newaxis]
+        delta_x = x_coords - self.X[:,np.newaxis,np.newaxis]
+        delta_y = y_coords - self.Y[:,np.newaxis,np.newaxis]
         
-        delta_x =  self.X[:,np.newaxis,np.newaxis] - x_coords
-        delta_y =  self.Y[:,np.newaxis,np.newaxis] - y_coords
+        # delta_x =  self.X[:,np.newaxis,np.newaxis] - x_coords
+        # delta_y =  self.Y[:,np.newaxis,np.newaxis] - y_coords
         
         # Calculate the magnitude of each vector
-        magnitudes = np.sqrt(np.power(delta_x,2) + np.power(delta_x,2))
+        magnitudes = np.sqrt(np.power(delta_x,2) + np.power(delta_y,2))
 
         # Avoid division by zero
         magnitudes = np.where(magnitudes == 0, 0.000001, magnitudes)
@@ -1619,7 +1624,7 @@ class simulation():
             total_x_force = np.nansum(x_force)#, axis = (1, 2))#, axis = (0))
             total_y_force = np.nansum(y_force)#, axis = (1, 2))
             
-        # if np.any(x_force > 0.):
+        # if np.any(np.nan_to_num(x_force) != 0.):
         #     print ('check repulsive force')
     
         repulsive_forces =  np.array([total_x_force, total_y_force]).T
@@ -1773,8 +1778,10 @@ class simulation():
                                     min_row_indices + ymin, 
                                     min_col_indices + xmin)
         
-        delta_x = self.X - min_x
-        delta_y = self.Y - min_y
+        # delta_x = self.X - min_x
+        # delta_y = self.Y - min_y
+        delta_x = min_x - self.X
+        delta_y = min_y - self.Y
         delta_x_sq = np.power(delta_x,2)
         delta_y_sq = np.power(delta_y,2)
         dist = np.sqrt(delta_x_sq + delta_y_sq)
@@ -1782,8 +1789,8 @@ class simulation():
         # Initialize an array to hold the velocity cues for each agent
         velocity_min = np.zeros((self.num_agents, 2), dtype=float)
 
-        attract_x = (weight * delta_x/dist) / np.power(buff,2)
-        attract_y = (weight * delta_y/dist) / np.power(buff,2)
+        attract_x = weight * delta_x
+        attract_y = weight * delta_y
         
         return np.array([attract_x,attract_y])
 
@@ -1846,8 +1853,8 @@ class simulation():
         centroid_y = np.array([np.mean(self.Y[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.num_agents)])
         
         # Calculate vectors to centroids
-        vectors_to_centroid_x = self.X - centroid_x
-        vectors_to_centroid_y = self.Y - centroid_x
+        vectors_to_centroid_x = centroid_x - self.X
+        vectors_to_centroid_y = centroid_y - self.Y 
         
         # Calculate distances to centroids
         distances = np.sqrt(vectors_to_centroid_x**2 + vectors_to_centroid_y**2)
@@ -1858,15 +1865,18 @@ class simulation():
         v_hat_y = np.divide(vectors_to_centroid_y, distances + epsilon, out=np.zeros_like(self.Y), where=distances+epsilon != 0)
         
         # Calculate attractive forces
-        school_cue_array[:, 0] = weight * v_hat_x / (distances**2 + epsilon)
-        school_cue_array[:, 1] = weight * v_hat_y / (distances**2 + epsilon)
+        # school_cue_array[:, 0] = weight * v_hat_x / (distances**2 + epsilon)
+        # school_cue_array[:, 1] = weight * v_hat_y / (distances**2 + epsilon)
+        
+        school_cue_array[:, 0] = weight * vectors_to_centroid_x 
+        school_cue_array[:, 1] = weight * vectors_to_centroid_y
         
         #TODO - we also need to perform velocity matching so.... update ideal_sog
         # Calcaluate a new ideal_sog based on the average sogs of those fish around me
-        sogs =  np.array([np.mean(self.sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.num_agents)])
+        sogs =  np.array([np.mean(self.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.num_agents)])
         self.school_sog = sogs
         
-        return school_cue_array
+        return np.nan_to_num(school_cue_array)
         
     def collision_cue(self, weight):
         """
@@ -1951,9 +1961,9 @@ class simulation():
                             out=np.zeros_like(closest_2_self[:,1]), where=safe_distances!=0)
                         
         # Calculate collision cue components
-        collision_cue_x = np.divide(weight * v_hat_x, safe_distances**2, 
+        collision_cue_x = np.divide(weight * v_hat_x, safe_distances, 
                                     out=np.zeros_like(v_hat_x), where=safe_distances!=0) * same_quad_multiplier
-        collision_cue_y = np.divide(weight * v_hat_y, safe_distances**2, 
+        collision_cue_y = np.divide(weight * v_hat_y, safe_distances, 
                                     out=np.zeros_like(v_hat_y), where=safe_distances!=0) * same_quad_multiplier
         
         # Optional: Combine the components into a single array
@@ -2011,13 +2021,13 @@ class simulation():
             school = self.school_cue(1)
             collision = self.collision_cue(1)
         else:
-            rheotaxis = self.rheo_cue(7000)       # 10000
-            shallow = self.shallow_cue(15000)      # 10000
-            wave_drag = self.wave_drag_cue(10000)   # 5000
-            low_speed = self.vel_cue(10000)         # 8000 
-            avoid = self.already_been_here(5000, t)# 3000
-            school = self.school_cue(12000)         # 9000
-            collision = self.collision_cue(2500)   # 2500 
+            rheotaxis = self.rheo_cue(17000)       # 10000
+            shallow = self.shallow_cue(-50000)      # 10000
+            wave_drag = self.wave_drag_cue(2500)   # 5000
+            low_speed = self.vel_cue(1000)         # 8000 
+            avoid = self.already_been_here(-1000, t)# 3000
+            school = self.school_cue(2500)         # 9000
+            collision = self.collision_cue(-5000)   # 2500 
             
             # rheotaxis = self.rheo_cue(10000)       # 10000
             # shallow = self.shallow_cue(1)      # 10000
@@ -2029,9 +2039,9 @@ class simulation():
         
         # Create dictionary that has order of behavioral cues
         order_dict = {0: shallow, 
-                      1: collision, 
-                      2: school, 
-                      3: avoid, 
+                      1: avoid,
+                      2: collision, 
+                      3: school, 
                       4: rheotaxis, 
                       5: low_speed.T, 
                       6: wave_drag.T}
@@ -2045,20 +2055,40 @@ class simulation():
                     'school': school, 
                     'collision': collision}
         
+        # how many f4cks does this fish have?
+        tolerance = 20000
+        
+        # if shallow cue magnitude is greater than our tolerance, make it equal to tolerance
+        shallow = np.where(np.linalg.norm(shallow,axis = -1)[:,np.newaxis] > tolerance,
+                           np.divide(tolerance,np.linalg.norm(shallow,axis = -1))[:,np.newaxis] * shallow,
+                           shallow)
+        
+        # add up vectors, but make sure it's not greater than the tolerance
+        vec_sum = np.zeros_like(rheotaxis)
+        for i in np.arange(0,7,1):
+            vec = order_dict[i]
+            vec_sum = np.where(np.linalg.norm(vec_sum, axis = -1)[:,np.newaxis] < tolerance,
+                               vec_sum + vec,
+                               vec_sum)
+        
         head_vec = np.zeros_like(rheotaxis)
         
         # Arbitrate between different behaviors
+        # head_vec = np.where(self.swim_behav[:,np.newaxis] == 1,
+        #                     sum([np.where(np.linalg.norm(head_vec, axis=1, keepdims=True) >= 20000, 
+        #                                   head_vec, 
+        #                                   head_vec + cue) for cue in order_dict.values()]),
+        #                     head_vec)
+        
         head_vec = np.where(self.swim_behav[:,np.newaxis] == 1,
-                            sum([np.where(np.linalg.norm(head_vec, axis=1, keepdims=True) >= 7000, 
-                                          head_vec, 
-                                          head_vec + cue) for cue in order_dict.values()]),
+                            vec_sum,
                             head_vec)
         
         head_vec = np.where(self.swim_behav[:,np.newaxis] == 2, 
                             cue_dict['shallow'] + cue_dict['collision'] + cue_dict['low_speed'],
                             head_vec)
         head_vec = np.where(self.swim_behav[:,np.newaxis] == 3, 
-                            cue_dict['low_speed'], 
+                            cue_dict['rheotaxis'],
                             head_vec)
         
         if len(head_vec.shape) == 2:
@@ -2134,9 +2164,13 @@ class simulation():
                 fish_x_vel = (self.X - self.prev_X)/dt
                 fish_y_vel = (self.Y - self.prev_Y)/dt
                 fish_dir = np.arctan2(fish_y_vel,fish_x_vel)
+                fish_mag = np.linalg.norm(np.stack((fish_x_vel,fish_y_vel)).T,axis = -1)
+
+                fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
+                                                    self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
                 
-                fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(fish_dir),
-                                                    self.ideal_sog * self.arr.sin(fish_dir)), axis=-1)
+                # fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(fish_dir),
+                #                                     self.ideal_sog * self.arr.sin(fish_dir)), axis=-1)
             
         ideal_swim_speed = np.linalg.norm(fish_velocities - water_vel, axis=-1)
 
@@ -2252,9 +2286,13 @@ class simulation():
             
         # Convert drag to erg/s
         drags_erg_s = np.where(mask,np.linalg.norm(ideal_drag, axis = -1) * self.length/1000 * 10000000,0)
+        
+        #TODO min_Hz should be the minimum tailbeat required to match the maximum sustained swim speed 
+        # self.max_s_U = 2.77 bl/s
+        min_Hz = np.interp(self.length, [450, 5.], [690, 1.])
     
         # Solve for Hz
-        Hz = np.where(self.swim_behav == 3, 7.0,
+        Hz = np.where(self.swim_behav == 3, min_Hz,
                       np.sqrt(drags_erg_s * V**2 * np.cos(np.radians(theta))/\
                               (A**2 * B**2 * swim_speeds_cms * np.pi**3 * rho * \
                               (swim_speeds_cms - V) * \
@@ -2536,6 +2574,7 @@ class simulation():
             >>> print(drags)
             # Output: array of drag force vectors for each fish
         """
+        tired_mask = np.where(self.swim_behav == 3,True,False)
 
         # Calculate fish velocities
         if fish_velocities is None:
@@ -2548,6 +2587,11 @@ class simulation():
                 fish_velocities = np.stack((fish_x_vel,fish_y_vel)).T
 
         water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
+        
+        
+        water_velocities = np.where(tired_mask[:,np.newaxis], 
+                                    water_velocities * 0.2,
+                                    water_velocities * 1.)
     
         # Ensure non-zero fish velocity for calculation
         fish_speeds = np.linalg.norm(fish_velocities, axis=-1)
@@ -2944,6 +2988,7 @@ class simulation():
         to prepare for the position update, which should be handled in the main 
         simulation loop where this method is called.
         """
+        tired_mask = np.where(self.swim_behav == 3,True,False)
         
         # Step 1: Calculate fish velocity in vector form for each fish
         if t == 0:
@@ -2984,6 +3029,7 @@ class simulation():
             print ('pid adjustment:')
             print ('%s'%(self.pid_adjustment))
             print ('shit')
+            self.hdf5.close()
             sys.exit()
             
         if self.pid_tuning == True:
@@ -3015,54 +3061,34 @@ class simulation():
         pid_adjustment = pid_controller.update(error, dt, None)
         self.integral = pid_controller.integral
         self.pid_adjustment = pid_adjustment
-        #TODO at what integral amount does the simulation fail?
         
-        # if np.any(np.linalg.norm(pid_adjustment, axis = -1) > 5.):
-        #     print ('check adjustment - why you so big?')
-        
-        # add adjustment to the magnitude of thrust
-        tired_mask = np.where(self.swim_behav == 3,True,False)
-        
-        #TODO - dampened the pid adjustment just a little bit
-        #new_thrust = np.where(~tired_mask[:,np.newaxis],self.thrust + pid_adjustment * 0.99 ,self.thrust)
-                                                                                            
-        #new_thrust = np.clip(new_thrust/self.thrust,-2,2)
-
-        # Step 6: Calculate adjusted surge for each fish
-        # surge_final = new_thrust + self.drag
-        
-        # Step 7: Calculate acceleration for each fish
-        # acc_final = surge_final / self.weight[:,np.newaxis]  
-        
-        # Step 14: Update velocity for each fish
-        #fish_vel_1 = fish_vel_0 + acc_final * dt  # X component of new velocity 
+        # Step 6: add adjustment to original velocity computation       
         fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
                               fish_vel_0 + acc_ini * dt + pid_adjustment,
                               fish_vel_0 + acc_ini * dt)
-        #np.stack((self.x_vel,self.y_vel)).T)
+        # quantify swim speeds to achieve fish_vel_1
         
-        # if np.any(tired_mask == True):
-        #     print ('check adjustments')
-            
-        # if np.any(error != 0):
-        #     print ('error is not zero - using PID adjustment')
-            
-        # if np.any(np.round(self.sog,2) != np.round(self.ideal_sog,2)):
-        #     print ('speed over ground is not equal to ideal speed over ground')
-            
+        
+        # get maximum sustained swim speeds (function of max bl/s and fish length)
+        
+        # if fish is fatigued and if the current swim speed is greater than max sustained, fish_vel_1 = max sustained
+        
         # Step 7: Prepare for position update
         dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
-        
-        # if np.any(self.swim_behav == 3):
-        #     print ('check swimming parameters, we have fatigued fish, should not be generating thrust')
-        
-        # if np.any(np.linalg.norm(dxdy, axis = -1) > 1.):
-        #     print ('large change in position - why?')
             
-        # if np.any(np.isnan(dxdy)):
-        #     print ('nan in dxdy - why?')
+        if np.any(np.logical_and(np.linalg.norm(pid_adjustment,axis = -1) > 5,self.swim_behav == 3)):
+            print ('huge change in velocity requested for a fatigued fish - why?')
             
-        
+        # if np.any(np.logical_and(np.linalg.norm(dxdy,axis = -1) > 0.5,self.swim_behav == 3)):
+        #     print ('huge change in position for a fatigued fish - why?')
+        #     print ('status: \n %s'%(self.swim_behav))
+        #     print ('dxdy: \n %s'%(dxdy))
+        #     print ('thrust: \n %s'%(self.thrust))
+        #     print ('drag: \n %s'%(self.drag))
+        #     print ('water velocity \n %s'%(np.stack((self.x_vel,self.y_vel)).T))
+        #     print ('shit')
+
+            
         return dxdy
                         
     def jump(self, t, g, mask):
@@ -3100,7 +3126,7 @@ class simulation():
         time_airborne = np.where(mask,(2 * self.ucrit * self.arr.sin(jump_angles)) / g, 0)
     
         # Calculate displacement for each fish
-        displacement = self.ucrit * 0.5 * time_airborne * self.arr.cos(jump_angles)
+        displacement = self.ucrit * time_airborne * self.arr.cos(jump_angles)
         
         # if np.any(displacement > 0.):
         #     print ('check jump parameters')
@@ -3116,10 +3142,17 @@ class simulation():
         #                         )
     
         # Calculate the new position for each fish
+        # should we make this the water direction?  calculate unit vector, multiply by displacement, and add to current position
+        
         dx = displacement * self.arr.cos(self.heading)
         dy = displacement * self.arr.sin(self.heading)
+        
+        dxdy = np.stack((dx,dy)).T
+        
+        if np.any(dxdy > 3):
+            print ('check jump parameters')
        
-        return np.stack((dx,dy)).T
+        return dxdy
 
             
     def odometer(self, t, dt):
@@ -3226,7 +3259,7 @@ class simulation():
         self.fatigue(t, dt)
         
         # Calculate the ratio of ideal speed over ground to the magnitude of water velocity
-        sog_to_water_vel_ratio = self.ideal_sog / self.arr.linalg.norm([self.x_vel, self.y_vel], axis=0)
+        sog_to_water_vel_ratio = self.ideal_sog / self.arr.linalg.norm(np.stack((self.x_vel, self.y_vel)).T, axis=-1)
         
         # Calculate the sign of the heading and the water flow direction
         heading_sign = np.sign(self.heading)
@@ -3236,9 +3269,10 @@ class simulation():
         time_since_jump = t - self.time_of_jump
         
         # Create a boolean mask for the fish that should jump
-        should_jump = (sog_to_water_vel_ratio <= 0.2) & \
-            (heading_sign != water_flow_direction_sign) & \
-                      (time_since_jump > 120) & (self.battery >= 0.4) # default value battery 0.4
+        should_jump = (sog_to_water_vel_ratio <= 0.25) & \
+            (time_since_jump > 120) & \
+                (self.battery >= 0.25)
+                           
         
         # Apply the jump or swim functions based on the condition
         # For each fish that should jump
