@@ -672,6 +672,9 @@ class simulation():
         self.recover_stopwatch = self.arr.repeat(0.0, num_agents)
         self.ttfr = self.arr.repeat(0.0, num_agents)
         self.time_out_of_water = self.arr.repeat(0.0, num_agents)
+        self.time_of_abandon = self.arr.repeat(0.0, num_agents)
+        self.time_since_abandon = self.arr.repeat(0.0, num_agents)
+        self.dead = self.arr.repeat(0.0, num_agents)
         if pid_tuning != True:
             self.X = self.arr.random.uniform(starting_box[0], starting_box[1],num_agents)
             self.Y = self.arr.random.uniform(starting_box[2], starting_box[3],num_agents)
@@ -1484,8 +1487,8 @@ class simulation():
 
         # attract_x = (weight * delta_x/dist) / np.power(buff,2)
         # attract_y = (weight * delta_y/dist) / np.power(buff,2)
-        attract_x = weight * delta_x
-        attract_y = weight * delta_y
+        attract_x = weight * delta_x/dist
+        attract_y = weight * delta_y/dist
         return np.array([attract_x,attract_y])
 
     def rheo_cue(self, weight):
@@ -1586,9 +1589,9 @@ class simulation():
         
 
         # get depth raster per agent
-        depths = np.stack([standardize_shape(self.hdf5['environment/depth'][sl[-2:]], target_shape=(9, 9)) for sl in slices])        
-        x_coords = np.stack([standardize_shape(self.hdf5['x_coords'][sl[-2:]], target_shape=(9, 9)) for sl in slices]) 
-        y_coords = np.stack([standardize_shape(self.hdf5['y_coords'][sl[-2:]], target_shape=(9, 9)) for sl in slices])       
+        depths = np.stack([standardize_shape(self.hdf5['environment/depth'][sl[-2:]], target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices])        
+        x_coords = np.stack([standardize_shape(self.hdf5['x_coords'][sl[-2:]], target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices]) 
+        y_coords = np.stack([standardize_shape(self.hdf5['y_coords'][sl[-2:]], target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices])       
         
         front_multiplier = calculate_front_masks(self.heading, x_coords, y_coords, self.X, self.Y)
 
@@ -1789,8 +1792,8 @@ class simulation():
         # Initialize an array to hold the velocity cues for each agent
         velocity_min = np.zeros((self.num_agents, 2), dtype=float)
 
-        attract_x = weight * delta_x
-        attract_y = weight * delta_y
+        attract_x = weight * delta_x/dist
+        attract_y = weight * delta_y/dist
         
         return np.array([attract_x,attract_y])
 
@@ -1868,8 +1871,8 @@ class simulation():
         # school_cue_array[:, 0] = weight * v_hat_x / (distances**2 + epsilon)
         # school_cue_array[:, 1] = weight * v_hat_y / (distances**2 + epsilon)
         
-        school_cue_array[:, 0] = weight * vectors_to_centroid_x 
-        school_cue_array[:, 1] = weight * vectors_to_centroid_y
+        school_cue_array[:, 0] = weight * v_hat_x 
+        school_cue_array[:, 1] = weight * v_hat_y
         
         #TODO - we also need to perform velocity matching so.... update ideal_sog
         # Calcaluate a new ideal_sog based on the average sogs of those fish around me
@@ -1968,11 +1971,11 @@ class simulation():
         
         # Optional: Combine the components into a single array
         collision_cue_mm = np.column_stack((collision_cue_x, collision_cue_y))
-        collision_cue = collision_cue_mm / 1000.
+        #collision_cue = collision_cue_mm / 1000.
         
-        np.nan_to_num(collision_cue, copy = False)
+        np.nan_to_num(collision_cue_mm, copy = False)
         
-        return collision_cue     
+        return collision_cue_mm     
             
     def arbitrate(self, t):
 
@@ -2021,13 +2024,13 @@ class simulation():
             school = self.school_cue(1)
             collision = self.collision_cue(1)
         else:
-            rheotaxis = self.rheo_cue(17000)       # 10000
-            shallow = self.shallow_cue(-50000)      # 10000
-            wave_drag = self.wave_drag_cue(2500)   # 5000
-            low_speed = self.vel_cue(1000)         # 8000 
-            avoid = self.already_been_here(-1000, t)# 3000
-            school = self.school_cue(2500)         # 9000
-            collision = self.collision_cue(-5000)   # 2500 
+            rheotaxis = self.rheo_cue(18000)       # 10000
+            shallow = self.shallow_cue(13000)      # 10000
+            wave_drag = self.wave_drag_cue(1)   # 5000
+            low_speed = self.vel_cue(1500)         # 8000 
+            avoid = self.already_been_here(1200, t)# 3000
+            school = self.school_cue(750)         # 9000
+            collision = self.collision_cue(2000)   # 2500 
             
             # rheotaxis = self.rheo_cue(10000)       # 10000
             # shallow = self.shallow_cue(1)      # 10000
@@ -2055,8 +2058,32 @@ class simulation():
                     'school': school, 
                     'collision': collision}
         
+        # Arbitrate between different behaviors
+        
+        # Set the cicada timestep based on sex
+        cicada_timestep = np.where(self.sex == 'M', 11, 13)
+        
+        # Calculate the time since the last jump
+        time_since_abandon = t - self.time_of_abandon
+        
+        # Determine which cicadas should abandon their trajectory
+        # This creates a boolean mask where True indicates an individual should abandon its trajectory
+        # should_abandon = np.logical_or(time_since_abandon % cicada_timestep == 0,
+        #                                time_since_abandon <= 3)
+        should_abandon = time_since_abandon % cicada_timestep == 0
+        still_abandon = np.where(t - self.time_of_abandon < 9,1,0)
+        
+        # Use the binomial distribution to randomly select a subset of those eligible to abandon
+        # Note: The binomial approach is applied only to those cicadas marked by 'should_abandon'
+        abandon = np.zeros_like(self.sex, dtype=np.int)  # Initialize with zeros
+        abandon[should_abandon] = np.random.binomial(1, 0.25, size=should_abandon.sum())
+        abandon = abandon + still_abandon
+        
+        # Update 'self.time_of_abandon' for those who abandoned their trajectory this timestep
+        self.time_of_abandon += abandon * t
+        
         # how many f4cks does this fish have?
-        tolerance = 20000
+        tolerance = 25000
         
         # if shallow cue magnitude is greater than our tolerance, make it equal to tolerance
         shallow = np.where(np.linalg.norm(shallow,axis = -1)[:,np.newaxis] > tolerance,
@@ -2067,18 +2094,13 @@ class simulation():
         vec_sum = np.zeros_like(rheotaxis)
         for i in np.arange(0,7,1):
             vec = order_dict[i]
+            if i == 'school':
+                vec * abandon
             vec_sum = np.where(np.linalg.norm(vec_sum, axis = -1)[:,np.newaxis] < tolerance,
                                vec_sum + vec,
                                vec_sum)
         
         head_vec = np.zeros_like(rheotaxis)
-        
-        # Arbitrate between different behaviors
-        # head_vec = np.where(self.swim_behav[:,np.newaxis] == 1,
-        #                     sum([np.where(np.linalg.norm(head_vec, axis=1, keepdims=True) >= 20000, 
-        #                                   head_vec, 
-        #                                   head_vec + cue) for cue in order_dict.values()]),
-        #                     head_vec)
         
         head_vec = np.where(self.swim_behav[:,np.newaxis] == 1,
                             vec_sum,
@@ -2903,6 +2925,7 @@ class simulation():
     
         # Recovery for fish that are station holding
         mask_station_holding = self.swim_behav == 3
+        #self.bout_no[mask_station_holding] += 1.
         self.bout_dur[mask_station_holding] = 0.0
         self.dist_per_bout[mask_station_holding] = 0.0
         self.battery[mask_station_holding] += per_rec[mask_station_holding]
@@ -3024,13 +3047,15 @@ class simulation():
         self.error = error
         
         if np.any(np.isnan(error)):
-            print ('nan in error print integral')
-            print ('%s'%(self.integral))
-            print ('pid adjustment:')
-            print ('%s'%(self.pid_adjustment))
-            print ('shit')
-            self.hdf5.close()
-            sys.exit()
+            self.dead = np.where(np.isnan(error),1,0)
+            
+            # print ('nan in error print integral')
+            # print ('%s'%(self.integral))
+            # print ('pid adjustment:')
+            # print ('%s'%(self.pid_adjustment))
+            # print ('shit')
+            # self.hdf5.close()
+            # sys.exit()
             
         if self.pid_tuning == True:
             self.error_array = np.append(self.error_array, error[0])
@@ -3066,12 +3091,7 @@ class simulation():
         fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
                               fish_vel_0 + acc_ini * dt + pid_adjustment,
                               fish_vel_0 + acc_ini * dt)
-        # quantify swim speeds to achieve fish_vel_1
-        
-        
-        # get maximum sustained swim speeds (function of max bl/s and fish length)
-        
-        # if fish is fatigued and if the current swim speed is greater than max sustained, fish_vel_1 = max sustained
+        fish_vel_1 = np.where(self.dead[:,np.newaxis], 0.,fish_vel_1)
         
         # Step 7: Prepare for position update
         dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
@@ -3304,9 +3324,11 @@ class simulation():
         #     print ('speed over ground way out of whack')
         
         if np.any(np.isnan(self.X)):
-            print ("fish off map")
-            self.hdf5.close()
-            sys.exit()
+            self.dead = np.where(np.isnan(self.X),1,0)
+
+            # print ("fish off map")
+            # self.hdf5.close()
+            # sys.exit()
                
         # if np.any(dxdy_jump != 0.):
         #     print ('check jump movement')
