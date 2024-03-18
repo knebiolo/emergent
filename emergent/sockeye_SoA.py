@@ -40,18 +40,24 @@ from rasterio.transform import Affine
 from rasterio.mask import mask
 from shapely import Point, Polygon, box
 from shapely import affinity
-from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline
+from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline, RectBivariateSpline
 from scipy.optimize import curve_fit
 from scipy.constants import g
 from scipy.spatial import cKDTree
+from scipy.stats import beta
 import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
 from datetime import datetime
 import time
 import warnings
+import sys
+import random
 warnings.filterwarnings("ignore")
 
 np.set_printoptions(suppress=True)
+
+# Get the directory of the current script
+current_dir = os.path.dirname(os.path.abspath(__file__))
 
 def get_arr(use_gpu):
     '''
@@ -71,7 +77,7 @@ def get_arr(use_gpu):
         try:
             import cupy as cp
             return cp
-        except ImportError:
+        except:
             print("CuPy not found. Falling back to Numpy.")
             import numpy as np
             return np
@@ -160,6 +166,423 @@ def calculate_front_masks(headings, x_coords, y_coords, agent_x, agent_y, behind
     front_masks[dot_product <= 0] = behind_value
 
     return front_masks
+
+def determine_slices_from_vectors(vectors, num_slices=4):
+    angles = np.arctan2(vectors[:, 1], vectors[:, 0])
+    normalized_angles = np.mod(angles, 2*np.pi)
+    slice_width = 2*np.pi / num_slices
+
+    slice_indices = (normalized_angles // slice_width).astype(int)
+    return slice_indices
+
+def determine_slices_from_headings(headings, num_slices=4):
+    normalized_headings = np.mod(headings, 2*np.pi)
+    slice_width = 2*np.pi / num_slices
+
+    slice_indices = (normalized_headings // slice_width).astype(int)
+    return slice_indices
+
+def output_excel(records, model_dir, model_name):
+    """
+    Export the records of PID optimization errors and rankings to an excel file.
+    
+    Parameters:
+    - records (dict): keys are generation iteration and values are the generation's
+                      dataframe of errors and rankings.
+    - model_dir: path to simulation output.
+    - model_name (str): name of the model to help name the output excel file.
+    
+    """
+    # export record results to excel via pandas
+    print('\nexporting records to excel...')
+    
+    # Create an Excel writer object
+    output_excel = os.path.join(model_dir,f'output_{model_name}.xlsx')
+    with pd.ExcelWriter(output_excel) as writer:
+        # iterate through the dictionary and write each dataframe to a sheet
+        for generation_name, df in records.items():
+            df.to_excel(writer,
+                        sheet_name = 'gen' + str(generation_name),
+                        index=False)
+    
+    print('records exported. check output excel file.')
+    
+def movie_maker(directory, model_name, crs, dt, depth_rast_transform):
+    # connect to model
+    model_directory = os.path.join(directory,'%s.h5'%(model_name))
+    hdf5 = h5py.File(model_directory, 'r')
+    X_arr = hdf5['agent_data/X'][:]
+    Y_arr = hdf5['agent_data/Y'][:]
+    
+    # calculate important things, like the number of columns which should equal the number of timesteps
+    shape = X_arr.shape
+
+    # Number of columns is the second element of the 'shape' tuple
+    num_columns = shape[1]
+
+    # get depth raster
+    depth_arr = hdf5['environment/depth'][:]
+    depth = rasterio.MemoryFile()
+    height = depth_arr.shape[0]
+    width = depth_arr.shape[1]
+    
+    with depth.open(
+        driver ='GTiff',
+        height = depth_arr.shape[0],
+        width = depth_arr.shape[1],
+        count =1,
+        dtype ='float32',
+        crs = crs,
+        transform = depth_rast_transform
+    ) as dataset:
+        dataset.write(depth_arr, 1)
+
+        # define metadata for movie
+        FFMpegWriter = manimation.writers['ffmpeg']
+        metadata = dict(title= model_name, artist='Matplotlib',
+                        comment='emergent model run %s'%(datetime.now()))
+        writer = FFMpegWriter(fps = np.round(30/dt,0), metadata=metadata)
+
+        #initialize plot
+        fig, ax = plt.subplots(figsize = (10,5))
+
+        background = ax.imshow(dataset.read(1),
+                               origin = 'upper',
+                               extent = [dataset.bounds[0],
+                                          dataset.bounds[2],
+                                          dataset.bounds[1],
+                                          dataset.bounds[3]])
+
+        agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
+
+        plt.xlabel('Easting')
+        plt.ylabel('Northing')
+
+        # Update the frames for the movie
+        with writer.saving(fig, 
+                           os.path.join(directory,'%s.mp4'%(model_name)), 
+                           dpi = 300):
+
+            for i in range(int(num_columns)):
+
+
+                # write frame
+                agent_pts.set_data(X_arr[:, i],
+                                   Y_arr[:, i])
+                writer.grab_frame()
+                    
+                print ('Time Step %s complete'%(i))
+
+    # clean up
+    writer.finish()
+    
+def HECRAS (model_dir, HECRAS_dir, resolution, crs):
+    """
+    Import environment data from a HECRAS model and generate raster files.
+    
+    This method extracts data from a HECRAS model stored in HDF format and 
+    interpolates the data to generate raster files for various environmental 
+    parameters such as velocity, water surface elevation, and bathymetry.
+    
+    Parameters:
+    - HECRAS_model (str): Path to the HECRAS model in HDF format.
+    - resolution (float): Desired resolution for the interpolated rasters.
+    
+    Attributes set:
+    
+    Notes:
+    - The method reads data from the HECRAS model, interpolates the data to the 
+      desired resolution, and then writes the interpolated data to raster files.
+    - The generated raster files are saved in the model directory with names corresponding 
+      to the environmental parameter they represent (e.g., 'elev.tif', 'wsel.tif').
+    - The method uses LinearNDInterpolator for interpolation and rasterio for raster 
+      generation and manipulation.
+    """
+    # Initialization Part 1: Connect to HECRAS model and import environment
+    hdf = h5py.File(HECRAS_dir,'r')
+    
+    # Extract Data from HECRAS HDF model
+    print ("Extracting Model Geometry and Results")
+    
+    pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
+    vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
+    vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
+    wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1]
+    elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
+    
+    hdf.close()
+    
+    # create list of xy tuples
+    geom = list(tuple(zip(pts[:,0],pts[:,1])))
+    
+    # create a dataframe with geom column and observations
+    df = pd.DataFrame.from_dict({'index':np.arange(0,len(pts),1),
+                                 'geom_tup':geom,
+                                 'vel_x':vel_x,
+                                 'vel_y':vel_y,
+                                 'wsel':wsel,
+                                 'elev':elev})
+    
+    # add a geometry column
+    df['geometry'] = df.geom_tup.apply(Point)
+    
+    # convert into a geodataframe
+    gdf = gpd.GeoDataFrame(df,crs = crs)
+    
+    print ("Create multidimensional interpolator functions for velocity, wsel, elev")
+    
+    vel_x_interp = LinearNDInterpolator(pts,gdf.vel_x)
+    vel_y_interp = LinearNDInterpolator(pts,gdf.vel_y)
+    wsel_interp = LinearNDInterpolator(pts,gdf.wsel)
+    elev_interp = LinearNDInterpolator(pts,gdf.elev)
+    
+    # first identify extents of image
+    xmin = np.min(pts[:,0])
+    xmax = np.max(pts[:,0])
+    ymin = np.min(pts[:,1])
+    ymax = np.max(pts[:,1])
+    
+    # interpoate velocity, wsel, and elevation at new xy's
+    ## TODO ISHA TO CHECK IF RASTER OUTPUTS LOOK DIFFERENT AT 0.5m vs 1m
+    xint = np.arange(xmin,xmax,resolution)
+    yint = np.arange(ymax,ymin,resolution * -1.)
+    xnew, ynew = np.meshgrid(xint,yint, sparse = True)
+    
+    print ("Interpolate Velocity East")
+    vel_x_new = vel_x_interp(xnew, ynew)
+    print ("Interpolate Velocity North")
+    vel_y_new = vel_y_interp(xnew, ynew)
+    print ("Interpolate WSEL")
+    wsel_new = wsel_interp(xnew, ynew)
+    print ("Interpolate bathymetry")
+    elev_new = elev_interp(xnew, ynew)
+    
+    # create a depth raster
+    depth = wsel_new - elev_new
+    
+    # calculate velocity magnitude
+    vel_mag = np.sqrt((np.power(vel_x_new,2)+np.power(vel_y_new,2)))
+    
+    # calculate velocity direction in radians
+    vel_dir = np.arctan2(vel_y_new,vel_x_new)
+    
+    print ("Exporting Rasters")
+
+    # create raster properties
+    driver = 'GTiff'
+    width = elev_new.shape[1]
+    height = elev_new.shape[0]
+    count = 1
+    crs = crs
+    #transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
+    transform = Affine.translation(xnew[0][0] - 0.5 * resolution, ynew[0][0] - 0.5 * resolution)\
+        * Affine.scale(resolution,-1 * resolution)
+
+    # write elev raster
+    with rasterio.open(os.path.join(model_dir,'elev.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as elev_rast:
+        elev_rast.write(elev_new,1)
+    
+    # write wsel raster
+    with rasterio.open(os.path.join(model_dir,'wsel.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as wsel_rast:
+        wsel_rast.write(wsel_new,1)
+                    
+    # write depth raster
+    with rasterio.open(os.path.join(model_dir,'depth.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as depth_rast:
+        depth_rast.write(depth,1)
+        
+    # write velocity dir raster
+    with rasterio.open(os.path.join(model_dir,'vel_dir.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as vel_dir_rast:
+        vel_dir_rast.write(vel_dir,1)
+                    
+    # write velocity .mag raster
+    with rasterio.open(os.path.join(model_dir,'vel_mag.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as vel_mag_rast:
+        vel_mag_rast.write(vel_mag,1)
+                
+    # write velocity x raster
+    with rasterio.open(os.path.join(model_dir,'vel_x.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as vel_x_rast:
+        vel_x_rast.write(vel_x_new,1)
+                    
+    # write velocity y raster
+    with rasterio.open(os.path.join(model_dir,'vel_y.tif'),
+                       mode = 'w',
+                       driver = driver,
+                       width = width,
+                       height = height,
+                       count = count,
+                       dtype = 'float64',
+                       crs = crs,
+                       transform = transform) as vel_y_rast:
+        vel_y_rast.write(vel_y_new,1)
+
+
+class PID_controller:
+    def __init__(self, n_agents, k_p = 0., k_i = 0., k_d = 0., tau_d = 1):
+        self.k_p = np.array([k_p])
+        self.k_i = np.array([k_i])
+        self.k_d = np.array([k_d])
+        self.tau_d = tau_d
+        self.integral = np.zeros((np.round(n_agents,0).astype(np.int32),2))
+        self.previous_error = np.zeros((np.round(n_agents,0).astype(np.int32),2))
+        self.derivative_filtered = np.zeros((np.round(n_agents,0).astype(np.int32),2))
+
+    def update(self, error, dt, status):
+        # create a mask - if this fish is fatigued, this doesn't matter
+        mask = np.where(status == 3,True,False)
+        
+        self.integral = np.where(~mask, self.integral + error, self.integral)
+        derivative = error - self.previous_error
+        self.previous_error = error
+    
+        p_term = self.k_p[:, np.newaxis] * error
+        i_term = self.k_i[:, np.newaxis] * self.integral
+        d_term = self.k_d[:, np.newaxis] * derivative
+        
+        # # calculate unsaturated output
+        # unsaturated_output = p_term + i_term + d_term
+
+        # # Apply limits
+        # max_limit = [[20.,20.]]
+        # min_limit = [[-20.,-20.]]
+        
+        # actual_output = np.clip(unsaturated_output, min_limit, max_limit)
+        
+        # # Back-calculation if necessary
+        # if np.any(actual_output != unsaturated_output):
+        #     excess = unsaturated_output - actual_output
+        #     excess_mask = np.where(excess != 0., True, False)
+        #     integral_adjustment = np.where(~mask,
+        #                                    excess / self.k_i[:, np.newaxis],
+        #                                    [[0., 0.]])
+            
+        #     print ('initial integral \n %s'%(self.integral))
+            
+        #     self.integral = np.where(~excess_mask,
+        #                              self.integral + integral_adjustment,
+        #                              [[0., 0.]])
+            
+        #     i_term = self.k_i[:, np.newaxis] * self.integral
+        #     print ('i term: \n %s'%(i_term))
+        #     print ('new integral \n %s'%(self.integral))
+            
+        
+        # # Apply low-pass filter to derivative
+        # self.derivative_filtered += (dt / (self.tau_d + dt)) * (derivative - self.derivative_filtered)
+    
+        # # Update for next iteration
+        # self.previous_measurement = error
+    
+        # # Calculate D term with filtered derivative
+        # d_term = -self.k_d[:, np.newaxis] * self.derivative_filtered
+    
+        return np.where(~mask,p_term + i_term + d_term,0.0) #+ i_term + d_term
+        
+    def interp_PID(self):
+        '''
+        Parameters
+        ----------
+        data_ws : file directory.
+
+        Returns
+        -------
+        tuple consisting of (P,I,D).
+        '''
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/pid_optimize_Nushagak.csv')
+        # get data
+        df = pd.read_csv(data_dir)
+        
+        # get data arrays
+        length = df.loc[:, 'fish_length'].values
+        velocity = df.loc[:, 'avg_water_velocity'].values
+        P = df.loc[:, 'p'].values
+        I = df.loc[:, 'i'].values
+        D = df.loc[:, 'd'].values
+        
+        # Plane model function
+        def plane_model(coords, a, b, c):
+            length, velocity = coords
+            return a * length + b * velocity + c
+        
+        # fit plane for P, I, and D values
+        self.P_params, _ = curve_fit(plane_model, (length, velocity), P)
+        
+        self.I_params, _ = curve_fit(plane_model, (length, velocity), I)
+        
+        self.D_params, _ = curve_fit(plane_model, (length, velocity), D)
+    
+    def PID_func(self, velocity, length):
+        '''
+        
+        '''
+        # P plane parameters
+        a_P = self.P_params[0]
+        b_P = self.P_params[1]
+        c_P = self.P_params[2]
+        
+        # I plane parameters
+        a_I = self.I_params[0]
+        b_I = self.I_params[1]
+        c_I = self.I_params[2]
+        
+        # D plane parameters
+        a_D = self.D_params[0]
+        b_D = self.D_params[1]
+        c_D = self.D_params[2]        
+        
+        P = a_P * length + b_P * velocity + c_P
+        I = a_I * length + b_I * velocity + c_I
+        D = a_D * length + b_D * velocity + c_D 
+        
+        return P, I, D
+    
+    
       
 class simulation():
     '''Python class object that implements an Agent Based Model of adult upstream
@@ -174,10 +597,12 @@ class simulation():
                  crs, 
                  basin, 
                  water_temp, 
-                 starting_box, 
+                 starting_box,
+                 fish_length = None,
                  num_timesteps = 100, 
                  num_agents = 100, 
-                 use_gpu = False,):
+                 use_gpu = False,
+                 pid_tuning = False):
         """
          Initialize the simulation environment.
          
@@ -208,6 +633,15 @@ class simulation():
         """        
         self.arr = get_arr(use_gpu)
         
+        # If we are tuning the PID controller, special settings used
+        if pid_tuning:
+            self.pid_tuning = pid_tuning
+            self.vel_x_array = np.array([])
+            self.vel_y_array = np.array([])
+            
+        else:
+            self.pid_tuning = False
+        
         # model directory and model name
         self.model_dir = model_dir
         self.model_name = model_name
@@ -224,10 +658,11 @@ class simulation():
         
         # initialize agent properties and internal states
         self.sim_sex()
-        self.sim_length()
+        self.sim_length(fish_length)
         self.sim_weight()
         self.sim_body_depth()
-        recover = pd.read_csv(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent\data\recovery.csv")
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/recovery.csv')
+        recover = pd.read_csv(data_dir)        
         recover['Seconds'] = recover.Minutes * 60.
         self.recovery = CubicSpline(recover.Seconds, recover.Recovery, extrapolate = True,)
         del recover
@@ -237,19 +672,32 @@ class simulation():
         self.recover_stopwatch = self.arr.repeat(0.0, num_agents)
         self.ttfr = self.arr.repeat(0.0, num_agents)
         self.time_out_of_water = self.arr.repeat(0.0, num_agents)
-        
-        self.X = self.arr.random.uniform(starting_box[0], starting_box[1],num_agents)
-        self.Y = self.arr.random.uniform(starting_box[2], starting_box[3],num_agents)
+        self.time_of_abandon = self.arr.repeat(0.0, num_agents)
+        self.time_since_abandon = self.arr.repeat(0.0, num_agents)
+        self.dead = np.full(self.ttfr.shape, np.nan)
+        if pid_tuning != True:
+            self.X = self.arr.random.uniform(starting_box[0], starting_box[1],num_agents)
+            self.Y = self.arr.random.uniform(starting_box[2], starting_box[3],num_agents)
+        else:
+            self.X = np.array([starting_box[0]])
+            self.Y = np.array([starting_box[1]])
+            
         self.prev_X = self.X
         self.prev_Y = self.Y
 
         # Time to Fatigue values for Sockeye digitized from Bret 1964
-        self.max_s_U = 2.77  # maximum sustained swim speed
+        #TODO - we need to scale these numbers by size, way too big for tiny fish
+        self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43  # maximum prolonged swim speed
         self.a_p = 8.643     # prolonged intercept
         self.b_p = -2.0894   # prolonged slope
         self.a_s = 0.1746    # sprint intercept
         self.b_s = -0.1806   # sprint slope
+        
+        # Time to Fatigue from Kathapodis 2016 Salmonids
+        self.K = 3.5825
+        self.b = -0.2621
+        self.a = 1.276
         
         # initialize movement parameters
         self.drag = self.arr.zeros(num_agents)           # computed theoretical drag
@@ -262,11 +710,11 @@ class simulation():
         
         # initialize odometer
         self.kcal = self.arr.zeros(num_agents)           #kilo calorie counter
-        
+    
         # create a project database and write initial arrays to HDF
         self.hdf5 = h5py.File(self.db, 'w')
         self.initialize_hdf5()
-        
+            
         # write agent properties that do not change with time
         self.hdf5["agent_data/sex"][:] = self.sex
         self.hdf5["agent_data/length"][:] = self.length
@@ -284,6 +732,7 @@ class simulation():
         self.enviro_import(os.path.join(model_dir,'elev.tif'),'elevation')
         self.enviro_import(os.path.join(model_dir,'vel_dir.tif'),'velocity direction')
         self.enviro_import(os.path.join(model_dir,'vel_mag.tif'),'velocity magnitude') 
+        self.hdf5.flush()
 
         # initialize mental map
         self.initialize_mental_map()
@@ -292,11 +741,14 @@ class simulation():
         self.initial_heading()
         
         # initialize swim speed
-        self.initial_swim_speed()    
-
-        self.hdf5.flush()
+        self.initial_swim_speed() 
         
-   
+        # error array
+        self.error_array = np.array([])
+        
+        # initialize cumulative time
+        self.cumulative_time = 0.
+
     def sim_sex(self):
         """
         Simulate the sex distribution of agents based on the basin.
@@ -313,7 +765,7 @@ class simulation():
         if self.basin == "Nushagak River":
             self.sex = self.arr.random.choice([0,1], size = self.num_agents, p = [0.503,0.497])
             
-    def sim_length(self):
+    def sim_length(self, fish_length = None):
         """
         Simulate the length distribution of agents based on the basin and their sex.
     
@@ -334,16 +786,22 @@ class simulation():
         - ValueError: If the `sex` attribute is not recognized.
         """
         # length in mm
-        if self.basin == "Nushagak River":
-            if self.sex == 'M':
-                self.length = self.arr.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents)
-            else:
-                self.length = self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
+        if self.pid_tuning == True:
+            self.length = np.repeat(fish_length,self.num_agents) # testing
+        
+        else:
+            if self.basin == "Nushagak River":
+                if self.sex == 'M':
+                    self.length = self.arr.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents)
+                else:
+                    self.length = self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
         
         # we can also set these arrays that contain parameters that are a function of length
-        self.sog = self.length/1000.  # sog = speed over ground - assume fish maintain 1 body length per second
+        self.length = np.where(self.length < 475.,475.,self.length)
+        self.sog = self.length/1000. * 0.8  # sog = speed over ground - assume fish maintain 1 body length per second
         self.ideal_sog = self.sog
-        self.swim_speed = self.length/1000.        # set initial swim speed
+        self.opt_sog = self.length/1000. * 0.8
+       # self.swim_speed = self.length/1000.        # set initial swim speed
         self.ucrit = self.sog * 7.    # TODO - what is the ucrit for sockeye?
         
     def sim_weight(self):
@@ -414,36 +872,39 @@ class simulation():
         self.hdf5.flush()
         
     def timestep_flush(self, timestep):
-        '''function writes to the open hdf5 file '''
-        
-        # write time step data to hdf
-        self.hdf5['agent_data/X'][..., timestep] = self.X.astype('float32')
-        self.hdf5['agent_data/Y'][..., timestep] = self.Y.astype('float32')
-        self.hdf5['agent_data/Z'][..., timestep] = self.z.astype('float32')
-        self.hdf5['agent_data/prev_X'][..., timestep] = self.prev_X.astype('float32')
-        self.hdf5['agent_data/prev_Y'][..., timestep] = self.prev_Y.astype('float32')
-        self.hdf5['agent_data/heading'][..., timestep] = self.heading.astype('float32')
-        self.hdf5['agent_data/sog'][..., timestep] = self.sog.astype('float32')
-        self.hdf5['agent_data/ideal_sog'][..., timestep] = self.ideal_sog.astype('float32')
-        self.hdf5['agent_data/swim_speed'][..., timestep] = self.swim_speed.astype('float32')
-        self.hdf5['agent_data/battery'][..., timestep] = self.battery.astype('float32')
-        self.hdf5['agent_data/swim_behav'][..., timestep] = self.swim_behav.astype('float32')
-        self.hdf5['agent_data/swim_mode'][..., timestep] = self.swim_mode.astype('float32')
-        self.hdf5['agent_data/recover_stopwatch'][..., timestep] = self.recover_stopwatch.astype('float32')
-        self.hdf5['agent_data/ttfr'][..., timestep] = self.ttfr.astype('float32')
-        self.hdf5['agent_data/time_out_of_water'][..., timestep] = self.time_out_of_water.astype('float32')
-        self.hdf5['agent_data/drag'][..., timestep] = np.linalg.norm(self.drag, axis = -1).astype('float32')
-        self.hdf5['agent_data/thrust'][..., timestep] = np.linalg.norm(self.thrust, axis = -1).astype('float32')
-        self.hdf5['agent_data/Hz'][..., timestep] = self.Hz.astype('float32')
-        self.hdf5['agent_data/bout_no'][..., timestep] = self.bout_no.astype('float32')
-        self.hdf5['agent_data/dist_per_bout'][..., timestep] = self.dist_per_bout.astype('float32')
-        self.hdf5['agent_data/bout_dur'][..., timestep] = self.bout_dur.astype('float32')
-        #self.hdf5['agent_data/time_of_jump'][..., timestep] = self.time_of_jump.astype('float32')
+        if self.pid_tuning == False:
+            '''function writes to the open hdf5 file '''
+            
+            # write time step data to hdf
+            self.hdf5['agent_data/X'][..., timestep] = self.X.astype('float32')
+            self.hdf5['agent_data/Y'][..., timestep] = self.Y.astype('float32')
+            self.hdf5['agent_data/Z'][..., timestep] = self.z.astype('float32')
+            self.hdf5['agent_data/prev_X'][..., timestep] = self.prev_X.astype('float32')
+            self.hdf5['agent_data/prev_Y'][..., timestep] = self.prev_Y.astype('float32')
+            self.hdf5['agent_data/heading'][..., timestep] = self.heading.astype('float32')
+            self.hdf5['agent_data/sog'][..., timestep] = self.sog.astype('float32')
+            self.hdf5['agent_data/ideal_sog'][..., timestep] = self.ideal_sog.astype('float32')
+            self.hdf5['agent_data/swim_speed'][..., timestep] = self.swim_speed.astype('float32')
+            self.hdf5['agent_data/battery'][..., timestep] = self.battery.astype('float32')
+            self.hdf5['agent_data/swim_behav'][..., timestep] = self.swim_behav.astype('float32')
+            self.hdf5['agent_data/swim_mode'][..., timestep] = self.swim_mode.astype('float32')
+            self.hdf5['agent_data/recover_stopwatch'][..., timestep] = self.recover_stopwatch.astype('float32')
+            self.hdf5['agent_data/ttfr'][..., timestep] = self.ttfr.astype('float32')
+            self.hdf5['agent_data/time_out_of_water'][..., timestep] = self.time_out_of_water.astype('float32')
+            self.hdf5['agent_data/drag'][..., timestep] = np.linalg.norm(self.drag, axis = -1).astype('float32')
+            self.hdf5['agent_data/thrust'][..., timestep] = np.linalg.norm(self.thrust, axis = -1).astype('float32')
+            self.hdf5['agent_data/Hz'][..., timestep] = self.Hz.astype('float32')
+            self.hdf5['agent_data/bout_no'][..., timestep] = self.bout_no.astype('float32')
+            self.hdf5['agent_data/dist_per_bout'][..., timestep] = self.dist_per_bout.astype('float32')
+            self.hdf5['agent_data/bout_dur'][..., timestep] = self.bout_dur.astype('float32')
+            self.hdf5['agent_data/kcal'][..., timestep] = self.kcal.astype('float32')
 
-
-        # # Periodically flush data to ensure it's written to disk
-        if timestep % 10 == 0:  # Adjust this value based on your needs
-            self.hdf5.flush()            
+            #self.hdf5['agent_data/time_of_jump'][..., timestep] = self.time_of_jump.astype('float32')
+    
+    
+            # # Periodically flush data to ensure it's written to disk
+            if timestep % 100 == 0:  # Adjust this value based on your needs
+                self.hdf5.flush()            
 
     def enviro_import(self, data_dir, surface_type):
         """
@@ -575,189 +1036,6 @@ class simulation():
         self.hdf5.flush()
         src.close()
 
-    def HECRAS (self,HECRAS_model,resolution):
-        """
-        Import environment data from a HECRAS model and generate raster files.
-        
-        This method extracts data from a HECRAS model stored in HDF format and 
-        interpolates the data to generate raster files for various environmental 
-        parameters such as velocity, water surface elevation, and bathymetry.
-        
-        Parameters:
-        - HECRAS_model (str): Path to the HECRAS model in HDF format.
-        - resolution (float): Desired resolution for the interpolated rasters.
-        
-        Attributes set:
-        
-        Notes:
-        - The method reads data from the HECRAS model, interpolates the data to the 
-          desired resolution, and then writes the interpolated data to raster files.
-        - The generated raster files are saved in the model directory with names corresponding 
-          to the environmental parameter they represent (e.g., 'elev.tif', 'wsel.tif').
-        - The method uses LinearNDInterpolator for interpolation and rasterio for raster 
-          generation and manipulation.
-        """
-        # Initialization Part 1: Connect to HECRAS model and import environment
-        hdf = h5py.File(HECRAS_model,'r')
-        
-        # Extract Data from HECRAS HDF model
-        print ("Extracting Model Geometry and Results")
-        
-        pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
-        vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
-        vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
-        wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1]
-        elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
-        
-        # create list of xy tuples
-        geom = list(tuple(zip(pts[:,0],pts[:,1])))
-        
-        # create a dataframe with geom column and observations
-        df = pd.DataFrame.from_dict({'index':np.arange(0,len(pts),1),
-                                     'geom_tup':geom,
-                                     'vel_x':vel_x,
-                                     'vel_y':vel_y,
-                                     'wsel':wsel,
-                                     'elev':elev})
-        
-        # add a geometry column
-        df['geometry'] = df.geom_tup.apply(Point)
-        
-        # convert into a geodataframe
-        gdf = gpd.GeoDataFrame(df,crs = self.crs)
-        
-        print ("Create multidimensional interpolator functions for velocity, wsel, elev")
-        
-        vel_x_interp = LinearNDInterpolator(pts,gdf.vel_x)
-        vel_y_interp = LinearNDInterpolator(pts,gdf.vel_y)
-        wsel_interp = LinearNDInterpolator(pts,gdf.wsel)
-        elev_interp = LinearNDInterpolator(pts,gdf.elev)
-        
-        # first identify extents of image
-        xmin = np.min(pts[:,0])
-        xmax = np.max(pts[:,0])
-        ymin = np.min(pts[:,1])
-        ymax = np.max(pts[:,1])
-        
-        # interpoate velocity, wsel, and elevation at new xy's
-        ## TODO ISHA TO CHECK IF RASTER OUTPUTS LOOK DIFFERENT AT 0.5m vs 1m
-        xint = np.arange(xmin,xmax,resolution)
-        yint = np.arange(ymax,ymin,resolution * -1.)
-        xnew, ynew = np.meshgrid(xint,yint, sparse = True)
-        
-        print ("Interpolate Velocity East")
-        vel_x_new = vel_x_interp(xnew, ynew)
-        print ("Interpolate Velocity North")
-        vel_y_new = vel_y_interp(xnew, ynew)
-        print ("Interpolate WSEL")
-        wsel_new = wsel_interp(xnew, ynew)
-        print ("Interpolate bathymetry")
-        elev_new = elev_interp(xnew, ynew)
-        
-        # create a depth raster
-        depth = wsel_new - elev_new
-        
-        # calculate velocity magnitude
-        vel_mag = np.sqrt((np.power(vel_x_new,2)+np.power(vel_y_new,2)))
-        
-        # calculate velocity direction in radians
-        vel_dir = np.arctan2(vel_y_new,vel_x_new)
-        
-        print ("Exporting Rasters")
-
-        # create raster properties
-        driver = 'GTiff'
-        width = elev_new.shape[1]
-        height = elev_new.shape[0]
-        count = 1
-        crs = self.crs
-        #transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
-        transform = Affine.translation(xnew[0][0] - 0.5 * resolution, ynew[0][0] - 0.5 * resolution)\
-            * Affine.scale(resolution,-1 * resolution)
-
-        # write elev raster
-        with rasterio.open(os.path.join(self.model_dir,'elev.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as elev_rast:
-            elev_rast.write(elev_new,1)
-        
-        # write wsel raster
-        with rasterio.open(os.path.join(self.model_dir,'wsel.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as wsel_rast:
-            wsel_rast.write(wsel_new,1)
-                        
-        # write depth raster
-        with rasterio.open(os.path.join(self.model_dir,'depth.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as depth_rast:
-            depth_rast.write(depth,1)
-            
-        # write velocity dir raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_dir.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_dir_rast:
-            vel_dir_rast.write(vel_dir,1)
-                        
-        # write velocity .mag raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_mag.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_mag_rast:
-            vel_mag_rast.write(vel_mag,1)
-                    
-        # write velocity x raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_x.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_x_rast:
-            vel_x_rast.write(vel_x_new,1)
-                        
-        # write velocity y raster
-        with rasterio.open(os.path.join(self.model_dir,'vel_y.tif'),
-                           mode = 'w',
-                           driver = driver,
-                           width = width,
-                           height = height,
-                           count = count,
-                           dtype = 'float64',
-                           crs = crs,
-                           transform = transform) as vel_y_rast:
-            vel_y_rast.write(vel_y_new,1)
             
     def initialize_mental_map(self):
         """
@@ -804,11 +1082,16 @@ class simulation():
         # Ensure that the indices are within the bounds of the raster data
         rows = np.clip(rows, 0, raster_dataset.shape[0] - 1)
         cols = np.clip(cols, 0, raster_dataset.shape[1] - 1)
-        values = raster_dataset[rows, cols]
+        
+        if self.num_agents > 1:
+            values = raster_dataset[rows, cols]
+        else:
+            values = np.array([raster_dataset[rows, cols]])
+        
         #self.hdf5['environment/%s'%(raster_name)] = raster_dataset
         self.hdf5.flush()
         
-        return values  
+        return values.flatten()  
      
     def initial_heading (self):
         """
@@ -861,8 +1144,14 @@ class simulation():
 
         # get velocity and coords raster per agent
         for i in np.arange(self.num_agents):
-            self.hdf5['memory/%s'%(i)][rows[i],cols[i]] = current_timestep
-    
+            if self.num_agents > 1:
+                self.hdf5['memory/%s'%(i)][rows[i],cols[i]] = current_timestep
+            else:
+                single_arr = np.array([self.hdf5['memory/%s'%(i)]])
+                single_arr[0,rows,cols] = current_timestep
+                self.hdf5['memory/%s'%(i)][:, :] = single_arr
+
+
         # # Update the mental map for all agents in the HDF5 dataset at once
         # mental_map_dataset = self.hdf5['memory/maps'][:]
             
@@ -942,8 +1231,14 @@ class simulation():
                     
         # Create slice objects for indexing
         slices = [(agent, slice(y0, y1), slice(x0, x1)) 
-                  for agent, y0, y1, x0, x1 in zip(np.arange(self.num_agents),  ymin, ymax ,xmin, xmax)]
-
+                  for agent, y0, y1, x0, x1 in zip(np.arange(self.num_agents),
+                                                   ymin.flatten(), 
+                                                   ymax.flatten(),
+                                                   xmin.flatten(),
+                                                   xmax.flatten()
+                                                   )
+                  ]
+        
         # get velocity and coords raster per agent
         mmap = np.stack([standardize_shape(self.hdf5['memory/%s'%(sl[0])][sl[-2:]]) for sl in slices])        
         x_coords = np.stack([standardize_shape(self.hdf5['x_coords'][sl[-2:]]) for sl in slices])        
@@ -954,11 +1249,13 @@ class simulation():
         
         t_since = mmap - t
         
-        multiplier = np.where(np.logical_and(t_since > 600, t_since < 3600),1,0)
+        multiplier = np.where(np.logical_and(t_since > 10, t_since < 7200),
+                              1 - (t_since - 5) / (7200 - 5),
+                              0)
 
         # Calculate the difference vectors
-        delta_x = x_coords - self.X[:,np.newaxis,np.newaxis]
-        delta_y = y_coords - self.Y[:,np.newaxis,np.newaxis]
+        delta_x = self.X[:,np.newaxis,np.newaxis] - x_coords
+        delta_y = self.Y[:,np.newaxis,np.newaxis] - y_coords
         
         # Calculate the magnitude of each vector
         magnitudes = np.sqrt(np.power(delta_x,2) + np.power(delta_x,2))
@@ -977,7 +1274,7 @@ class simulation():
         # Sum the forces for this agent
         total_x_force = np.nansum(x_force, axis = (1,2))
         total_y_force = np.nansum(y_force, axis = (1,2))
-    
+
         repulsive_forces =  np.array([total_x_force, total_y_force]).T
              
         return repulsive_forces
@@ -1029,13 +1326,15 @@ class simulation():
         self.time_out_of_water = np.where(self.depth < self.too_shallow, 
                                           self.time_out_of_water + 1, 
                                           self.time_out_of_water)
+        
+        self.dead = np.where(self.time_out_of_water > 10, 1, self.dead)
     
-        positions = np.vstack([self.X,self.Y]).T
+        positions = np.vstack([self.X.flatten(),self.Y.flatten()]).T
         # Creating a KDTree for efficient spatial queries
         tree = cKDTree(positions)
         
         # Radius for nearest neighbors search
-        radius = 10
+        radius = 2.
         
         # Find agents within the specified radius for each agent
         agents_within_radius = tree.query_ball_tree(tree, r=radius)
@@ -1131,16 +1430,34 @@ class simulation():
 
         # Create slices
         slices = [(agent, slice(y0, y1), slice(x0, x1)) 
-                  for agent, y0, y1, x0, x1 in zip(np.arange(self.num_agents),  ymin, ymax ,xmin, xmax)]
+                  for agent, y0, y1, x0, x1 in zip(np.arange(self.num_agents),
+                                                   ymin.flatten(), 
+                                                   ymax.flatten(),
+                                                   xmin.flatten(), 
+                                                   xmax.flatten()
+                                                   )
+                  ]
 
         # get velocity and coords raster per agent
         vel3d = np.stack([standardize_shape(self.hdf5['environment/vel_mag'][sl[-2:]]) for sl in slices])
         x_coords = np.stack([standardize_shape(self.hdf5['x_coords'][sl[-2:]]) for sl in slices])
         y_coords = np.stack([standardize_shape(self.hdf5['y_coords'][sl[-2:]]) for sl in slices])
         
-        vel3d_multiplier = calculate_front_masks(self.heading, x_coords, y_coords, self.X, self.Y, behind_value = 999.9)
-        vel3d = vel3d * vel3d_multiplier
+        vel3d_multiplier = calculate_front_masks(self.heading.flatten(), 
+                                                 x_coords, 
+                                                 y_coords, 
+                                                 self.X.flatten(), 
+                                                 self.Y.flatten(), 
+                                                 behind_value = 999.9)
         
+        # if self.num_agents > 1:
+        #     vel3d = vel3d * vel3d_multiplier
+        # else:
+        #     vel3d = vel3d[0] * vel3d_multiplier[0]
+            
+        vel3d = vel3d * vel3d_multiplier
+
+            
         num_agents, rows, cols = vel3d.shape
         
         # Reshape the 3D array into a 2D array where each row represents an agent
@@ -1159,8 +1476,10 @@ class simulation():
                                     min_row_indices + ymin, 
                                     min_col_indices + xmin)
         
+        # delta_x = self.X - min_x
+        # delta_y = self.Y - min_y
         delta_x = min_x - self.X
-        delta_y = min_y - self.Y 
+        delta_y = min_y - self.Y
         delta_x_sq = np.power(delta_x,2)
         delta_y_sq = np.power(delta_y,2)
         dist = np.sqrt(delta_x_sq + delta_y_sq)
@@ -1168,9 +1487,10 @@ class simulation():
         # Initialize an array to hold the velocity cues for each agent
         velocity_min = np.zeros((self.num_agents, 2), dtype=float)
 
-        attract_x = (weight * delta_x/dist) / np.power(dist,2)
-        attract_y = (weight * delta_y/dist) / np.power(dist,2)
-        
+        # attract_x = (weight * delta_x/dist) / np.power(buff,2)
+        # attract_y = (weight * delta_y/dist) / np.power(buff,2)
+        attract_x = weight * delta_x/dist
+        attract_y = weight * delta_y/dist
         return np.array([attract_x,attract_y])
 
     def rheo_cue(self, weight):
@@ -1202,12 +1522,16 @@ class simulation():
     
         # Sample the environment to get the velocity direction and adjust to point upstream
         vel_dir = self.sample_environment(self.vel_dir_rast_transform, 'vel_dir') - np.radians(180)
+        #vel_dir = self.sample_environment(self.vel_dir_rast_transform, 'vel_dir')
+
         
         # Calculate the unit vector in the upstream direction
         v_hat = np.vstack([np.cos(vel_dir), np.sin(vel_dir)]).T
         
         # Calculate the rheotactic cue
-        rheotaxis = (weight * v_hat)/((2 * length_numpy[:,np.newaxis]/1000.)**2)
+        #rheotaxis = (weight * v_hat)/(2**2)
+        rheotaxis = weight * v_hat
+
         
         return rheotaxis
 
@@ -1232,7 +1556,7 @@ class simulation():
         - The vectorized approach is expected to improve performance by reducing the overhead of Python loops.
         """
 
-        buff = 2.  # 2 meters
+        buff = 2 #* self.length / 1000.  # 2 meters
     
         # get the x, y position of the agent 
         x, y = (self.X, self.Y)
@@ -1258,13 +1582,18 @@ class simulation():
             
         # Create slices
         slices = [(agent, slice(y0, y1), slice(x0, x1)) 
-                  for agent, y0, y1, x0, x1 in zip(np.arange(self.num_agents),  ymin, ymax ,xmin, xmax)]
+                  for agent, y0, y1, x0, x1 in zip(np.arange(self.num_agents),  
+                                                   ymin.flatten(), 
+                                                   ymax.flatten(),
+                                                   xmin.flatten(),
+                                                   xmax.flatten())
+                  ]
         
 
         # get depth raster per agent
-        depths = np.stack([standardize_shape(self.hdf5['environment/depth'][sl[-2:]]) for sl in slices])        
-        x_coords = np.stack([standardize_shape(self.hdf5['x_coords'][sl[-2:]]) for sl in slices]) 
-        y_coords = np.stack([standardize_shape(self.hdf5['y_coords'][sl[-2:]]) for sl in slices])       
+        depths = np.stack([standardize_shape(self.hdf5['environment/depth'][sl[-2:]], target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices])        
+        x_coords = np.stack([standardize_shape(self.hdf5['x_coords'][sl[-2:]], target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices]) 
+        y_coords = np.stack([standardize_shape(self.hdf5['y_coords'][sl[-2:]], target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices])       
         
         front_multiplier = calculate_front_masks(self.heading, x_coords, y_coords, self.X, self.Y)
 
@@ -1272,11 +1601,16 @@ class simulation():
         depth_multiplier = np.where(depths < min_depth[:,np.newaxis,np.newaxis], 1, 0)
 
         # Calculate the difference vectors
-        delta_x = x_coords - self.X[:,np.newaxis,np.newaxis]
-        delta_y = y_coords - self.Y[:,np.newaxis,np.newaxis]
+        #delta_x = x_coords - self.X[:,np.newaxis,np.newaxis]
+        #delta_y = y_coords - self.Y[:,np.newaxis,np.newaxis]
+        
+        delta_x =  self.X[:,np.newaxis,np.newaxis] - x_coords
+        delta_y =  self.Y[:,np.newaxis,np.newaxis] - y_coords
         
         # Calculate the magnitude of each vector
-        magnitudes = np.sqrt(np.power(delta_x,2) + np.power(delta_x,2))
+        magnitudes = np.sqrt(np.power(delta_x,2) + np.power(delta_y,2))
+        
+        #TODO rater than norm of every delta_x, we just grab the mean delta_x, delta_y?
 
         # Avoid division by zero
         magnitudes = np.where(magnitudes == 0, 0.000001, magnitudes)
@@ -1290,8 +1624,15 @@ class simulation():
         y_force = ((weight * unit_vector_y) / magnitudes) * depth_multiplier * front_multiplier
     
         # Sum the forces for this agent
-        total_x_force = np.nansum(x_force, axis = (1, 2))#, axis = (0))
-        total_y_force = np.nansum(y_force, axis = (1, 2))
+        if self.num_agents > 1:
+            total_x_force = np.nansum(x_force, axis = (1, 2))#, axis = (0))
+            total_y_force = np.nansum(y_force, axis = (1, 2))
+        else:
+            total_x_force = np.nansum(x_force)#, axis = (1, 2))#, axis = (0))
+            total_y_force = np.nansum(y_force)#, axis = (1, 2))
+            
+        # if np.any(np.nan_to_num(x_force) != 0.):
+        #     print ('check repulsive force')
     
         repulsive_forces =  np.array([total_x_force, total_y_force]).T
         
@@ -1332,7 +1673,9 @@ class simulation():
         """
 
         # get data
-        hughes = pd.read_csv(r'../data/wave_drag_huges_2004_fig3.csv')
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/wave_drag_huges_2004_fig3.csv')
+
+        hughes = pd.read_csv(data_dir)
 
         hughes.sort_values(by = 'body_depths_submerged',
                            ascending = True,
@@ -1393,7 +1736,13 @@ class simulation():
         
         # Create slices
         slices = [(agent, slice(y0, y1), slice(x0, x1)) 
-                  for agent, y0, y1, x0, x1 in zip(np.arange(self.num_agents),  ymin, ymax ,xmin, xmax)]
+                  for agent, y0, y1, x0, x1 in zip(np.arange(self.num_agents),
+                                                   ymin.flatten(), 
+                                                   ymax.flatten() ,
+                                                   xmin.flatten(), 
+                                                   xmax.flatten()
+                                                   )
+                  ]
         
         # get depth raster per agent
         #dep3D = np.stack([self.hdf5['environment/depth'][sl[-2:]] for sl in slices])
@@ -1401,11 +1750,22 @@ class simulation():
         x_coords = np.stack([standardize_shape(self.hdf5['x_coords'][sl[-2:]]) for sl in slices])
         y_coords = np.stack([standardize_shape(self.hdf5['y_coords'][sl[-2:]]) for sl in slices])
         
-        dep3D_multiplier = calculate_front_masks(self.heading, x_coords, y_coords, self.X, self.Y, behind_value = 99999.9)
+        dep3D_multiplier = calculate_front_masks(self.heading.flatten(), 
+                                                 x_coords, 
+                                                 y_coords, 
+                                                 self.X.flatten(), 
+                                                 self.Y.flatten(), 
+                                                 behind_value = 99999.9)
+        
+        # if self.num_agents > 1:
+        #     dep3D = dep3D * dep3D_multiplier
+        # else:
+        #     dep3D = dep3D[0] * dep3D_multiplier[0]
+            
         dep3D = dep3D * dep3D_multiplier
-        
+
         num_agents, rows, cols = dep3D.shape
-        
+ 
         # Reshape the 3D array into a 2D array where each row represents an agent
         reshaped_dep3D = dep3D.reshape(num_agents, rows * cols)
         
@@ -1425,6 +1785,8 @@ class simulation():
                                     min_row_indices + ymin, 
                                     min_col_indices + xmin)
         
+        # delta_x = self.X - min_x
+        # delta_y = self.Y - min_y
         delta_x = min_x - self.X
         delta_y = min_y - self.Y
         delta_x_sq = np.power(delta_x,2)
@@ -1434,8 +1796,8 @@ class simulation():
         # Initialize an array to hold the velocity cues for each agent
         velocity_min = np.zeros((self.num_agents, 2), dtype=float)
 
-        attract_x = (weight * delta_x/dist) / np.power(dist,2)
-        attract_y = (weight * delta_y/dist) / np.power(dist,2)
+        attract_x = weight * delta_x/dist
+        attract_y = weight * delta_y/dist
         
         return np.array([attract_x,attract_y])
 
@@ -1494,17 +1856,12 @@ class simulation():
         # Calculate the means; use np.add.at for unbuffered in-place operation
         centroid_x = np.zeros(self.num_agents)
         centroid_y = np.zeros(self.num_agents)
-        np.add.at(centroid_x, agent_indices, x_neighbors)
-        np.add.at(centroid_y, agent_indices, y_neighbors)
-        
-        # Normalize by the number of neighbors (including the agent itself)
-        neighbor_counts = np.array([len(neighbors) for neighbors in self.agents_within_buffers])
-        centroid_x /= (neighbor_counts + 1)  # +1 to include the agent itself
-        centroid_y /= (neighbor_counts + 1)
+        centroid_x = np.array([np.mean(self.X[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.num_agents)])
+        centroid_y = np.array([np.mean(self.Y[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.num_agents)])
         
         # Calculate vectors to centroids
         vectors_to_centroid_x = centroid_x - self.X
-        vectors_to_centroid_y = centroid_y - self.Y
+        vectors_to_centroid_y = centroid_y - self.Y 
         
         # Calculate distances to centroids
         distances = np.sqrt(vectors_to_centroid_x**2 + vectors_to_centroid_y**2)
@@ -1515,10 +1872,18 @@ class simulation():
         v_hat_y = np.divide(vectors_to_centroid_y, distances + epsilon, out=np.zeros_like(self.Y), where=distances+epsilon != 0)
         
         # Calculate attractive forces
-        school_cue_array[:, 0] = weight * v_hat_x / (distances**2 + epsilon)
-        school_cue_array[:, 1] = weight * v_hat_y / (distances**2 + epsilon)
+        # school_cue_array[:, 0] = weight * v_hat_x / (distances**2 + epsilon)
+        # school_cue_array[:, 1] = weight * v_hat_y / (distances**2 + epsilon)
         
-        return school_cue_array
+        school_cue_array[:, 0] = weight * v_hat_x 
+        school_cue_array[:, 1] = weight * v_hat_y
+        
+        #TODO - we also need to perform velocity matching so.... update ideal_sog
+        # Calcaluate a new ideal_sog based on the average sogs of those fish around me
+        sogs =  np.array([np.mean(self.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.num_agents)])
+        self.school_sog = sogs
+        
+        return np.nan_to_num(school_cue_array)
         
     def collision_cue(self, weight):
         """
@@ -1569,13 +1934,23 @@ class simulation():
         closest_Y[valid_indices] = self.Y[self.closest_agent[valid_indices].astype(int)]
         
         # calculate vector pointing from neighbor to self
-        v = np.column_stack((closest_X - self.X, closest_Y - self.Y))
+        self_2_closest = np.column_stack((closest_X.flatten() - self.X.flatten(), closest_Y.flatten() - self.Y.flatten()))
+        closest_2_self = np.column_stack((self.X.flatten() - closest_X.flatten(), self.Y.flatten() - closest_Y.flatten()))
+        
+        coll_slice = determine_slices_from_vectors(closest_2_self, num_slices = 8)
+        head_slice = determine_slices_from_headings(self.heading, num_slices = 8)
+        
+        same_quad_multiplier = np.where(coll_slice == head_slice,0,1)
+        
+        #TODO - run tests to see if we need to increase the number of slices
+        # if np.any(same_quad_multiplier == 1):
+        #     print ('fuck')
         
         # Handling np.nan values
         # If either component of a vector is np.nan, you might want to treat the whole vector as invalid
-        invalid_vectors = np.isnan(v).any(axis=1)
-        v[invalid_vectors] = [np.nan, np.nan]
-        v = np.nan_to_num(v)
+        invalid_vectors = np.isnan(closest_2_self).any(axis=1)
+        closest_2_self[invalid_vectors] = [np.nan, np.nan]
+        closest_2_self = np.nan_to_num(closest_2_self)
         
         # Replace zeros and NaNs in distances to avoid division errors
         # This step assumes that a zero distance implies the agent is its own closest neighbor, 
@@ -1584,18 +1959,27 @@ class simulation():
                                   self.nearest_neighbor_distance, 
                                   np.nan)
         
+        safe_distances_mm = safe_distances * 1000
+        
         # Calculate unit vector components
-        v_hat_x = np.divide(v[:,0], safe_distances, out=np.zeros_like(v[:,0]), where=safe_distances!=0)
-        v_hat_y = np.divide(v[:,1], safe_distances, out=np.zeros_like(v[:,1]), where=safe_distances!=0)
+        v_hat_x = np.divide(closest_2_self[:,0], safe_distances, 
+                            out=np.zeros_like(closest_2_self[:,0]), where=safe_distances!=0)
+        v_hat_y = np.divide(closest_2_self[:,1], safe_distances, 
+                            out=np.zeros_like(closest_2_self[:,1]), where=safe_distances!=0)
                         
         # Calculate collision cue components
-        collision_cue_x = np.divide(weight * v_hat_x, safe_distances**2, out=np.zeros_like(v_hat_x), where=safe_distances!=0)
-        collision_cue_y = np.divide(weight * v_hat_y, safe_distances**2, out=np.zeros_like(v_hat_y), where=safe_distances!=0)
+        collision_cue_x = np.divide(weight * v_hat_x, safe_distances, 
+                                    out=np.zeros_like(v_hat_x), where=safe_distances!=0) * same_quad_multiplier
+        collision_cue_y = np.divide(weight * v_hat_y, safe_distances, 
+                                    out=np.zeros_like(v_hat_y), where=safe_distances!=0) * same_quad_multiplier
         
         # Optional: Combine the components into a single array
-        collision_cue = np.column_stack((collision_cue_x, collision_cue_y))
+        collision_cue_mm = np.column_stack((collision_cue_x, collision_cue_y))
+        #collision_cue = collision_cue_mm / 1000.
         
-        return collision_cue     
+        np.nan_to_num(collision_cue_mm, copy = False)
+        
+        return collision_cue_mm     
             
     def arbitrate(self, t):
 
@@ -1633,20 +2017,37 @@ class simulation():
         agent_model.arbitrate(t=current_time_step)
         # The agent's heading is updated based on the arbitration of behavioral cues.
         """
-
+        
         # calculate behavioral cues
-        rheotaxis = self.rheo_cue(15000)
-        shallow = self.shallow_cue(50000)
-        wave_drag = self.wave_drag_cue(5000)
-        low_speed = self.vel_cue(8000)
-        avoid = self.already_been_here(8000, t)
-        school = self.school_cue(8000)
-        collision = self.collision_cue(50)
+        if self.pid_tuning == True:
+            rheotaxis = self.rheo_cue(50000)
+            shallow = self.shallow_cue(1)
+            wave_drag = self.wave_drag_cue(1)
+            low_speed = self.vel_cue(1)
+            avoid = self.already_been_here(1, t)
+            school = self.school_cue(1)
+            collision = self.collision_cue(1)
+        else:
+            rheotaxis = self.rheo_cue(18000)       # 10000
+            shallow = self.shallow_cue(10000)      # 10000
+            wave_drag = self.wave_drag_cue(2500)   # 5000
+            low_speed = self.vel_cue(1200)         # 8000 
+            avoid = self.already_been_here(8000, t)# 3000
+            school = self.school_cue(1500)         # 9000
+            collision = self.collision_cue(2000)   # 2500 
+            
+            # rheotaxis = self.rheo_cue(10000)       # 10000
+            # shallow = self.shallow_cue(1)      # 10000
+            # wave_drag = self.wave_drag_cue(1)   # 5000
+            # low_speed = self.vel_cue(1)         # 8000 
+            # avoid = self.already_been_here(1, t)# 3000
+            # school = self.school_cue(1)         # 9000
+            # collision = self.collision_cue(1)   # 2500         
         
         # Create dictionary that has order of behavioral cues
         order_dict = {0: shallow, 
-                      1: collision, 
-                      2: avoid, 
+                      1: avoid,
+                      2: collision, 
                       3: school, 
                       4: rheotaxis, 
                       5: low_speed.T, 
@@ -1661,27 +2062,63 @@ class simulation():
                     'school': school, 
                     'collision': collision}
         
+        # Arbitrate between different behaviors
+        # how many f4cks does this fish have?
+        tolerance = 25000
+        
+        # Set the cicada timestep based on sex
+        cicada_timestep = np.where(self.sex == 'M', 11, 13)
+        
+        # Calculate the time since the last jump
+        time_since_abandon = t - self.time_of_abandon
+        
+        # Determine which cicadas should abandon their trajectory
+        # This creates a boolean mask where True indicates an individual should abandon its trajectory
+        # should_abandon = np.logical_or(time_since_abandon % cicada_timestep == 0,
+        #                                time_since_abandon <= 3)
+        should_abandon = time_since_abandon % cicada_timestep == 0
+
+        still_abandon = np.where(t - self.time_of_abandon < 9,1,0)
+        
+        # Use the binomial distribution to randomly select a subset of those eligible to abandon
+        # Note: The binomial approach is applied only to those cicadas marked by 'should_abandon'
+        abandon = np.zeros_like(self.sex, dtype=np.int)  # Initialize with zeros
+        abandon[should_abandon] = np.random.binomial(1, 0.25, size=should_abandon.sum())
+        abandon = abandon + still_abandon
+        
+        # Update 'self.time_of_abandon' for those who abandoned their trajectory this timestep
+        self.time_of_abandon[abandon] = t
+        
+        # add up vectors, but make sure it's not greater than the tolerance
+        vec_sum = np.zeros_like(rheotaxis)
+        for i in np.arange(0,7,1):
+            vec = order_dict[i]
+
+            vec_sum = np.where(np.linalg.norm(vec_sum, axis = -1)[:,np.newaxis] < tolerance,
+                               vec_sum + vec,
+                               vec_sum)
+            vec_sum[abandon] = rheotaxis
+        
         head_vec = np.zeros_like(rheotaxis)
         
-        # Arbitrate between different behaviors
         head_vec = np.where(self.swim_behav[:,np.newaxis] == 1,
-                            sum([np.where(np.linalg.norm(head_vec, axis=1, keepdims=True) >= 7500, 
-                                          head_vec, 
-                                          head_vec + cue) for cue in order_dict.values()]),
+                            vec_sum,
                             head_vec)
         
         head_vec = np.where(self.swim_behav[:,np.newaxis] == 2, 
                             cue_dict['shallow'] + cue_dict['collision'] + cue_dict['low_speed'],
                             head_vec)
         head_vec = np.where(self.swim_behav[:,np.newaxis] == 3, 
-                            cue_dict['rheotaxis'], 
+                            cue_dict['rheotaxis'],
                             head_vec)
         
-        # Calculate heading for each agent
-        self.heading = np.arctan2(head_vec[:, 1], head_vec[:, 0])
-
-        
-    def thrust_fun(self, mask):
+        if len(head_vec.shape) == 2:
+            return np.arctan2(head_vec[:, 1], head_vec[:, 0])
+        else:
+            return np.arctan2(head_vec[:, 0, 1], head_vec[:, 0, 0])
+       
+    
+    def thrust_fun(self, mask, t, dt, fish_velocities = None):
         """
         Calculates the thrust for a collection of agents based on Lighthill's elongated-body theory of fish propulsion.
         
@@ -1740,9 +2177,24 @@ class simulation():
         
         # Calculate swim speed
         water_vel = self.arr.stack((self.x_vel, self.y_vel), axis=-1)
-        ideal_vel_vec = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
-                                            self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
-        ideal_swim_speed = self.arr.linalg.norm(ideal_vel_vec - water_vel, axis=-1)
+        if fish_velocities is None:
+            if t == 0:
+                fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
+                                                    self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+            else:
+                fish_x_vel = (self.X - self.prev_X)/dt
+                fish_y_vel = (self.Y - self.prev_Y)/dt
+                fish_dir = np.arctan2(fish_y_vel,fish_x_vel)
+                fish_mag = np.linalg.norm(np.stack((fish_x_vel,fish_y_vel)).T,axis = -1)
+
+                fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
+                                                    self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+                
+                # fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(fish_dir),
+                #                                     self.ideal_sog * self.arr.sin(fish_dir)), axis=-1)
+            
+        ideal_swim_speed = np.linalg.norm(fish_velocities - water_vel, axis=-1)
+
         swim_speed_cms = ideal_swim_speed * 100.
     
         # Data for interpolation
@@ -1752,10 +2204,14 @@ class simulation():
         wave_dat = self.arr.array([53.4361, 82.863, 107.2632, 131.7, 148.125, 166.278, 199.5652, 230.0044, 258.3])
         edge_dat = self.arr.array([1., 2., 3., 4., 5., 6., 8., 10., 12.])
     
-        # Interpolation
-        A = self.arr.interp(length_cm, length_dat, amp_dat)
-        V = self.arr.interp(swim_speed_cms, speed_dat, wave_dat)
-        B = self.arr.interp(length_cm, length_dat, edge_dat)
+        # Interpolation with extrapolation using UnivariateSpline
+        A_spline = UnivariateSpline(length_dat, amp_dat, k = 2, ext = 0)
+        V_spline = UnivariateSpline(speed_dat, wave_dat, k = 1, ext = 0)
+        B_spline = UnivariateSpline(length_dat, edge_dat, k = 1, ext = 0)
+    
+        A = A_spline(length_cm)
+        V = V_spline(swim_speed_cms)
+        B = B_spline(length_cm)
     
         # Calculate thrust
         m = (self.arr.pi * rho * B**2) / 4.
@@ -1763,93 +2219,69 @@ class simulation():
         w = W * (1 - swim_speed_cms / V)
     
         # Thrust calculation
-        thrust_erg_s = m * W * w * swim_speed_cms - (m * w**2 * swim_speed_cms) / (2. * self.arr.cos(self.arr.radians(theta)))
+        thrust_erg_s = m * W * w * swim_speed_cms - (m * w**2 * swim_speed_cms) / (2. * np.cos(np.radians(theta)))
         thrust_Nm = thrust_erg_s / 10000000.
         thrust_N = thrust_Nm / (self.length / 1000.)
     
         # Convert thrust to vector
-        thrust = self.arr.where(mask,[thrust_N * self.arr.cos(self.heading),
-                                      thrust_N * self.arr.sin(self.heading)],0)
-    
+        thrust = np.where(mask,[thrust_N * np.cos(self.heading),
+                                thrust_N * np.sin(self.heading)],0)
+            
         self.thrust = thrust.T
         
-    def frequency(self, mask):
-        """
-        Calculates the tailbeat frequency for a collection of agents based on the 
-        balance of propulsive forces and drag, following Lighthill's (1970) 
-        elongated-body theory of fish propulsion.
-    
-        This method applies piecewise linear interpolation to estimate parameters 
-        such as amplitude, propulsive wave velocity, and trailing edge span as 
-        functions of body length and swimming speed. It is designed to work with 
-        array operations, allowing for simultaneous calculations across multiple 
-        agents.
-    
-        The method assumes a freshwater environment with a density of 1.0 kg/m^3 
-        and uses the agents' lengths, velocities, and drag forces to compute the 
-        tailbeat frequency for each agent.
-    
-        Attributes
-        ----------
-        length : array_like
-            The lengths of the agents in meters.
-        x_vel : array_like
-            The x-components of the water velocity vectors for the agents in m/s.
-        y_vel : array_like
-            The y-components of the water velocity vectors for the agents in m/s.
-        ideal_sog : array_like
-            The ideal speeds over ground for the agents in m/s.
-        heading : array_like
-            The headings of the agents in radians.
-        drag : array_like
-            The drag forces experienced by the agents in N.
-        swim_behav : array_like
-            An array indicating the swimming behavior of each agent, where a 
-            specific value (e.g., 3) indicates 'station holding'.
+    def frequency(self, mask, t, dt, fish_velocities = None):
+        ''' Calculate tailbeat frequencies for a collection of agents in a vectorized manner.
         
-        Returns
-        -------
-        Hzs : ndarray
-            An array of tailbeat frequencies for each agent in Hz.
+            This method computes tailbeat frequencies based on Lighthill's elongated-body theory,
+            considering each agent's length, velocity, and drag. It then adjusts these frequencies
+            using a vectorized PID controller to better match the desired speed over ground.
         
-        Notes
-        -----
-        The function assumes that the input arrays are of equal length, with each 
-        index corresponding to a different agent. The tailbeat frequency calculation 
-        is vectorized to handle multiple agents simultaneously.
-    
-        The piecewise linear interpolation is used for the amplitude (A), propulsive 
-        wave velocity (V), and trailing edge span (B) based on the provided data points. 
-        This approach simplifies the computation and is suitable for scenarios 
-        where a small amount of error is acceptable.
-    
-        The function also accounts for different swimming behaviors, assigning a 
-        default frequency for agents that are 'station holding'.
-    
-        Examples
-        --------
-        Assuming `agents` is an instance of the simulation class with all necessary 
-        properties set as arrays:
+            Parameters
+            ----------
+            mask : array_like
+                A boolean array indicating which agents to include in the calculation.
+            pid_controller : VectorizedPIDController
+                An instance of the VectorizedPIDController class for adjusting Hz values.
         
-        >>> Hzs = agents.frequency()
+            Returns
+            -------
+            Hzs : ndarray
+                An array of adjusted tailbeat frequencies for each agent, in Hz.
         
-        The `Hzs` array will contain the tailbeat frequencies for each agent after 
-        the function call.
-        """
-        # ... function implementation ...
+            Notes
+            -----
+            The function assumes that all input arrays are of equal length, corresponding
+            to different agents. It uses vectorized operations for efficiency and is
+            compatible with a structure-of-arrays approach.
+        
+            The PID controller adjusts frequencies based on the error between the actual
+            and desired speeds, improving the model's realism and accuracy.
+        
+                # ... function implementation ...'''
 
         # Constants
         rho = 1.0  # density of freshwater
         theta = 32.  # theta for cos(theta) = 0.85
     
         # Convert lengths from meters to centimeters
-        lengths_cm = self.length * 100
+        lengths_cm = self.length / 10
     
         # Calculate swim speed in cm/s
         water_velocities = self.arr.stack((self.x_vel, self.y_vel), axis=-1)
-        fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
-                                              self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
-        swim_speeds_cms = self.arr.linalg.norm(fish_velocities - water_velocities, axis=-1) * 100
+        alternate = True
+        
+        if fish_velocities is None:
+            if t == 0:
+                fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
+                                                    self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+            else:
+                fish_x_vel = (self.X - self.prev_X)/dt
+                fish_y_vel = (self.Y - self.prev_Y)/dt
+                fish_velocities = np.stack((fish_x_vel,fish_y_vel)).T
+            
+            alternate = False
+        
+        swim_speeds_cms = self.arr.linalg.norm(fish_velocities - water_velocities, axis=-1) * 100 + 0.00001
 
         # sockeye parameters (Webb 1975, Table 20) units in CM!!! 
         length_dat = self.arr.array([5.,10.,15.,20.,25.,30.,40.,50.,60.])
@@ -1857,31 +2289,48 @@ class simulation():
         amp_dat = self.arr.array([1.06,2.01,3.,4.02,4.91,5.64,6.78,7.67,8.4])
         wave_dat = self.arr.array([53.4361,82.863,107.2632,131.7,148.125,166.278,199.5652,230.0044,258.3])
         edge_dat = self.arr.array([1.,2.,3.,4.,5.,6.,8.,10.,12.])
+        
+        # Interpolation with extrapolation using UnivariateSpline
+        A_spline = UnivariateSpline(length_dat, amp_dat, k = 2, ext = 0)
+        V_spline = UnivariateSpline(speed_dat, wave_dat, k = 1, ext = 0)
+        B_spline = UnivariateSpline(length_dat, edge_dat, k = 1, ext = 0)
     
-        # Interpolate A, V, B using piecewise linear functions based on provided data
-        # Replace with actual piecewise linear interpolation based on your data
-        A = self.arr.interp(lengths_cm, length_dat, amp_dat)
-        V = self.arr.interp(swim_speeds_cms, speed_dat, wave_dat)
-        B = self.arr.interp(lengths_cm, length_dat, edge_dat)
-    
-        ideal_drag = self.ideal_drag_fun()
+        A = A_spline(lengths_cm)
+        V = V_spline(swim_speeds_cms)
+        B = B_spline(lengths_cm)
+        
+        # get the ideal drag - aka drag if fish is moving how we want it to
+        if alternate == True:
+            ideal_drag = self.ideal_drag_fun(fish_velocities = fish_velocities)
+        else:
+            ideal_drag = self.ideal_drag_fun()
+            
         # Convert drag to erg/s
-        #drag = np.where(mask,np.linalg.norm(ideal_drag,axis = -1) * (self.length/1000) * 10000000.,0)
-        drags_erg_s = np.where(mask,self.arr.linalg.norm(ideal_drag, axis = -1) * self.length/1000 * 10000000,0)
+        drags_erg_s = np.where(mask,np.linalg.norm(ideal_drag, axis = -1) * self.length/1000 * 10000000,0)
+        
+        #TODO min_Hz should be the minimum tailbeat required to match the maximum sustained swim speed 
+        # self.max_s_U = 2.77 bl/s
+        min_Hz = np.interp(self.length, [450, 5.], [690, 1.])
     
         # Solve for Hz
-        Hzs = self.arr.where(mask,self.arr.where(self.swim_behav == 3,
-                             1.0,
-                             self.arr.sqrt(drags_erg_s * V**2 * \
-                                           self.arr.cos(self.arr.radians(theta)) \
-                                               /(A**2 * B**2 * swim_speeds_cms * \
-                                                 self.arr.pi**3 * rho * (swim_speeds_cms - V)\
-                                                     * (-0.062518880701972 * swim_speeds_cms \
-                                                        - 0.125037761403944 * V * \
-                                                            self.arr.cos(self.arr.radians(theta))\
-                                                                + 0.062518880701972 * V)))),0)
-    
-        self.Hz = Hzs
+        Hz = np.where(self.swim_behav == 3, min_Hz,
+                      np.sqrt(drags_erg_s * V**2 * np.cos(np.radians(theta))/\
+                              (A**2 * B**2 * swim_speeds_cms * np.pi**3 * rho * \
+                              (swim_speeds_cms - V) * \
+                              (-0.062518880701972 * swim_speeds_cms - \
+                              0.125037761403944 * V * np.cos(np.radians(theta)) + \
+                               0.062518880701972 * V)
+                               )
+                              )
+                      )
+            
+        # if np.any(np.isnan(Hz)):
+        #     print ('fuck')
+        self.prev_Hz = self.Hz   
+        self.Hz = np.where(Hz > 20, 20, Hz)
+        
+        # if np.any(np.abs(self.prev_Hz/self.Hz) > 1.5):
+        #     print ('big change in tail beat frequency - why')
          
     def kin_visc(self, temp):
         """
@@ -2107,7 +2556,7 @@ class simulation():
     
         return drag_coefficients
 
-    def drag_fun(self, mask):
+    def drag_fun(self, mask, t, dt, fish_velocities = None):
         """
         Calculate the drag force on a sockeye salmon swimming upstream.
     
@@ -2146,26 +2595,40 @@ class simulation():
             >>> print(drags)
             # Output: array of drag force vectors for each fish
         """
+        tired_mask = np.where(self.swim_behav == 3,True,False)
 
         # Calculate fish velocities
-        fish_velocities = np.stack((self.sog * np.cos(self.heading), self.sog * np.sin(self.heading)), axis=-1)
+        if fish_velocities is None:
+            if t == 0:
+                fish_velocities = self.arr.stack((self.ideal_sog * self.arr.cos(self.heading),
+                                                    self.ideal_sog * self.arr.sin(self.heading)), axis=-1)
+            else:
+                fish_x_vel = (self.X - self.prev_X)/dt
+                fish_y_vel = (self.Y - self.prev_Y)/dt
+                fish_velocities = np.stack((fish_x_vel,fish_y_vel)).T
+
         water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
+        
+        
+        water_velocities = np.where(tired_mask[:,np.newaxis], 
+                                    water_velocities * 0.2,
+                                    water_velocities * 1.)
     
         # Ensure non-zero fish velocity for calculation
-        fish_speeds = np.linalg.norm(fish_velocities, axis=1)
+        fish_speeds = np.linalg.norm(fish_velocities, axis=-1)
         fish_speeds[fish_speeds == 0.0] = 0.0001
         fish_velocities[fish_speeds == 0.0] = [0.0001, 0.0001]
     
         # Calculate kinematic viscosity and density based on water temperature
-        viscosities = self.kin_visc(self.water_temp)
-        densities = self.wat_dens(self.water_temp)
+        viscosity = self.kin_visc(self.water_temp)
+        density = self.wat_dens(self.water_temp)
 
         # Calculate Reynolds numbers
         #reynolds_numbers = self.calc_Reynolds(self.length, viscosities, np.linalg.norm(water_velocities, axis=1))
         length_m = self.length / 1000.
     
         # Calculate the Reynolds number for each fish
-        reynolds_numbers = water_velocities * length_m[:,np.newaxis] / viscosities
+        reynolds_numbers = np.linalg.norm(water_velocities, axis = -1) * length_m / viscosity
     
         # Calculate surface areas
         
@@ -2182,23 +2645,39 @@ class simulation():
     
         # Calculate relative velocities and their norms
         relative_velocities = fish_velocities - water_velocities
-        relative_speeds_squared = np.linalg.norm(relative_velocities, axis=1)**2
+        relative_speeds_squared = np.linalg.norm(relative_velocities, axis=-1)**2
     
         # Calculate unit vectors for fish velocities
-        unit_fish_velocities = fish_velocities / self.arr.linalg.norm(fish_velocities, axis=1)[:,self.arr.newaxis]
-    
-        # Calculate drag forces
-        drags = np.where(mask[:,self.arr.newaxis], -0.5 * (densities * 1000) * \
-                         (surface_areas[:,self.arr.newaxis] / 100**2) * drag_coeffs * \
-                             relative_speeds_squared[:, self.arr.newaxis]  * \
-                                 unit_fish_velocities * self.wave_drag[:, self.arr.newaxis],0)
+        unit_relative_vector= np.nan_to_num(relative_velocities / self.arr.linalg.norm(relative_velocities, axis=1)[:,self.arr.newaxis])
 
-        # drags = np.where(mask, -0.5 * (densities * 1000) * (surface_areas / 100**2) * drag_coeffs * relative_speeds_squared \
-        #     * self.arr.linalg.norm(fish_velocities, axis = 1) * self.wave_drag,0)
+        # Calculate drag forces
+        drags = np.where(mask[:,np.newaxis],
+                         -0.5 * (density * 1000) * (surface_areas[:,np.newaxis] / 100**2) \
+                                       * drag_coeffs[:,self.arr.newaxis] * relative_speeds_squared[:, np.newaxis] \
+                                           * unit_relative_vector * self.wave_drag[:, np.newaxis],0)
+            
+        max_drag_magnitude = 5.  # Set a reasonable limit based on your system's physical reality
+
+        # Calculate the magnitude of each drag force vector
+        drag_magnitudes = np.linalg.norm(drags, axis=1)
+        
+        # Find where the drag exceeds the maximum and scale it down
+        excessive_drag_indices = np.where(np.logical_and( self.swim_behav == 3, drag_magnitudes > max_drag_magnitude),True,False)
+        drags[excessive_drag_indices] = (drags[excessive_drag_indices].T * (max_drag_magnitude / drag_magnitudes[excessive_drag_indices])).T
+            
+        # if np.any(self.swim_behav == 3):
+        #     print ('check drags calc if fish has forward momentum it should still generate drag, \n but if fish is moving with flow, drag should be minimal')
+        #     print ('fish status: \n %s'%(self.swim_behav))
+        #     print ('fish velocities: \n %s'%(fish_velocities))
+        #     print ('water velocities: \n %s'%(water_velocities))
+        #     print ('relative velocities: \n %s'%(relative_velocities))
+        #     print ('drags: \n %s'%(drags))
+        #     print ('thrust from last t-step, we can only gen 1 Hz: \n %s'%(self.thrust))
+        #     print ('shit')
             
         self.drag = drags
 
-    def ideal_drag_fun(self):
+    def ideal_drag_fun(self, fish_velocities = None):
         """
         Calculate the ideal drag force on multiple sockeye salmon swimming upstream.
         
@@ -2232,11 +2711,13 @@ class simulation():
         """
         # Vector components of water velocity and speed over ground for each fish
         water_velocities = np.stack((self.x_vel, self.y_vel), axis=-1)
-        fish_velocities = np.stack((self.ideal_sog * np.cos(self.heading),
-                                    self.ideal_sog * np.sin(self.heading)), axis=-1)
+        
+        if fish_velocities is None:
+            fish_velocities = np.stack((self.ideal_sog * np.cos(self.heading),
+                                        self.ideal_sog * np.sin(self.heading)), axis=-1)
     
         # calculate ideal swim speed  
-        ideal_swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=1)
+        ideal_swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=-1)
        
         # make sure fish isn't swimming faster than it should
         refugia_mask = (self.swim_behav == 2) & (ideal_swim_speeds > self.max_s_U)
@@ -2250,18 +2731,21 @@ class simulation():
         # Calculate the maximum practical speed over ground
         self.max_practical_sog = fish_velocities
         
-        self.max_practical_sog[np.linalg.norm(self.max_practical_sog, axis=1) == 0.0] = [0.0001, 0.0001]
-    
+        if self.num_agents > 1:
+            self.max_practical_sog[np.linalg.norm(self.max_practical_sog, axis=1) == 0.0] = [0.0001, 0.0001]
+        else:
+            pass
+
         # Kinematic viscosity and density based on water temperature for each fish
-        viscosities = self.kin_visc(self.water_temp)
-        densities = self.wat_dens(self.water_temp)
+        viscosity = self.kin_visc(self.water_temp)
+        density = self.wat_dens(self.water_temp)
     
         # Reynolds numbers for each fish
         #reynolds_numbers = self.calc_Reynolds(self.length, viscosities, np.linalg.norm(water_velocities, axis=1))
         length_m = self.length / 1000.
     
         # Calculate the Reynolds number for each fish
-        reynolds_numbers = water_velocities * length_m[:,np.newaxis] / viscosities
+        reynolds_numbers = np.linalg.norm(water_velocities, axis = -1) * length_m / viscosity
         
         # Surface areas for each fish
         # Constants for the power-law relationship
@@ -2275,17 +2759,18 @@ class simulation():
     
         # Calculate ideal drag forces
         relative_velocities = self.max_practical_sog - water_velocities
-        relative_speeds_squared = np.linalg.norm(relative_velocities, axis=1)**2
+        relative_speeds_squared = np.linalg.norm(relative_velocities, axis=-1)**2
         unit_max_practical_sog = self.max_practical_sog / np.linalg.norm(self.max_practical_sog, axis=1)[:, np.newaxis]
     
         # Ideal drag calculation
-        ideal_drags = -0.5 * (densities * 1000) * (surface_areas[:,np.newaxis] / 100**2) * drag_coeffs \
-                      * relative_speeds_squared[:, np.newaxis] * unit_max_practical_sog \
+        ideal_drags = -0.5 * (density * 1000) * \
+            (surface_areas[:,np.newaxis] / 100**2) * drag_coeffs[:,np.newaxis] \
+                * relative_speeds_squared[:, np.newaxis] * unit_max_practical_sog \
                       * self.wave_drag[:, np.newaxis]
     
         return ideal_drags
             
-    def fatigue(self, t):
+    def fatigue(self, t, dt):
         """
         Method tracks battery levels and assigns swimming modes for multiple fish.
     
@@ -2316,7 +2801,7 @@ class simulation():
         - The function adjusts the fish's swimming mode and behavior based on its
           energy expenditure and recovery.
         """
-        dt = 1.0  # Time step duration
+        #dt = 1.0  # Time step duration
     
         # Vector components of water velocity and speed over ground for each fish
         water_velocities = self.arr.stack((self.x_vel, self.y_vel), axis=-1)
@@ -2324,21 +2809,52 @@ class simulation():
                                     self.sog * self.arr.sin(self.heading)), axis=-1)
     
         # Calculate swim speeds for each fish
-        swim_speeds = self.arr.linalg.norm(fish_velocities - water_velocities, axis=1)
+        swim_speeds = self.arr.linalg.norm(fish_velocities - water_velocities, axis=-1)
+        bl_s = swim_speeds / (self.length/1000.)
     
         # Calculate distances travelled and update bout odometer and duration
         dist_travelled = self.arr.sqrt((self.prev_X - self.X)**2 + (self.prev_Y - self.Y)**2)
-        self.dist_per_bout += dist_travelled
+        if len(dist_travelled.shape) == 1:
+            self.dist_per_bout += dist_travelled
+        else:
+            self.dist_per_bout += dist_travelled.flatten()
+
         self.bout_dur += dt
     
-        # Initialize time to fatigue (ttf) array
+        # # Initialize time to fatigue (ttf) array
         ttf = self.arr.full_like(swim_speeds, self.arr.nan)
     
-        # Calculate ttf for prolonged and sprint swimming modes
-        mask_prolonged = (self.max_s_U < swim_speeds) & (swim_speeds <= self.max_p_U)
-        mask_sprint = swim_speeds > self.max_p_U
-        ttf[mask_prolonged] = 10. ** (self.a_p + swim_speeds[mask_prolonged] * self.b_p) * 60.
-        ttf[mask_sprint] = 10. ** (self.a_s + swim_speeds[mask_sprint] * self.b_s) * 60.
+        # # Calculate ttf for prolonged and sprint swimming modes
+        mask_prolonged = np.where((self.max_s_U < bl_s) & (bl_s <= self.max_p_U),True,False)
+        mask_sprint = np.where(bl_s > self.max_p_U,True,False)
+        ttf = np.where(mask_prolonged, np.exp((self.a_p + swim_speeds/self.length * self.b_p)),ttf)
+        ttf = np.where(mask_sprint, np.exp((self.a_s + swim_speeds/self.length * self.b_s)),ttf)
+                
+        # def time_to_fatigue(U, l, a, b):
+        #     """
+        #     Calculate time to fatigue for a given swim speed.
+        
+        #     Parameters:
+        #     U (float): Swim speed of the fish in m/s.
+        #     K (float): Fatigue curve parameter.
+        #     b (float): Fatigue curve exponent.
+        #     l (float): Characteristic length in meters.
+            
+        #     Returns:
+        #     float: Time to fatigue in seconds.
+        #     """
+        #     g = 9.81  # acceleration due to gravity in m/s^2
+        #     # Calculate the dimensionless time to fatigue
+        #     #t_s = (K * np.sqrt(g * l) / U) ** (1 / b)
+        #     #t_s = (K / U)**(1/b)
+        #     t_s = np.exp(np.log(U) * np.sqrt(g * l) - a)/b
+            
+        #     # Convert the dimensionless time to actual time to fatigue
+        #     t = t_s * np.sqrt(l / g)
+        #     return t
+        
+        # ttf_f = np.vectorize(time_to_fatigue, excluded = (2,3))
+        # ttf2 = ttf_f(swim_speeds,self.length/1000.,self.a,self.b)
     
         # Set swimming modes based on swim speeds
         self.swim_mode = self.arr.where(mask_prolonged, 2, self.swim_mode)
@@ -2350,20 +2866,41 @@ class simulation():
         rec0[rec0 < 0.0] = 0.0
         rec1 = self.recovery(self.recover_stopwatch + dt) / 100.
         rec1[rec1 > 1.0] = 1.0
+        rec1[rec1 < 0.] = 0.0
         per_rec = rec1 - rec0
     
         # Update battery levels for sustained swimming mode
-        mask_sustained = self.swim_mode == 1
-        self.battery[mask_sustained] += per_rec[mask_sustained]
+        mask_sustained = bl_s <= self.max_s_U 
+        if mask_sustained.ndim == 2:
+            mask_sustained = mask_sustained.squeeze()
+        if self.num_agents > 1:
+            self.battery[mask_sustained] += per_rec[mask_sustained]
+        else:
+            self.battery[mask_sustained.flatten()] += per_rec[mask_sustained.flatten()]
         self.battery[self.battery > 1.0] = 1.0
     
         # Update battery levels for non-sustained swimming modes
         mask_non_sustained = ~mask_sustained
-        ttf0 = ttf[mask_non_sustained] * self.battery[mask_non_sustained]
+        if self.num_agents > 1:
+             ttf0 = ttf[mask_non_sustained] * self.battery[mask_non_sustained]
+        else:
+            ttf0 = ttf[mask_non_sustained.flatten()] * self.battery[mask_non_sustained.flatten()]
+
         ttf1 = ttf0 - dt
-        self.battery[mask_non_sustained] *= ttf1 / ttf0
+        if self.num_agents > 1:
+            self.battery[mask_non_sustained] *= np.nan_to_num(ttf1 / ttf0)
+        else:
+            self.battery[mask_non_sustained.flatten()] *= ttf1.flatten() / ttf0.flatten()
+
         self.battery[self.battery < 0.0] = 0.0
-    
+        
+        # if np.any(np.isnan(self.battery)):
+        #     print ('fuck')
+        
+        if self.pid_tuning == True:
+            if np.isnan(self.battery):
+                sys.exit()   
+                
         # Set swimming behavior based on battery level
         mask_low_battery = self.battery <= 0.1
         mask_mid_battery = (self.battery > 0.1) & (self.battery <= 0.3)
@@ -2387,6 +2924,7 @@ class simulation():
     
         # Recovery for fish that are station holding
         mask_station_holding = self.swim_behav == 3
+        #self.bout_no[mask_station_holding] += 1.
         self.bout_dur[mask_station_holding] = 0.0
         self.dist_per_bout[mask_station_holding] = 0.0
         self.battery[mask_station_holding] += per_rec[mask_station_holding]
@@ -2397,7 +2935,18 @@ class simulation():
         self.recover_stopwatch[mask_ready_to_move] = 0.0
         self.swim_behav[mask_ready_to_move] = 1
         self.swim_mode[mask_ready_to_move] = 1
-            
+        
+        if self.pid_tuning == True:
+            print(f'battery: {np.round(self.battery,4)}')
+            print(f'swim behavior: {self.swim_behav[0]}')
+            print(f'swim mode: {self.swim_mode[0]}')
+
+            if np.any(self.swim_behav == 3):
+                print('error no longer counts, fatigued')
+                sys.exit()
+        
+        # if np.any(self.battery != 1):
+        #     print ('debug battery change QC')
     def initial_swim_speed(self):
         """
         Calculates the initial swim speed required for each fish to overcome
@@ -2429,10 +2978,11 @@ class simulation():
         # Calculate swim speed for each fish
         # Subtracting the scalar water velocity from the vector ideal velocity
         # requires broadcasting the water_velocities array to match the shape of ideal_velocities
-        self.swim_speed = np.linalg.norm(ideal_velocities - water_velocities[:, np.newaxis], axis=1)
+        #self.swim_speed = np.linalg.norm(ideal_velocities - water_velocities[:, np.newaxis], axis=1)
+        self.swim_speed = np.linalg.norm(ideal_velocities - np.array([self.x_vel,self.y_vel]).T)
             
 
-    def swim(self, dt, mask):
+    def swim(self, t, dt, pid_controller, mask):
         """
         Method propels each fish agent forward by calculating its new speed over ground 
         (sog) and updating its position.
@@ -2460,43 +3010,110 @@ class simulation():
         to prepare for the position update, which should be handled in the main 
         simulation loop where this method is called.
         """
+        tired_mask = np.where(self.swim_behav == 3,True,False)
         
         # Step 1: Calculate fish velocity in vector form for each fish
-        fish_vel_0_x = np.where(mask, self.sog * np.cos(self.heading),0) # X component of velocity
-        fish_vel_0_y = np.where(mask, self.sog * np.sin(self.heading),0)  # Y component of velocity
+        if t == 0:
+            fish_vel_0_x = np.where(mask, self.sog * np.cos(self.heading),0) 
+            fish_vel_0_y = np.where(mask, self.sog * np.sin(self.heading),0)  
+            fish_vel_0 = np.stack((fish_vel_0_x, fish_vel_0_y)).T
+        else:
+            fish_vel_0_x = (self.X - self.prev_X)/dt
+            fish_vel_0_y = (self.Y - self.prev_Y)/dt
+            fish_vel_0 = np.stack((fish_vel_0_x,fish_vel_0_y)).T
+        
+
+        
+        ideal_vel_x = np.where(mask, self.ideal_sog * np.cos(self.heading),0) 
+        ideal_vel_y = np.where(mask, self.ideal_sog * np.sin(self.heading),0)  
+        
+        ideal_vel = np.stack((ideal_vel_x, ideal_vel_y)).T
         
         # Step 2: Calculate surge for each fish
-        surge_x = np.round(self.thrust[:, 0], 2) + np.round(self.drag[:, 0], 2)  # X component of surge
-        surge_y = np.round(self.thrust[:, 1], 2) + np.round(self.drag[:, 1], 2)  # Y component of surge
+        surge_ini = self.thrust + self.drag
         
         # Step 3: Calculate acceleration for each fish
-        acc_x = np.round(surge_x / self.weight, 2)  # X component of acceleration
-        acc_y = np.round(surge_y / self.weight, 2)  # Y component of acceleration
+        acc_ini = np.round(surge_ini / self.weight[:,np.newaxis], 2)  
         
-        # Step 4: Apply dampening to acceleration for each fish
-        acc_mag = np.sqrt(acc_x**2 + acc_y**2)  # Magnitude of acceleration
-        damp = np.where(acc_mag > 0.0, (-0.067 * np.log(acc_mag) + 0.3718), 0.0000001)
-        damp = np.maximum(damp, 0.0000001)  # Ensure dampening factor is not negative
+        # Step 4: Update velocity for each fish
+        fish_vel_1_ini = fish_vel_0 + acc_ini * dt
+            
+        # Step 5: Thrust feedback PID controller 
+        error = np.where(mask[:,np.newaxis], 
+                         np.round(ideal_vel - fish_vel_1_ini,12),
+                         0.)
         
-        acc_x *= damp  # Apply dampening to X component of acceleration
-        acc_y *= damp  # Apply dampening to Y component of acceleration
+        self.error = error
+        ded = np.where(np.isnan(error))
+        #self.dead = 
         
-        # Step 5: Update velocity for each fish
-        fish_vel_1_x = fish_vel_0_x + acc_x * dt  # X component of new velocity
-        fish_vel_1_y = fish_vel_0_y + acc_y * dt  # Y component of new velocity
+        if np.any(np.isnan(error)):
+
+            # print ('nan in error print integral')
+            # print ('%s'%(self.integral))
+            # print ('pid adjustment:')
+            # print ('%s'%(self.pid_adjustment))
+            print ('shit')
+            # self.hdf5.close()
+            # sys.exit()
+            
+        if self.pid_tuning == True:
+            self.error_array = np.append(self.error_array, error[0])
+            self.vel_x_array = np.append(self.vel_x_array, self.x_vel)
+            self.vel_y_array = np.append(self.vel_y_array, self.y_vel)
+            
+            curr_vel = np.round(np.sqrt(np.power(self.x_vel,2) + np.power(self.y_vel,2)),2)
+            
+            print (f'error: {error}')
+            print (f'current velocity: {curr_vel}')
+            print (f'Hz: {self.Hz}')
+            print (f'thrust: {np.round(self.thrust,2)}')
+            print (f'drag: {np.round(self.drag,2)}')
+            print (f'sog: {np.round(self.sog,4)}')
+
+            if np.any(np.isnan(error)):
+                print('nan in error')
+                sys.exit()
+                
+        else:
+            k_p, k_i, k_d = pid_controller.PID_func(np.sqrt(np.power(self.x_vel,2) + np.power(self.y_vel,2)),
+                                                    self.length)
+            pid_controller.k_p = np.array([1.])
+            pid_controller.k_i = np.array([0.])
+            pid_controller.k_d = np.array([0.])
+            
+        # Adjust Hzs using the PID controller (vectorized)
+        pid_adjustment = pid_controller.update(error, dt, None)
+        self.integral = pid_controller.integral
+        self.pid_adjustment = pid_adjustment
         
-        # Step 6: Update sog for each fish
-        self.sog = np.round(np.sqrt(fish_vel_1_x**2 + fish_vel_1_y**2), 6)
+        # Step 6: add adjustment to original velocity computation       
+        fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
+                              fish_vel_0 + acc_ini * dt + pid_adjustment,
+                              fish_vel_0 + acc_ini * dt)
+        
+        fish_vel_1 = np.where(self.dead[:,np.newaxis] == 1,
+                              fish_vel_1 * 0,
+                              fish_vel_1)
         
         # Step 7: Prepare for position update
-        # Note: Actual position update should be done in the main simulation loop
-        self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
-        self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
-        self.X = np.where(mask, self.X + fish_vel_1_x * dt, self.X)
-        self.Y = np.where(mask, self.Y + fish_vel_1_y * dt, self.Y)
-        if np.nan in fish_vel_1_x:
-            print ('fuck')
+        dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
             
+        if np.any(np.logical_and(np.linalg.norm(pid_adjustment,axis = -1) > 5,self.swim_behav == 3)):
+            print ('huge change in velocity requested for a fatigued fish - why?')
+            
+        # if np.any(np.logical_and(np.linalg.norm(dxdy,axis = -1) > 0.5,self.swim_behav == 3)):
+        #     print ('huge change in position for a fatigued fish - why?')
+        #     print ('status: \n %s'%(self.swim_behav))
+        #     print ('dxdy: \n %s'%(dxdy))
+        #     print ('thrust: \n %s'%(self.thrust))
+        #     print ('drag: \n %s'%(self.drag))
+        #     print ('water velocity \n %s'%(np.stack((self.x_vel,self.y_vel)).T))
+        #     print ('shit')
+
+            
+        return dxdy
+                        
     def jump(self, t, g, mask):
         """
         Simulates each fish jumping using a ballistic trajectory.
@@ -2521,9 +3138,9 @@ class simulation():
         - The function updates the position and speed over ground (sog) for each fish
           based on their jump.
         """
-        if np.sum(mask) > 0:
-            print ('fuck')
+
         # Reset jump time for each fish
+        
         self.time_of_jump = np.where(mask,t,self.time_of_jump)
     
         # Get jump angle for each fish
@@ -2534,18 +3151,35 @@ class simulation():
     
         # Calculate displacement for each fish
         displacement = self.ucrit * time_airborne * self.arr.cos(jump_angles)
+        
+        # if np.any(displacement > 0.):
+        #     print ('check jump parameters')
     
         # Set speed over ground to ucrit for each fish
-        self.sog = np.where(mask, self.ucrit, self.sog)
+        #self.sog = np.where(mask, self.ucrit, self.sog)
     
         # Calculate new heading angle for each fish based solely on flow direction
-        self.heading = np.where(mask,self.arr.arctan2(self.y_vel, self.x_vel) - self.arr.radians(180),self.heading)
+        # self.heading = np.where(mask,
+        #                         self.arr.arctan2(self.y_vel.flatten(), 
+        #                                          self.x_vel.flatten()) - self.arr.radians(180),
+        #                         self.heading
+        #                         )
     
         # Calculate the new position for each fish
-        self.X += displacement * self.arr.cos(self.heading)
-        self.Y += displacement * self.arr.sin(self.heading)
+        # should we make this the water direction?  calculate unit vector, multiply by displacement, and add to current position
+        
+        dx = displacement * self.arr.cos(self.heading)
+        dy = displacement * self.arr.sin(self.heading)
+        
+        dxdy = np.stack((dx,dy)).T
+        
+        if np.any(dxdy > 3):
+            print ('check jump parameters')
+       
+        return dxdy
+
             
-    def odometer(self, t):
+    def odometer(self, t, dt):
         """
         Updates the running counter of the amount of kCal consumed by each fish during a simulation timestep.
     
@@ -2572,35 +3206,48 @@ class simulation():
         # O2_rate in units of mg O2/hr
         sr_o2_rate = self.arr.where(
             self.water_temp <= 5.3,
-            self.arr.exp(0.0565 * np.power(self.arr.log(self.weight * 1000), 0.9141)),
+            self.arr.exp(0.0565 * np.power(self.arr.log(self.weight), 0.9141)),
             self.arr.where(
                 self.water_temp <= 15,
-                self.arr.exp(0.1498 * self.arr.power(self.arr.log(self.weight * 1000), 0.8465)),
-                self.arr.exp(0.1987 * self.arr.power(self.arr.log(self.weight * 1000), 0.8844))
+                self.arr.exp(0.1498 * self.arr.power(self.arr.log(self.weight), 0.8465)),
+                self.arr.exp(0.1987 * self.arr.power(self.arr.log(self.weight), 0.8844))
             )
         )
     
         ar_o2_rate = self.arr.where(
             self.water_temp <= 5.3,
-            self.arr.exp(0.4667 * self.arr.power(self.arr.log(self.weight * 1000), 0.9989)),
+            self.arr.exp(0.4667 * self.arr.power(self.arr.log(self.weight), 0.9989)),
             self.arr.where(
                 self.water_temp <= 15,
-                self.arr.exp(0.9513 * self.arr.power(self.arr.log(self.weight * 1000), 0.9632)),
-                self.arr.exp(0.8237 * self.arr.power(self.arr.log(self.weight * 1000), 0.9947))
+                self.arr.exp(0.9513 * self.arr.power(self.arr.log(self.weight), 0.9632)),
+                self.arr.exp(0.8237 * self.arr.power(self.arr.log(self.weight), 0.9947))
             )
         )
     
         # Calculate total metabolic rate
-        swim_cost = sr_o2_rate + self.wave_drag * (
-            self.arr.exp(np.log(sr_o2_rate) + self.swim_speed * (
-                (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
-            )) - sr_o2_rate
-        )
-    
-        # Update kilocalories burned
-        self.kcal += swim_cost
+        if self.num_agents > 1:
+            swim_cost = sr_o2_rate + self.wave_drag * (
+                self.arr.exp(np.log(sr_o2_rate) + self.swim_speed * (
+                    (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
+                )) - sr_o2_rate
+            )
+        else:
+            swim_cost = sr_o2_rate + self.wave_drag.flatten() * (
+                self.arr.exp(np.log(sr_o2_rate) + np.linalg.norm(self.swim_speed.flatten(), axis = -1) * (
+                    (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
+                )) - sr_o2_rate
+            )
+        # swim cost is expressed in mg O2 _kg _hr.  convert to mg O2 _ kg
+        hours = dt * (1./3600.)
+        per_capita_swim_cost = swim_cost * hours
+        mg_O2 = per_capita_swim_cost * self.weight
+        # Brett (1973) used a mean oxycalorific equivalent of 3.36 cal/ mg O2 (RQ = 0.8) 
+        kcal = mg_O2 * (3.36 / 1000)
             
-    def timestep(self, t, dt, g):
+        # Update kilocalories burned
+        self.kcal += kcal
+            
+    def timestep(self, t, dt, g, pid_controller):
         """
         Simulates a single time step for all fish in the simulation.
     
@@ -2633,13 +3280,10 @@ class simulation():
         self.wave_drag_multiplier()
         
         # Assess fatigue
-        self.fatigue(t)
-        
-        # Arbitrate amongst behavioral cues
-        self.arbitrate(t)
+        self.fatigue(t, dt)
         
         # Calculate the ratio of ideal speed over ground to the magnitude of water velocity
-        sog_to_water_vel_ratio = self.ideal_sog / self.arr.linalg.norm([self.x_vel, self.y_vel], axis=0)
+        sog_to_water_vel_ratio = self.ideal_sog / self.arr.linalg.norm(np.stack((self.x_vel, self.y_vel)).T, axis=-1)
         
         # Calculate the sign of the heading and the water flow direction
         heading_sign = np.sign(self.heading)
@@ -2649,27 +3293,63 @@ class simulation():
         time_since_jump = t - self.time_of_jump
         
         # Create a boolean mask for the fish that should jump
-        should_jump = (sog_to_water_vel_ratio < 0.05) & (heading_sign != water_flow_direction_sign) & \
-                      (time_since_jump > 180) & (self.battery > 0.4)
+        should_jump = (sog_to_water_vel_ratio <= 0.25) & \
+            (time_since_jump > 120) & \
+                (self.battery >= 0.25)
+                           
         
         # Apply the jump or swim functions based on the condition
         # For each fish that should jump
-        self.jump(t=t, g = g, mask=should_jump)
+        dxdy_jump = self.jump(t=t, g = g, mask=should_jump)
         
         # For each fish that should swim
-        self.drag_fun(mask=~should_jump)
-        self.frequency(mask=~should_jump)
-        self.thrust_fun(mask=~should_jump)
-        self.swim(dt, mask=~should_jump)
+        self.drag_fun(mask=~should_jump, t = t, dt = dt)
+        self.frequency(mask=~should_jump, t = t, dt = dt)
+        self.thrust_fun(mask=~should_jump, t = t, dt = dt)
+        dxdy_swim = self.swim(t, dt, pid_controller = pid_controller, mask=~should_jump)
         
+        # Arbitrate amongst behavioral cues
+        tolerance = 0.1  # A small tolerance level to account for floating-point arithmetic issues
+        if abs(self.cumulative_time % 1) < tolerance or abs(self.cumulative_time % 1 - 1) < tolerance:
+            self.heading = self.arbitrate(t)
+            
+        # move
+        self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
+        self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
+        try:
+            self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
+        except:
+            print ('fuck')
+        self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
+        
+        self.sog = np.where(should_jump,
+                            self.ideal_sog,
+                            np.sqrt(np.power(self.X - self.prev_X,2)+ np.power(self.Y - self.prev_Y,2)) / dt)
+        
+        # if np.any(self.sog > self.ideal_sog * 2.):
+        #     print ('speed over ground way out of whack')
+        
+        if np.any(np.isnan(self.X)):
+            self.dead = np.where(np.isnan(self.X),1,0)
+
+            # print ("fish off map")
+            # self.hdf5.close()
+            # sys.exit()
+               
+        # if np.any(dxdy_jump != 0.):
+        #     print ('check jump movement')
+            
         # Calculate mileage
-        self.odometer(t=t)  
+        self.odometer(t=t, dt = dt)  
         
         # Log the timestep data
         self.timestep_flush(t)
+        
+        # accumulate time
+        self.cumulative_time = self.cumulative_time + dt
 
             
-    def run(self, model_name, n, dt):
+    def run(self, model_name, n, dt, video = False, k_p = None, k_i = None, k_d = None):
         """
         Executes the simulation model over a specified number of time steps and generates a movie of the simulation.
     
@@ -2697,67 +3377,558 @@ class simulation():
         None. The result of the function is the creation of a movie file visualizing the simulation.
         """        
         t0 = time.time()
-        # get depth raster
-        depth_arr = self.hdf5['environment/depth'][:]
-        depth = rasterio.MemoryFile()
-        height = depth_arr.shape[0]
-        width = depth_arr.shape[1]
+        if self.pid_tuning == False:
+            if video == True:
+                # get depth raster
+                depth_arr = self.hdf5['environment/depth'][:]
+                depth = rasterio.MemoryFile()
+                height = depth_arr.shape[0]
+                width = depth_arr.shape[1]
+                
+                with depth.open(
+                    driver ='GTiff',
+                    height = depth_arr.shape[0],
+                    width = depth_arr.shape[1],
+                    count =1,
+                    dtype ='float32',
+                    crs = self.crs,
+                    transform = self.depth_rast_transform
+                ) as dataset:
+                    dataset.write(depth_arr, 1)
         
-        with depth.open(
-            driver ='GTiff',
-            height = depth_arr.shape[0],
-            width = depth_arr.shape[1],
-            count =1,
-            dtype ='float32',
-            crs = self.crs,
-            transform = self.depth_rast_transform
-        ) as dataset:
-            dataset.write(depth_arr, 1)
-
-            # define metadata for movie
-            FFMpegWriter = manimation.writers['ffmpeg']
-            metadata = dict(title= model_name, artist='Matplotlib',
-                            comment='emergent model run %s'%(datetime.now()))
-            writer = FFMpegWriter(fps=30, metadata=metadata)
-
-            #initialize plot
-            fig, ax = plt.subplots(figsize = (10,5))
-
-            background = ax.imshow(dataset.read(1),
-                                   origin = 'upper',
-                                   extent = [dataset.bounds[0],
-                                              dataset.bounds[2],
-                                              dataset.bounds[1],
-                                              dataset.bounds[3]])
-
-            agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
-
-            plt.xlabel('Easting')
-            plt.ylabel('Northing')
-
-            # Update the frames for the movie
-            with writer.saving(fig, os.path.join(self.model_dir,'%s.mp4'%(model_name)), 300):
-                for i in range(n):
-                    self.timestep(i,1,g)
-
-                    # write frame
-                    agent_pts.set_data(self.X,
-                                       self.Y)
-                    writer.grab_frame()
-
+                    # define metadata for movie
+                    FFMpegWriter = manimation.writers['ffmpeg']
+                    metadata = dict(title= model_name, artist='Matplotlib',
+                                    comment='emergent model run %s'%(datetime.now()))
+                    writer = FFMpegWriter(fps = np.round(30/dt,0), metadata=metadata)
+        
+                    #initialize plot
+                    fig, ax = plt.subplots(figsize = (10,5))
+        
+                    background = ax.imshow(dataset.read(1),
+                                           origin = 'upper',
+                                           extent = [dataset.bounds[0],
+                                                      dataset.bounds[2],
+                                                      dataset.bounds[1],
+                                                      dataset.bounds[3]])
+        
+                    agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
+        
+                    plt.xlabel('Easting')
+                    plt.ylabel('Northing')
+        
+                    # Update the frames for the movie
+                    with writer.saving(fig, 
+                                       os.path.join(self.model_dir,'%s.mp4'%(model_name)), 
+                                       dpi = 300):
+                        # set up PID controller 
+                        #TODO make PID controller a function of length and water velocity
+                        pid_controller = PID_controller(self.num_agents,
+                                                        k_p, 
+                                                        k_i, 
+                                                        k_d)
+                        
+                        pid_controller.interp_PID()
+                        for i in range(int(n)):
+                            self.timestep(i, dt, g, pid_controller)
+        
+                            # write frame
+                            agent_pts.set_data(self.X,
+                                               self.Y)
+                            writer.grab_frame()
+                                
+                            print ('Time Step %s complete'%(i))
+    
+                # clean up
+                writer.finish()
+                self.hdf5.flush()
+                self.hdf5.close()
+                depth.close()     
+                t1 = time.time() 
+            
+            else:
+                #TODO make PID controller a function of length and water velocity
+                pid_controller = PID_controller(self.num_agents,
+                                                k_p, 
+                                                k_i, 
+                                                k_d)
+                
+                pid_controller.interp_PID()
+                
+                # iterate over timesteps 
+                for i in range(int(n)):
+                    self.timestep(i, dt, g, pid_controller)
                     print ('Time Step %s complete'%(i))
-
-
-        # clean up
-        writer.finish()
-        self.hdf5.flush()
-        self.hdf5.close()
-        depth.close()
-        t1 = time.time()     
-        
+                    
+                # close and cleanup
+                self.hdf5.flush()
+                self.hdf5.close()
+                t1 = time.time() 
+                    
+        else:
+            pid_controller = PID_controller(self.num_agents,
+                                            k_p, 
+                                            k_i, 
+                                            k_d)
+            for i in range(n):
+                self.timestep(i, dt, g, pid_controller)
+                
+                print ('Time Step %s %s %s %s %s %s complete'%(i,i,i,i,i,i))
+                
+                if i == range(n)[-1]:
+                    self.hdf5.close()
+                    sys.exit()
+            
         print ('ABM took %s to compile'%(t1-t0))
+
+        
+    def close(self):
+        self.hdf5.close()
             
+class PID_optimization():
+    '''
+    Python class object for solving a genetic algorithm to optimize PID controller values. 
+    '''
+    def __init__(self,
+                 pop_size,
+                 generations,
+                 min_p_value,
+                 max_p_value,
+                 min_i_value,
+                 max_i_value,
+                 min_d_value,
+                 max_d_value):
+        """
+        Initializes an individual's genetic traits.
+    
+        """
+        self.num_genes = 3
+        self.min_p_value = min_p_value
+        self.max_p_value = max_p_value
+        self.min_i_value = min_i_value
+        self.max_i_value = max_i_value
+        self.min_d_value = min_d_value
+        self.max_d_value = max_d_value
+        
+        # population size, number of individuals to create
+        self.pop_size = pop_size
+        
+        # number of generations to run the alogrithm for
+        self.generations = generations
+        
+        ## for non-uniform range across p/i/d values
+        self.p_component = np.random.uniform(self.min_p_value, self.max_p_value, size=1)
+        self.i_component = np.random.uniform(self.min_i_value, self.max_i_value, size=1)
+        self.d_component = np.random.uniform(self.min_d_value, self.max_d_value, size=1)
+        self.genes = np.concatenate((self.p_component, self.i_component, self.d_component), axis=None)
+        
+        self.cross_ratio = 0.9 # percent of offspring that are crossover vs mutation
+        self.mutation_count = 0 # dummy value, will be overwritten
+        self.p = {}
+        self.i = {}
+        self.d = {}
+        self.errors = {}
+        self.velocities = {}
+        self.batteries = {}
+        
+
+    def fitness(self):
+        '''
+        Overview
+
+        This fitness function is designed to evaluate a population of individuals 
+        based on three key criteria: error magnitude, array length, and battery life. 
+        The function ranks each individual by combining these criteria into a single 
+        score, with the goal of minimizing error magnitude, maximizing array length, 
+        and maximizing battery life.
+        
+        Attributes
+        
+            pop_size (int): The number of individuals in the population. Each 
+            individual's performance is evaluated against the set criteria.
+            errors (dict): A dictionary where keys are individual identifiers and 
+            values are arrays representing the error magnitude for each timestep.
+            p, i, d (arrays): Parameters associated with each individual, potentially 
+            relevant to the context of the evaluation (e.g., PID controller parameters).
+            velocities (array): An array containing the average velocities for each 
+            individual, which might be relevant for certain analyses.
+            batteries (array): An array containing the battery life values for each 
+            individual. Higher values indicate better performance.
+        
+        Returns
+        
+            error_df (DataFrame): A pandas DataFrame containing the following 
+            columns for each individual:
+                individual: The identifier for the individual.
+                p, i, d: The PID controller parameters or other relevant parameters 
+                for the individual.
+                magnitude: The sum of squared errors, representing the error magnitude. 
+                Lower values are better.
+                array_length: The length of the error array, indicative of the operational 
+                duration. Higher values are better.
+                avg_velocity: The average velocity for the individual. Included for 
+                contextual information.
+                battery: The battery life of the individual. Higher values are better.
+                arr_len_score: Normalized score based on array_length. Higher scores are better.
+                mag_score: Normalized score based on magnitude. Higher scores are better (inverted).
+                battery_score: Normalized score based on battery. Higher scores are better.
+                rank: The final ranking score, calculated by combining arr_len_score, mag_score, 
+                and battery_score according to their respective weights.
+        
+        Methodology
+        
+            Data Preparation: The function iterates through each individual in 
+            the population, calculating the magnitude of errors and extracting 
+            other relevant parameters. It then appends this information to error_df.
+        
+            Normalization: Each criterion (array length, magnitude, and battery) 
+            is normalized to a [0, 1] scale. For array length and battery, higher 
+            values result in higher scores. For magnitude, the normalization is 
+            inverted so that lower values result in higher scores.
+        
+            Weighting and Preference Matrix: The criteria are weighted according 
+            to their perceived importance to the overall fitness. A pairwise 
+            preference matrix is constructed based on these weighted scores, 
+            comparing each individual against every other individual.
+        
+            Ranking: The final rank for each individual is determined by summing 
+            up their preferences in the preference matrix. The DataFrame is then 
+            sorted by these ranks in descending order, with higher ranks indicating 
+            better overall fitness according to the defined criteria.
+        
+        Customization
+        
+            The weights assigned to each criterion (array_len_weight, 
+                                                    magnitude_weight, 
+                                                    battery_weight) can be adjusted 
+            to reflect their relative importance in the specific context of use. The 
+            default weights are set based on a balanced assumption but should be 
+            tailored to the specific requirements of the evaluation.
+            Additional criteria can be incorporated into the evaluation by extending 
+            the DataFrame to include new columns, normalizing these new criteria,
+            and adjusting the preference matrix calculation to account for these 
+            criteria.
+        
+        Usage
+        
+        To use this function, instantiate the class with the relevant data 
+        (errors, parameters, velocities, and batteries) and call the fitness method. 
+        The method returns a ranked DataFrame, which can be used to select the 
+        top-performing individuals for further analysis or operations.
+                
+                
+                
+        '''
+        error_df = pd.DataFrame(columns=['individual', 
+                                         'p', 
+                                         'i', 
+                                         'd', 
+                                         'magnitude',
+                                         'array_length',
+                                         'avg_velocity',
+                                         'battery',
+                                         'arr_len_score',
+                                         'mag_score',
+                                         'battery_score',
+                                         'rank'])
+
+        for i in range(self.pop_size):
+            filtered_array = self.errors[i][:-1]
+            magnitude = np.nansum(np.power(filtered_array, 2))
+
+            row_data = {
+                'individual': i,
+                'p': self.p[i],
+                'i': self.i[i],
+                'd': self.d[i],
+                'magnitude': magnitude,
+                'array_length': len(filtered_array),
+                'avg_velocity': np.nanmean(self.velocities[i]),
+                'battery': self.batteries[i]  # Assuming you have battery data in self.batteries
+            }
+
+            error_df = error_df.append(row_data, ignore_index=True)
+
+        # Normalize the criteria
+        error_df['arr_len_score'] = (error_df['array_length'] - error_df['array_length'].min()) / (error_df['array_length'].max() - error_df['array_length'].min())
+        error_df['mag_score'] = (error_df['magnitude'].max() - error_df['magnitude']) / (error_df['magnitude'].max() - error_df['magnitude'].min())
+        error_df['battery_score'] = (error_df['battery'] - error_df['battery'].min()) / (error_df['battery'].max() - error_df['battery'].min())
+
+        error_df.set_index('individual', inplace=True)
+
+        # Update weights to include battery
+        array_len_weight = 0.35
+        magnitude_weight = 0.40
+        battery_weight = 1 - array_len_weight - magnitude_weight
+
+        n = len(error_df)
+        preference_matrix = np.zeros((n, n))
+
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    preference_matrix[i, j] = (array_len_weight * (error_df.at[i, 'arr_len_score'] > error_df.at[j, 'arr_len_score'])) + \
+                                              (magnitude_weight * (error_df.at[i, 'mag_score'] > error_df.at[j, 'mag_score'])) + \
+                                              (battery_weight * (error_df.at[i, 'battery_score'] > error_df.at[j, 'battery_score']))
+
+        final_scores = np.sum(preference_matrix, axis=1)
+        error_df['rank'] = final_scores
+        error_df.reset_index(drop=False, inplace=True)
+        error_df.sort_values(by='rank', ascending=False, inplace=True)
+
+        return error_df
+    
+    def selection(self, error_df):
+        """
+        Selects the highest performing indivduals to become parents, based on
+        solution rank. Assigns a number of offspring to each parent pair based
+        on a beta probability distribution function. Fitter parents produce more
+        offspring.
+        
+        Parameters:
+        - error_df (dataframe): a ranked dataframe of indidvidual solutions.
+                                output of the self.fitness() function.
+        
+        Attributes set:
+        - pop_size (int): number of indidivduals in population. useful for defining
+                          the number of offspring to ensure population doesn't balloon.
+        - cross_ratio (float): controls the ratio of crossover offspring vs mutation offspring
+                          
+        Returns: list of dataframes. each dataframe contained paired parents with
+                 assigned number of offspring
+        
+        """
+        # selects the top 80% of individuals to be parents
+        index_80_percent = int(0.8 * len(error_df))
+        parents = error_df.iloc[:index_80_percent]
+        
+        # create a list of dataframes -> pairs of parents by fitness
+        pairs_parents = []
+        for i in np.arange(0, len(parents), 2):
+            pairs_parents.append(parents[i:(i + 2)])
+        
+        # shape parameters for the beta distribution -> have more fit parents produce more offspring
+        # https://en.wikipedia.org/wiki/Beta_distribution#/media/File:Beta_distribution_pdf.svg
+        a = 1
+        b = 3
+        
+        # calculate PDF values of the beta distribution based on the length of the list
+        beta_values = beta.pdf(np.linspace(0, 0.5, len(pairs_parents)), a, b)
+        
+        # scale values to number of offspring desired
+        offspring = self.cross_ratio * self.pop_size # generate XX% of offspring as crossover
+        scaled_values = offspring * beta_values / sum(beta_values)
+        scaled_values = np.round(scaled_values).astype(int)
+        
+        # assign beta values (as offspring weight) to appropriate parent pair
+        for i, df in enumerate(pairs_parents):
+            df['offspring_weight'] = scaled_values[i]  # Assign array value to the column
+        
+        return pairs_parents
+    
+    def crossover(self, pairs_parents):
+        """
+        Generate new genes for offspring based on existing parent genes. Number of offspring
+        per parent pair is dictated by 'offspring_weight' as set in selection function.
+        
+        Parameters:
+        - pairs_parents (list): list of dataframes. each dataframe contained paired
+                                parents with assigned number of offspring
+                                
+        Returns: list of lists, each list contains random p,i,d values between parent values
+                                
+        """
+        offspring = []
+
+        for i in pairs_parents:
+            parent1 = i[:1]
+            parent2 = i[1:]
+            num_offspring = parent1.iloc[0]['offspring_weight'].astype(int)
             
+            for j in range(num_offspring):
+                p = random.uniform(parent1.iloc[0]['p'], parent2.iloc[0]['p'])
+                i = random.uniform(parent1.iloc[0]['i'], parent2.iloc[0]['i'])
+                d = random.uniform(parent1.iloc[0]['d'], parent2.iloc[0]['d'])
+                offspring.append([p,i,d])
+        
+        # set a number of mutations to generate
+        # this ensures the correct number of offspring are generated
+        self.mutation_count = self.pop_size - len(offspring)
+        
+        return offspring
+
+    def mutation(self, error_df):
+        """
+        Generate new genes for offspring independent of parent genes. Uses the min/max
+        gene values set in the first generation population.
+        
+        Attributes set:
+        - mutation_count (int): number of mutation individuals to create. defined by the crossover
+                                function, this ensures that the offspring total are the same as the
+                                previous population so it doesn't change.
+        - min_gene_value: minimum for gene value. same as defined in initial population
+        - max_gene_value: maximum for gene value. same as defined in initial population
+        - num_genes: number of genes to create. should always be 3 for pid controller
+                                
+        Returns: list of lists, each list contains random p,i,d values between min/max gene values.
+                 this list will be combined with the crossover offspring to produce the full
+                 population of the next generation.
+        
+        """
+        population = []
+
+        for i in range(self.mutation_count):
+            # individual = [random.uniform(self.min_gene_value, self.max_gene_value) for _ in range(self.num_genes)]
+            P = np.abs(error_df.iloc[i]['p'] + np.random.uniform(-4.0,4.0,1)[0])
+            I = np.abs(error_df.iloc[i]['i'] + np.random.uniform(-0.1,0.1,1)[0])
+            D = np.abs(error_df.iloc[i]['d'] + np.random.uniform(-1.0,1.0,1)[0])
+            
+            individual = np.concatenate((P, I, D), axis=None)
+            
+            population.append(individual)
+   
+        return population
+
+    def population_create(self):
+        """
+        Generate the population of individuals.
+        
+        Attributes set:
+        - genes
+        - pop_size
+        - num_genes
+        - min_gene_value
+        - max_gene_value
+                                
+        Returns: array of population p/i/d values, one set for each individual.
+        
+        """      
+        population = []
+
+        for _ in range(self.pop_size):
+        # create a new instance of the solution class for each individual
+            individual = PID_optimization(self.pop_size,
+                                          self.generations,
+                                          self.min_p_value,
+                                          self.max_p_value,
+                                          self.min_i_value,
+                                          self.max_i_value,
+                                          self.min_d_value,
+                                          self.max_d_value)
+            population.append(individual.genes)
+
+        return population
+    
+    def run(self, population, sockeye, model_dir, crs, basin, water_temp, pid_tuning_start, fish_length, ts, n, dt):
+        """
+        Run the genetic algorithm.
+        
+        Parameters:
+        - population (array): collection of solutions (population of individuals)
+        - sockeye: sockeye model
+        - model_dir (str): Directory where the model data will be stored.
+        - crs (str): Coordinate reference system for the model.
+        - basin (str): Name or identifier of the basin.
+        - water_temp (float): Water temperature in degrees Celsius.
+        - pid_tuning_start (tuple): A tuple of two values (x, y) defining the point where agents start.
+        - ts (int, optional): Number of timesteps for the simulation. Defaults to 100.
+        - n (int, optional): Number of agents in the simulation. Defaults to 100.
+        - dt (float): The duration of each time step.
+        
+        Attributes:
+        - generations
+        - pop_size
+        - p
+        - i
+        - d
+        - errors
+        - velocities
+        
+        Returns:
+        - records (dict): dictionary holding each generation's errors and rankings. 
+                          Generation number is used as the dictionary key. Each key's value
+                          is the dataframe of PID values and ranking metrics.
+        """
+        records = {}
+        
+        for generation in range(self.generations):
+            
+            # keep track of the timesteps before error (length of error array),
+            # also used to calc magnitude of errors
+            pop_error_array = []
+            
+            prev_error_sum = np.zeros(1)
+
+            #for i in range(len(self.population)):
+            for i in range(self.pop_size):
+            
+                print(f'\nrunning individual {i+1} of generation {generation+1}, {generation+1}, {generation+1}, {generation+1}, {generation+1}...')
+                
+                # useful to have these in pid_solution
+                self.p[i] = population[i][0]
+                self.i[i] = population[i][1]
+                self.d[i] = population[i][2]
+                
+                print(f'P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}')
+                
+                # set up the simulation
+                sim = sockeye.simulation(model_dir,
+                                         'solution',
+                                         crs,
+                                         basin,
+                                         water_temp,
+                                         pid_tuning_start,
+                                         fish_length,
+                                         ts,
+                                         n,
+                                         use_gpu = False,
+                                         pid_tuning = True)
+                
+                # run the model and append the error array
+
+                try:
+                    sim.run('solution',
+                            n = ts,
+                            dt = dt,
+                            k_p = self.p[i], # k_p
+                            k_i = self.i[i], # k_i
+                            k_d = self.d[i], # k_d
+                            )
+                    
+                except:
+                    print(f'failed --> P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}\n')
+                    pop_error_array.append(sim.error_array)
+                    self.errors[i] = sim.error_array
+                    self.velocities[i] = np.sqrt(np.power(sim.vel_x_array,2) + np.power(sim.vel_y_array,2))
+                    self.batteries[i] = sim.battery[-1]
+                    sim.close()
+
+                    continue
+
+            # run the fitness function -> output is a df
+            error_df = self.fitness()
+            # print(f'Generation {generation+1}: {error_df.head()}')
+            
+            # update logging dictionary
+            records[generation] = error_df
+
+            # selection -> output is list of paired parents dfs
+            selected_parents = PID_optimization.selection(self, error_df)
+
+            # crossover -> output is list of crossover pid values
+            cross_offspring = PID_optimization.crossover(self, selected_parents)
+
+            # mutation -> output is list of muation pid values
+            mutated_offspring = PID_optimization.mutation(self, error_df)
+            # combine crossover and mutation offspring to get next generation
+            population = cross_offspring + mutated_offspring
+            
+            print(f'completed generation {generation+1}.... ')
+            
+            if np.all(error_df.magnitude.values == 0):
+                return records
+                        
+        return records
             
             
             
