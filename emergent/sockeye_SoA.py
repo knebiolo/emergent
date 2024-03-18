@@ -674,7 +674,7 @@ class simulation():
         self.time_out_of_water = self.arr.repeat(0.0, num_agents)
         self.time_of_abandon = self.arr.repeat(0.0, num_agents)
         self.time_since_abandon = self.arr.repeat(0.0, num_agents)
-        self.dead = self.arr.repeat(0.0, num_agents)
+        self.dead = np.full(self.ttfr.shape, np.nan)
         if pid_tuning != True:
             self.X = self.arr.random.uniform(starting_box[0], starting_box[1],num_agents)
             self.Y = self.arr.random.uniform(starting_box[2], starting_box[3],num_agents)
@@ -1326,6 +1326,8 @@ class simulation():
         self.time_out_of_water = np.where(self.depth < self.too_shallow, 
                                           self.time_out_of_water + 1, 
                                           self.time_out_of_water)
+        
+        self.dead = np.where(self.time_out_of_water > 10, 1, self.dead)
     
         positions = np.vstack([self.X.flatten(),self.Y.flatten()]).T
         # Creating a KDTree for efficient spatial queries
@@ -1599,14 +1601,16 @@ class simulation():
         depth_multiplier = np.where(depths < min_depth[:,np.newaxis,np.newaxis], 1, 0)
 
         # Calculate the difference vectors
-        delta_x = x_coords - self.X[:,np.newaxis,np.newaxis]
-        delta_y = y_coords - self.Y[:,np.newaxis,np.newaxis]
+        #delta_x = x_coords - self.X[:,np.newaxis,np.newaxis]
+        #delta_y = y_coords - self.Y[:,np.newaxis,np.newaxis]
         
-        # delta_x =  self.X[:,np.newaxis,np.newaxis] - x_coords
-        # delta_y =  self.Y[:,np.newaxis,np.newaxis] - y_coords
+        delta_x =  self.X[:,np.newaxis,np.newaxis] - x_coords
+        delta_y =  self.Y[:,np.newaxis,np.newaxis] - y_coords
         
         # Calculate the magnitude of each vector
         magnitudes = np.sqrt(np.power(delta_x,2) + np.power(delta_y,2))
+        
+        #TODO rater than norm of every delta_x, we just grab the mean delta_x, delta_y?
 
         # Avoid division by zero
         magnitudes = np.where(magnitudes == 0, 0.000001, magnitudes)
@@ -2025,11 +2029,11 @@ class simulation():
             collision = self.collision_cue(1)
         else:
             rheotaxis = self.rheo_cue(18000)       # 10000
-            shallow = self.shallow_cue(13000)      # 10000
-            wave_drag = self.wave_drag_cue(1)   # 5000
-            low_speed = self.vel_cue(1500)         # 8000 
-            avoid = self.already_been_here(1200, t)# 3000
-            school = self.school_cue(750)         # 9000
+            shallow = self.shallow_cue(10000)      # 10000
+            wave_drag = self.wave_drag_cue(2500)   # 5000
+            low_speed = self.vel_cue(1200)         # 8000 
+            avoid = self.already_been_here(8000, t)# 3000
+            school = self.school_cue(1500)         # 9000
             collision = self.collision_cue(2000)   # 2500 
             
             # rheotaxis = self.rheo_cue(10000)       # 10000
@@ -2059,6 +2063,8 @@ class simulation():
                     'collision': collision}
         
         # Arbitrate between different behaviors
+        # how many f4cks does this fish have?
+        tolerance = 25000
         
         # Set the cicada timestep based on sex
         cicada_timestep = np.where(self.sex == 'M', 11, 13)
@@ -2071,6 +2077,7 @@ class simulation():
         # should_abandon = np.logical_or(time_since_abandon % cicada_timestep == 0,
         #                                time_since_abandon <= 3)
         should_abandon = time_since_abandon % cicada_timestep == 0
+
         still_abandon = np.where(t - self.time_of_abandon < 9,1,0)
         
         # Use the binomial distribution to randomly select a subset of those eligible to abandon
@@ -2080,25 +2087,17 @@ class simulation():
         abandon = abandon + still_abandon
         
         # Update 'self.time_of_abandon' for those who abandoned their trajectory this timestep
-        self.time_of_abandon += abandon * t
-        
-        # how many f4cks does this fish have?
-        tolerance = 25000
-        
-        # if shallow cue magnitude is greater than our tolerance, make it equal to tolerance
-        shallow = np.where(np.linalg.norm(shallow,axis = -1)[:,np.newaxis] > tolerance,
-                           np.divide(tolerance,np.linalg.norm(shallow,axis = -1))[:,np.newaxis] * shallow,
-                           shallow)
+        self.time_of_abandon[abandon] = t
         
         # add up vectors, but make sure it's not greater than the tolerance
         vec_sum = np.zeros_like(rheotaxis)
         for i in np.arange(0,7,1):
             vec = order_dict[i]
-            if i == 'school':
-                vec * abandon
+
             vec_sum = np.where(np.linalg.norm(vec_sum, axis = -1)[:,np.newaxis] < tolerance,
                                vec_sum + vec,
                                vec_sum)
+            vec_sum[abandon] = rheotaxis
         
         head_vec = np.zeros_like(rheotaxis)
         
@@ -3045,15 +3044,16 @@ class simulation():
                          0.)
         
         self.error = error
+        ded = np.where(np.isnan(error))
+        #self.dead = 
         
         if np.any(np.isnan(error)):
-            self.dead = np.where(np.isnan(error),1,0)
-            
+
             # print ('nan in error print integral')
             # print ('%s'%(self.integral))
             # print ('pid adjustment:')
             # print ('%s'%(self.pid_adjustment))
-            # print ('shit')
+            print ('shit')
             # self.hdf5.close()
             # sys.exit()
             
@@ -3091,7 +3091,10 @@ class simulation():
         fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
                               fish_vel_0 + acc_ini * dt + pid_adjustment,
                               fish_vel_0 + acc_ini * dt)
-        fish_vel_1 = np.where(self.dead[:,np.newaxis], 0.,fish_vel_1)
+        
+        fish_vel_1 = np.where(self.dead[:,np.newaxis] == 1,
+                              fish_vel_1 * 0,
+                              fish_vel_1)
         
         # Step 7: Prepare for position update
         dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
@@ -3137,6 +3140,7 @@ class simulation():
         """
 
         # Reset jump time for each fish
+        
         self.time_of_jump = np.where(mask,t,self.time_of_jump)
     
         # Get jump angle for each fish
@@ -3202,21 +3206,21 @@ class simulation():
         # O2_rate in units of mg O2/hr
         sr_o2_rate = self.arr.where(
             self.water_temp <= 5.3,
-            self.arr.exp(0.0565 * np.power(self.arr.log(self.weight * 1000), 0.9141)),
+            self.arr.exp(0.0565 * np.power(self.arr.log(self.weight), 0.9141)),
             self.arr.where(
                 self.water_temp <= 15,
-                self.arr.exp(0.1498 * self.arr.power(self.arr.log(self.weight * 1000), 0.8465)),
-                self.arr.exp(0.1987 * self.arr.power(self.arr.log(self.weight * 1000), 0.8844))
+                self.arr.exp(0.1498 * self.arr.power(self.arr.log(self.weight), 0.8465)),
+                self.arr.exp(0.1987 * self.arr.power(self.arr.log(self.weight), 0.8844))
             )
         )
     
         ar_o2_rate = self.arr.where(
             self.water_temp <= 5.3,
-            self.arr.exp(0.4667 * self.arr.power(self.arr.log(self.weight * 1000), 0.9989)),
+            self.arr.exp(0.4667 * self.arr.power(self.arr.log(self.weight), 0.9989)),
             self.arr.where(
                 self.water_temp <= 15,
-                self.arr.exp(0.9513 * self.arr.power(self.arr.log(self.weight * 1000), 0.9632)),
-                self.arr.exp(0.8237 * self.arr.power(self.arr.log(self.weight * 1000), 0.9947))
+                self.arr.exp(0.9513 * self.arr.power(self.arr.log(self.weight), 0.9632)),
+                self.arr.exp(0.8237 * self.arr.power(self.arr.log(self.weight), 0.9947))
             )
         )
     
@@ -3312,8 +3316,10 @@ class simulation():
         # move
         self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
         self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
-        
-        self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
+        try:
+            self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
+        except:
+            print ('fuck')
         self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
         
         self.sog = np.where(should_jump,
