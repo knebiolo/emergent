@@ -795,10 +795,13 @@ class simulation():
         
         else:
             if self.basin == "Nushagak River":
-                if self.sex == 'M':
-                    self.length = self.arr.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents)
-                else:
-                    self.length = self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
+                self.length=np.where(self.sex=='M',
+                         self.arr.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents),
+                         self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents))
+                # if self.sex == 'M':
+                #     self.length = self.arr.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents)
+                # else:
+                #     self.length = self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
         
         # we can also set these arrays that contain parameters that are a function of length
         self.length = np.where(self.length < 475.,475.,self.length)
@@ -819,10 +822,13 @@ class simulation():
         sex of fish'''
         # body depth is in cm
         if self.basin == "Nushagak River":
-            if self.sex == 'M':
-                self.body_depth = self.arr.exp(-1.938 + np.log(self.length) * 1.084 + 0.0435) / 10.
-            else:
-                self.body_depth = self.arr.exp(-1.938 + np.log(self.length) * 1.084) / 10.
+            self.body_depth=np.where(self.sex=='M',
+                        self.arr.exp(-1.938 + np.log(self.length) * 1.084 + 0.0435) / 10.,
+                        self.arr.exp(-1.938 + np.log(self.length) * 1.084) / 10.)
+            # if self.sex == 'M':
+            #     self.body_depth = self.arr.exp(-1.938 + np.log(self.length) * 1.084 + 0.0435) / 10.
+            # else:
+            #     self.body_depth = self.arr.exp(-1.938 + np.log(self.length) * 1.084) / 10.
                 
         self.too_shallow = self.body_depth /100. / 2. # m
         self.opt_wat_depth = self.body_depth /100 * 3.0 + self.too_shallow
@@ -2072,11 +2078,13 @@ class simulation():
         should_abandon = t % cicada_timestep == 0
         still_abandon = np.where(time_since_abandon < 15,1,0)
         
-        abandon = np.zeros_like(self.sex, dtype=np.int)  # Initialize with zeros
-        
+        # Use the binomial distribution to randomly select a subset of those eligible to abandon
+        # Note: The binomial approach is applied only to those cicadas marked by 'should_abandon'
+        abandon = np.zeros_like(self.sex, dtype=np.int32)  # Initialize with zeros
+
         if np.any(should_abandon):
             # roll dice - will it abandon?
-            abandon[should_abandon] = np.random.binomial(1, 0.25, size=should_abandon.sum())
+            abandon[should_abandon] = np.random.binomial(1, 0.33, size=should_abandon.sum())
             
             # Update 'self.time_of_abandon' for those who abandoned their trajectory this timestep
             self.time_of_abandon[should_abandon] = t

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """
 Created on Tue Nov 27 14:31:15 2023
 
@@ -8,49 +8,37 @@ Script intent: Multi model summary is to be used to summarize multiple models at
 has finished running, this script will take said model as well as others and complete the summarization
 without having to run the class Summarization on multiple occasions.
 """
+
 #Import Dependencies
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-import geopandas as gpd
-from shapely.wkt import loads as loads
 from matplotlib.patches import Rectangle
 import rasterio
 from rasterio.crs import CRS
 from rasterio.warp import reproject, calculate_default_transform
 from matplotlib.backends.backend_pdf import PdfPages
-
+from rasterio.plot import show
+import h5py
 
 
 #Identify the directory path
-directory_path = [
-    r"J:\2819\005\Calcs\ABM\Output\test_29",
-    r"J:\2819\005\Calcs\ABM\Output\test_43",
-    r"J:\2819\005\Calcs\ABM\Output\test_55"
-]
-    
-    
-hdf_path = [
-    r"J:\2819\005\Calcs\ABM\Output\test_29\test_29.hdf",
-    r"J:\2819\005\Calcs\ABM\Output\test_43\test_43.h5",
-    r"J:\2819\005\Calcs\ABM\Output\test_55\test_55.h5"
-]
- 
- 
-tif_path=[
-    r'J:\2819\005\Calcs\ABM\Data\elev.tif',
-]
+directory_path = r"J:\2819\005\Calcs\ABM\Data\Agent_data_files\Multi_Model_Summarize\Validation_Test"
+hdf_path = r"J:\2819\005\Calcs\ABM\Data\Agent_data_files\Multi_Model_Summarize\Validation_Test\validation_testing.h5"
+exports_path=r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Multi_Model_Summarize\Validation_Test'
+Data_output=r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Multi_Model_Summarize\Validation_Test'
+tif_path=r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Multi_Model_Summarize\Validation_Test\elev.tif'
 
-Data_output=[
-    r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_29',
-    r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_43',
-    r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_55'
-]
+#Rectangle boundary information
+x_min = 548500
+y_min = 6641036
+width = 549000 - x_min
+height = 6641968 - y_min
+rect_position = (x_min, y_min, width, height)
 
 
-
-class Summarization:
+class Multi_Summarization:
     def __init__(self, directory_path, hdf_path, tif_path, Data_output):
         self.directory_path = directory_path
         self.hdf_path = hdf_path
@@ -63,63 +51,24 @@ class Summarization:
         self.data_list = []  # Initialize data_list
         self.bout_duration_list = []  # Initialize bout_duration_list
         self.ids_in_rectangle = set()
-        
-        
-
-
-
-    
-
-        
+        self.exports_path=exports_path
+       
 
     def h5_agent_list(self):
-        # Create an empty list to store the .h5 files
-        h5_files = []
+        agent_keys = []
+        # Open the main HDF5 file in read-only mode using pandas.HDFStore
+        with pd.HDFStore(self.hdf_path, 'r') as store:
+            # Iterate through all keys in the store
+            for key in store.keys():
+                # Check if the key starts with the specified prefix '/agent_data/'
+                # Note: HDFStore keys always start with '/', no need to add it
+                if key.startswith('agent_data'):
+                    # Append the key to the list
+                    agent_keys.append(key)
 
-        # Iterate through the files in the directory
-        for filename in os.listdir(directory_path):
-            if filename.endswith('.h5'):
-                h5_files.append(filename)
-
-        # Return the list of .h5 files
-        return h5_files
+        return agent_keys
     
-
-    def list_keys_h5_files(self):
-        for filename in self.h5_files:
-            full_path_keys = os.path.join(self.directory_path, filename)
-            with pd.HDFStore(full_path_keys, mode='r') as store:
-                keys = store.keys()
-                print(f"Keys in the .h5 file '{filename}':")
-                for key in keys:
-                    print(key)
-
-    def unique_h5_index(self):
-        self.h5_files = list(set(self.h5_files))
-
-    def process_hdf5_data(self):
-        with pd.HDFStore(self.hdf_path, mode='r') as store:
-            keys = store.keys()
-            for key in keys:
-                print(f"Contents of key '{key}':")
-                data = pd.read_hdf(self.hdf_path, key)
-                print(data)
-
-    def process_h5_battery(self):
-        for filename in self.h5_files:
-            full_path_battery = os.path.join(self.directory_path, filename)
-            try:
-                with pd.HDFStore(full_path_battery, mode='r') as store:
-                    battery_key = '/battery'
-                    if battery_key in store:
-                        print(f"Contents of '/battery' in '{filename}':")
-                        battery_data = pd.read_hdf(full_path_battery, battery_key)
-                        print(battery_data)
-                    else:
-                        print(f"Key '/battery' not found in '{filename}'")
-            except Exception as e:
-                print(f"Error reading file '{filename}': {e}")
-
+    
 
     def load_tiff_image(self, crs_epsg=32604):
         # Define the desired CRS
@@ -145,1017 +94,839 @@ class Summarization:
 
         return image_data, tiff_extent
 
-
-    def read_ts_loc_data(self):
-        ts_loc_df = pd.DataFrame()
-        try:
-            with pd.HDFStore(self.hdf_path, mode='r') as store:
-                if '/TS' in store:
-                    ts_data = pd.read_hdf(self.hdf_path, '/TS')
-                    ts_loc_df = pd.concat([ts_loc_df, ts_data], ignore_index=True)
-        except Exception as e:
-            print(f"Error reading file '{self.hdf_path}': {e}")
-        return ts_loc_df
-
-
-
         
-    # Find the .h5 files
     def find_h5_files(self):
-        h5_files=[]
-        for filename in os.listdir(self.directory_path):
-            if filename.endswith('.h5'):
-                h5_files.append(filename)
-        return h5_files
+        h5_agent_keys = []
 
-    # Collect length values
-    def length_values(self):
-        self.lengths = []  # Initialize the 'lengths' list
+        # Open the main HDF5 file in read-only mode
+        with pd.HDFStore(self.hdf_path, mode='r') as store:
+            # Iterate through all keys in the store
+            for key in store.keys():
+                # Check if the key starts with the specified prefix for agents
+                if key.startswith('agent_data'):
+                    # Append the key (representing an individual agent's data) to the list
+                    h5_agent_keys.append(key)
 
-        # Iterate through each HDF5 file in the specified directory
-        for filename in self.h5_files:
-            full_path = os.path.join(self.directory_path, filename)
+        return h5_agent_keys
+    
+    
+    
 
-            # Open the HDF5 file in read-only mode
-            with pd.HDFStore(full_path, mode='r') as store:
-                agent_key = '/agent'
+    
 
-                # Check if the '/agent' key exists in the HDF5 file
-                if agent_key in store:
-                    # Read the agent data from the '/agent' key
-                    agent_data = pd.read_hdf(full_path, agent_key)
-                    agent_data.reset_index(inplace=True)
-
-                    # Check if the 'length' column exists in the agent data
-                    if 'length' in agent_data.columns:
-                        # Extend the 'lengths' list with the 'length' column values
-                        self.lengths.extend(agent_data['length'])
-                    else:
-                        # Handle the case where 'length' column is not found in the agent data
-                        pass
-                else:
-                    # Handle the case where '/agent' key is not found in the HDF5 file
-                    pass
-
-    # Plot lengths
     def plot_lengths(self):
-        if self.lengths:
-            # Create a PDF booklet
-            pdf_filepath = os.path.join(self.Data_output, 'Agent_Lengths.pdf')
-            with PdfPages(pdf_filepath) as pdf:
-                # Plot histogram
-                plt.hist(self.lengths, bins=20, edgecolor='black')
-                plt.xlabel('Length')
-                plt.ylabel('Frequency')
-                plt.title('Agent Lengths')
-                pdf.savefig()
-                plt.close()
+        # Construct the output filename based on the HDF5 filename
+        base_name = os.path.splitext(os.path.basename(self.hdf_path))[0]
+        pdf_filename = f"{base_name}_Lengths_By_Sex_Comparison.pdf"
+        pdf_filepath = os.path.join(self.Data_output, pdf_filename)
+        
+        with PdfPages(pdf_filepath) as pdf:
+            with h5py.File(self.hdf_path, 'r') as file:
+                if 'agent_data' in file:
+                    lengths = file['/agent_data/length'][:]
+                    sexes = file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
 
-            print(f"Results written to: {pdf_filepath}")
-        else:
-            print("No 'length' values found for plotting")
+                    for sex in np.unique(sexes):
+                        sex_label = 'Male' if sex == 0 else 'Female'
+                        sex_mask = sexes == sex
+                        lengths_by_sex = lengths[sex_mask]
+
+                        if lengths_by_sex.size > 0:
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            # Dynamically calculate the number of bins
+                            q75, q25 = np.percentile(lengths_by_sex, [75, 25])
+                            bin_width = 2 * (q75 - q25) * len(lengths_by_sex) ** (-1/3)  # Freedman-Diaconis rule
+                            bins = round((max(lengths_by_sex) - min(lengths_by_sex)) / bin_width)
+                            ax.hist(lengths_by_sex, bins=bins, alpha=0.7, color='blue' if sex == 0 else 'pink')
+                            ax.set_title(f'{base_name} - {sex_label} Agent Lengths')
+                            ax.set_xlabel('Length')
+                            ax.set_ylabel('Frequency')
+                            plt.tight_layout()
+                            pdf.savefig(fig)
+                            plt.close()
+                        else:
+                            print(f"No length values found for {sex_label}.")
+        
+        print(f"Plots saved to: {pdf_filepath}")
+        
             
+        
     # Calculate Statistics
     def length_statistics(self):
-        length_stats_file_path = os.path.join(self.Data_output, 'length_statistics_results.txt')
+        # Construct the output filename based on the HDF5 filename
+        base_name = os.path.splitext(os.path.basename(self.hdf_path))[0]
+        stats_file_name = f"{base_name}_length_statistics_by_sex.txt"
+        stats_file_path = os.path.join(self.Data_output, stats_file_name)
 
-        print(f"Attempting to write results to: {length_stats_file_path}")
+        with h5py.File(self.hdf_path, 'r') as file, open(stats_file_path, 'w') as output_file:
+            if 'agent_data' in file:
+                lengths = file['/agent_data/length'][:]
+                sexes = file['/agent_data/sex'][:]  # This assumes 0 and 1 encoding for sexes
 
-        with open(length_stats_file_path, 'w') as output_file:
-            if self.lengths:
-                mean_length = sum(self.lengths) / len(self.lengths)
-                median_length = sorted(self.lengths)[len(self.lengths) // 2]
-                std_dev_length = (sum((x - mean_length) ** 2 for x in self.lengths) / len(self.lengths)) ** 0.5
+                for sex in np.unique(sexes):
+                    sex_mask = sexes == sex
+                    lengths_by_sex = lengths[sex_mask]
+                    if lengths_by_sex.size > 0:
+                        mean_length = np.mean(lengths_by_sex)
+                        median_length = np.median(lengths_by_sex)
+                        std_dev_length = np.std(lengths_by_sex, ddof=1)
+                        sex_label = 'Male' if sex == 0 else 'Female'
+                        output_file.write(f"Statistics for {sex_label}:\n")
+                        output_file.write(f"  Average (Mean) Length: {mean_length:.2f}\n")
+                        output_file.write(f"  Median Length: {median_length:.2f}\n")
+                        output_file.write(f"  Standard Deviation of Length: {std_dev_length:.2f}\n\n")
+                    else:
+                        output_file.write(f"No length values found for {sex_label}.\n\n")
 
-                result_line = f"Average (Mean) Length: {mean_length}\n"
-                output_file.write(result_line)
-                result_line = f"Median Length: {median_length}\n"
-                output_file.write(result_line)
-                result_line = f"Standard Deviation of Length: {std_dev_length}\n"
-                output_file.write(result_line)
-            else:
-                result_line = "No 'length' values found for statistics\n"
-                output_file.write(result_line)
-
-        print(f"Results written to: {length_stats_file_path}")
+        print(f"Results written to: {stats_file_path}")
 
 
     # class weights
 
 
-    # Collect weights
-    def collect_weights(self):
-        self.weights = []  # Initialize the 'weights' list
-        for filename in self.h5_files:
-            full_path = os.path.join(self.directory_path, filename)
-            with pd.HDFStore(full_path, mode='r') as store:
-                agent_key = '/agent'
-                if agent_key in store:
-                    agent_data = pd.read_hdf(full_path, agent_key)
-                    agent_data.reset_index(inplace=True)
-                    if 'weight' in agent_data.columns:
-                        self.weights.extend(agent_data['weight'])
-                    else:
-                        print(f"'weight' not found in '{filename}'")
-                else:
-                    print(f"Key '/agent' not found in '{filename}'")
-
     # Plot weights
     def plot_weights(self):
-        if self.weights:
-            # Create a PDF booklet
-            pdf_filepath = os.path.join(self.Data_output, 'Agent_Weights.pdf')
-            with PdfPages(pdf_filepath) as pdf:
-                # Plot histogram
-                plt.hist(self.weights, bins=20, edgecolor='black')
-                plt.xlabel('Weight')
-                plt.ylabel('Frequency')
-                plt.title('Weights for All Agents')
-                pdf.savefig()
-                plt.close()
+        # Construct the output filename based on the HDF5 filename
+        base_name = os.path.splitext(os.path.basename(self.hdf_path))[0]
+        pdf_filename = f"{base_name}_Weights_By_Sex_Comparison.pdf"
+        pdf_filepath = os.path.join(self.Data_output, pdf_filename)
 
-            print(f"Results written to: {pdf_filepath}")
-        else:
-            print("No 'weight' values found for plotting")
+        with PdfPages(pdf_filepath) as pdf:
+            with h5py.File(self.hdf_path, 'r') as file:
+                if 'agent_data' in file:
+                    weights = file['/agent_data/weight'][:]
+                    sexes = file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
+
+                    for sex in np.unique(sexes):
+                        sex_label = 'Male' if sex == 0 else 'Female'
+                        sex_mask = sexes == sex
+                        weights_by_sex = weights[sex_mask]
+
+                        if weights_by_sex.size > 0:
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            # Dynamically calculate the number of bins
+                            q75, q25 = np.percentile(weights_by_sex, [75, 25])
+                            bin_width = 2 * (q75 - q25) * len(weights_by_sex) ** (-1/3)  # Freedman-Diaconis rule
+                            bins = round((max(weights_by_sex) - min(weights_by_sex)) / bin_width)
+                            ax.hist(weights_by_sex, bins=bins, edgecolor='black', color='blue' if sex == 0 else 'pink')
+                            ax.set_title(f'{base_name} - {sex_label} Agent Weights')
+                            ax.set_xlabel('Weight')
+                            ax.set_ylabel('Frequency')
+                            plt.tight_layout()
+                            pdf.savefig(fig)
+                            plt.close()
+                            print(f"Plot for {sex_label} in {base_name} added to PDF.")
+                        else:
+                            print(f"No weight values found for {sex_label} in {base_name}.")
+
+        print(f"Plots saved to: {pdf_filepath}")
+    
+    
 
     # Calculate Statistics
     def weight_statistics(self):
-        weight_stats_file_path = os.path.join(self.Data_output, 'weight_statistics_results.txt')
+        # Construct the output filename based on the HDF5 filename
+        base_name = os.path.splitext(os.path.basename(self.hdf_path))[0]
+        stats_file_name = f"{base_name}_weight_statistics_by_sex.txt"
+        stats_file_path = os.path.join(self.Data_output, stats_file_name)
 
-        with open(weight_stats_file_path, 'w') as output_file:
-            if self.weights:
-                mean_weight = np.mean(self.weights)
-                median_weight = np.median(self.weights)
-                std_dev_weight = np.std(self.weights)
+        with h5py.File(self.hdf_path, 'r') as file, open(stats_file_path, 'w') as output_file:
+            if 'agent_data' in file:
+                weights = file['/agent_data/weight'][:]
+                sexes = file['/agent_data/sex'][:]  # This assumes 0 and 1 encoding for sexes
 
-                result_line = f"Average (Mean) Weight: {mean_weight}\n"
-                output_file.write(result_line)
-                result_line = f"Median Weight: {median_weight}\n"
-                output_file.write(result_line)
-                result_line = f"Standard Deviation of Weight: {std_dev_weight}\n"
-                output_file.write(result_line)
-            else:
-                result_line = "No 'weight' values found for statistics\n"
-                output_file.write(result_line)
-
-        print(f"Results written to: {weight_stats_file_path}")
-
-
-    # Collect body_depths data
-    def collect_body_depths(self):
-        self.body_depths = []  # Initialize the 'body_depths' list
-        for filename in self.h5_files:
-            full_path = os.path.join(self.directory_path, filename)
-            with pd.HDFStore(full_path, mode='r') as store:
-                agent_key = '/agent'
-                if agent_key in store:
-                    agent_data = pd.read_hdf(full_path, agent_key)
-                    agent_data.reset_index(inplace=True)
-                    if 'body_depth' in agent_data.columns:
-                        self.body_depths.extend(agent_data['body_depth'])
+                for sex in np.unique(sexes):
+                    sex_mask = sexes == sex
+                    weights_by_sex = weights[sex_mask]
+                    if weights_by_sex.size > 0:
+                        mean_weight = np.mean(weights_by_sex)
+                        median_weight = np.median(weights_by_sex)
+                        std_dev_weight = np.std(weights_by_sex, ddof=1)  # Use ddof=1 for sample standard deviation
+                        sex_label = 'Male' if sex == 0 else 'Female'
+                        output_file.write(f"Statistics for {sex_label}:\n")
+                        output_file.write(f"  Average (Mean) Weight: {mean_weight:.2f}\n")
+                        output_file.write(f"  Median Weight: {median_weight:.2f}\n")
+                        output_file.write(f"  Standard Deviation of Weight: {std_dev_weight:.2f}\n\n")
                     else:
-                        print(f"'body_depth' not found in '{filename}'")
-                else:
-                    print(f"Key '/agent' not found in '{filename}'")
+                        output_file.write(f"No weight values found for {sex_label} in {base_name}.\n\n")
 
-    # Plot body_depths
+        print(f"Results written to: {stats_file_path}")
+
+
+
+
     def plot_body_depths(self):
-        if self.body_depths:
-            # Create a PDF booklet
-            pdf_filepath = os.path.join(self.Data_output, 'Agent_Body_Depths.pdf')
-            with PdfPages(pdf_filepath) as pdf:
-                # Plot histogram
-                plt.hist(self.body_depths, bins=20, edgecolor='black')
-                plt.xlabel('Body Depth')
-                plt.ylabel('Frequency')
-                plt.title('Body Depths for All Agents')
-                pdf.savefig()
-                plt.close()
+        # Construct the output filename based on the HDF5 filename
+        base_name = os.path.splitext(os.path.basename(self.hdf_path))[0]
+        pdf_filename = f"{base_name}_Body_Depths_By_Sex_Comparison.pdf"
+        pdf_filepath = os.path.join(self.Data_output, pdf_filename)
 
-            print(f"Results written to: {pdf_filepath}")
-        else:
-            print("No 'body_depth' values found for plotting.")
+        with PdfPages(pdf_filepath) as pdf:
+            with h5py.File(self.hdf_path, 'r') as file:
+                if 'agent_data' in file:
+                    body_depths = file['/agent_data/body_depth'][:]
+                    sexes = file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
+
+                    for sex in np.unique(sexes):
+                        sex_label = 'Male' if sex == 0 else 'Female'
+                        sex_mask = sexes == sex
+                        body_depths_by_sex = body_depths[sex_mask]
+
+                        if body_depths_by_sex.size > 0:
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            # Dynamically calculate the number of bins
+                            q75, q25 = np.percentile(body_depths_by_sex, [75, 25])
+                            bin_width = 2 * (q75 - q25) * len(body_depths_by_sex) ** (-1/3)  # Freedman-Diaconis rule
+                            bins = round((max(body_depths_by_sex) - min(body_depths_by_sex)) / bin_width)
+                            ax.hist(body_depths_by_sex, bins=bins, edgecolor='black', color='blue' if sex == 0 else 'pink')
+                            ax.set_title(f'{base_name} - {sex_label} Body Depths')
+                            ax.set_xlabel('Body Depth')
+                            ax.set_ylabel('Frequency')
+                            plt.tight_layout()
+                            pdf.savefig(fig)
+                            plt.close()
+                            print(f"Plot for {sex_label} in {base_name} added to PDF.")
+                        else:
+                            print(f"No body depth values found for {sex_label} in {base_name}.")
+
+        print(f"Plots saved to: {pdf_filepath}")
+    
 
     # Calculate Statistics
     def body_depth_statistics(self):
-        body_depth_stats_file_path = os.path.join(self.Data_output, 'body_depth_statistics_results.txt')
+        # Construct the output filename based on the HDF5 filename
+        base_name = os.path.splitext(os.path.basename(self.hdf_path))[0]
+        stats_file_name = f"{base_name}_body_depth_statistics_by_sex.txt"
+        stats_file_path = os.path.join(self.Data_output, stats_file_name)
 
-        with open(body_depth_stats_file_path, 'w') as output_file:
-            if self.body_depths:
-                mean_body_depth = np.mean(self.body_depths)
-                median_body_depth = np.median(self.body_depths)
-                std_dev_body_depth = np.std(self.body_depths)
+        with h5py.File(self.hdf_path, 'r') as file, open(stats_file_path, 'w') as output_file:
+            if 'agent_data' in file:
+                body_depths = file['/agent_data/body_depth'][:]
+                sexes = file['/agent_data/sex'][:]  # This assumes 0 and 1 encoding for sexes
 
-                result_line = f"Average (Mean) Body Depth: {mean_body_depth}\n"
-                output_file.write(result_line)
-                result_line = f"Median Body Depth: {median_body_depth}\n"
-                output_file.write(result_line)
-                result_line = f"Standard Deviation of Body Depth: {std_dev_body_depth}\n"
-                output_file.write(result_line)
-            else:
-                result_line = "No 'body_depth' values found for statistics\n"
-                output_file.write(result_line)
+                for sex in np.unique(sexes):
+                    sex_mask = sexes == sex
+                    body_depths_by_sex = body_depths[sex_mask]
+                    if body_depths_by_sex.size > 0:
+                        mean_body_depth = np.mean(body_depths_by_sex)
+                        median_body_depth = np.median(body_depths_by_sex)
+                        std_dev_body_depth = np.std(body_depths_by_sex, ddof=1)  # Use ddof=1 for sample standard deviation
+                        sex_label = 'Male' if sex == 0 else 'Female'
+                        output_file.write(f"Statistics for {sex_label}:\n")
+                        output_file.write(f"  Average (Mean) Body Depth: {mean_body_depth:.2f}\n")
+                        output_file.write(f"  Median Body Depth: {median_body_depth:.2f}\n")
+                        output_file.write(f"  Standard Deviation of Body Depth: {std_dev_body_depth:.2f}\n\n")
+                    else:
+                        output_file.write(f"No body depth values found for {sex_label} in {base_name}.\n\n")
 
-        print(f"Results written to: {body_depth_stats_file_path}")
+        print(f"Results written to: {stats_file_path}")
     
  
         
     # Find max bout duration
     def max_bout_duration(self):
-        max_bout_file_path = os.path.join(self.Data_output, 'max_bout_duration_results.txt')
+        max_bout_file_path = os.path.join(self.Data_output, 'max_bout_duration_by_agent.txt')
 
-        print(f"Attempting to write results to: {max_bout_file_path}")
+        # Open the HDF5 file in read-only mode
+        with h5py.File(self.hdf_path, 'r') as hdf:
+            # Ensure 'agent_data' and 'bout_dur' exist
+            if 'agent_data' in hdf.keys() and 'bout_dur' in hdf['agent_data'].keys():
+                # Access the 'bout_dur' data
+                bout_dur_data = hdf['agent_data']['bout_dur'][:]
 
-        with open(max_bout_file_path, 'w') as output_file:
-            for filename in self.h5_files:
-                full_path = os.path.join(self.directory_path, filename)
-                with pd.HDFStore(full_path, mode='r') as store:
-                    if '/battery' in store:
-                        battery_data = pd.read_hdf(full_path, '/battery')
-                        if 'bout_duration' in battery_data.columns:
-                            max_bout_duration = battery_data['bout_duration'].max()
-                            result_line = f"Maximum bout duration in '/battery' key for file {filename}: {max_bout_duration}\n"
-                            output_file.write(result_line)
-                        else:
-                            result_line = f"Column 'bout_duration' not found in '/battery' key for file {filename}.\n"
-                            output_file.write(result_line)
-                    else:
-                            result_line = f"Key '/battery' not found in file {filename}.\n"
-                            output_file.write(result_line)
+                # Dictionary to store the maximum bout duration for each agent
+                max_durations_by_agent = {}
 
-        print(f"Results written to: {max_bout_file_path}")
+                # Iterate over each row (agent) in the 'bout_dur' dataset
+                for agent_id, durations in enumerate(bout_dur_data):
+                    # Calculate the maximum duration for this agent
+                    max_duration = np.max(durations)
+                    max_durations_by_agent[agent_id] = max_duration
 
-
-            
-    def max_bout_no(self):
-        max_bout_no_file_path = os.path.join(self.Data_output, 'max_bout_no_results.txt')
-
-        print(f"Attempting to write results to: {max_bout_no_file_path}")
-
-        with open(max_bout_no_file_path, 'w') as output_file:
-            for filename in self.h5_files:
-                full_path = os.path.join(self.directory_path, filename)
-                with pd.HDFStore(full_path, mode='r') as store:
-                    if '/battery' in store:
-                        battery_data = pd.read_hdf(full_path, '/battery')
-                        if 'bout_no' in battery_data.columns:
-                            max_bout_no = battery_data['bout_no'].max()
-                            result_line = f"Maximum bout no in '/battery' key for file {filename}: {max_bout_no}\n"
-                            output_file.write(result_line)
-                        else:
-                            result_line = f"Column 'bout_no' not found in '/battery' key for file {filename}.\n"
-                            output_file.write(result_line)
-                    else:
-                        result_line = f"Key '/battery' not found in file {filename}.\n"
-                        output_file.write(result_line)
-
-        print(f"Results written to: {max_bout_no_file_path}")
-
-
-
-    def max_bout_noduration(self):
-        data_list = []  # Initialize the 'data_list' to store results
-
-        for filename in self.h5_files:
-            full_path = os.path.join(self.directory_path, filename)
-            with pd.HDFStore(full_path, mode='r') as store:
-                if '/battery' in store:
-                    battery_data = pd.read_hdf(full_path, '/battery')
-                    if 'bout_no' in battery_data.columns and 'bout_duration' in battery_data.columns and 'ID' in battery_data.columns:
-                        max_values = battery_data.groupby('ID')[['bout_no', 'bout_duration']].max().reset_index()
-                        for index, row in max_values.iterrows():
-                            data_list.append({'ID': row['ID'], 'max_bout_no': row['bout_no'], 'max_bout_duration': row['bout_duration']})
-                        else:
-                            print(f"Columns 'ID', 'bout_no', or 'bout_duration' not found in '/battery' key for file {filename}.")
-                    else:
-                        print(f"Key '/battery' not found in file {filename}.")
-
-        return pd.DataFrame(data_list)
-    
-    
-    def agent_bout_df(self):
-        bout_duration_list = []  # Initialize the 'bout_duration_list' to store results
-
-        for filename in self.h5_files:
-            full_path = os.path.join(self.directory_path, filename)
-            with pd.HDFStore(full_path, mode='r') as store:
-                if '/battery' in store:
-                    battery_data = pd.read_hdf(full_path, '/battery')
-                    if 'bout_no' in battery_data.columns and 'bout_duration' in battery_data.columns and 'ID' in battery_data.columns:
-                        extracted_data = battery_data[['ID', 'bout_no', 'bout_duration']]
-                        bout_duration_list.extend(extracted_data.to_dict(orient='records'))
-                    else:
-                        print(f"Columns 'ID', 'bout_no', or 'bout_duration' not found in '/battery' key for file {filename}.")
+                # Write the maximum bout duration for each agent to the file
+                if max_durations_by_agent:
+                    with open(max_bout_file_path, 'w') as output_file:
+                        for agent_id, max_duration in max_durations_by_agent.items():
+                            output_file.write(f"Maximum bout duration for agent {agent_id}: {max_duration}\n")
+                        print(f"Results written to: {max_bout_file_path}")
                 else:
-                    print(f"Key '/battery' not found in file {filename}.")
+                    print("No 'bout_dur' data found for any agent.")
+            else:
+                print("No 'bout_dur' data found in 'agent_data'.")
+                    
+                    
 
-        return pd.DataFrame(bout_duration_list)
+    def max_bout_duration_statistics(self):
+        # File path for the output text file
+        stats_file_path = os.path.join(self.Data_output, 'bout_duration_statistics.txt')
+
+        # Open the HDF5 file in read-only mode
+        with h5py.File(self.hdf_path, 'r') as hdf:
+            # Ensure 'agent_data' and 'bout_dur' exist
+            if 'agent_data' in hdf.keys() and 'bout_dur' in hdf['agent_data'].keys():
+                # Access the 'bout_dur' data
+                bout_dur_data = hdf['agent_data']['bout_dur'][:]
+
+                # Flatten the data if it's multidimensional to get all durations
+                all_durations = bout_dur_data.flatten()
+
+                # Calculate statistics
+                mean_duration = np.mean(all_durations)
+                median_duration = np.median(all_durations)
+                std_dev_duration = np.std(all_durations, ddof=1)  # Use ddof=1 for sample standard deviation
+                min_duration = np.min(all_durations)
+                max_duration = np.max(all_durations)
+
+                # Write the statistics to the file
+                with open(stats_file_path, 'w') as output_file:
+                    output_file.write("Bout Duration Statistics:\n")
+                    output_file.write(f"Mean Bout Duration: {mean_duration}\n")
+                    output_file.write(f"Median Bout Duration: {median_duration}\n")
+                    output_file.write(f"Standard Deviation of Bout Duration: {std_dev_duration}\n")
+                    output_file.write(f"Minimum Bout Duration: {min_duration}\n")
+                    output_file.write(f"Maximum Bout Duration: {max_duration}\n")
+                    print(f"Results written to: {stats_file_path}")
+            else:
+                print("No 'bout_dur' data found in 'agent_data'.")
+                    
+                    
+                    
+                                
+    
+    def max_bout_no(self):
+        max_bout_file_path = os.path.join(self.Data_output, 'max_bout_no_by_agent.txt')
+
+        # Open the HDF5 file in read-only mode
+        with h5py.File(self.hdf_path, 'r') as hdf:
+            # Ensure 'agent_data' and 'bout_no' exist
+            if 'agent_data' in hdf.keys() and 'bout_no' in hdf['agent_data'].keys():
+                # Access the 'bout_no' data
+                bout_no_data = hdf['agent_data']['bout_no'][:]
+
+                # Dictionary to store the maximum bout number for each agent
+                max_no_by_agent = {}
+
+                # Iterate over each row (agent) in the 'bout_no' dataset
+                for agent_id, bout_nos in enumerate(bout_no_data):
+                    # Calculate the maximum bout number for this agent
+                    max_no = np.max(bout_nos)
+                    max_no_by_agent[agent_id] = max_no
+
+                # Write the maximum bout number for each agent to the file
+                if max_no_by_agent:
+                    with open(max_bout_file_path, 'w') as output_file:
+                        for agent_id, max_no in max_no_by_agent.items():
+                            output_file.write(f"Maximum bout no for agent {agent_id}: {max_no}\n")
+                        print(f"Results written to: {max_bout_file_path}")
+                else:
+                    print("No 'bout_no' data found for any agent.")
+            else:
+                print("No 'bout_no' data found in 'agent_data'.")
+                    
+                    
+    def bout_no_statistics(self):
+        stats_file_path = os.path.join(self.Data_output, 'bout_no_statistics.txt')
+
+        # Open the HDF5 file in read-only mode
+        with h5py.File(self.hdf_path, 'r') as hdf:
+            # Ensure 'agent_data' and 'bout_no' exist
+            if 'agent_data' in hdf.keys() and 'bout_no' in hdf['agent_data'].keys():
+                # Access the 'bout_no' data
+                bout_no_data = hdf['agent_data']['bout_no'][:]
+
+                # Flatten the data if it's multidimensional to get all bout numbers
+                all_bout_nos = bout_no_data.flatten()
+
+                # Calculate statistics
+                mean_bout_no = np.mean(all_bout_nos)
+                median_bout_no = np.median(all_bout_nos)
+                std_dev_bout_no = np.std(all_bout_nos, ddof=1)  # Use ddof=1 for sample standard deviation
+                min_bout_no = np.min(all_bout_nos)
+                max_bout_no = np.max(all_bout_nos)
+
+                # Write the statistics to the file
+                with open(stats_file_path, 'w') as output_file:
+                    output_file.write("Bout Number Statistics:\n")
+                    output_file.write(f"Mean Bout Number: {mean_bout_no}\n")
+                    output_file.write(f"Median Bout Number: {median_bout_no}\n")
+                    output_file.write(f"Standard Deviation of Bout Number: {std_dev_bout_no}\n")
+                    output_file.write(f"Minimum Bout Number: {min_bout_no}\n")
+                    output_file.write(f"Maximum Bout Number: {max_bout_no}\n")
+                    print(f"Results written to: {stats_file_path}")
+            else:
+                print("No 'bout_no' data found in 'agent_data'.")
+                
+                
+
+    def kcal_statistics(self):
+        # File path for the output text file
+        stats_file_path = os.path.join(self.Data_output, 'kcal_statistics_by_sex.txt')
+        
+        # Open the HDF5 file in read-only mode
+        with h5py.File(self.hdf_path, 'r') as hdf:
+            # Ensure 'agent_data', 'kcal', and 'sex' exist
+            if 'agent_data' in hdf.keys() and 'kcal' in hdf['agent_data'].keys() and 'sex' in hdf['agent_data'].keys():
+                # Access the 'kcal' data and convert it to float64 to prevent overflow
+                kcal_data = hdf['agent_data']['kcal'][:].astype(np.float64)
+                # Access the 'sex' data
+                sex_data = hdf['agent_data']['sex'][:]
+                
+                # Separate kcal data by sex
+                males_kcal = kcal_data[sex_data == 0]  # Assuming '0' represents males
+                females_kcal = kcal_data[sex_data == 1]  # Assuming '1' represents females
+                
+                # Calculate statistics for males
+                mean_kcal_males = np.mean(males_kcal)
+                median_kcal_males = np.median(males_kcal)
+                std_dev_kcal_males = np.std(males_kcal, ddof=1)  # Use ddof=1 for sample standard deviation
+                min_kcal_males = np.min(males_kcal)
+                max_kcal_males = np.max(males_kcal)
+                
+                # Calculate statistics for females
+                mean_kcal_females = np.mean(females_kcal)
+                median_kcal_females = np.median(females_kcal)
+                std_dev_kcal_females = np.std(females_kcal, ddof=1)
+                min_kcal_females = np.min(females_kcal)
+                max_kcal_females = np.max(females_kcal)
+                
+                # Write the statistics to the file
+                with open(stats_file_path, 'w') as output_file:
+                    output_file.write("Kcal Statistics for Males:\n")
+                    output_file.write(f"Mean Kcal: {mean_kcal_males}\n")
+                    output_file.write(f"Median Kcal: {median_kcal_males}\n")
+                    output_file.write(f"Standard Deviation of Kcal: {std_dev_kcal_males}\n")
+                    output_file.write(f"Minimum Kcal: {min_kcal_males}\n")
+                    output_file.write(f"Maximum Kcal: {max_kcal_males}\n\n")
+
+                    output_file.write("Kcal Statistics for Females:\n")
+                    output_file.write(f"Mean Kcal: {mean_kcal_females}\n")
+                    output_file.write(f"Median Kcal: {median_kcal_females}\n")
+                    output_file.write(f"Standard Deviation of Kcal: {std_dev_kcal_females}\n")
+                    output_file.write(f"Minimum Kcal: {min_kcal_females}\n")
+                    output_file.write(f"Maximum Kcal: {max_kcal_females}\n")
+                    print(f"Results written to: {stats_file_path}")
+            else:
+                print("Required data ('kcal' and/or 'sex') not found in 'agent_data'.")
+                
+                
+                
 
 
+#TODO we need to find the FIRST agent based on the timesteps with the information and then go to the second one and so forth
+    def Agent_Plot_Rectangle(self, rect_position):
+        # rect_position should be a tuple or list like (x, y, width, height) for the rectangle's position and size
 
-    # Plot Agent w/ Rectangle
-    def Agent_Plot_Rectangle(self):
+        hdf_filename = os.path.basename(self.hdf_path)
+        
         pdf_filepath = os.path.join(self.Data_output, 'Agent_Rectangle_Plots.pdf')
         txt_filepath = os.path.join(self.Data_output, 'Agents_In_Rectangle.txt')
+        jpeg_filepath= os.path.join(self.Data_output, 'Agents_In_Rectangle.jpeg')
 
-        with PdfPages(pdf_filepath) as pdf, open(txt_filepath, 'w') as txt_file:
-            with pd.HDFStore(self.hdf_path, mode='r') as store:
-                keys = store.keys()
-                for key in keys:
-                    print(f"Contents of key '{key}':")
-                    data = pd.read_hdf(self.hdf_path, key)
+        with PdfPages(pdf_filepath) as pdf, open(txt_filepath, 'w') as txt_file, h5py.File(self.hdf_path, 'r') as hdf, rasterio.open(self.tif_path) as tif:
+            x_coords = hdf['agent_data']['X'][:]
+            y_coords = hdf['agent_data']['Y'][:]
 
-                    data['geometry'] = data['loc'].apply(loads)
-                    gdf = gpd.GeoDataFrame(data, geometry='geometry')
+            fig, ax = plt.subplots(figsize=(10, 8))
+            show(tif.read(1), transform=tif.transform, ax=ax)  # Show the TIFF image as a background
 
+            ax.scatter(x_coords.flatten(), y_coords.flatten(), alpha=0.5, s=1, c='orange')  # Agents plotted on top
+
+            # Define the rectangle's position based on rect_position
+            rect = Rectangle((rect_position[0], rect_position[1]), rect_position[2], rect_position[3], linewidth=2, edgecolor='red', fill=False)
+            ax.add_patch(rect)
+        
+            ax.set_xlabel('Easting (E)')
+            ax.set_ylabel('Northing (N)')
+            ax.set_title("Agents in Rectangle")
+            pdf.savefig(fig)
+            fig.savefig(jpeg_filepath, format='jpeg')
+            plt.close(fig)
+
+            # Adjust the rectangle's logic to use the specific rect_position
+            rect_x_min, rect_y_min, rect_width, rect_height = rect_position
+            rect_x_max = rect_x_min + rect_width
+            rect_y_max = rect_y_min + rect_height
+
+            txt_file.write(f"Data from HDF5 file: {hdf_filename}\n\n")
+            for agent_index in range(x_coords.shape[0]):
+                entered = False
+                for timestep in range(x_coords.shape[1]):
+                    if rect_x_min <= x_coords[agent_index, timestep] <= rect_x_max and rect_y_min <= y_coords[agent_index, timestep] <= rect_y_max:
+                        if not entered:  # Log the first timestep the agent enters the rectangle
+                            entered = True
+                            # Write detailed agent entry information
+                            entry_info = f"Agent ID {agent_index} first timestep within the rectangle:\n  timestep: {timestep}\n  Easting: {x_coords[agent_index, timestep]}\n  Northing: {y_coords[agent_index, timestep]}\n\n"
+                            txt_file.write(entry_info)
+                            break  # Only log the first entry
+
+        print(f"Plot saved to: {pdf_filepath}")
+        print(f"IDs of agents within the rectangle written to: {txt_filepath}")
+        print(f"JPEG image saved to: {jpeg_filepath}")
+#TODO          
+                   
+            
+    #  AgentVisualizer     
+    def plot_agent_locations(self):
+        pdf_filepath = os.path.join(self.Data_output, 'Agent_Locations_Plots.pdf')
+        with PdfPages(pdf_filepath) as pdf:
+            with h5py.File(self.hdf_path, 'r') as hdf:
+                # Assuming 'X' and 'Y' are under 'agent_data'
+                x_data = hdf['agent_data']['X'][:]
+                y_data = hdf['agent_data']['Y'][:]
+
+                # Assume each row in 'X' and 'Y' corresponds to a different agent
+                for agent_index in range(x_data.shape[0]):
                     plt.figure(figsize=(10, 8))
-                    ax = gdf.plot(marker='o', markersize=1, color='blue', alpha=0.5)
-
-                    y_max = gdf.geometry.bounds['maxy'].max()
-                    y_min_top_10 = y_max - 0.1 * (y_max - gdf.geometry.bounds['miny'].min())
-
-                    rect = Rectangle((gdf.geometry.bounds['minx'].min(), y_min_top_10),
-                                     gdf.geometry.bounds['maxx'].max() - gdf.geometry.bounds['minx'].min(),
-                                     y_max - y_min_top_10, linewidth=2, edgecolor='red', fill=False)
-
-                    ax.add_patch(rect)
-
-                    unique_ids = data['id'].unique()
-                    for id in unique_ids:
-                        data_for_id = data[data['id'] == id]
-                        gdf_id = gpd.GeoDataFrame(data_for_id, geometry='geometry')
-
-                        data_in_rectangle = gdf_id.cx[gdf_id.geometry.bounds['minx'].min():gdf_id.geometry.bounds['maxx'].max(),
-                                                      y_min_top_10:y_max]
-
-                        first_timestep = data_in_rectangle.head(1)
-                        if not first_timestep.empty:
-                            self.ids_in_rectangle.add(id)
-
-                            print(f"First timestep within the rectangle for ID {id}:")
-                            print(first_timestep)
-
-                            # Write ID and relevant information to the text file
-                            txt_file.write(f"First timestep within the rectangle for ID {id}:\n")
-                            txt_file.write(first_timestep.to_string(index=False) + '\n\n')
-
-                    plt.xlabel('Longitude')
-                    plt.ylabel('Latitude')
-                    plt.title("Agents Passing Through Falls")
+                    plt.plot(x_data[agent_index], y_data[agent_index], marker='o', markersize=1)
+                    plt.xlabel('X')
+                    plt.ylabel('Y')
+                    plt.title(f'Agent {agent_index} Locations')
                     pdf.savefig()
                     plt.close()
 
         print(f"Results written to: {pdf_filepath}")
-        print(f"IDs of agents within the rectangle written to: {txt_filepath}")
-
-    #  AgentVisualizer     
-    def plot_agent_locations(self):
-        # Create a PDF booklet
-        pdf_filepath = os.path.join(self.Data_output, 'Agent_Locations_Plots.pdf')
-        with PdfPages(pdf_filepath) as pdf:
-            # Read the contents of the '/TS' key
-            with pd.HDFStore(self.hdf_path, mode='r') as store:
-                ts_key = '/TS'
-                if ts_key in store:
-                    ts_data = pd.read_hdf(self.hdf_path, ts_key)
-                else:
-                    raise ValueError(f"Key '{ts_key}' not found in '{self.hdf_path}'")
-
-            # Extract 'id' and 'ts' columns
-            id_ts_data = ts_data[['id', 'ts']]
-
-            # Filter out duplicate rows based on 'id' to get unique IDs
-            unique_ids = id_ts_data['id'].unique()
-
-            # Loop through each unique ID and plot individually
-            for unique_id in unique_ids:
-                # Filter data for the current unique ID
-                filtered_data = id_ts_data[id_ts_data['id'] == unique_id]
-
-                # Extract 'ts' values for the unique ID
-                timesteps = filtered_data['ts'].tolist()
-
-                # Extract 'loc' data for the unique ID
-                loc_data = ts_data[ts_data['id'] == unique_id]['loc'].apply(lambda x: loads(x))
-                x_coords = [loc.x for loc in loc_data]
-                y_coords = [loc.y for loc in loc_data]
-
-                # Create a figure and axis for the plot
-                plt.figure(figsize=(10, 8))
-
-                # Plot the timesteps for the unique ID
-                plt.plot(x_coords, y_coords, label=f'ID {unique_id}')
-
-                # Add labels, legend, and title as needed
-                plt.xlabel('X Coordinate')
-                plt.ylabel('Y Coordinate')
-                plt.legend()
-                plt.title(f'Agent {unique_id} Locations Based Off Timesteps')
-
-                # Save the plot to the PDF
-                pdf.savefig()
-                plt.close()
-
-        print(f"Results written to: {pdf_filepath}")
-
 
 
 
     def plot_agent_locations_on_tiff(self):
-        # Create a PDF booklet
         pdf_filepath = os.path.join(self.Data_output, 'Agent_Locations_on_TIFF_Plots.pdf')
-        tiff_filepath = os.path.join(self.Data_output, 'Agent_Locations_on_TIFF.tif')
+        tiff_output_path = os.path.join(self.Data_output, 'Agent_Locations_on_TIFF_Plots.tif')  # Corrected path for TIFF file
 
-        with PdfPages(pdf_filepath) as pdf:
-            # Read the contents of the HDF file
-            with pd.HDFStore(self.hdf_path, mode='r') as store:
-                keys = store.keys()
-                for key in keys:
-                    print(f"Contents of key '{key}':")
-                    data = pd.read_hdf(self.hdf_path, key)
+        with PdfPages(pdf_filepath) as pdf, h5py.File(self.hdf_path, 'r') as hdf:
+            x_data = hdf['agent_data']['X'][:]
+            y_data = hdf['agent_data']['Y'][:]
 
-                    # Grab coordinates from the dataframe
-                    data['geometry'] = data['loc'].apply(loads)
-
-                    # Create a GeoDataFrame
-                    gdf = gpd.GeoDataFrame(data, geometry='geometry')
-
-                    # Create a figure and axis
-                    fig, ax = plt.subplots(figsize=(10, 8))
-
-                    # Open the TIFF file with rasterio
-                    with rasterio.open(self.tif_path) as tiff_dataset:
-                        # Calculate the transformation parameters for reprojecting
-                        transform, width, height = calculate_default_transform(
-                            tiff_dataset.crs, tiff_dataset.crs, tiff_dataset.width, tiff_dataset.height,
-                            *tiff_dataset.bounds)
-
-                        # Reproject the TIFF image to the same CRS for display
-                        image_data, _ = reproject(
-                            source=tiff_dataset.read(1),
-                            src_crs=tiff_dataset.crs,
-                            src_transform=tiff_dataset.transform,
-                            dst_crs=tiff_dataset.crs,
-                            resampling=rasterio.enums.Resampling.bilinear)
-
-                        # Update the extent based on the reprojected data
-                        tiff_extent = rasterio.transform.array_bounds(height, width, transform)
-
-                    # Display the reprojected TIFF image using imshow with the correct extent and CRS
-                    ax.imshow(image_data[0], cmap='viridis', extent=(tiff_extent[0], tiff_extent[2], tiff_extent[1], tiff_extent[3]), aspect='equal')
-
-                    # Plot the agent points on top of the TIFF image as points
-                    gdf.plot(ax=ax, marker='o', markersize=1, color='blue', alpha=0.5)
-
-                    # Add labels, legend, and title as needed
-                    plt.xlabel('Longitude')
-                    plt.ylabel('Latitude')
-                    plt.title("Agent Locations on TIFF Background")
-
-                    # Save the plot to the PDF
-                    pdf.savefig()
-                    plt.close()
-
-            # Save the plot as a TIFF image
             fig, ax = plt.subplots(figsize=(10, 8))
-            ax.imshow(image_data[0], cmap='viridis', extent=(tiff_extent[0], tiff_extent[2], tiff_extent[1], tiff_extent[3]), aspect='equal')
-            gdf.plot(ax=ax, marker='o', markersize=1, color='blue', alpha=0.5)
-            plt.xlabel('Longitude')
-            plt.ylabel('Latitude')
-            plt.title("Agent Locations on TIFF Background")
-            plt.savefig(tiff_filepath)
-            plt.close()
+            with rasterio.open(self.tif_path) as tiff:
+                tiff_extent = tiff.bounds
+                show(tiff, ax=ax, extent=tiff_extent)
 
-        print(f"Results written to: {pdf_filepath} and {tiff_filepath}")
+                # Plot all agents' locations on the same figure
+                ax.scatter(x_data.flatten(), y_data.flatten(), s=1, color='red', alpha=0.5)  # Flatten arrays for consistent scatter plot
+
+                ax.set_title('All Agent Locations')
+                plt.xlabel('Easting (E)')
+                plt.ylabel('Northing (N)')
+                pdf.savefig(fig)  # Save the current figure to the PDF
+
+        # After saving to PDF, now save the same figure as a TIFF file
+        plt.savefig(tiff_output_path, dpi=300)  # Specify dpi for higher resolution if needed
+        plt.close(fig)
+
+        print(f"Plot saved to {pdf_filepath} and {tiff_output_path}")
                 
                 
     def plot_agent_timestep_locations_on_tiff(self):
-        # Create a PDF booklet
         pdf_filepath = os.path.join(self.Data_output, 'Agent_Timestep_Locations_on_TIFF_Plots.pdf')
-        with PdfPages(pdf_filepath) as pdf:
-            # Create a folder to store individual TIFF files
-            tiff_folder = os.path.join(self.Data_output, 'Agent_TIFFs')
-            os.makedirs(tiff_folder, exist_ok=True)
+        tiff_folder = os.path.join(self.Data_output, 'Agent_TIFFs')
+        os.makedirs(tiff_folder, exist_ok=True)  # Create the folder for individual TIFFs if it doesn't exist
 
-            # Load the TIFF image
-            tiff_image, tiff_extent = self.load_tiff_image()
+        with PdfPages(pdf_filepath) as pdf, h5py.File(self.hdf_path, 'r') as hdf:
+            x_data = hdf['agent_data']['X'][:]
+            y_data = hdf['agent_data']['Y'][:]
 
-            # Check if tiff_image is a 3D array
-            if len(tiff_image.shape) == 3 and tiff_image.shape[0] == 1:
-                # If it's a 3D array, select the first channel (single band)
-                tiff_image = tiff_image[0]
+            with rasterio.open(self.tif_path) as tiff:
+                tiff_extent = tiff.bounds
+                for agent_index in range(x_data.shape[0]):
+                    fig, ax = plt.subplots(figsize=(10, 8))
+                    show(tiff, ax=ax, extent=tiff_extent)
+                    ax.scatter(x_data[agent_index, :], y_data[agent_index, :], s=1, color='red', alpha=0.5)
+                    ax.set_title(f'Agent {agent_index} Locations')
 
-            # Read agent timestep data
-            with pd.HDFStore(self.hdf_path, mode='r') as store:
-                ts_key = '/TS'
-                if ts_key in store:
-                    ts_data = pd.read_hdf(self.hdf_path, ts_key)
-                else:
-                    raise ValueError(f"Key '{ts_key}' not found in '{self.hdf_path}'")
+                    # Save the current figure to the PDF
+                    pdf.savefig(fig)
+                    plt.close(fig)
 
-            # Get unique IDs in the data
-            unique_ids = ts_data['id'].unique()
+                    # Additionally, save the figure as an individual TIFF file
+                    agent_tiff_filepath = os.path.join(tiff_folder, f'Agent_{agent_index}_Locations.tif')
+                    fig.savefig(agent_tiff_filepath)  # This should be before plt.close(fig)
+                    plt.close()
 
-            # Loop through each unique ID and plot individually
-            for plot_id in unique_ids:
-                # Filter data for the specified ID
-                filtered_data = ts_data[ts_data['id'] == plot_id]
-
-                # Extract 'ts' values for the specified ID
-                timesteps = filtered_data['ts'].tolist()
-
-                # Extract 'loc' data for the specified ID
-                loc_data = filtered_data['loc'].apply(lambda x: loads(x))
-                x_coords = [loc.x for loc in loc_data if loc is not None]  # Check for None values
-                y_coords = [loc.y for loc in loc_data if loc is not None]  # Check for None values
-
-                # Create a figure and axis for the plot
-                fig, ax = plt.subplots(figsize=(10, 8))
-
-                # Display the TIFF image using imshow with the correct extent and CRS
-                ax.imshow(tiff_image, cmap='viridis', extent=(tiff_extent[0], tiff_extent[2], tiff_extent[1], tiff_extent[3]), aspect='equal')
-
-                # Plot the agent's path on top of the TIFF image
-                ax.plot(x_coords, y_coords, label=f'ID {plot_id}')
-
-                # Add labels, legend, and title as needed
-                plt.xlabel('Longitude')
-                plt.ylabel('Latitude')
-                plt.title(f'Agent {plot_id} Timestep Locations on TIFF Background')
-                plt.legend()
-
-                # Save the plot to the PDF
-                pdf.savefig()
-                plt.close()
-
-                # Save the TIFF file for the current agent
-                agent_tiff_filepath = os.path.join(tiff_folder, f'Agent_{plot_id}_Locations.tif')
-                fig, ax = plt.subplots(figsize=(10, 8))
-                ax.imshow(tiff_image, cmap='viridis', extent=(tiff_extent[0], tiff_extent[2], tiff_extent[1], tiff_extent[3]), aspect='equal')
-                ax.plot(x_coords, y_coords, label=f'ID {plot_id}', color='blue', markersize=1, linestyle='', marker='o', alpha=0.5)
-                plt.xlabel('Longitude')
-                plt.ylabel('Latitude')
-                plt.title(f'Agent {plot_id} Timestep Locations on TIFF Background')
-                plt.savefig(agent_tiff_filepath)
-                plt.close()
-
-        print(f"Results written to: {pdf_filepath} and TIFFs in {tiff_folder}")
+        print(f"Plots saved to {pdf_filepath} and individual TIFFs saved in {tiff_folder}")
 
 
     # Individual Agents
          
-    def plot_agent_timestep_locations(self, pdf_filename='Individual_Agent_Timesteps.pdf'):
+    def plot_agent_timestep_locations(self, pdf_filename='Individual_Agent_Timesteps_with_TIFF.pdf'):
         pdf_filepath = os.path.join(self.Data_output, pdf_filename)
 
-        with pd.HDFStore(self.hdf_path, mode='r') as store:
-            ts_key = '/TS'
-            if ts_key in store:
-                ts_data = pd.read_hdf(self.hdf_path, ts_key)
-            else:
-                raise ValueError(f"Key '{ts_key}' not found in '{self.hdf_path}'")
+        with PdfPages(pdf_filepath) as pdf, h5py.File(self.hdf_path, 'r') as hdf:
+            # Assuming 'X' and 'Y' are under 'agent_data' and represent locations over time for each agent
+            x_data = hdf['agent_data']['X'][:]
+            y_data = hdf['agent_data']['Y'][:]
 
-        # Get unique IDs in the data
-        unique_ids = ts_data['id'].unique()
+            with rasterio.open(self.tif_path) as src:
+                tiff_extent = src.bounds
+                for agent_index in range(x_data.shape[0]):
+                    fig, ax = plt.subplots()
+                    show(src, ax=ax, extent=tiff_extent)  # Show the TIFF image as the background
+                    
+                    # Plot the agent's location over time
+                    ax.scatter(x_data[agent_index, :], y_data[agent_index, :], s=1, alpha=0.5, color='orange', label=f'Agent {agent_index}')
+                    ax.set_xlabel('Easting (E)')
+                    ax.set_ylabel('Northing (N)')
+                    ax.set_title(f'Agent {agent_index} Timestep Locations')
 
-        # Create a PDF file for the plots
-        with PdfPages(pdf_filepath) as pdf:
-            # Loop through each unique ID and plot individually
-            for plot_id in unique_ids:
-                # Filter data for the specified ID
-                filtered_data = ts_data[ts_data['id'] == plot_id]
+                    pdf.savefig(fig)
+                    plt.close(fig)
 
-                # Extract 'ts' values for the specified ID
-                timesteps = filtered_data['ts'].tolist()
-
-                # Extract 'loc' data for the specified ID
-                loc_data = filtered_data['loc'].apply(lambda x: loads(x))
-                x_coords = [loc.x for loc in loc_data if loc is not None]  # Check for None values
-                y_coords = [loc.y for loc in loc_data if loc is not None]  # Check for None values
-
-                # Create a line plot for the specified ID
-                plt.figure()
-                plt.plot(x_coords, y_coords, label=f'ID {plot_id}')
-
-                # Add labels, legend, and title
-                plt.xlabel('X Coordinate')
-                plt.ylabel('Y Coordinate')
-                plt.legend()
-                plt.title(f'Agent {plot_id} Timestep Locations (Lines)')
-                plt.grid(True)
-
-                # Save the current plot to the PDF file
-                pdf.savefig()
-                plt.close()
-
-        print(f"PDF booklet created: {pdf_filepath}")
+        print(f"PDF booklet with TIFF background created: {pdf_filepath}")
 
 
-    def plot_individual_agent_timestep_locations_on_tiff(self):
-        # Load the TIFF image
-        tiff_image, tiff_extent = self.load_tiff_image()
-
-        # Check if tiff_image is a 3D array
-        if len(tiff_image.shape) == 3 and tiff_image.shape[0] == 1:
-            # If it's a 3D array, select the first channel (single band)
-            tiff_image = tiff_image[0]
-
-        # Read agent timestep data from the HDF5 file
-        with pd.HDFStore(self.hdf_path, mode='r') as store:
-            ts_key = '/TS'
-            if ts_key in store:
-                ts_data = pd.read_hdf(self.hdf_path, ts_key)
-            else:
-                raise ValueError(f"Key '{ts_key}' not found in '{self.hdf_path}'")
-
-        # Get unique IDs in the data
-        unique_ids = ts_data['id'].unique()
-
-        # Create a PDF booklet
-        pdf_filepath = os.path.join(self.Data_output, 'Individual_Agent_Timesteps_on_TIFF.pdf')
-        with PdfPages(pdf_filepath) as pdf:
-            # Loop through each unique ID and plot individually
-            for plot_id in unique_ids:
-                # Filter data for the specified ID
-                filtered_data = ts_data[ts_data['id'] == plot_id]
-
-                # Extract 'ts' values for the specified ID
-                timesteps = filtered_data['ts'].tolist()
-
-                # Extract 'loc' data for the specified ID
-                loc_data = filtered_data['loc'].apply(lambda x: loads(x))
-                x_coords = [loc.x for loc in loc_data if loc is not None]  # Check for None values
-                y_coords = [loc.y for loc in loc_data if loc is not None]  # Check for None values
-
-                # Create a figure and axis for the plot
-                fig, ax = plt.subplots(figsize=(10, 8))
-
-                # Display the TIFF image using imshow with the correct extent and CRS
-                ax.imshow(tiff_image, cmap='viridis', extent=(tiff_extent[0], tiff_extent[2], tiff_extent[1], tiff_extent[3]), aspect='equal')
-
-                # Plot the agent's path on top of the TIFF image
-                ax.plot(x_coords, y_coords, label=f'ID {plot_id}')
-
-                # Add labels, legend, and title as needed
-                plt.xlabel('Longitude')
-                plt.ylabel('Latitude')
-                plt.title(f'Agent {plot_id} Timestep Locations (Lines) on TIFF Background')
-
-                # Save the plot to the PDF
-                pdf.savefig()
-                plt.close()
-
-        print(f"Results written to: {pdf_filepath}")
-        
 
     #Jump DF
+    def plot_agent_jump_locations(self):
+        with h5py.File(self.hdf_path, 'r') as hdf:
+            # Access the datasets
+            x_coords = hdf['agent_data']['X'][:]
+            y_coords = hdf['agent_data']['Y'][:]
+            time_of_jump = hdf['agent_data']['time_of_jump'][:]
 
-    def read_jump_data(self):
-        jump_df_all = pd.DataFrame()
-        for filename in os.listdir(self.directory_path):
-            if filename.endswith('.h5'):
-                h5_file_path = os.path.join(self.directory_path, filename)
-                try:
-                    with pd.HDFStore(h5_file_path, mode='r') as store:
-                        if '/jump' in store:
-                            jump_data = pd.read_hdf(h5_file_path, '/jump')
-                            jump_df_all = pd.concat([jump_df_all, jump_data], ignore_index=True)
-                except Exception as e:
-                    print(f"Error reading file '{h5_file_path}': {e}")
-        return jump_df_all
+        # Setup PDF output
+        pdf_path = os.path.join(self.Data_output, 'agent_jump_locations.pdf')
 
+        # Plotting starts here
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Plot all coordinates for context
+        ax.scatter(x_coords.flatten(), y_coords.flatten(), color='lightgray', alpha=0.5, s=1, label='All Positions')
 
-    def plot_agent_location_jump(self):
-        # Create a PDF booklet
-        pdf_filepath = os.path.join(self.Data_output, 'Agent_Location_Jump_Plots.pdf')
-        with PdfPages(pdf_filepath) as pdf:
-            jump_df_all = self.read_jump_data()
-            ts_loc_df = self.read_ts_loc_data()
+        # Filter and plot jump positions
+        valid_jump_mask = (time_of_jump >= 0) & (time_of_jump < x_coords.shape[1]) & np.isfinite(time_of_jump)
+        valid_jump_indices = np.nonzero(valid_jump_mask)
+        jump_times = time_of_jump[valid_jump_mask].astype(int)
 
-            ts_loc_df['id'] = ts_loc_df['id'].astype('int32')
-            merged_df = jump_df_all.merge(ts_loc_df, left_on=['ID', 'timestep'], right_on=['id', 'ts'], how='inner')
-            merged_df['x'] = merged_df['loc'].apply(lambda point: loads(point).x)
-            merged_df['y'] = merged_df['loc'].apply(lambda point: loads(point).y)
+        jump_x_coords = x_coords[valid_jump_indices[0], jump_times]
+        jump_y_coords = y_coords[valid_jump_indices[0], jump_times]
+        ax.scatter(jump_x_coords, jump_y_coords, color='orange', marker='o', s=50, label='Jump Positions')
 
-            plt.figure(figsize=(10, 6))
-            plt.scatter(merged_df['x'], merged_df['y'], marker='o')
-            plt.xlabel('X Coordinate')
-            plt.ylabel('Y Coordinate')
-            plt.title('Agents Plotted Based on Timesteps')
+        ax.set_xlabel('Easting (E)')
+        ax.set_ylabel('Northing (N)')
+        ax.set_title('Agent Locations at Time of Jump')
+        plt.legend()
+        plt.tight_layout()
 
-            # Save the plot to the PDF
-            pdf.savefig()
-            plt.close()
+        # Save the current figure into the PDF
+        with PdfPages(pdf_path) as pdf:
+            pdf.savefig(fig)
+        plt.close(fig)
 
-        print(f"Results written to: {pdf_filepath}")
+        print(f"Plot saved to: {pdf_path}")
 
-    def plot_agent_locations_with_colors(self):
-        # Create a PDF booklet
-        pdf_filepath = os.path.join(self.Data_output, 'Agent_Locations_with_Colors_Plots.pdf')
-        with PdfPages(pdf_filepath) as pdf:
-            jump_df_all = self.read_jump_data()
-            ts_loc_df = self.read_ts_loc_data()
-
-            ts_loc_df['id'] = ts_loc_df['id'].astype('int32')
-            merged_df = jump_df_all.merge(ts_loc_df, left_on=['ID', 'timestep'], right_on=['id', 'ts'], how='inner')
-            merged_df['x'] = merged_df['loc'].apply(lambda point: loads(point).x)
-            merged_df['y'] = merged_df['loc'].apply(lambda point: loads(point).y)
-            unique_ids = merged_df['ID'].unique()
-            num_agents = len(unique_ids)
-            color_map = plt.get_cmap('viridis', num_agents)
-
-            fig, ax = plt.subplots(figsize=(10, 6))
-
-            for agent_id, color in zip(unique_ids, color_map(range(num_agents))):
-                agent_data = merged_df[merged_df['ID'] == agent_id]
-                x_coordinates = agent_data['x']
-                y_coordinates = agent_data['y']
-                ax.scatter(x_coordinates, y_coordinates, marker='o', label=f'Agent {agent_id}', color=color)
-
-            ax.set_xlabel('X Coordinate')
-            ax.set_ylabel('Y Coordinate')
-            ax.set_title('Agents Plotted with Different Colors')
-            ax.legend()
-
-            # Save the plot to the PDF
-            pdf.savefig()
-            plt.close()
-
-        print(f"Results written to: {pdf_filepath}")
-
-
-
+            
+            
     def plot_agent_jump_locations_tif(self):
-        # Create a PDF booklet
-        pdf_filepath = os.path.join(self.Data_output, 'Agent_Jump_Locations_TIF_Plots.pdf')
-        with PdfPages(pdf_filepath) as pdf:
-            jump_df_all = self.read_jump_data()
-            ts_loc_df = self.read_ts_loc_data()
+        with h5py.File(self.hdf_path, 'r') as hdf:
+            # Access the datasets
+            x_coords = hdf['agent_data']['X'][:]
+            y_coords = hdf['agent_data']['Y'][:]
+            time_of_jump = hdf['agent_data']['time_of_jump'][:]
 
-            ts_loc_df['id'] = ts_loc_df['id'].astype('int32')
-            merged_df = jump_df_all.merge(ts_loc_df, left_on=['ID', 'timestep'], right_on=['id', 'ts'], how='inner')
-            merged_df['x'] = merged_df['loc'].apply(lambda point: loads(point).x)
-            merged_df['y'] = merged_df['loc'].apply(lambda point: loads(point).y)
+        # Setup PDF output
+        pdf_path = os.path.join(self.Data_output, 'agent_jump_locations.pdf')
 
-            # Create a folder to store individual TIFF files
-            tiff_folder = os.path.join(self.Data_output, 'Agent_Jump_TIFFs')
-            os.makedirs(tiff_folder, exist_ok=True)
+        # Plotting starts here
+        fig, ax = plt.subplots(figsize=(10, 6))
 
-            # Open the GeoTIFF file for the background
-            with rasterio.open(self.tif_path) as src:
-                tiff_image = src.read(1)  # Read the first band of the GeoTIFF
-                tiff_extent = src.bounds
+        # Display TIFF as the background
+        with rasterio.open(self.tif_path) as tiff:
+            show(tiff, ax=ax, alpha=1)  # Adjust alpha as needed for background transparency
+        
+        # Plot all coordinates for context
+        ax.scatter(x_coords.flatten(), y_coords.flatten(), color='lightgray', alpha=0.5, s=1, label='All Positions')
 
-            # Create a figure and axis for the plot
-            fig, ax = plt.subplots(figsize=(10, 8))
+        # Filter and plot jump positions
+        valid_jump_mask = (time_of_jump >= 0) & (time_of_jump < x_coords.shape[1]) & np.isfinite(time_of_jump)
+        valid_jump_indices = np.nonzero(valid_jump_mask)
+        jump_times = time_of_jump[valid_jump_mask].astype(int)
 
-            # Display the TIFF image using imshow with the correct extent and CRS
-            ax.imshow(tiff_image, cmap='viridis', extent=(tiff_extent.left, tiff_extent.right, tiff_extent.bottom, tiff_extent.top), aspect='equal')
+        jump_x_coords = x_coords[valid_jump_indices[0], jump_times]
+        jump_y_coords = y_coords[valid_jump_indices[0], jump_times]
+        ax.scatter(jump_x_coords, jump_y_coords, color='orange', marker='o', s=50, label='Jump Positions')
 
-            # Plot the agent locations on top of the TIFF image
-            ax.scatter(merged_df['x'], merged_df['y'], marker='o', c='red', label='Agent Locations')
-            plt.xlabel('X Coordinate')
-            plt.ylabel('Y Coordinate')
-            plt.title('Agents Plotted Based on Timesteps')
-            plt.legend()
+        ax.set_xlabel('Easting (E)')
+        ax.set_ylabel('Northing (N)')
+        ax.set_title('Agent Locations at Time of Jump')
+        plt.legend()
+        plt.tight_layout()
+        # Save the current figure into the PDF
+        with PdfPages(pdf_path) as pdf:
+            pdf.savefig(fig)
+        plt.close(fig)
 
-            # Save the plot to the PDF
-            pdf.savefig()
-            plt.close()
+        print(f"Plot saved to: {pdf_path}")
 
-            # Save the TIFF file for the current jump
-            jump_tiff_filepath = os.path.join(tiff_folder, 'Agent_Jump_Locations.tif')
-            fig, ax = plt.subplots(figsize=(10, 8))
-            ax.imshow(tiff_image, cmap='viridis', extent=(tiff_extent.left, tiff_extent.right, tiff_extent.bottom, tiff_extent.top), aspect='equal')
-            ax.scatter(merged_df['x'], merged_df['y'], marker='o', c='red', label='Agent Locations')
-            plt.xlabel('X Coordinate')
-            plt.ylabel('Y Coordinate')
-            plt.title('Agents Plotted Based on Timesteps')
-            plt.legend()
-            plt.savefig(jump_tiff_filepath)
-            plt.close()
-
-        print(f"Results written to: {pdf_filepath} and TIFF in {tiff_folder}")
 
 
     #Jump_Data_Statistics
-    def read_jump_data_1(self):
-        self.jump_angles = []
-        self.time_airborne_values = []
-        self.displacement_values = []
 
-        for filename in os.listdir(self.directory_path):
-            if filename.endswith('.h5'):
-                h5_file_path = os.path.join(self.directory_path, filename)
-                try:
-                    with pd.HDFStore(h5_file_path, mode='r') as store:
-                        if '/jump' in store:
-                            jump_data = pd.read_hdf(h5_file_path, '/jump')
-                            self.jump_angles.extend(jump_data['jump_angle'])
-                            self.time_airborne_values.extend(jump_data['time_airborne'])
-                            self.displacement_values.extend(jump_data['displacement'])
-                except Exception as e:
-                    print(f"Error reading file '{h5_file_path}': {e}")
+    def calculate_statistics(self, hdf_path):
+        stats_filepath = os.path.join(self.Data_output, 'jump_and_out_of_water_statistics.txt')
 
+        with h5py.File(hdf_path, 'r') as hdf:
+            if 'agent_data' in hdf:
+                agent_data_group = hdf['agent_data']
+                keys_of_interest = ['time_of_jump', 'time_out_of_water']
 
+                with open(stats_filepath, 'w') as stats_file:
+                    for key in keys_of_interest:
+                        if key in agent_data_group:
+                            dataset = np.array(agent_data_group[key])
+                            # Filter out zeros to focus on non-zero values (assuming zeros indicate no event)
+                            non_zero_values = dataset[dataset > 0]
 
-    def calculate_statistics(self):
-        self.read_jump_data()
+                            if non_zero_values.size > 0:
+                                mean_val = np.mean(non_zero_values)
+                                min_val = np.min(non_zero_values)
+                                max_val = np.max(non_zero_values)
+                                std_dev_val = np.std(non_zero_values)
 
-        if not self.jump_angles:
-            print("No jump data found.")
-            return
+                                stats_file.write(f"Statistics for {key}:\n")
+                                stats_file.write(f"Mean: {mean_val:.2f}\n")
+                                stats_file.write(f"Minimum: {min_val:.2f}\n")
+                                stats_file.write(f"Maximum: {max_val:.2f}\n")
+                                stats_file.write(f"Standard Deviation: {std_dev_val:.2f}\n\n")
+                            else:
+                                stats_file.write(f"No non-zero values found for {key}.\n\n")
+                    else:
+                            stats_file.write(f"Key '{key}' does not exist in 'agent_data'.\n\n")
 
-        average_jump_angle = sum(self.jump_angles) / len(self.jump_angles)
-        min_jump_angle = min(self.jump_angles)
-        max_jump_angle = max(self.jump_angles)
-
-        average_time_airborne = sum(self.time_airborne_values) / len(self.time_airborne_values)
-        min_time_airborne = min(self.time_airborne_values)
-        max_time_airborne = max(self.time_airborne_values)
-
-        average_displacement = sum(self.displacement_values) / len(self.displacement_values)
-        min_displacement = min(self.displacement_values)
-        max_displacement = max(self.displacement_values)
-
-        # Create a dictionary with the statistics
-        statistics = {
-            "Average Jump Angle": average_jump_angle,
-            "Minimum Jump Angle": min_jump_angle,
-            "Maximum Jump Angle": max_jump_angle,
-            "Average Time Airborne": average_time_airborne,
-            "Minimum Time Airborne": min_time_airborne,
-            "Maximum Time Airborne": max_time_airborne,
-            "Average Displacement": average_displacement,
-            "Minimum Displacement": min_displacement,
-            "Maximum Displacement": max_displacement
-        }
-
-        # Save the statistics to a text file
-        stats_filepath = os.path.join(self.Data_output, 'jump_statistics.txt')
-        with open(stats_filepath, 'w') as stats_file:
-            for stat_name, stat_value in statistics.items():
-                stats_file.write(f"{stat_name}: {stat_value}\n")
-
-        print(f"Statistics written to: {stats_filepath}")
-
-        return statistics
+                print(f"Statistics written to: {stats_filepath}")
+            else:
+                print("'agent_data' key does not exist in the file.")
 
 
     # Heatmap of ALL Agents
     
     def plot_agent_timestep_heatmap(self):
-        # Create a PDF booklet
-        pdf_filepath = os.path.join(self.Data_output, 'Agent_Timestep_Heatmap.pdf')
-        with PdfPages(pdf_filepath) as pdf:
-            # Read the contents of the '/TS' key
-            with pd.HDFStore(self.hdf_path, mode='r') as store:
-                ts_key = '/TS'
-                if ts_key in store:
-                    ts_data = pd.read_hdf(self.hdf_path, ts_key)
-                else:
-                    raise ValueError(f"Key '{ts_key}' not found in '{self.hdf_path}'")
+        pdf_filepath = os.path.join(self.Data_output, 'Agent_Timestep_Frequency_Heatmap.pdf')
 
-            loc_data = ts_data['loc'].apply(lambda x: loads(x))
-            x_coords = np.array([loc.x for loc in loc_data])
-            y_coords = np.array([loc.y for loc in loc_data])
-
-            # Create a 2D histogram
-            heatmap, xedges, yedges = np.histogram2d(x_coords, y_coords, bins=100)
-
-            # Create a heatmap plot
-            plt.imshow(heatmap.T, extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]], origin='lower', cmap='viridis')
-
-            # Add labels and title
-            plt.xlabel('X Coordinate')
-            plt.ylabel('Y Coordinate')
-            plt.title('Heatmap of Agent Location Data')
-
-            # Show the colorbar for reference
-            plt.colorbar(label='Frequency')
-
-            # Save the plot to the PDF
-            pdf.savefig()
-            plt.close()
-
+        with PdfPages(pdf_filepath) as pdf, h5py.File(self.hdf_path, 'r') as hdf:
+            # Access 'X' and 'Y' datasets under 'agent_data'
+            x_data = hdf['agent_data']['X'][:]
+            y_data = hdf['agent_data']['Y'][:]
+            
+            # Flatten the arrays to get all x and y coordinates across all timesteps
+            x_flat = x_data.flatten()
+            y_flat = y_data.flatten()
+            
+            # Generate a 2D histogram with the flattened x and y data to visualize frequency
+            heatmap, xedges, yedges = np.histogram2d(x_flat, y_flat, bins=100, density=False)
+            heatmap_masked = np.ma.masked_where(heatmap == 0, heatmap)
+            
+            with rasterio.open(self.tif_path) as src:
+                fig, ax = plt.subplots(figsize=(10, 8))
+                show(src, ax=ax, with_bounds=True)
+                
+                # Overlay the heatmap
+                im = ax.pcolormesh(xedges, yedges, heatmap_masked.T, cmap='hot', alpha=0.7)
+                
+                plt.xlabel('Easting (E)')
+                plt.ylabel('Northing (N)')
+                plt.title('Heatmap of Agent Frequencies by Timestep')
+                plt.colorbar(im, ax=ax, label='Frequency')
+                
+                pdf.savefig(fig)
+                plt.close(fig)
+        
         print(f"Results written to: {pdf_filepath}")
 
     # Agent Jump Location Heat Map
 
-    def plot_agent_jump_heatmap(self):
-        # Create a PDF booklet
-        pdf_filepath = os.path.join(self.Data_output, 'Agent_Jump_Heatmap.pdf')
-        with PdfPages(pdf_filepath) as pdf:
-            jump_df_all = self.read_jump_data()
-            ts_loc_df = self.read_ts_loc_data()
-
-            ts_loc_df['id'] = ts_loc_df['id'].astype('int32')
-            merged_df = jump_df_all.merge(ts_loc_df, left_on=['ID', 'timestep'], right_on=['id', 'ts'], how='inner')
-            merged_df['x'] = merged_df['loc'].apply(lambda point: loads(point).x)
-            merged_df['y'] = merged_df['loc'].apply(lambda point: loads(point).y)
-
-            # Create a 2D histogram for agent locations
-            plt.figure(figsize=(10, 8))
-            x_values = merged_df['x']
-            y_values = merged_df['y']
-            plt.hist2d(x_values, y_values, bins=(100, 100), cmap='viridis')
-
-            # Add labels and a title
-            plt.xlabel('X Coordinate')
-            plt.ylabel('Y Coordinate')
-            plt.title('Heatmap of Agent Locations')
-
-            # Add a colorbar to the heatmap
-            colorbar = plt.colorbar()
-            colorbar.set_label('Frequency')
-
-            # Save the plot to the PDF
-            pdf.savefig()
-            plt.close()
-
-        print(f"Results written to: {pdf_filepath}")
-        
-    
-    #Reset the summarization class so other models can run
-    def reset_state(self):
-        self.lengths = []
-        self.weights = []
-        self.body_depths = []
-        self.data_list = []  # Initialize data_list
-        self.bout_duration_list = []  # Initialize bout_duration_list
-        self.ids_in_rectangle = set()
-        self.length_statistics()
-        self.weight_statistics()
-        self.body_depth_statistics()
-
-
-class MultiModelSummarize:
-    def __init__(self, model_configurations):
-        self.model_configurations = model_configurations
-
-    def process_all_models(self):
-        for config in self.model_configurations:
-            dir_path, hdf_path, tif_path, data_output = config
-            print(f"\nProcessing model in directory: {dir_path}")
+    def plot_agent_jump_heatmap(self, tif_path):
+        with h5py.File(self.hdf_path, 'r') as hdf:
+            if 'agent_data' in hdf:
+                x_coords = hdf['agent_data']['X'][:]
+                y_coords = hdf['agent_data']['Y'][:]
+                time_of_jump = hdf['agent_data']['time_of_jump'][:]
             
-            summarization = Summarization(dir_path, hdf_path, tif_path, data_output)
-            summarization.reset_state()
-            
-            tiff_image, tiff_extent = summarization.load_tiff_image()
-            summarization.length_values()
-            summarization.plot_lengths()
-            summarization.length_statistics()
-            summarization.collect_weights()
-            summarization.plot_weights()
-            summarization.weight_statistics()
-            summarization.collect_body_depths()
-            summarization.plot_body_depths()
-            summarization.body_depth_statistics()
-            summarization.max_bout_duration()
-            summarization.max_bout_no()
-            summarization.Agent_Plot_Rectangle()
-            summarization.plot_agent_locations()
-            summarization.plot_agent_locations_on_tiff()
-            summarization.plot_agent_timestep_locations_on_tiff()
-            summarization.plot_agent_timestep_locations()
-            summarization.plot_individual_agent_timestep_locations_on_tiff()
-            summarization.read_jump_data()
-            summarization.plot_agent_location_jump()
-            summarization.plot_agent_locations_with_colors()
-            summarization.plot_agent_jump_locations_tif()
-            summarization.read_jump_data_1()
-            summarization.calculate_statistics()
-            summarization.plot_agent_timestep_heatmap()
-            summarization.plot_agent_jump_heatmap()
-            
-            
-            
-            # Explicitly delete the summarization instance to ensure a clean state for the next iteration
-            del summarization
+                # Filter out the invalid jump times
+                valid_mask = time_of_jump > 0
+                valid_x = x_coords[valid_mask]
+                valid_y = y_coords[valid_mask]
+
+                if np.any(valid_mask):
+                    plt.figure(figsize=(10, 6))
+                    with rasterio.open(tif_path) as tiff:
+                        show(tiff, alpha=0.5)  # Show the TIFF image as a background
+                        
+                    # Create a heatmap of jump locations
+                    plt.hexbin(valid_x, valid_y, gridsize=50, cmap='hot', bins='log')
+                    plt.colorbar(label='log10(N)')
+                    plt.xlabel('Easting (E)')
+                    plt.ylabel('Northing (N)')
+                    plt.title('Heatmap of Agent Jump Locations')
+
+                    # Save the plot
+                    plot_path = os.path.join(self.Data_output, 'agent_jump_locations_heatmap.png')
+                    plt.savefig(plot_path)
+                    plt.show
+                    plt.close()
+                
+                    print(f"Heatmap plot saved to: {plot_path}")
+                else:
+                    print("No valid jump locations found.")
+            else:
+                print("'agent_data' key does not exist in the HDF5 file.")
+ 
+
+    #Use these to run code
+
+multi_summarization=Multi_Summarization(directory_path, hdf_path, tif_path, Data_output)
+tiff_image, tiff_extent = multi_summarization.load_tiff_image()
+#TODO multi_summarization.plot_lengths()
+#TODO multi_summarization.length_statistics()
+#TODO multi_summarization.plot_weights()
+#TODO multi_summarization.weight_statistics()
+#TODO multi_summarization.plot_body_depths()
+#TODO multi_summarization.body_depth_statistics()
+#TODO multi_summarization.max_bout_duration()
+#TODO multi_summarization.max_bout_duration_statistics()
+#TODO multi_summarization.max_bout_no()
+#TODO multi_summarization.bout_no_statistics()
+#TODO multi_summarization.kcal_statistics()
+#TODO multi_summarization.Agent_Plot_Rectangle(rect_position)
+#TODO multi_summarization.plot_agent_locations()
+#TODO multi_summarization.plot_agent_locations_on_tiff()
+#multi_summarization.plot_agent_timestep_locations_on_tiff()    Optional to have, might not need with such large datasets
+#multi_summarization.plot_agent_timestep_locations() Optional for code, we don't need unless asked for
+#TODO multi_summarization.plot_agent_jump_locations()
+#TODO multi_summarization.plot_agent_jump_locations_tif()
+#TODO multi_summarization.calculate_statistics(hdf_path)
+#TODO multi_summarization.plot_agent_timestep_heatmap()
+multi_summarization.plot_agent_jump_heatmap(tif_path)
 
 
-model_configurations = [
-    (
-        r"J:\2819\005\Calcs\ABM\Output\test_29",
-        r"J:\2819\005\Calcs\ABM\Output\test_29\test_29.hdf",
-        r'J:\2819\005\Calcs\ABM\Data\elev.tif',
-        r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_29'
-    ),
-    (
-        r"J:\2819\005\Calcs\ABM\Output\test_43",
-        r"J:\2819\005\Calcs\ABM\Output\test_43\test_43.h5",
-        r'J:\2819\005\Calcs\ABM\Data\elev.tif',
-        r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_43'
-    ),
-    (
-        r"J:\2819\005\Calcs\ABM\Output\test_55",
-        r"J:\2819\005\Calcs\ABM\Output\test_55\test_55.h5",
-        r'J:\2819\005\Calcs\ABM\Data\elev.tif',
-        r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Test_55'
-    )
-]
 
-multi_model_summarizer = MultiModelSummarize(model_configurations)
-multi_model_summarizer.process_all_models()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
