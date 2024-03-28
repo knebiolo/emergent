@@ -38,8 +38,11 @@ import pandas as pd
 import rasterio
 from rasterio.transform import Affine
 from rasterio.mask import mask
+from rasterio.crs import CRS
+from rasterio.warp import reproject, calculate_default_transform
 from shapely import Point, Polygon, box
 from shapely import affinity
+from shapely.wkt import loads as loads
 from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline, RectBivariateSpline
 from scipy.optimize import curve_fit
 from scipy.constants import g
@@ -47,6 +50,7 @@ from scipy.spatial import cKDTree
 from scipy.stats import beta
 import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 from datetime import datetime
 import time
 import warnings
@@ -2034,21 +2038,13 @@ class simulation():
             school = self.school_cue(1)
             collision = self.collision_cue(1)
         else:
-            rheotaxis = self.rheo_cue(18000)       # 10000
+            rheotaxis = self.rheo_cue(15000)       # 10000
             shallow = self.shallow_cue(10000)      # 10000
             wave_drag = self.wave_drag_cue(2500)   # 5000
-            low_speed = self.vel_cue(1200)         # 8000 
-            avoid = self.already_been_here(8000, t)# 3000
-            school = self.school_cue(1500)         # 9000
-            collision = self.collision_cue(2000)   # 2500 
-            
-            # rheotaxis = self.rheo_cue(10000)       # 10000
-            # shallow = self.shallow_cue(1)      # 10000
-            # wave_drag = self.wave_drag_cue(1)   # 5000
-            # low_speed = self.vel_cue(1)         # 8000 
-            # avoid = self.already_been_here(1, t)# 3000
-            # school = self.school_cue(1)         # 9000
-            # collision = self.collision_cue(1)   # 2500         
+            low_speed = self.vel_cue(1800)         # 8000 
+            avoid = self.already_been_here(9000, t)# 3000
+            school = self.school_cue(15000)         # 9000
+            collision = self.collision_cue(5000)   # 2500 
         
         # Create dictionary that has order of behavioral cues
         order_dict = {0: shallow, 
@@ -2073,27 +2069,27 @@ class simulation():
         tolerance = 25000
         
         # Set the cicada timestep based on sex
-        cicada_timestep = np.where(self.sex == 'M', 11, 13)
+        cicada_timestep = np.where(self.sex == 'M', 7, 13)
         
-        # Calculate the time since the last jump
+        # Calculate the fish abandoned competing behavioral cues
         time_since_abandon = t - self.time_of_abandon
         
         # Determine which cicadas should abandon their trajectory
-        # This creates a boolean mask where True indicates an individual should abandon its trajectory
-        # should_abandon = np.logical_or(time_since_abandon % cicada_timestep == 0,
-        #                                time_since_abandon <= 3)
-        should_abandon = time_since_abandon % cicada_timestep == 0
-
-        still_abandon = np.where(t - self.time_of_abandon < 9,1,0)
+        should_abandon = t % cicada_timestep == 0
+        still_abandon = np.where(time_since_abandon < 15,1,0)
         
         # Use the binomial distribution to randomly select a subset of those eligible to abandon
         # Note: The binomial approach is applied only to those cicadas marked by 'should_abandon'
         abandon = np.zeros_like(self.sex, dtype=np.int32)  # Initialize with zeros
-        abandon[should_abandon] = np.random.binomial(1, 0.25, size=should_abandon.sum())
-        abandon = abandon + still_abandon
+
+        if np.any(should_abandon):
+            # roll dice - will it abandon?
+            abandon[should_abandon] = np.random.binomial(1, 0.33, size=should_abandon.sum())
+            
+            # Update 'self.time_of_abandon' for those who abandoned their trajectory this timestep
+            self.time_of_abandon[should_abandon] = t
         
-        # Update 'self.time_of_abandon' for those who abandoned their trajectory this timestep
-        self.time_of_abandon[abandon] = t
+        abandon = abandon + still_abandon
         
         # add up vectors, but make sure it's not greater than the tolerance
         vec_sum = np.zeros_like(rheotaxis)
@@ -2316,7 +2312,7 @@ class simulation():
         
         #TODO min_Hz should be the minimum tailbeat required to match the maximum sustained swim speed 
         # self.max_s_U = 2.77 bl/s
-        min_Hz = np.interp(self.length, [450, 5.], [690, 1.])
+        min_Hz = np.interp(self.length, [450, 7.], [690, 1.])
     
         # Solve for Hz
         Hz = np.where(self.swim_behav == 3, min_Hz,
@@ -2670,16 +2666,6 @@ class simulation():
         # Find where the drag exceeds the maximum and scale it down
         excessive_drag_indices = np.where(np.logical_and( self.swim_behav == 3, drag_magnitudes > max_drag_magnitude),True,False)
         drags[excessive_drag_indices] = (drags[excessive_drag_indices].T * (max_drag_magnitude / drag_magnitudes[excessive_drag_indices])).T
-            
-        # if np.any(self.swim_behav == 3):
-        #     print ('check drags calc if fish has forward momentum it should still generate drag, \n but if fish is moving with flow, drag should be minimal')
-        #     print ('fish status: \n %s'%(self.swim_behav))
-        #     print ('fish velocities: \n %s'%(fish_velocities))
-        #     print ('water velocities: \n %s'%(water_velocities))
-        #     print ('relative velocities: \n %s'%(relative_velocities))
-        #     print ('drags: \n %s'%(drags))
-        #     print ('thrust from last t-step, we can only gen 1 Hz: \n %s'%(self.thrust))
-        #     print ('shit')
             
         self.drag = drags
 
@@ -3050,18 +3036,7 @@ class simulation():
                          0.)
         
         self.error = error
-        ded = np.where(np.isnan(error))
-        #self.dead = 
-        
-        if np.any(np.isnan(error)):
-
-            # print ('nan in error print integral')
-            # print ('%s'%(self.integral))
-            # print ('pid adjustment:')
-            # print ('%s'%(self.pid_adjustment))
-            print ('shit')
-            # self.hdf5.close()
-            # sys.exit()
+        self.dead = np.where(np.isnan(error[:, 0]),1,self.dead)
             
         if self.pid_tuning == True:
             self.error_array = np.append(self.error_array, error[0])
@@ -3105,19 +3080,7 @@ class simulation():
         # Step 7: Prepare for position update
         dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
             
-        if np.any(np.logical_and(np.linalg.norm(pid_adjustment,axis = -1) > 5,self.swim_behav == 3)):
-            print ('huge change in velocity requested for a fatigued fish - why?')
-            
-        # if np.any(np.logical_and(np.linalg.norm(dxdy,axis = -1) > 0.5,self.swim_behav == 3)):
-        #     print ('huge change in position for a fatigued fish - why?')
-        #     print ('status: \n %s'%(self.swim_behav))
-        #     print ('dxdy: \n %s'%(dxdy))
-        #     print ('thrust: \n %s'%(self.thrust))
-        #     print ('drag: \n %s'%(self.drag))
-        #     print ('water velocity \n %s'%(np.stack((self.x_vel,self.y_vel)).T))
-        #     print ('shit')
-
-            
+  
         return dxdy
                         
     def jump(self, t, g, mask):
@@ -3322,28 +3285,16 @@ class simulation():
         # move
         self.prev_X = np.where(mask,self.X.copy(),self.prev_X)
         self.prev_Y = np.where(mask,self.Y.copy(),self.prev_Y)
-        try:
-            self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
-        except:
-            print ('fuck')
+        
+        self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
         self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
         
         self.sog = np.where(should_jump,
                             self.ideal_sog,
                             np.sqrt(np.power(self.X - self.prev_X,2)+ np.power(self.Y - self.prev_Y,2)) / dt)
         
-        # if np.any(self.sog > self.ideal_sog * 2.):
-        #     print ('speed over ground way out of whack')
-        
         if np.any(np.isnan(self.X)):
-            self.dead = np.where(np.isnan(self.X),1,0)
-
-            # print ("fish off map")
-            # self.hdf5.close()
-            # sys.exit()
-               
-        # if np.any(dxdy_jump != 0.):
-        #     print ('check jump movement')
+            self.dead = np.where(np.isnan(self.X),1,self.dead)
             
         # Calculate mileage
         self.odometer(t=t, dt = dt)  
@@ -3489,6 +3440,7 @@ class simulation():
 
         
     def close(self):
+        self.hdf5.flush()  
         self.hdf5.close()
             
 class PID_optimization():
@@ -3936,9 +3888,194 @@ class PID_optimization():
                         
         return records
             
+class summary:
+    '''The power of an agent based model lies in its ability to produce emergent
+    behavior of interest to managers.  novel self organized patterns that 
+    only happen once are a consequence, predictable self organized patterns  
+    are powerful.  Each Emergent simulation should be run no less than 30 times. 
+    This summary class object is designed to iterate over a parent directory, 
+    extract data from child directories, and compile statistics.  The parent 
+    directory describes a single scenario (for sockeye these are discharge)
+    while each child directory is an individual iteration.  
+    
+    The class object iterates over child directories, extracts and manipulates data,
+    calculate basic descriptive statistics, manages information, and utilizes 
+    Poisson kriging to produce a surface that depicts the average number of agents
+    per cell per second.  High use corridors should be visible in the surface.
+    These corridors are akin to the desire paths we see snaking through college
+    campuses and urban parks the world over.
+    
+    '''
+    def __init__(self, parent_directory, tif_path):
+        # set the model directory path
+        self.parent_directory = parent_directory
+        
+        # where are the background tiffs stored?
+        self.tif_path = tif_path
+        
+        # get h5 files associated with this model
+        self.h5_files = self.find_h5_files()
+        
+        # create empty thigs to hold agent data
+        self.ts = gpd.GeoDataFrame(columns = ['agent','timestep','X','Y','kcal','Hz','filename','geometry'])
+        self.morphometrics = pd.DataFrame()
+        self.success_rates = {}
+
+    def load_tiff(self, crs):
+        # Define the desired CRS
+        desired_crs = CRS.from_epsg(crs)
+
+        # Open the TIFF file with rasterio
+        with rasterio.open(self.tif_path) as tiff_dataset:
+            # Calculate the transformation parameters for reprojecting
+            transform, width, height = calculate_default_transform(
+                tiff_dataset.crs, desired_crs, tiff_dataset.width, tiff_dataset.height,
+                *tiff_dataset.bounds)
+
+            # Reproject the TIFF image to the desired CRS
+            image_data, _ = reproject(
+                source=tiff_dataset.read(1),
+                src_crs=tiff_dataset.crs,
+                src_transform=tiff_dataset.transform,
+                dst_crs=desired_crs,
+                resampling=rasterio.enums.Resampling.bilinear)
+
+            # Update the extent based on the reprojected data
+            tiff_extent = rasterio.transform.array_bounds(height, width, transform)
+
+        return image_data, tiff_extent
+   
+    # Find the .h5 files
+    def find_h5_files(self):
+        
+        # create empty holders for all of the h5 files and child directories
+        h5_files=[]
+        child_dirs = []
+        
+        # first iterate over the parent diretory to find the children (iterations)
+        for item in os.listdir(self.parent_directory):
+            # create a full path object
+            full_path = os.path.join(self.parent_directory, item)
             
+            # if full path is a directory and not a file - we found a child
+            if os.path.isdir(full_path):
+                child_dirs.append(full_path)
+        
+        # iterate over child directories and find the h5 files
+        for child_dir in child_dirs:
+            for filename in os.listdir(child_dir):
+                if filename.endswith('.h5'):
+                    h5_files.append(os.path.join(child_dir,filename))
+        
+        # we found our files
+        return h5_files
+        
+    # Collect, rearrange, and manage data
+    def get_data(self):
+
+        # Iterate through each HDF5 file in the specified directory and get data
+        for filename in self.h5_files:
+
+            with h5py.File(filename, 'r') as hdf:
+                cell_center_x = pd.DataFrame(hdf['x_coords'][:])
+                cell_center_x['row'] = np.arange(len(cell_center_x))
+                cell_center_y = pd.DataFrame(hdf['y_coords'][:])
+                cell_center_y['row'] = np.arange(len(cell_center_y))
+
+                melted_center_x = pd.melt(cell_center_x, id_vars = ['row'], var_name = 'column', value_name = 'X')
+                melted_center_y = pd.melt(cell_center_y, id_vars = ['row'], var_name = 'column', value_name = 'Y')
+                melted_center = pd.merge(melted_center_x, melted_center_y, on = ['row','column'])
+                self.melted_center = melted_center
+                              
+                if 'agent_data' in hdf:
+                    # timestep data
+                    X = pd.DataFrame(hdf['agent_data/X'][:])
+                    X['agent'] = np.arange(X.shape[0])
+                    Y = pd.DataFrame(hdf['agent_data/Y'][:])
+                    Y['agent'] = np.arange(Y.shape[0])
+                    Hz = pd.DataFrame(hdf['agent_data/Hz'][:])
+                    Hz['agent'] = np.arange(Hz.shape[0])
+                    kcal = pd.DataFrame(hdf['agent_data/kcal'][:])
+                    kcal['agent'] = np.arange(kcal.shape[0])  
+                    
+                    # agent specific 
+                    length = pd.DataFrame(hdf['agent_data/length'][:])
+                    length['agent'] = np.arange(len(length))
+                    length.rename(mapper = {0:'length'}, axis = 'columns', inplace = True)
+                    
+                    weight = pd.DataFrame(hdf['agent_data/weight'][:])
+                    weight['agent'] = np.arange(len(weight))
+                    weight.rename(mapper = {0:'weight'}, axis = 'columns', inplace = True)
+
+                    body_depth = pd.DataFrame(hdf['agent_data/body_depth'][:])
+                    body_depth['agent'] = np.arange(len(body_depth))
+                    body_depth.rename(mapper = {0:'body_depth'}, axis = 'columns', inplace = True)
+
+                    # melt time series data
+                    melted_X = pd.melt(X, id_vars=['agent'], var_name='timestep', value_name='X')
+                    melted_Y = pd.melt(Y, id_vars=['agent'], var_name='timestep', value_name='Y')
+                    melted_kcal = pd.melt(kcal, id_vars=['agent'], var_name='timestep', value_name='kcal')
+                    melted_Hz = pd.melt(Hz, id_vars=['agent'], var_name='timestep', value_name='Hz')
+                    
+                    # make one dataframe 
+                    ts = pd.merge(melted_X, melted_Y, on = ['agent','timestep'])
+                    ts = pd.merge(ts, melted_kcal, on = ['agent','timestep'])
+                    ts = pd.merge(ts, melted_Hz, on = ['agent','timestep'])
+                    ts['filename'] = filename
+                    
+                    # turn ts into a geodataframe and find the fish that passed
+                    geometry = [Point(xy) for xy in zip(ts['X'], ts['Y'])]
+                    geo_ts = gpd.GeoDataFrame(ts, geometry=geometry)            
+                    
+                    # make one morphometric dataframe
+                    morphometrics = pd.merge(length, weight, on = ['agent'])
+                    morphometrics = pd.merge(morphometrics, body_depth, on = ['agent'])
+                    
+                    # add to summary data
+                    self.ts = pd.concat([self.ts,geo_ts], ignore_index = True)
+                    self.morphometrics = pd.concat([self.morphometrics,morphometrics], 
+                                                  ignore_index = True) 
+                    
+                    print ('File %s imported'%(filename))
+                    
+    def successful(self,finish_line):
+        '''find the fish that are successful'''
+        
+        for filename in self.h5_files:
+            dat = self.ts[self.ts.filename == filename]
+            agents_in_box = dat[dat.within(finish_line)]
             
+            # get the unique list of successful agents 
+            succesful = agents_in_box.agent.unique()
             
+            # get complete list of agents
+            n_agents = dat.agent.unique()
+            
+            # success rate
+            success = len(succesful) / n_agents 
+            
+            # get first detections in finish area
+            passing_times = agents_in_box.groupby('agent')['timestep'].min()
+            
+            # get passage time stats
+            pass_time_0 = passing_times.timestep.min()
+            pass_time_10 = np.percentile(passing_times.timestep,10)
+            pass_time_25 = np.percentile(passing_times.timestep,25)
+            pass_time_50 = np.percentile(passing_times.timestep,50)
+            pass_time_75 = np.percentile(passing_times.timestep,75)
+            pass_time_90 = np.percentile(passing_times.timestep,90)
+            pass_time_100 = passing_times.timestep.max()
+            
+            # make a row and add it to the success_rates dictionary
+            self.success_rates[filename] = [success, 
+                                            pass_time_0,
+                                            pass_time_10,
+                                            pass_time_25,
+                                            pass_time_50,
+                                            pass_time_75,
+                                            pass_time_90,
+                                            pass_time_100]
+
             
             
             
