@@ -14,32 +14,27 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Rectangle
 import rasterio
 from rasterio.crs import CRS
 from rasterio.warp import reproject, calculate_default_transform
 from matplotlib.backends.backend_pdf import PdfPages
 from rasterio.plot import show
 import h5py
-
+from rasterio.transform import from_origin
+import geopandas as gpd
+from shapely.geometry import Point
 
 #Identify the directory path
-directory_path = r"J:\2819\005\Calcs\ABM\Data\Agent_data_files\Multi_Model_Summarize\Validation_Test"
-hdf_path = r"J:\2819\005\Calcs\ABM\Data\Agent_data_files\Multi_Model_Summarize\Validation_Test\validation_testing.h5"
-exports_path=r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Multi_Model_Summarize\Validation_Test'
-Data_output=r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Multi_Model_Summarize\Validation_Test'
+directory_path = r"C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST_1"
+hdf_path = r"C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST_1\val_TEST_1.h5"
+exports_path=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST_1'
+Data_output=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST_1'
 tif_path=r'J:\2819\005\Calcs\ABM\Data\Agent_data_files\Multi_Model_Summarize\Validation_Test\elev.tif'
-
-#Rectangle boundary information
-x_min = 548500
-y_min = 6641036
-width = 549000 - x_min
-height = 6641968 - y_min
-rect_position = (x_min, y_min, width, height)
+shapefile_path=r'Q:\Internal_Data\Staff_Projects\ENM\Nuyakuk\Rectangle\Rectangle.shp'
 
 
 class Multi_Summarization:
-    def __init__(self, directory_path, hdf_path, tif_path, Data_output):
+    def __init__(self, directory_path, hdf_path, tif_path, Data_output, cell_width=50, cell_height=50):
         self.directory_path = directory_path
         self.hdf_path = hdf_path
         self.tif_path = tif_path
@@ -52,6 +47,8 @@ class Multi_Summarization:
         self.bout_duration_list = []  # Initialize bout_duration_list
         self.ids_in_rectangle = set()
         self.exports_path=exports_path
+        self.cell_width = cell_width
+        self.cell_height = cell_height
        
 
     def h5_agent_list(self):
@@ -323,71 +320,71 @@ class Multi_Summarization:
     
  
         
-    # Find max bout duration
-    def max_bout_duration(self):
-        max_bout_file_path = os.path.join(self.Data_output, 'max_bout_duration_by_agent.txt')
+    # # Find max bout duration
+    # def max_bout_duration(self):
+    #     max_bout_file_path = os.path.join(self.Data_output, 'max_bout_duration_by_agent.txt')
 
-        # Open the HDF5 file in read-only mode
-        with h5py.File(self.hdf_path, 'r') as hdf:
-            # Ensure 'agent_data' and 'bout_dur' exist
-            if 'agent_data' in hdf.keys() and 'bout_dur' in hdf['agent_data'].keys():
-                # Access the 'bout_dur' data
-                bout_dur_data = hdf['agent_data']['bout_dur'][:]
+    #     # Open the HDF5 file in read-only mode
+    #     with h5py.File(self.hdf_path, 'r') as hdf:
+    #         # Ensure 'agent_data' and 'bout_dur' exist
+    #         if 'agent_data' in hdf.keys() and 'bout_dur' in hdf['agent_data'].keys():
+    #             # Access the 'bout_dur' data
+    #             bout_dur_data = hdf['agent_data']['bout_dur'][:]
 
-                # Dictionary to store the maximum bout duration for each agent
-                max_durations_by_agent = {}
+    #             # Dictionary to store the maximum bout duration for each agent
+    #             max_durations_by_agent = {}
 
-                # Iterate over each row (agent) in the 'bout_dur' dataset
-                for agent_id, durations in enumerate(bout_dur_data):
-                    # Calculate the maximum duration for this agent
-                    max_duration = np.max(durations)
-                    max_durations_by_agent[agent_id] = max_duration
+    #             # Iterate over each row (agent) in the 'bout_dur' dataset
+    #             for agent_id, durations in enumerate(bout_dur_data):
+    #                 # Calculate the maximum duration for this agent
+    #                 max_duration = np.max(durations)
+    #                 max_durations_by_agent[agent_id] = max_duration
 
-                # Write the maximum bout duration for each agent to the file
-                if max_durations_by_agent:
-                    with open(max_bout_file_path, 'w') as output_file:
-                        for agent_id, max_duration in max_durations_by_agent.items():
-                            output_file.write(f"Maximum bout duration for agent {agent_id}: {max_duration}\n")
-                        print(f"Results written to: {max_bout_file_path}")
-                else:
-                    print("No 'bout_dur' data found for any agent.")
-            else:
-                print("No 'bout_dur' data found in 'agent_data'.")
+    #             # Write the maximum bout duration for each agent to the file
+    #             if max_durations_by_agent:
+    #                 with open(max_bout_file_path, 'w') as output_file:
+    #                     for agent_id, max_duration in max_durations_by_agent.items():
+    #                         output_file.write(f"Maximum bout duration for agent {agent_id}: {max_duration}\n")
+    #                     print(f"Results written to: {max_bout_file_path}")
+    #             else:
+    #                 print("No 'bout_dur' data found for any agent.")
+    #         else:
+    #             print("No 'bout_dur' data found in 'agent_data'.")
                     
                     
 
-    def max_bout_duration_statistics(self):
-        # File path for the output text file
-        stats_file_path = os.path.join(self.Data_output, 'bout_duration_statistics.txt')
+    # def max_bout_duration_statistics(self):
+    #     # File path for the output text file
+    #     stats_file_path = os.path.join(self.Data_output, 'bout_duration_statistics.txt')
 
-        # Open the HDF5 file in read-only mode
-        with h5py.File(self.hdf_path, 'r') as hdf:
-            # Ensure 'agent_data' and 'bout_dur' exist
-            if 'agent_data' in hdf.keys() and 'bout_dur' in hdf['agent_data'].keys():
-                # Access the 'bout_dur' data
-                bout_dur_data = hdf['agent_data']['bout_dur'][:]
+    #     # Open the HDF5 file in read-only mode
+    #     with h5py.File(self.hdf_path, 'r') as hdf:
+    #         # Ensure 'agent_data' and 'bout_dur' exist
+    #         if 'agent_data' in hdf.keys() and 'bout_dur' in hdf['agent_data'].keys():
+    #             # Access the 'bout_dur' data
+    #             bout_dur_data = hdf['agent_data']['bout_dur'][:]
 
-                # Flatten the data if it's multidimensional to get all durations
-                all_durations = bout_dur_data.flatten()
+    #             # Flatten the data if it's multidimensional to get all durations
+    #             all_durations = bout_dur_data.flatten()
 
-                # Calculate statistics
-                mean_duration = np.mean(all_durations)
-                median_duration = np.median(all_durations)
-                std_dev_duration = np.std(all_durations, ddof=1)  # Use ddof=1 for sample standard deviation
-                min_duration = np.min(all_durations)
-                max_duration = np.max(all_durations)
+    #             # Calculate statistics
+    #             mean_duration = np.mean(all_durations)
+    #             median_duration = np.median(all_durations)
+    #             std_dev_duration = np.std(all_durations, ddof=1)  # Use ddof=1 for sample standard deviation
+    #             min_duration = np.min(all_durations)
+    #             max_duration = np.max(all_durations)
 
-                # Write the statistics to the file
-                with open(stats_file_path, 'w') as output_file:
-                    output_file.write("Bout Duration Statistics:\n")
-                    output_file.write(f"Mean Bout Duration: {mean_duration}\n")
-                    output_file.write(f"Median Bout Duration: {median_duration}\n")
-                    output_file.write(f"Standard Deviation of Bout Duration: {std_dev_duration}\n")
-                    output_file.write(f"Minimum Bout Duration: {min_duration}\n")
-                    output_file.write(f"Maximum Bout Duration: {max_duration}\n")
-                    print(f"Results written to: {stats_file_path}")
-            else:
-                print("No 'bout_dur' data found in 'agent_data'.")
+    #             # Write the statistics to the file
+    #             with open(stats_file_path, 'w') as output_file:
+    #                 output_file.write("Bout Duration Statistics:\n")
+    #                 output_file.write(f"Mean Bout Duration: {mean_duration}\n")
+    #                 output_file.write(f"Median Bout Duration: {median_duration}\n")
+    #                 output_file.write(f"Standard Deviation of Bout Duration: {std_dev_duration}\n")
+    #                 output_file.write(f"Minimum Bout Duration: {min_duration}\n")
+    #                 output_file.write(f"Maximum Bout Duration: {max_duration}\n")
+    #                 print(f"Results written to: {stats_file_path}")
+    #         else:
+    #             print("No 'bout_dur' data found in 'agent_data'.")
                     
                     
                     
@@ -513,55 +510,57 @@ class Multi_Summarization:
 
 
 #TODO we need to find the FIRST agent based on the timesteps with the information and then go to the second one and so forth
-    def Agent_Plot_Rectangle(self, rect_position):
-        # rect_position should be a tuple or list like (x, y, width, height) for the rectangle's position and size
-
+    def Agent_Plot_Rectangle(self, shapefile_path):
         hdf_filename = os.path.basename(self.hdf_path)
         
-        pdf_filepath = os.path.join(self.Data_output, 'Agent_Rectangle_Plots.pdf')
-        txt_filepath = os.path.join(self.Data_output, 'Agents_In_Rectangle.txt')
-        jpeg_filepath= os.path.join(self.Data_output, 'Agents_In_Rectangle.jpeg')
+        pdf_filepath = os.path.join(self.Data_output, 'Agent_Shapefile_Plots.pdf')
+        txt_filepath = os.path.join(self.Data_output, 'Agents_In_Shapefile.txt')
+        jpeg_filepath = os.path.join(self.Data_output, 'Agents_In_Shapefile.jpeg')
 
-        with PdfPages(pdf_filepath) as pdf, open(txt_filepath, 'w') as txt_file, h5py.File(self.hdf_path, 'r') as hdf, rasterio.open(self.tif_path) as tif:
-            x_coords = hdf['agent_data']['X'][:]
-            y_coords = hdf['agent_data']['Y'][:]
+        # Load the shapefile
+        gdf = gpd.read_file(shapefile_path)
 
-            fig, ax = plt.subplots(figsize=(10, 8))
-            show(tif.read(1), transform=tif.transform, ax=ax)  # Show the TIFF image as a background
+        with rasterio.open(self.tif_path) as tif:
+            tif_crs = tif.crs
 
-            ax.scatter(x_coords.flatten(), y_coords.flatten(), alpha=0.5, s=1, c='orange')  # Agents plotted on top
+            # Check and reproject the shapefile CRS to match the TIFF's CRS if necessary
+            if gdf.crs != tif_crs:
+                gdf = gdf.to_crs(tif_crs)
+                print("Shapefile reprojected to match the TIFF's CRS.")
 
-            # Define the rectangle's position based on rect_position
-            rect = Rectangle((rect_position[0], rect_position[1]), rect_position[2], rect_position[3], linewidth=2, edgecolor='red', fill=False)
-            ax.add_patch(rect)
-        
-            ax.set_xlabel('Easting (E)')
-            ax.set_ylabel('Northing (N)')
-            ax.set_title("Agents in Rectangle")
-            pdf.savefig(fig)
-            fig.savefig(jpeg_filepath, format='jpeg')
-            plt.close(fig)
+            with PdfPages(pdf_filepath) as pdf, open(txt_filepath, 'w') as txt_file, h5py.File(self.hdf_path, 'r') as hdf:
+                x_coords = hdf['agent_data']['X'][:]
+                y_coords = hdf['agent_data']['Y'][:]
+                
+                fig, ax = plt.subplots(figsize=(10, 8))
+                show(tif.read(1), transform=tif.transform, ax=ax)  # Show the TIFF image as a background
+                
+                ax.scatter(x_coords.flatten(), y_coords.flatten(), alpha=0.5, s=1, c='orange')  # Agents plotted on top
+                
+                # Plot the reprojected shapefile
+                gdf.plot(ax=ax, edgecolor='red', facecolor='none', linewidth=2)
+                
+                ax.set_xlabel('Easting (E)')
+                ax.set_ylabel('Northing (N)')
+                ax.set_title("Agents in Shapefile Area")
+                pdf.savefig(fig)
+                fig.savefig(jpeg_filepath, format='jpeg')
+                plt.close(fig)
 
-            # Adjust the rectangle's logic to use the specific rect_position
-            rect_x_min, rect_y_min, rect_width, rect_height = rect_position
-            rect_x_max = rect_x_min + rect_width
-            rect_y_max = rect_y_min + rect_height
+                # Logic for determining agents within the shapefile area
+                agent_points = gpd.GeoDataFrame(geometry=[Point(x, y) for x, y in zip(x_coords.flatten(), y_coords.flatten())], crs=tif_crs)
 
-            txt_file.write(f"Data from HDF5 file: {hdf_filename}\n\n")
-            for agent_index in range(x_coords.shape[0]):
-                entered = False
-                for timestep in range(x_coords.shape[1]):
-                    if rect_x_min <= x_coords[agent_index, timestep] <= rect_x_max and rect_y_min <= y_coords[agent_index, timestep] <= rect_y_max:
-                        if not entered:  # Log the first timestep the agent enters the rectangle
-                            entered = True
-                            # Write detailed agent entry information
-                            entry_info = f"Agent ID {agent_index} first timestep within the rectangle:\n  timestep: {timestep}\n  Easting: {x_coords[agent_index, timestep]}\n  Northing: {y_coords[agent_index, timestep]}\n\n"
-                            txt_file.write(entry_info)
-                            break  # Only log the first entry
+                # Perform spatial join to find agents within the polygons
+                agents_in_shapefile = gpd.sjoin(agent_points, gdf, how="inner", op='intersects')
 
-        print(f"Plot saved to: {pdf_filepath}")
-        print(f"IDs of agents within the rectangle written to: {txt_filepath}")
-        print(f"JPEG image saved to: {jpeg_filepath}")
+                txt_file.write(f"Data from HDF5 file: {hdf_filename}\n\n")
+                txt_file.write(f"Agents within the shapefile area:\n")
+                for index in agents_in_shapefile.index.unique():
+                    txt_file.write(f"Agent ID {index}\n")
+
+            print(f"Plot saved to: {pdf_filepath}")
+            print(f"IDs of agents within the shapefile area written to: {txt_filepath}")
+            print(f"JPEG image saved to: {jpeg_filepath}")
 #TODO          
                    
             
@@ -675,87 +674,144 @@ class Multi_Summarization:
 
 
     #Jump DF
-    def plot_agent_jump_locations(self):
+    def plot_agent_location_jump_with_tiff_and_save(self):
         with h5py.File(self.hdf_path, 'r') as hdf:
             # Access the datasets
             x_coords = hdf['agent_data']['X'][:]
             y_coords = hdf['agent_data']['Y'][:]
             time_of_jump = hdf['agent_data']['time_of_jump'][:]
 
-        # Setup PDF output
-        pdf_path = os.path.join(self.Data_output, 'agent_jump_locations.pdf')
+        # Setup PDF output and folder for TIFFs
+        pdf_path = os.path.join(self.Data_output, 'agent_jump_locations_with_tiff.pdf')
+        tiff_folder = os.path.join(self.Data_output, 'Agent_Jump_TIFFs')
+        os.makedirs(tiff_folder, exist_ok=True)  # Ensure the directory exists
 
-        # Plotting starts here
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        # Plot all coordinates for context
-        ax.scatter(x_coords.flatten(), y_coords.flatten(), color='lightgray', alpha=0.5, s=1, label='All Positions')
-
-        # Filter and plot jump positions
-        valid_jump_mask = (time_of_jump >= 0) & (time_of_jump < x_coords.shape[1]) & np.isfinite(time_of_jump)
-        valid_jump_indices = np.nonzero(valid_jump_mask)
-        jump_times = time_of_jump[valid_jump_mask].astype(int)
-
-        jump_x_coords = x_coords[valid_jump_indices[0], jump_times]
-        jump_y_coords = y_coords[valid_jump_indices[0], jump_times]
-        ax.scatter(jump_x_coords, jump_y_coords, color='orange', marker='o', s=50, label='Jump Positions')
-
-        ax.set_xlabel('Easting (E)')
-        ax.set_ylabel('Northing (N)')
-        ax.set_title('Agent Locations at Time of Jump')
-        plt.legend()
-        plt.tight_layout()
-
-        # Save the current figure into the PDF
         with PdfPages(pdf_path) as pdf:
+            # Plotting starts here
+            fig, ax = plt.subplots(figsize=(10, 6))
+            with rasterio.open(self.tif_path) as tiff:
+                # Plot the GeoTIFF as the background
+                tiff_image = tiff.read(1)  # Assuming you want to plot the first band
+                extent = rasterio.plot.plotting_extent(tiff)
+                ax.imshow(tiff_image, extent=extent, cmap='gray', alpha=0.5)  # Adjust cmap as needed
+
+            # Plot all coordinates for context
+            ax.scatter(x_coords.flatten(), y_coords.flatten(), color='lightgray', alpha=0.5, s=1, label='All Positions')
+
+            # Filter and plot jump positions
+            valid_jump_mask = (time_of_jump >= 0) & (time_of_jump < x_coords.shape[1]) & np.isfinite(time_of_jump)
+            valid_jump_indices = np.nonzero(valid_jump_mask)
+            jump_times = time_of_jump[valid_jump_mask].astype(int)
+
+            jump_x_coords = x_coords[valid_jump_indices[0], jump_times]
+            jump_y_coords = y_coords[valid_jump_indices[0], jump_times]
+            ax.scatter(jump_x_coords, jump_y_coords, color='red', marker='^', s=50, label='Jump Positions')
+
+            ax.set_xlabel('Easting (E)')
+            ax.set_ylabel('Northing (N)')
+            ax.set_title('Agent Locations at Time of Jump')
+            plt.legend()
+            plt.tight_layout()
+
+            # Save the current figure into the PDF and as a TIFF image
             pdf.savefig(fig)
-        plt.close(fig)
+            tiff_output_path = os.path.join(tiff_folder, 'agent_jump_locations.tif')
+            plt.savefig(tiff_output_path, format='tiff')
+            plt.close(fig)
 
-        print(f"Plot saved to: {pdf_path}")
+        print(f"Plot saved to: {pdf_path} and {tiff_output_path}")
 
             
             
-    def plot_agent_jump_locations_tif(self):
-        with h5py.File(self.hdf_path, 'r') as hdf:
+#TODO Do we need? Just shows the agents in different colors jumping, but legend will be too big
+#   def plot_agent_locations_with_colors(self):
+#       pdf_filepath = os.path.join(self.Data_output, 'Agent_Locations_with_Colors_Plots.pdf')
+#
+#       # Use the merged data from merge_model_jump_and_database_data method
+#       model_jump_data = self.read_jump_data()
+#       copy_databases = self.jump_data_model_databases()
+#       merged_data_all_models = self.merge_model_jump_and_database_data(model_jump_data, copy_databases)
+
+#       with PdfPages(pdf_filepath) as pdf:
+#           for model_name, merged_df in merged_data_all_models.items():
+#               # Check if 'E' and 'N' columns exist for plotting
+#               if 'E' in merged_df.columns and 'N' in merged_df.columns:
+#                   unique_ids = merged_df['ID'].unique()
+#                   num_agents = len(unique_ids)
+#                   color_map = plt.get_cmap('viridis', num_agents)
+
+#                   fig, ax = plt.subplots(figsize=(10, 6))
+
+#                   for agent_id, color in zip(unique_ids, color_map(range(num_agents))):
+#                       agent_data = merged_df[merged_df['ID'] == agent_id]
+#                       ax.scatter(agent_data['E'], agent_data['N'], marker='o', label=f'Agent {agent_id}', color=color)
+
+#                   ax.set_xlabel('Easting (E)')
+#                   ax.set_ylabel('Northing (N)')
+#                   ax.set_title(f'Agents Plotted with Different Colors for Model {model_name}')
+                
+                    # Optional: If you want to include a legend
+                    # Since the legend could contain many entries (one for each agent), it might be impractical to display it.
+                    # ax.legend()
+
+                    # Save the plot to the PDF
+#                   pdf.savefig(fig)
+#                   plt.close(fig)
+#               else:
+#                   print(f"Columns 'E' and 'N' not found in merged data for model {model_name}")
+
+#           print(f"Results written to: {pdf_filepath}")
+#TODO End
+
+
+    def plot_agent_jump_heatmap_tif(self):
+        pdf_path = os.path.join(self.Data_output, 'agent_jump_heatmap_with_tiff.pdf')
+        jpeg_path = os.path.join(self.Data_output, 'agent_jump_heatmap_with_tiff.jpg')
+        tiff_path = os.path.join(self.Data_output, 'agent_jump_heatmap_with_tiff.tif')
+
+        with h5py.File(self.hdf_path, 'r') as hdf, PdfPages(pdf_path) as pdf:
             # Access the datasets
             x_coords = hdf['agent_data']['X'][:]
             y_coords = hdf['agent_data']['Y'][:]
             time_of_jump = hdf['agent_data']['time_of_jump'][:]
-
-        # Setup PDF output
-        pdf_path = os.path.join(self.Data_output, 'agent_jump_locations.pdf')
-
-        # Plotting starts here
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        # Display TIFF as the background
-        with rasterio.open(self.tif_path) as tiff:
-            show(tiff, ax=ax, alpha=1)  # Adjust alpha as needed for background transparency
         
-        # Plot all coordinates for context
-        ax.scatter(x_coords.flatten(), y_coords.flatten(), color='lightgray', alpha=0.5, s=1, label='All Positions')
+            # Assuming the time_of_jump contains valid indices for jumps, filter coordinates
+            valid_jump_mask = (time_of_jump >= 0) & (np.isfinite(time_of_jump))
+            valid_jump_indices = np.where(valid_jump_mask)
+            # Assuming time_of_jump points directly to the jump index in X and Y for each agent
+            jump_x_coords = x_coords[valid_jump_indices]
+            jump_y_coords = y_coords[valid_jump_indices]
+        
+            # Flatten the arrays for simplicity
+            jump_x_coords_flat = jump_x_coords.flatten()
+            jump_y_coords_flat = jump_y_coords.flatten()
 
-        # Filter and plot jump positions
-        valid_jump_mask = (time_of_jump >= 0) & (time_of_jump < x_coords.shape[1]) & np.isfinite(time_of_jump)
-        valid_jump_indices = np.nonzero(valid_jump_mask)
-        jump_times = time_of_jump[valid_jump_mask].astype(int)
+            # Create a heatmap of jump locations
+            heatmap, xedges, yedges = np.histogram2d(jump_x_coords_flat, jump_y_coords_flat, bins=(100, 100))
+            heatmap_masked = np.ma.masked_where(heatmap == 0, heatmap)
 
-        jump_x_coords = x_coords[valid_jump_indices[0], jump_times]
-        jump_y_coords = y_coords[valid_jump_indices[0], jump_times]
-        ax.scatter(jump_x_coords, jump_y_coords, color='orange', marker='o', s=50, label='Jump Positions')
+            with rasterio.open(self.tif_path) as tiff:
+                fig, ax = plt.subplots(figsize=(10, 8))
+                tiff_image = tiff.read(1)
+                extent = rasterio.plot.plotting_extent(tiff)
+                ax.imshow(tiff_image, cmap='gray', extent=extent, alpha=0.5)  # Display as grayscale
+            
+                # Overlay the heatmap
+                extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+                pcm = ax.imshow(heatmap_masked.T, cmap='hot', alpha=0.5, extent=extent, origin='lower')
+            
+                plt.xlabel('Easting (E)')
+                plt.ylabel('Northing (N)')
+                plt.title('Heatmap of Agent Jump Locations on TIFF Background')
+                plt.colorbar(pcm, ax=ax, label='Jump Density')
+                plt.tight_layout()
 
-        ax.set_xlabel('Easting (E)')
-        ax.set_ylabel('Northing (N)')
-        ax.set_title('Agent Locations at Time of Jump')
-        plt.legend()
-        plt.tight_layout()
-        # Save the current figure into the PDF
-        with PdfPages(pdf_path) as pdf:
-            pdf.savefig(fig)
-        plt.close(fig)
+                pdf.savefig(fig)  # Save the figure into the PDF
+                plt.savefig(jpeg_path, format='jpeg')  # Save as JPEG
+                plt.savefig(tiff_path, format='tiff')  # Save as TIFF
+                plt.close(fig)
 
-        print(f"Plot saved to: {pdf_path}")
-
+        print(f"Plot saved to: {pdf_path}, {jpeg_path}, and {tiff_path}")
 
 
     #Jump_Data_Statistics
@@ -834,41 +890,160 @@ class Multi_Summarization:
     # Agent Jump Location Heat Map
 
     def plot_agent_jump_heatmap(self, tif_path):
+        # Assuming self.hdf_path is defined in your class
         with h5py.File(self.hdf_path, 'r') as hdf:
             if 'agent_data' in hdf:
-                x_coords = hdf['agent_data']['X'][:]
-                y_coords = hdf['agent_data']['Y'][:]
                 time_of_jump = hdf['agent_data']['time_of_jump'][:]
             
-                # Filter out the invalid jump times
-                valid_mask = time_of_jump > 0
-                valid_x = x_coords[valid_mask]
-                valid_y = y_coords[valid_mask]
-
-                if np.any(valid_mask):
+                # Assuming time_of_jump is structured such that positive values indicate jump times
+                # Flatten the array and filter out invalid times
+                valid_times = time_of_jump.flatten()[time_of_jump.flatten() > 0]
+            
+                if valid_times.size > 0:
+                    # Create a histogram of jump times
                     plt.figure(figsize=(10, 6))
-                    with rasterio.open(tif_path) as tiff:
-                        show(tiff, alpha=0.5)  # Show the TIFF image as a background
-                        
-                    # Create a heatmap of jump locations
-                    plt.hexbin(valid_x, valid_y, gridsize=50, cmap='hot', bins='log')
-                    plt.colorbar(label='log10(N)')
-                    plt.xlabel('Easting (E)')
-                    plt.ylabel('Northing (N)')
-                    plt.title('Heatmap of Agent Jump Locations')
-
+                    plt.hist(valid_times, bins=100, color='blue', alpha=0.7)
+                    plt.xlabel('Time')
+                    plt.ylabel('Number of Jumps')
+                    plt.title('Frequency of Jumps Over Time')
+                    plt.grid(True)
+                
                     # Save the plot
-                    plot_path = os.path.join(self.Data_output, 'agent_jump_locations_heatmap.png')
+                    plot_path = os.path.join(self.Data_output, 'jump_frequency_over_time.png')
                     plt.savefig(plot_path)
-                    plt.show
                     plt.close()
                 
-                    print(f"Heatmap plot saved to: {plot_path}")
+                    print(f"Jump frequency plot saved to: {plot_path}")
                 else:
-                    print("No valid jump locations found.")
+                    print("No valid jump times found.")
             else:
                 print("'agent_data' key does not exist in the HDF5 file.")
- 
+
+
+
+
+
+
+    def process_agents(self):
+        # Ensure the output directory exists; create it if not
+        if not os.path.exists(self.Data_output):
+            os.makedirs(self.Data_output)
+            print(f"Created output directory: {self.Data_output}")
+        
+        with rasterio.open(self.tif_path) as tiff:
+            tiff_bounds = tiff.bounds
+            num_cells_x = int(np.ceil((tiff_bounds.right - tiff_bounds.left) / self.cell_width))
+            num_cells_y = int(np.ceil((tiff_bounds.top - tiff_bounds.bottom) / self.cell_height))
+        
+        with h5py.File(self.hdf_path, 'r') as hdf:
+            num_timesteps = hdf['/agent_data/X'].shape[1]
+            agent_counts = np.zeros((num_timesteps, num_cells_x, num_cells_y), dtype=int)
+        
+            for timestep in range(num_timesteps):
+                x_coords = hdf['/agent_data/X'][:, timestep]
+                y_coords = hdf['/agent_data/Y'][:, timestep]
+        
+                for x, y in zip(x_coords, y_coords):
+                    if np.isnan(x) or np.isnan(y):
+                        continue
+        
+                    cell_x = int((x - tiff_bounds.left) / self.cell_width)
+                    cell_y = int((y - tiff_bounds.bottom) / self.cell_height)
+        
+                    if 0 <= cell_x < num_cells_x and 0 <= cell_y < num_cells_y:
+                        agent_counts[timestep, cell_x, cell_y] += 1
+        
+        output_file_path = os.path.join(self.Data_output, 'output.txt')
+        with open(output_file_path, 'w') as f:
+            for timestep in range(num_timesteps):
+                for cell_x in range(num_cells_x):
+                    for cell_y in range(num_cells_y):
+                        if agent_counts[timestep, cell_x, cell_y] > 0:
+                            f.write(f"Timestep {timestep}: {agent_counts[timestep, cell_x, cell_y]} agents in cell (x={cell_x}, y={cell_y})\n")
+        
+        output_raster_path = os.path.join(self.Data_output, 'agents_distribution.tif')
+        average_agents_per_cell = np.mean(agent_counts, axis=0)
+        std_dev_agents_per_cell = np.std(agent_counts, axis=0)
+        
+        meta = tiff.meta.copy()
+        meta.update({
+            'count': 2,
+            'dtype': 'float32',
+            'width': num_cells_x,
+            'height': num_cells_y,
+            'transform': from_origin(tiff_bounds.left, tiff_bounds.top, self.cell_width, self.cell_height)
+        })
+        
+        with rasterio.open(output_raster_path, 'w', **meta) as dst:
+            dst.write(average_agents_per_cell.astype('float32'), 1)
+            dst.write(std_dev_agents_per_cell.astype('float32'), 2)
+        
+        print(f"Agent distribution text file saved to: {output_file_path}")
+        print(f"Output raster with statistics saved to: {output_raster_path}")
+        
+        # Plotting the raster data
+        with rasterio.open(output_raster_path) as src:
+            average_agents = src.read(1)
+            std_dev_agents = src.read(2)
+        
+        fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+        cax1 = ax[0].imshow(average_agents, cmap='viridis')
+        fig.colorbar(cax1, ax=ax[0], orientation='vertical')
+        ax[0].set_title('Average Agents per Cell')
+        
+        cax2 = ax[1].imshow(std_dev_agents, cmap='magma')
+        fig.colorbar(cax2, ax=ax[1], orientation='vertical')
+        ax[1].set_title('Standard Deviation of Agents per Cell')
+        
+        plt.tight_layout()
+        plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     #Use these to run code
 
@@ -885,51 +1060,17 @@ tiff_image, tiff_extent = multi_summarization.load_tiff_image()
 #TODO multi_summarization.max_bout_no()
 #TODO multi_summarization.bout_no_statistics()
 #TODO multi_summarization.kcal_statistics()
-#TODO multi_summarization.Agent_Plot_Rectangle(rect_position)
+#TODO multi_summarization.Agent_Plot_Rectangle(shapefile_path)
 #TODO multi_summarization.plot_agent_locations()
 #TODO multi_summarization.plot_agent_locations_on_tiff()
 #multi_summarization.plot_agent_timestep_locations_on_tiff()    Optional to have, might not need with such large datasets
 #multi_summarization.plot_agent_timestep_locations() Optional for code, we don't need unless asked for
-#TODO multi_summarization.plot_agent_jump_locations()
-#TODO multi_summarization.plot_agent_jump_locations_tif()
-#TODO multi_summarization.calculate_statistics(hdf_path)
+#TODO multi_summarization.plot_agent_location_jump_with_tiff_and_save()
+#multi_summarization.plot_agent_locations_with_colors  #Might not need
+#multi_summarization.plot_agent_jump_locations_tif()
+#multi_summarization.calculate_statistics(hdf_path)
 #TODO multi_summarization.plot_agent_timestep_heatmap()
-multi_summarization.plot_agent_jump_heatmap(tif_path)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+#ulti_summarization.plot_agent_jump_heatmap(tif_path)
+multi_summarization.process_agents()
 
 
