@@ -18,14 +18,13 @@ sys.path.append(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Soft
 # import dependencies
 import emergent as sockeye
 import os
+import numpy as np
 
 #%% Identify directories and Summarize
 parent_dir = r"C:\Users\knebiolo\Desktop\abm_simulations\summ_test"
-tif_dir = r"C:\Users\knebiolo\Desktop\abm_simulations\background"
-output_dir = r"C:\Users\knebiolo\Desktop\abm_simulations\poisson_kriging"
+tif_dir = r"C:\Users\knebiolo\Desktop\abm_simulations\summ_test\depth.tif"
 
 summary = sockeye.summary(parent_dir, tif_dir)
 summary.get_data()
-
-summary.ts.to_csv(os.path.join(output_dir,'timeseries.csv'), index = False)
-summary.melted_center.to_csv(os.path.join(output_dir,'cell_centers.csv'), index = False)
+summary.load_tiff(32604)
+summary.emergence()

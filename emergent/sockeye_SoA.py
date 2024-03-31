@@ -35,6 +35,9 @@ import geopandas as gpd
 import numpy as np
 import os
 import pandas as pd
+# from pysal.explore import esda
+# from pysal.lib import weights
+# from pysal.model import spreg
 import rasterio
 from rasterio.transform import Affine
 from rasterio.mask import mask
@@ -46,7 +49,7 @@ from shapely.wkt import loads as loads
 from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline, RectBivariateSpline
 from scipy.optimize import curve_fit
 from scipy.constants import g
-from scipy.spatial import cKDTree
+from scipy.spatial import cKDTree#, cdist
 from scipy.stats import beta
 import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
@@ -586,7 +589,450 @@ class PID_controller:
         
         return P, I, D
     
+class PID_optimization():
+    '''
+    Python class object for solving a genetic algorithm to optimize PID controller values. 
+    '''
+    def __init__(self,
+                 pop_size,
+                 generations,
+                 min_p_value,
+                 max_p_value,
+                 min_i_value,
+                 max_i_value,
+                 min_d_value,
+                 max_d_value):
+        """
+        Initializes an individual's genetic traits.
     
+        """
+        self.num_genes = 3
+        self.min_p_value = min_p_value
+        self.max_p_value = max_p_value
+        self.min_i_value = min_i_value
+        self.max_i_value = max_i_value
+        self.min_d_value = min_d_value
+        self.max_d_value = max_d_value
+        
+        # population size, number of individuals to create
+        self.pop_size = pop_size
+        
+        # number of generations to run the alogrithm for
+        self.generations = generations
+        
+        ## for non-uniform range across p/i/d values
+        self.p_component = np.random.uniform(self.min_p_value, self.max_p_value, size=1)
+        self.i_component = np.random.uniform(self.min_i_value, self.max_i_value, size=1)
+        self.d_component = np.random.uniform(self.min_d_value, self.max_d_value, size=1)
+        self.genes = np.concatenate((self.p_component, self.i_component, self.d_component), axis=None)
+        
+        self.cross_ratio = 0.9 # percent of offspring that are crossover vs mutation
+        self.mutation_count = 0 # dummy value, will be overwritten
+        self.p = {}
+        self.i = {}
+        self.d = {}
+        self.errors = {}
+        self.velocities = {}
+        self.batteries = {}
+        
+
+    def fitness(self):
+        '''
+        Overview
+
+        This fitness function is designed to evaluate a population of individuals 
+        based on three key criteria: error magnitude, array length, and battery life. 
+        The function ranks each individual by combining these criteria into a single 
+        score, with the goal of minimizing error magnitude, maximizing array length, 
+        and maximizing battery life.
+        
+        Attributes
+        
+            pop_size (int): The number of individuals in the population. Each 
+            individual's performance is evaluated against the set criteria.
+            errors (dict): A dictionary where keys are individual identifiers and 
+            values are arrays representing the error magnitude for each timestep.
+            p, i, d (arrays): Parameters associated with each individual, potentially 
+            relevant to the context of the evaluation (e.g., PID controller parameters).
+            velocities (array): An array containing the average velocities for each 
+            individual, which might be relevant for certain analyses.
+            batteries (array): An array containing the battery life values for each 
+            individual. Higher values indicate better performance.
+        
+        Returns
+        
+            error_df (DataFrame): A pandas DataFrame containing the following 
+            columns for each individual:
+                individual: The identifier for the individual.
+                p, i, d: The PID controller parameters or other relevant parameters 
+                for the individual.
+                magnitude: The sum of squared errors, representing the error magnitude. 
+                Lower values are better.
+                array_length: The length of the error array, indicative of the operational 
+                duration. Higher values are better.
+                avg_velocity: The average velocity for the individual. Included for 
+                contextual information.
+                battery: The battery life of the individual. Higher values are better.
+                arr_len_score: Normalized score based on array_length. Higher scores are better.
+                mag_score: Normalized score based on magnitude. Higher scores are better (inverted).
+                battery_score: Normalized score based on battery. Higher scores are better.
+                rank: The final ranking score, calculated by combining arr_len_score, mag_score, 
+                and battery_score according to their respective weights.
+        
+        Methodology
+        
+            Data Preparation: The function iterates through each individual in 
+            the population, calculating the magnitude of errors and extracting 
+            other relevant parameters. It then appends this information to error_df.
+        
+            Normalization: Each criterion (array length, magnitude, and battery) 
+            is normalized to a [0, 1] scale. For array length and battery, higher 
+            values result in higher scores. For magnitude, the normalization is 
+            inverted so that lower values result in higher scores.
+        
+            Weighting and Preference Matrix: The criteria are weighted according 
+            to their perceived importance to the overall fitness. A pairwise 
+            preference matrix is constructed based on these weighted scores, 
+            comparing each individual against every other individual.
+        
+            Ranking: The final rank for each individual is determined by summing 
+            up their preferences in the preference matrix. The DataFrame is then 
+            sorted by these ranks in descending order, with higher ranks indicating 
+            better overall fitness according to the defined criteria.
+        
+        Customization
+        
+            The weights assigned to each criterion (array_len_weight, 
+                                                    magnitude_weight, 
+                                                    battery_weight) can be adjusted 
+            to reflect their relative importance in the specific context of use. The 
+            default weights are set based on a balanced assumption but should be 
+            tailored to the specific requirements of the evaluation.
+            Additional criteria can be incorporated into the evaluation by extending 
+            the DataFrame to include new columns, normalizing these new criteria,
+            and adjusting the preference matrix calculation to account for these 
+            criteria.
+        
+        Usage
+        
+        To use this function, instantiate the class with the relevant data 
+        (errors, parameters, velocities, and batteries) and call the fitness method. 
+        The method returns a ranked DataFrame, which can be used to select the 
+        top-performing individuals for further analysis or operations.
+                
+                
+                
+        '''
+        error_df = pd.DataFrame(columns=['individual', 
+                                         'p', 
+                                         'i', 
+                                         'd', 
+                                         'magnitude',
+                                         'array_length',
+                                         'avg_velocity',
+                                         'battery',
+                                         'arr_len_score',
+                                         'mag_score',
+                                         'battery_score',
+                                         'rank'])
+
+        for i in range(self.pop_size):
+            filtered_array = self.errors[i][:-1]
+            magnitude = np.nansum(np.power(filtered_array, 2))
+
+            row_data = {
+                'individual': i,
+                'p': self.p[i],
+                'i': self.i[i],
+                'd': self.d[i],
+                'magnitude': magnitude,
+                'array_length': len(filtered_array),
+                'avg_velocity': np.nanmean(self.velocities[i]),
+                'battery': self.batteries[i]  # Assuming you have battery data in self.batteries
+            }
+
+            error_df = error_df.append(row_data, ignore_index=True)
+
+        # Normalize the criteria
+        error_df['arr_len_score'] = (error_df['array_length'] - error_df['array_length'].min()) / (error_df['array_length'].max() - error_df['array_length'].min())
+        error_df['mag_score'] = (error_df['magnitude'].max() - error_df['magnitude']) / (error_df['magnitude'].max() - error_df['magnitude'].min())
+        error_df['battery_score'] = (error_df['battery'] - error_df['battery'].min()) / (error_df['battery'].max() - error_df['battery'].min())
+
+        error_df.set_index('individual', inplace=True)
+
+        # Update weights to include battery
+        array_len_weight = 0.35
+        magnitude_weight = 0.40
+        battery_weight = 1 - array_len_weight - magnitude_weight
+
+        n = len(error_df)
+        preference_matrix = np.zeros((n, n))
+
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    preference_matrix[i, j] = (array_len_weight * (error_df.at[i, 'arr_len_score'] > error_df.at[j, 'arr_len_score'])) + \
+                                              (magnitude_weight * (error_df.at[i, 'mag_score'] > error_df.at[j, 'mag_score'])) + \
+                                              (battery_weight * (error_df.at[i, 'battery_score'] > error_df.at[j, 'battery_score']))
+
+        final_scores = np.sum(preference_matrix, axis=1)
+        error_df['rank'] = final_scores
+        error_df.reset_index(drop=False, inplace=True)
+        error_df.sort_values(by='rank', ascending=False, inplace=True)
+
+        return error_df
+    
+    def selection(self, error_df):
+        """
+        Selects the highest performing indivduals to become parents, based on
+        solution rank. Assigns a number of offspring to each parent pair based
+        on a beta probability distribution function. Fitter parents produce more
+        offspring.
+        
+        Parameters:
+        - error_df (dataframe): a ranked dataframe of indidvidual solutions.
+                                output of the self.fitness() function.
+        
+        Attributes set:
+        - pop_size (int): number of indidivduals in population. useful for defining
+                          the number of offspring to ensure population doesn't balloon.
+        - cross_ratio (float): controls the ratio of crossover offspring vs mutation offspring
+                          
+        Returns: list of dataframes. each dataframe contained paired parents with
+                 assigned number of offspring
+        
+        """
+        # selects the top 80% of individuals to be parents
+        index_80_percent = int(0.8 * len(error_df))
+        parents = error_df.iloc[:index_80_percent]
+        
+        # create a list of dataframes -> pairs of parents by fitness
+        pairs_parents = []
+        for i in np.arange(0, len(parents), 2):
+            pairs_parents.append(parents[i:(i + 2)])
+        
+        # shape parameters for the beta distribution -> have more fit parents produce more offspring
+        # https://en.wikipedia.org/wiki/Beta_distribution#/media/File:Beta_distribution_pdf.svg
+        a = 1
+        b = 3
+        
+        # calculate PDF values of the beta distribution based on the length of the list
+        beta_values = beta.pdf(np.linspace(0, 0.5, len(pairs_parents)), a, b)
+        
+        # scale values to number of offspring desired
+        offspring = self.cross_ratio * self.pop_size # generate XX% of offspring as crossover
+        scaled_values = offspring * beta_values / sum(beta_values)
+        scaled_values = np.round(scaled_values).astype(int)
+        
+        # assign beta values (as offspring weight) to appropriate parent pair
+        for i, df in enumerate(pairs_parents):
+            df['offspring_weight'] = scaled_values[i]  # Assign array value to the column
+        
+        return pairs_parents
+    
+    def crossover(self, pairs_parents):
+        """
+        Generate new genes for offspring based on existing parent genes. Number of offspring
+        per parent pair is dictated by 'offspring_weight' as set in selection function.
+        
+        Parameters:
+        - pairs_parents (list): list of dataframes. each dataframe contained paired
+                                parents with assigned number of offspring
+                                
+        Returns: list of lists, each list contains random p,i,d values between parent values
+                                
+        """
+        offspring = []
+
+        for i in pairs_parents:
+            parent1 = i[:1]
+            parent2 = i[1:]
+            num_offspring = parent1.iloc[0]['offspring_weight'].astype(int)
+            
+            for j in range(num_offspring):
+                p = random.uniform(parent1.iloc[0]['p'], parent2.iloc[0]['p'])
+                i = random.uniform(parent1.iloc[0]['i'], parent2.iloc[0]['i'])
+                d = random.uniform(parent1.iloc[0]['d'], parent2.iloc[0]['d'])
+                offspring.append([p,i,d])
+        
+        # set a number of mutations to generate
+        # this ensures the correct number of offspring are generated
+        self.mutation_count = self.pop_size - len(offspring)
+        
+        return offspring
+
+    def mutation(self, error_df):
+        """
+        Generate new genes for offspring independent of parent genes. Uses the min/max
+        gene values set in the first generation population.
+        
+        Attributes set:
+        - mutation_count (int): number of mutation individuals to create. defined by the crossover
+                                function, this ensures that the offspring total are the same as the
+                                previous population so it doesn't change.
+        - min_gene_value: minimum for gene value. same as defined in initial population
+        - max_gene_value: maximum for gene value. same as defined in initial population
+        - num_genes: number of genes to create. should always be 3 for pid controller
+                                
+        Returns: list of lists, each list contains random p,i,d values between min/max gene values.
+                 this list will be combined with the crossover offspring to produce the full
+                 population of the next generation.
+        
+        """
+        population = []
+
+        for i in range(self.mutation_count):
+            # individual = [random.uniform(self.min_gene_value, self.max_gene_value) for _ in range(self.num_genes)]
+            P = np.abs(error_df.iloc[i]['p'] + np.random.uniform(-4.0,4.0,1)[0])
+            I = np.abs(error_df.iloc[i]['i'] + np.random.uniform(-0.1,0.1,1)[0])
+            D = np.abs(error_df.iloc[i]['d'] + np.random.uniform(-1.0,1.0,1)[0])
+            
+            individual = np.concatenate((P, I, D), axis=None)
+            
+            population.append(individual)
+   
+        return population
+
+    def population_create(self):
+        """
+        Generate the population of individuals.
+        
+        Attributes set:
+        - genes
+        - pop_size
+        - num_genes
+        - min_gene_value
+        - max_gene_value
+                                
+        Returns: array of population p/i/d values, one set for each individual.
+        
+        """      
+        population = []
+
+        for _ in range(self.pop_size):
+        # create a new instance of the solution class for each individual
+            individual = PID_optimization(self.pop_size,
+                                          self.generations,
+                                          self.min_p_value,
+                                          self.max_p_value,
+                                          self.min_i_value,
+                                          self.max_i_value,
+                                          self.min_d_value,
+                                          self.max_d_value)
+            population.append(individual.genes)
+
+        return population
+    
+    def run(self, population, sockeye, model_dir, crs, basin, water_temp, pid_tuning_start, fish_length, ts, n, dt):
+        """
+        Run the genetic algorithm.
+        
+        Parameters:
+        - population (array): collection of solutions (population of individuals)
+        - sockeye: sockeye model
+        - model_dir (str): Directory where the model data will be stored.
+        - crs (str): Coordinate reference system for the model.
+        - basin (str): Name or identifier of the basin.
+        - water_temp (float): Water temperature in degrees Celsius.
+        - pid_tuning_start (tuple): A tuple of two values (x, y) defining the point where agents start.
+        - ts (int, optional): Number of timesteps for the simulation. Defaults to 100.
+        - n (int, optional): Number of agents in the simulation. Defaults to 100.
+        - dt (float): The duration of each time step.
+        
+        Attributes:
+        - generations
+        - pop_size
+        - p
+        - i
+        - d
+        - errors
+        - velocities
+        
+        Returns:
+        - records (dict): dictionary holding each generation's errors and rankings. 
+                          Generation number is used as the dictionary key. Each key's value
+                          is the dataframe of PID values and ranking metrics.
+        """
+        records = {}
+        
+        for generation in range(self.generations):
+            
+            # keep track of the timesteps before error (length of error array),
+            # also used to calc magnitude of errors
+            pop_error_array = []
+            
+            prev_error_sum = np.zeros(1)
+
+            #for i in range(len(self.population)):
+            for i in range(self.pop_size):
+            
+                print(f'\nrunning individual {i+1} of generation {generation+1}, {generation+1}, {generation+1}, {generation+1}, {generation+1}...')
+                
+                # useful to have these in pid_solution
+                self.p[i] = population[i][0]
+                self.i[i] = population[i][1]
+                self.d[i] = population[i][2]
+                
+                print(f'P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}')
+                
+                # set up the simulation
+                sim = sockeye.simulation(model_dir,
+                                         'solution',
+                                         crs,
+                                         basin,
+                                         water_temp,
+                                         pid_tuning_start,
+                                         fish_length,
+                                         ts,
+                                         n,
+                                         use_gpu = False,
+                                         pid_tuning = True)
+                
+                # run the model and append the error array
+
+                try:
+                    sim.run('solution',
+                            n = ts,
+                            dt = dt,
+                            k_p = self.p[i], # k_p
+                            k_i = self.i[i], # k_i
+                            k_d = self.d[i], # k_d
+                            )
+                    
+                except:
+                    print(f'failed --> P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}\n')
+                    pop_error_array.append(sim.error_array)
+                    self.errors[i] = sim.error_array
+                    self.velocities[i] = np.sqrt(np.power(sim.vel_x_array,2) + np.power(sim.vel_y_array,2))
+                    self.batteries[i] = sim.battery[-1]
+                    sim.close()
+
+                    continue
+
+            # run the fitness function -> output is a df
+            error_df = self.fitness()
+            # print(f'Generation {generation+1}: {error_df.head()}')
+            
+            # update logging dictionary
+            records[generation] = error_df
+
+            # selection -> output is list of paired parents dfs
+            selected_parents = PID_optimization.selection(self, error_df)
+
+            # crossover -> output is list of crossover pid values
+            cross_offspring = PID_optimization.crossover(self, selected_parents)
+
+            # mutation -> output is list of muation pid values
+            mutated_offspring = PID_optimization.mutation(self, error_df)
+            # combine crossover and mutation offspring to get next generation
+            population = cross_offspring + mutated_offspring
+            
+            print(f'completed generation {generation+1}.... ')
+            
+            if np.all(error_df.magnitude.values == 0):
+                return records
+                        
+        return records    
       
 class simulation():
     '''Python class object that implements an Agent Based Model of adult upstream
@@ -2038,13 +2484,13 @@ class simulation():
             school = self.school_cue(1)
             collision = self.collision_cue(1)
         else:
-            rheotaxis = self.rheo_cue(15000)       # 10000
+            rheotaxis = self.rheo_cue(20000)       # 10000
             shallow = self.shallow_cue(10000)      # 10000
             wave_drag = self.wave_drag_cue(2500)   # 5000
-            low_speed = self.vel_cue(1800)         # 8000 
-            avoid = self.already_been_here(9000, t)# 3000
-            school = self.school_cue(15000)         # 9000
-            collision = self.collision_cue(5000)   # 2500 
+            low_speed = self.vel_cue(1000)         # 8000 
+            avoid = self.already_been_here(5000, t)# 3000
+            school = self.school_cue(5000)         # 9000
+            collision = self.collision_cue(9000)   # 2500 
         
         # Create dictionary that has order of behavioral cues
         order_dict = {0: shallow, 
@@ -2066,7 +2512,7 @@ class simulation():
         
         # Arbitrate between different behaviors
         # how many f4cks does this fish have?
-        tolerance = 25000
+        tolerance = 26000
         
         # Set the cicada timestep based on sex
         cicada_timestep = np.where(self.sex == 'M', 7, 13)
@@ -2312,7 +2758,7 @@ class simulation():
         
         #TODO min_Hz should be the minimum tailbeat required to match the maximum sustained swim speed 
         # self.max_s_U = 2.77 bl/s
-        min_Hz = np.interp(self.length, [450, 7.], [690, 1.])
+        min_Hz = np.interp(self.length, [450, 7.5], [690, 2.])
     
         # Solve for Hz
         Hz = np.where(self.swim_behav == 3, min_Hz,
@@ -2813,38 +3259,54 @@ class simulation():
 
         self.bout_dur += dt
     
-        # # Initialize time to fatigue (ttf) array
-        ttf = self.arr.full_like(swim_speeds, self.arr.nan)
+        # # # Initialize time to fatigue (ttf) array
+        # ttf = self.arr.full_like(swim_speeds, self.arr.nan)
     
-        # # Calculate ttf for prolonged and sprint swimming modes
+        # # # Calculate ttf for prolonged and sprint swimming modes
         mask_prolonged = np.where((self.max_s_U < bl_s) & (bl_s <= self.max_p_U),True,False)
         mask_sprint = np.where(bl_s > self.max_p_U,True,False)
-        ttf = np.where(mask_prolonged, np.exp((self.a_p + swim_speeds/self.length * self.b_p)),ttf)
-        ttf = np.where(mask_sprint, np.exp((self.a_s + swim_speeds/self.length * self.b_s)),ttf)
-                
-        # def time_to_fatigue(U, l, a, b):
-        #     """
-        #     Calculate time to fatigue for a given swim speed.
+        # ttf = np.where(mask_prolonged, np.exp((self.a_p + swim_speeds/self.length * self.b_p)),ttf)
+        # ttf = np.where(mask_sprint, np.exp((self.a_s + swim_speeds/self.length * self.b_s)),ttf)
+        def time_to_fatigue(body_lengths_per_second, species = 'Salmon and Walleye Group'):
+            # Regression parameters extracted from the document, indexed by species or group
+            regression_params = {
+                'Catfish and Sunfish Group': {'k': 2.176, 'b': -0.202},
+                'Eel Group': {'k': 3.722, 'b': -0.367},
+                'Herring Group': {'k': 10.119, 'b': -0.402},
+                'Salmon and Walleye Group': {'k': 4.004, 'b': -0.250},
+                'Sturgeon Group': {'k': 0.756, 'b': -0.130},
+                'Pike Group': {'k': 3.811, 'b': -0.329}  # Derived group
+            }
         
-        #     Parameters:
-        #     U (float): Swim speed of the fish in m/s.
-        #     K (float): Fatigue curve parameter.
-        #     b (float): Fatigue curve exponent.
-        #     l (float): Characteristic length in meters.
+            if species in regression_params:
+                k, b = regression_params[species]['k'], regression_params[species]['b']
+            else:
+                print("Species not found. Please use a species from the provided list or check the spelling.")
+                return None
             
-        #     Returns:
-        #     float: Time to fatigue in seconds.
-        #     """
-        #     g = 9.81  # acceleration due to gravity in m/s^2
-        #     # Calculate the dimensionless time to fatigue
-        #     #t_s = (K * np.sqrt(g * l) / U) ** (1 / b)
-        #     #t_s = (K / U)**(1/b)
-        #     t_s = np.exp(np.log(U) * np.sqrt(g * l) - a)/b
+            # Calculate time to fatigue using the regression equation
+            time_to_fatigue = (body_lengths_per_second * k) + b
             
-        #     # Convert the dimensionless time to actual time to fatigue
-        #     t = t_s * np.sqrt(l / g)
-        #     return t
+            return time_to_fatigue
         
+        ttf = time_to_fatigue(bl_s)
+        
+        # g = 9.81
+
+        # swim_speed_dimensionless = swim_speeds / np.sqrt(g * (self.length / 1000.))
+        
+        # # Constants from the regression equation
+        # a = 1.276
+        # b = -0.246
+        # K = np.exp(a)  # Calculate K
+        
+        # # Calculate dimensionless time-to-fatigue using the swim speed
+        # time_to_fatigue_dimensionless = K * swim_speed_dimensionless ** b 
+        
+        # # Convert dimensionless time-to-fatigue to time-to-fatigue in seconds
+        # # Ensure length is in meters when multiplying by the square root of (g * length)
+        # ttf = time_to_fatigue_dimensionless * np.sqrt(g * (self.length / 1000.))
+              
         # ttf_f = np.vectorize(time_to_fatigue, excluded = (2,3))
         # ttf2 = ttf_f(swim_speeds,self.length/1000.,self.a,self.b)
     
@@ -3369,8 +3831,9 @@ class simulation():
                                                       dataset.bounds[1],
                                                       dataset.bounds[3]])
         
-                    agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
-        
+                    #agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
+                    agent_scatter = ax.scatter([], [], s=1)
+                    
                     plt.xlabel('Easting')
                     plt.ylabel('Northing')
         
@@ -3388,10 +3851,23 @@ class simulation():
                         pid_controller.interp_PID()
                         for i in range(int(n)):
                             self.timestep(i, dt, g, pid_controller)
+                            
+                            # Calculate the RGB colors using vectorized operations
+                            # Green (0, 1, 0) to Red (1, 0, 0) based on the battery state
+                            colors = np.column_stack([1 - self.battery, 
+                                                      self.battery, 
+                                                      np.zeros_like(self.battery)])
+
+                            # Update the positions ('offsets') of the agents in the scatter plot
+                            agent_scatter.set_offsets(np.column_stack([self.X, self.Y]))
+                            
+                            # Update the colors of each agent
+                            agent_scatter.set_facecolor(colors)
+                            
+                            # agent_pts.set_data(self.X,
+                            #                    self.Y)
         
                             # write frame
-                            agent_pts.set_data(self.X,
-                                               self.Y)
                             writer.grab_frame()
                                 
                             print ('Time Step %s complete'%(i))
@@ -3443,450 +3919,7 @@ class simulation():
         self.hdf5.flush()  
         self.hdf5.close()
             
-class PID_optimization():
-    '''
-    Python class object for solving a genetic algorithm to optimize PID controller values. 
-    '''
-    def __init__(self,
-                 pop_size,
-                 generations,
-                 min_p_value,
-                 max_p_value,
-                 min_i_value,
-                 max_i_value,
-                 min_d_value,
-                 max_d_value):
-        """
-        Initializes an individual's genetic traits.
-    
-        """
-        self.num_genes = 3
-        self.min_p_value = min_p_value
-        self.max_p_value = max_p_value
-        self.min_i_value = min_i_value
-        self.max_i_value = max_i_value
-        self.min_d_value = min_d_value
-        self.max_d_value = max_d_value
-        
-        # population size, number of individuals to create
-        self.pop_size = pop_size
-        
-        # number of generations to run the alogrithm for
-        self.generations = generations
-        
-        ## for non-uniform range across p/i/d values
-        self.p_component = np.random.uniform(self.min_p_value, self.max_p_value, size=1)
-        self.i_component = np.random.uniform(self.min_i_value, self.max_i_value, size=1)
-        self.d_component = np.random.uniform(self.min_d_value, self.max_d_value, size=1)
-        self.genes = np.concatenate((self.p_component, self.i_component, self.d_component), axis=None)
-        
-        self.cross_ratio = 0.9 # percent of offspring that are crossover vs mutation
-        self.mutation_count = 0 # dummy value, will be overwritten
-        self.p = {}
-        self.i = {}
-        self.d = {}
-        self.errors = {}
-        self.velocities = {}
-        self.batteries = {}
-        
 
-    def fitness(self):
-        '''
-        Overview
-
-        This fitness function is designed to evaluate a population of individuals 
-        based on three key criteria: error magnitude, array length, and battery life. 
-        The function ranks each individual by combining these criteria into a single 
-        score, with the goal of minimizing error magnitude, maximizing array length, 
-        and maximizing battery life.
-        
-        Attributes
-        
-            pop_size (int): The number of individuals in the population. Each 
-            individual's performance is evaluated against the set criteria.
-            errors (dict): A dictionary where keys are individual identifiers and 
-            values are arrays representing the error magnitude for each timestep.
-            p, i, d (arrays): Parameters associated with each individual, potentially 
-            relevant to the context of the evaluation (e.g., PID controller parameters).
-            velocities (array): An array containing the average velocities for each 
-            individual, which might be relevant for certain analyses.
-            batteries (array): An array containing the battery life values for each 
-            individual. Higher values indicate better performance.
-        
-        Returns
-        
-            error_df (DataFrame): A pandas DataFrame containing the following 
-            columns for each individual:
-                individual: The identifier for the individual.
-                p, i, d: The PID controller parameters or other relevant parameters 
-                for the individual.
-                magnitude: The sum of squared errors, representing the error magnitude. 
-                Lower values are better.
-                array_length: The length of the error array, indicative of the operational 
-                duration. Higher values are better.
-                avg_velocity: The average velocity for the individual. Included for 
-                contextual information.
-                battery: The battery life of the individual. Higher values are better.
-                arr_len_score: Normalized score based on array_length. Higher scores are better.
-                mag_score: Normalized score based on magnitude. Higher scores are better (inverted).
-                battery_score: Normalized score based on battery. Higher scores are better.
-                rank: The final ranking score, calculated by combining arr_len_score, mag_score, 
-                and battery_score according to their respective weights.
-        
-        Methodology
-        
-            Data Preparation: The function iterates through each individual in 
-            the population, calculating the magnitude of errors and extracting 
-            other relevant parameters. It then appends this information to error_df.
-        
-            Normalization: Each criterion (array length, magnitude, and battery) 
-            is normalized to a [0, 1] scale. For array length and battery, higher 
-            values result in higher scores. For magnitude, the normalization is 
-            inverted so that lower values result in higher scores.
-        
-            Weighting and Preference Matrix: The criteria are weighted according 
-            to their perceived importance to the overall fitness. A pairwise 
-            preference matrix is constructed based on these weighted scores, 
-            comparing each individual against every other individual.
-        
-            Ranking: The final rank for each individual is determined by summing 
-            up their preferences in the preference matrix. The DataFrame is then 
-            sorted by these ranks in descending order, with higher ranks indicating 
-            better overall fitness according to the defined criteria.
-        
-        Customization
-        
-            The weights assigned to each criterion (array_len_weight, 
-                                                    magnitude_weight, 
-                                                    battery_weight) can be adjusted 
-            to reflect their relative importance in the specific context of use. The 
-            default weights are set based on a balanced assumption but should be 
-            tailored to the specific requirements of the evaluation.
-            Additional criteria can be incorporated into the evaluation by extending 
-            the DataFrame to include new columns, normalizing these new criteria,
-            and adjusting the preference matrix calculation to account for these 
-            criteria.
-        
-        Usage
-        
-        To use this function, instantiate the class with the relevant data 
-        (errors, parameters, velocities, and batteries) and call the fitness method. 
-        The method returns a ranked DataFrame, which can be used to select the 
-        top-performing individuals for further analysis or operations.
-                
-                
-                
-        '''
-        error_df = pd.DataFrame(columns=['individual', 
-                                         'p', 
-                                         'i', 
-                                         'd', 
-                                         'magnitude',
-                                         'array_length',
-                                         'avg_velocity',
-                                         'battery',
-                                         'arr_len_score',
-                                         'mag_score',
-                                         'battery_score',
-                                         'rank'])
-
-        for i in range(self.pop_size):
-            filtered_array = self.errors[i][:-1]
-            magnitude = np.nansum(np.power(filtered_array, 2))
-
-            row_data = {
-                'individual': i,
-                'p': self.p[i],
-                'i': self.i[i],
-                'd': self.d[i],
-                'magnitude': magnitude,
-                'array_length': len(filtered_array),
-                'avg_velocity': np.nanmean(self.velocities[i]),
-                'battery': self.batteries[i]  # Assuming you have battery data in self.batteries
-            }
-
-            error_df = error_df.append(row_data, ignore_index=True)
-
-        # Normalize the criteria
-        error_df['arr_len_score'] = (error_df['array_length'] - error_df['array_length'].min()) / (error_df['array_length'].max() - error_df['array_length'].min())
-        error_df['mag_score'] = (error_df['magnitude'].max() - error_df['magnitude']) / (error_df['magnitude'].max() - error_df['magnitude'].min())
-        error_df['battery_score'] = (error_df['battery'] - error_df['battery'].min()) / (error_df['battery'].max() - error_df['battery'].min())
-
-        error_df.set_index('individual', inplace=True)
-
-        # Update weights to include battery
-        array_len_weight = 0.35
-        magnitude_weight = 0.40
-        battery_weight = 1 - array_len_weight - magnitude_weight
-
-        n = len(error_df)
-        preference_matrix = np.zeros((n, n))
-
-        for i in range(n):
-            for j in range(n):
-                if i != j:
-                    preference_matrix[i, j] = (array_len_weight * (error_df.at[i, 'arr_len_score'] > error_df.at[j, 'arr_len_score'])) + \
-                                              (magnitude_weight * (error_df.at[i, 'mag_score'] > error_df.at[j, 'mag_score'])) + \
-                                              (battery_weight * (error_df.at[i, 'battery_score'] > error_df.at[j, 'battery_score']))
-
-        final_scores = np.sum(preference_matrix, axis=1)
-        error_df['rank'] = final_scores
-        error_df.reset_index(drop=False, inplace=True)
-        error_df.sort_values(by='rank', ascending=False, inplace=True)
-
-        return error_df
-    
-    def selection(self, error_df):
-        """
-        Selects the highest performing indivduals to become parents, based on
-        solution rank. Assigns a number of offspring to each parent pair based
-        on a beta probability distribution function. Fitter parents produce more
-        offspring.
-        
-        Parameters:
-        - error_df (dataframe): a ranked dataframe of indidvidual solutions.
-                                output of the self.fitness() function.
-        
-        Attributes set:
-        - pop_size (int): number of indidivduals in population. useful for defining
-                          the number of offspring to ensure population doesn't balloon.
-        - cross_ratio (float): controls the ratio of crossover offspring vs mutation offspring
-                          
-        Returns: list of dataframes. each dataframe contained paired parents with
-                 assigned number of offspring
-        
-        """
-        # selects the top 80% of individuals to be parents
-        index_80_percent = int(0.8 * len(error_df))
-        parents = error_df.iloc[:index_80_percent]
-        
-        # create a list of dataframes -> pairs of parents by fitness
-        pairs_parents = []
-        for i in np.arange(0, len(parents), 2):
-            pairs_parents.append(parents[i:(i + 2)])
-        
-        # shape parameters for the beta distribution -> have more fit parents produce more offspring
-        # https://en.wikipedia.org/wiki/Beta_distribution#/media/File:Beta_distribution_pdf.svg
-        a = 1
-        b = 3
-        
-        # calculate PDF values of the beta distribution based on the length of the list
-        beta_values = beta.pdf(np.linspace(0, 0.5, len(pairs_parents)), a, b)
-        
-        # scale values to number of offspring desired
-        offspring = self.cross_ratio * self.pop_size # generate XX% of offspring as crossover
-        scaled_values = offspring * beta_values / sum(beta_values)
-        scaled_values = np.round(scaled_values).astype(int)
-        
-        # assign beta values (as offspring weight) to appropriate parent pair
-        for i, df in enumerate(pairs_parents):
-            df['offspring_weight'] = scaled_values[i]  # Assign array value to the column
-        
-        return pairs_parents
-    
-    def crossover(self, pairs_parents):
-        """
-        Generate new genes for offspring based on existing parent genes. Number of offspring
-        per parent pair is dictated by 'offspring_weight' as set in selection function.
-        
-        Parameters:
-        - pairs_parents (list): list of dataframes. each dataframe contained paired
-                                parents with assigned number of offspring
-                                
-        Returns: list of lists, each list contains random p,i,d values between parent values
-                                
-        """
-        offspring = []
-
-        for i in pairs_parents:
-            parent1 = i[:1]
-            parent2 = i[1:]
-            num_offspring = parent1.iloc[0]['offspring_weight'].astype(int)
-            
-            for j in range(num_offspring):
-                p = random.uniform(parent1.iloc[0]['p'], parent2.iloc[0]['p'])
-                i = random.uniform(parent1.iloc[0]['i'], parent2.iloc[0]['i'])
-                d = random.uniform(parent1.iloc[0]['d'], parent2.iloc[0]['d'])
-                offspring.append([p,i,d])
-        
-        # set a number of mutations to generate
-        # this ensures the correct number of offspring are generated
-        self.mutation_count = self.pop_size - len(offspring)
-        
-        return offspring
-
-    def mutation(self, error_df):
-        """
-        Generate new genes for offspring independent of parent genes. Uses the min/max
-        gene values set in the first generation population.
-        
-        Attributes set:
-        - mutation_count (int): number of mutation individuals to create. defined by the crossover
-                                function, this ensures that the offspring total are the same as the
-                                previous population so it doesn't change.
-        - min_gene_value: minimum for gene value. same as defined in initial population
-        - max_gene_value: maximum for gene value. same as defined in initial population
-        - num_genes: number of genes to create. should always be 3 for pid controller
-                                
-        Returns: list of lists, each list contains random p,i,d values between min/max gene values.
-                 this list will be combined with the crossover offspring to produce the full
-                 population of the next generation.
-        
-        """
-        population = []
-
-        for i in range(self.mutation_count):
-            # individual = [random.uniform(self.min_gene_value, self.max_gene_value) for _ in range(self.num_genes)]
-            P = np.abs(error_df.iloc[i]['p'] + np.random.uniform(-4.0,4.0,1)[0])
-            I = np.abs(error_df.iloc[i]['i'] + np.random.uniform(-0.1,0.1,1)[0])
-            D = np.abs(error_df.iloc[i]['d'] + np.random.uniform(-1.0,1.0,1)[0])
-            
-            individual = np.concatenate((P, I, D), axis=None)
-            
-            population.append(individual)
-   
-        return population
-
-    def population_create(self):
-        """
-        Generate the population of individuals.
-        
-        Attributes set:
-        - genes
-        - pop_size
-        - num_genes
-        - min_gene_value
-        - max_gene_value
-                                
-        Returns: array of population p/i/d values, one set for each individual.
-        
-        """      
-        population = []
-
-        for _ in range(self.pop_size):
-        # create a new instance of the solution class for each individual
-            individual = PID_optimization(self.pop_size,
-                                          self.generations,
-                                          self.min_p_value,
-                                          self.max_p_value,
-                                          self.min_i_value,
-                                          self.max_i_value,
-                                          self.min_d_value,
-                                          self.max_d_value)
-            population.append(individual.genes)
-
-        return population
-    
-    def run(self, population, sockeye, model_dir, crs, basin, water_temp, pid_tuning_start, fish_length, ts, n, dt):
-        """
-        Run the genetic algorithm.
-        
-        Parameters:
-        - population (array): collection of solutions (population of individuals)
-        - sockeye: sockeye model
-        - model_dir (str): Directory where the model data will be stored.
-        - crs (str): Coordinate reference system for the model.
-        - basin (str): Name or identifier of the basin.
-        - water_temp (float): Water temperature in degrees Celsius.
-        - pid_tuning_start (tuple): A tuple of two values (x, y) defining the point where agents start.
-        - ts (int, optional): Number of timesteps for the simulation. Defaults to 100.
-        - n (int, optional): Number of agents in the simulation. Defaults to 100.
-        - dt (float): The duration of each time step.
-        
-        Attributes:
-        - generations
-        - pop_size
-        - p
-        - i
-        - d
-        - errors
-        - velocities
-        
-        Returns:
-        - records (dict): dictionary holding each generation's errors and rankings. 
-                          Generation number is used as the dictionary key. Each key's value
-                          is the dataframe of PID values and ranking metrics.
-        """
-        records = {}
-        
-        for generation in range(self.generations):
-            
-            # keep track of the timesteps before error (length of error array),
-            # also used to calc magnitude of errors
-            pop_error_array = []
-            
-            prev_error_sum = np.zeros(1)
-
-            #for i in range(len(self.population)):
-            for i in range(self.pop_size):
-            
-                print(f'\nrunning individual {i+1} of generation {generation+1}, {generation+1}, {generation+1}, {generation+1}, {generation+1}...')
-                
-                # useful to have these in pid_solution
-                self.p[i] = population[i][0]
-                self.i[i] = population[i][1]
-                self.d[i] = population[i][2]
-                
-                print(f'P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}')
-                
-                # set up the simulation
-                sim = sockeye.simulation(model_dir,
-                                         'solution',
-                                         crs,
-                                         basin,
-                                         water_temp,
-                                         pid_tuning_start,
-                                         fish_length,
-                                         ts,
-                                         n,
-                                         use_gpu = False,
-                                         pid_tuning = True)
-                
-                # run the model and append the error array
-
-                try:
-                    sim.run('solution',
-                            n = ts,
-                            dt = dt,
-                            k_p = self.p[i], # k_p
-                            k_i = self.i[i], # k_i
-                            k_d = self.d[i], # k_d
-                            )
-                    
-                except:
-                    print(f'failed --> P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}\n')
-                    pop_error_array.append(sim.error_array)
-                    self.errors[i] = sim.error_array
-                    self.velocities[i] = np.sqrt(np.power(sim.vel_x_array,2) + np.power(sim.vel_y_array,2))
-                    self.batteries[i] = sim.battery[-1]
-                    sim.close()
-
-                    continue
-
-            # run the fitness function -> output is a df
-            error_df = self.fitness()
-            # print(f'Generation {generation+1}: {error_df.head()}')
-            
-            # update logging dictionary
-            records[generation] = error_df
-
-            # selection -> output is list of paired parents dfs
-            selected_parents = PID_optimization.selection(self, error_df)
-
-            # crossover -> output is list of crossover pid values
-            cross_offspring = PID_optimization.crossover(self, selected_parents)
-
-            # mutation -> output is list of muation pid values
-            mutated_offspring = PID_optimization.mutation(self, error_df)
-            # combine crossover and mutation offspring to get next generation
-            population = cross_offspring + mutated_offspring
-            
-            print(f'completed generation {generation+1}.... ')
-            
-            if np.all(error_df.magnitude.values == 0):
-                return records
-                        
-        return records
             
 class summary:
     '''The power of an agent based model lies in its ability to produce emergent
@@ -3931,6 +3964,10 @@ class summary:
             transform, width, height = calculate_default_transform(
                 tiff_dataset.crs, desired_crs, tiff_dataset.width, tiff_dataset.height,
                 *tiff_dataset.bounds)
+            
+            self.transform = transform
+            self.width = width
+            self.height = height
 
             # Reproject the TIFF image to the desired CRS
             image_data, _ = reproject(
@@ -3986,6 +4023,8 @@ class summary:
                 melted_center_y = pd.melt(cell_center_y, id_vars = ['row'], var_name = 'column', value_name = 'Y')
                 melted_center = pd.merge(melted_center_x, melted_center_y, on = ['row','column'])
                 self.melted_center = melted_center
+                self.x_coords = hdf['x_coords'][:]
+                self.y_coords = hdf['y_coords'][:]
                               
                 if 'agent_data' in hdf:
                     # timestep data
@@ -4038,7 +4077,7 @@ class summary:
                     
                     print ('File %s imported'%(filename))
                     
-    def successful(self,finish_line):
+    def passage_success(self,finish_line):
         '''find the fish that are successful'''
         
         for filename in self.h5_files:
@@ -4075,10 +4114,78 @@ class summary:
                                             pass_time_75,
                                             pass_time_90,
                                             pass_time_100]
+            
+    def emergence(self):
+        '''Method quantifies emergent spatial properties of the agent based model.
+        
+        Our problem is 5D, 2 spatial dimensions, 1 temporal dimension, iterations, 
+        and finally scenario.  Comparison of each scenario output will typicall 
+        occur in a GIS as those are the final surfaces.  
+        
+        Emergence first calculates the number of agents per cell per timestep.
+        Then, emergence produces a 2 band raster for every iteration where the 
+        first band is the average number of agents per cell per timestep and the 
+        second band is the standard deviaition.  
+        
+        Then, Emergence statistically compares iterations, develops and index of 
+        similarity, identifies a corridor threshold, and produces a final surface
+        for comparison in a GIS.
 
+        Returns
+        -------
+        corridor raster surface.
+
+        '''
+        # Agent coordinates and rasterio affine transform
+        x_coords = self.ts.X  # X coordinates of agents
+        y_coords = self.ts.Y # Y coordinates of agents
+        transform = self.transform  # affine transform from your rasterio dataset
+        
+        iterations = dict()
+        
+        for filename in self.ts.filename.unique():
+            dat = self.ts[self.ts.filename == filename]
+            num_timesteps = self.ts.timestep.max()
             
+            # Pre-allocate a 3D numpy array with zeros
+            data_over_time = np.zeros((num_timesteps, self.height, self.width))
             
+            for timestep in range(num_timesteps):
+                # Your calculation here that results in a 2D array for this timestep
+                # For demonstration, we'll just fill with the timestep value
+                data_2d = np.full((self.height, self.width), timestep)
+        
+                t_dat = dat[dat.timestep == timestep]
+                # Convert geographic coordinates to pixel indices using your function
+                rows, cols = geo_to_pixel(t_dat.X, t_dat.Y, np, transform)
+                
+                # Combine row and column indices to get unique cell identifiers
+                cell_indices = np.stack((cols, rows), axis=1)
+                
+                # Count unique cells
+                unique_cells, counts = np.unique(cell_indices, axis=0, return_counts=True)
+                valid_rows, valid_cols = unique_cells[:, 1], unique_cells[:, 0]  # Unpack the unique cell indices
+                
+                # Assuming the size of your raster grid
+                grid_rows, grid_cols = self.height, self.width  # Actual size of your raster grid
+                
+                # Initialize a 2D array with zeros
+                agent_counts_grid = np.zeros((grid_rows, grid_cols), dtype=int)
+                
+                # Ensure the indices are within the grid bounds and update the agent_counts_grid
+                within_bounds = (valid_rows >= 0) & (valid_rows < grid_rows) & (valid_cols >= 0) & (valid_cols < grid_cols)
+                agent_counts_grid[valid_rows[within_bounds], valid_cols[within_bounds]] = counts[within_bounds]            
+                
+                # Insert the 2D array into the pre-allocated 3D array
+                data_over_time[timestep, :, :] = agent_counts_grid
+                print ('file %s timestep %s complete')
+                
+            # calculate the average and st dev count per cell per time
+            average_per_cell = np.mean(data_over_time, axis = 0)
+            sd_per_cell = np.std(data_over_time, axis = 0)
             
-            
-            
+            # create dual band raster and write to output directory
+                
+            # add data to dictionary to hold all data
+            iterations[filename] = data_over_time
             
