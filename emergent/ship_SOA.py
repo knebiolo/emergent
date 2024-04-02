@@ -49,8 +49,10 @@ class simulation:
         self.vessels = [self.Container(vessel, starting_loc, ending_loc) for vessel, starting_loc, ending_loc in zip(vessels, starting_locs, ending_locs)]
         # You might need to include logic to handle obstacles as well
 
-    class container:
-        """Class object for a container vessel."""
+    class container (self):
+        """Class object for a container vessel.  The agent based model uses a structure
+        of arrays approach to maximize efficiency.  Therefore, there is a numpy array 
+        for every model parameter, where the first item in the array refers to agent 0"""
 
         def __init__(self, simulation, mask, starting_loc, ending_loc, t, dt, x, ui):
             self.mask = mask
@@ -58,6 +60,9 @@ class simulation:
             self.destination = ending_loc
             self.t = t
             self.dt = dt
+            self.rho = 
+            self.Cd =
+            self.A = 
 
             #x and ui are state variables that change with time, these are initial values
             
@@ -261,6 +266,109 @@ class simulation:
                             p*(self.U/self.L),
                             delta_dot,
                             self.n_dot])
+            
+        def stopping_distance(self):
+            # Define the function for the ship's deceleration dynamics
+            def deceleration_dynamics(t, y):
+                v = y[0]  # Current velocity
+                
+                # Compute drag force (simplified model)
+                F_drag = 0.5 * self.rho * self.Cd * self.A * v**2
+                
+                # Assuming reverse thrust is a function of velocity; you'll need to define this based on your model
+                reverse_thrust = self.reverse_thrust_function(v)
+                
+                # Net deceleration
+                a = -(F_drag + reverse_thrust) / self.m
+                
+                return [a]
+            
+            # Initial conditions: current velocity of the ship
+            v_initial = self.U
+            y0 = [v_initial]
+            
+            # Time span for the simulation; you might need to adjust this based on typical deceleration times for your ships
+            t_span = [0, 1000]
+            
+            # Solve the system of equations using scipy's solve_ivp
+            from scipy.integrate import solve_ivp
+            sol = solve_ivp(deceleration_dynamics, t_span, y0, dense_output=True)
+            
+            # Calculate the stopping distance by integrating the velocity over the time it takes to stop
+            stopping_time = sol.t[-1]
+            stopping_distance = np.trapz(sol.sol(sol.t)[0], sol.t)
+            
+            return stopping_distance
+
+    class seamanship (self):
+        
+        def __init__(self, X, Y, velocities, headings, sizes):
+            """
+            Initialize the Seamanship class with arrays of properties for all agents.
+    
+            Parameters:
+            - positions: An array of positions for all agents in the environment.
+            - velocities: An array of velocities for all agents.
+            - headings: An array of headings (directions) for all agents.
+            - sizes: An array of sizes (e.g., length, beam) for all agents, which could affect maneuvering and stopping distances.
+            """
+            self.positions = positions
+            self.velocities = velocities
+            self.headings = headings
+            self.sizes = sizes
+    
+        def lookout(self, visibility):
+            """
+            Implements Rule 5 (Look-out) considering visibility conditions.
+            Updates the visibility range for all agents based on environmental conditions like fog.
+            
+            returns a visibility matrix which indicates which agents are visible to each other
+            """
+            # For simplicity, let's assume visibility_range is a scalar applied to all agents uniformly.
+            # In a more complex model, visibility_range could be an array with different values for each agent.
+    
+            # Determine which agents are within the visibility range of each other
+            # Calculate pairwise distances between agents
+            distances = np.linalg.norm(self.positions[:, None, :] - self.positions[None, :, :], axis=-1)
+    
+            # Create a visibility matrix where entries are True if agents are within each other's visibility range
+            visibility_matrix = distances < visibility
+    
+            # Use the visibility_matrix to determine which agents can be "seen" by each agent
+            # This information can be used in subsequent navigation decisions to avoid collisions
+    
+            return visibility_matrix  # This could be used by other methods to consider only visible agents in decision making
+    
+        def safe_speed(self):
+            """
+            Implements Rule 6 (Safe Speed) for all agents using array operations.
+            """
+            # Vectorized operation to adjust speeds based on conditions and visibility for all agents
+            pass  # Implementation here
+    
+        # Other COLREGS rules implemented as methods...
+    
+        def apply_boids_preferences(self):
+            """
+            Applies a Boids-like preference algorithm for collision avoidance and navigation for all agents.
+            This method considers the collective behavior and preferences based on proximity to other agents,
+            alignment with the group, and avoidance of collisions, using array operations.
+            """
+            # Vectorized operations for separation, alignment, and cohesion
+            pass  # Implementation here
+    
+        def make_decisions(self):
+            """
+            Integrates all the rules and preferences to make navigational decisions for all agents.
+            This involves prioritizing certain rules over others based on the current context and applying
+            the Boids preferences to adjust courses and speeds safely and efficiently.
+            """
+            # Example integration logic for all agents using array operations:
+            # 1. Apply immediate collision risk rules.
+            # 2. Apply relevant rules based on type of encounter.
+            # 3. Apply Boids preferences for optimal group navigation.
+            # 4. Ensure safe speeds under current conditions.
+            pass  # Implementation here
     
     def create_ship_polygons(ship_positions, ship_orientations, ship_shape):
         """

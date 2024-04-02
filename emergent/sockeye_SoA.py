@@ -94,29 +94,36 @@ def get_arr(use_gpu):
 
 # ... other utility functions ...
 
-def geo_to_pixel(X, Y, arr_type, transform):
+def geo_to_pixel(X, Y, transform):
     """
     Convert x, y coordinates to row, column indices in the raster grid.
 
     Parameters:
+    - X: array of x coordinates (longitude or projected x)
+    - Y: array of y coordinates (latitude or projected y)
     - transform: affine transform of the raster
 
     Returns:
     - rows: array of row indices
     - cols: array of column indices
     """
-    cols = (X - transform.c) / transform.a
-    rows = (Y - transform.f) / transform.e
-    
-    cols = arr_type.round(cols).astype(arr_type.int32)
-    rows = arr_type.round(rows).astype(arr_type.int32)
+    # Invert the transform to go from geographic to pixel coordinates
+    inv_transform = ~transform
 
-    # If using CuPy, transfer indices to CPU as NumPy arrays for HDF5 operations
-    # if isinstance(cols, arr_type.ndarray):
-    #     cols = cols.get()
-    #     rows = rows.get()
+    # Apply the inverted transform to each coordinate pair
+    pixels = [inv_transform * (x, y) for x, y in zip(X, Y)]
+    rows = (Y - transform.f)/transform.e
+    cols = (X - transform.c)/transform.a
+
+    # Separate the pixel coordinates into rows and columns
+    cols, rows = zip(*pixels)
+
+    # Round the values to get pixel indices and convert to integers
+    rows = np.round(rows).astype(int)
+    cols = np.round(cols).astype(int)
 
     return rows, cols
+
 
 def pixel_to_geo(arr_type, transform, rows, cols):
     """
@@ -1435,30 +1442,62 @@ class simulation():
             # set transform as parameter of simulation
             self.vel_x_rast_transform = transform
             
+            # get data 
+            arr = src.read(1)
+            print ('%s raster stats are:\n sum = %s \n mean = %s \n min = %s \n max = %s \n st dev = %s'%(surface_type,
+                                                                                                          np.nansum(arr),
+                                                                                                          np.nanmean(arr),
+                                                                                                          np.nanmin(arr),
+                                                                                                          np.nanmax(arr),
+                                                                                                          np.nanstd(arr)))
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_x", (height, width), dtype='f4', data = src.read(1))
-            self.hdf5['environment/vel_x'][:, :] = src.read(1)
+            env_data.create_dataset("vel_x", (height, width), dtype='f4')
+            self.hdf5['environment/vel_x'][:, :] = arr
 
         elif surface_type == 'velocity y':
             # set transform as parameter of simulation            
             self.vel_y_rast_transform = transform
             
+            # get data and desribe
+            arr = src.read(1)
+            print ('%s raster stats are:\n sum = %s \n mean = %s \n min = %s \n max = %s \n st dev = %s'%(surface_type,
+                                                                                                          np.nansum(arr),
+                                                                                                          np.nanmean(arr),
+                                                                                                          np.nanmin(arr),
+                                                                                                          np.nanmax(arr),
+                                                                                                          np.nanstd(arr)))
             # create an hdf5 array and write to it
             env_data.create_dataset("vel_y", (height, width), dtype='f4')
-            self.hdf5['environment/vel_y'][:, :] = src.read(1)
+            self.hdf5['environment/vel_y'][:, :] = arr
             
         elif surface_type == 'depth':
             # set transform as parameter of simulation            
             self.depth_rast_transform = transform
             
+            # get data and desribe
+            arr = src.read(1)
+            print ('%s raster stats are:\n sum = %s \n mean = %s \n min = %s \n max = %s \n st dev = %s'%(surface_type,
+                                                                                                          np.nansum(arr),
+                                                                                                          np.nanmean(arr),
+                                                                                                          np.nanmin(arr),
+                                                                                                          np.nanmax(arr),
+                                                                                                          np.nanstd(arr)))           
             # create an hdf5 array and write to it
             env_data.create_dataset("depth", (height, width), dtype='f4')
-            self.hdf5['environment/depth'][:, :] = src.read(1)
+            self.hdf5['environment/depth'][:, :] =arr
             
         elif surface_type == 'wsel':
             # set transform as parameter of simulation            
             self.wsel_rast_transform = transform
             
+            # get data and desribe
+            arr = src.read(1)
+            print ('%s raster stats are:\n sum = %s \n mean = %s \n min = %s \n max = %s \n st dev = %s'%(surface_type,
+                                                                                                          np.nansum(arr),
+                                                                                                          np.nanmean(arr),
+                                                                                                          np.nanmin(arr),
+                                                                                                          np.nanmax(arr),
+                                                                                                          np.nanstd(arr)))
             # create an hdf5 array and write to it
             env_data.create_dataset("wsel", (height, width), dtype='f4')
             self.hdf5['environment/wsel'][:, :] = src.read(1)
@@ -1467,25 +1506,49 @@ class simulation():
             # set transform as parameter of simulation                        
             self.elev_rast_transform = transform
             
+            # get data and desribe
+            arr = src.read(1)
+            print ('%s raster stats are:\n sum = %s \n mean = %s \n min = %s \n max = %s \n st dev = %s'%(surface_type,
+                                                                                                          np.nansum(arr),
+                                                                                                          np.nanmean(arr),
+                                                                                                          np.nanmin(arr),
+                                                                                                          np.nanmax(arr),
+                                                                                                          np.nanstd(arr)))
             # create an hdf5 array and write to it
-            env_data.create_dataset("elevation", (height, width), dtype='f4')
-            self.hdf5['environment/elevation'][:, :] = src.read(1)  
+            env_data.create_dataset("elevation", (height, width), dtype='f4')#, data = src.read(1))
+            self.hdf5['environment/elevation'][:, :] = arr
                 
         elif surface_type == 'velocity direction':          
             # set transform as parameter of simulation                        
             self.vel_dir_rast_transform = transform
-
+            
+            # get data and desribe
+            arr = src.read(1)
+            print ('%s raster stats are:\n sum = %s \n mean = %s \n min = %s \n max = %s \n st dev = %s'%(surface_type,
+                                                                                                          np.nansum(arr),
+                                                                                                          np.nanmean(arr),
+                                                                                                          np.nanmin(arr),
+                                                                                                          np.nanmax(arr),
+                                                                                                          np.nanstd(arr)))
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_dir", (height, width), dtype='f4')
-            self.hdf5['environment/vel_dir'][:, :] = src.read(1)  
+            env_data.create_dataset("vel_dir", (height, width), dtype='f4')#, data = src.read(1))
+            self.hdf5['environment/vel_dir'][:, :] = src.read(1) 
                 
         elif surface_type == 'velocity magnitude': 
             # set transform as parameter of simulation                        
             self.vel_mag_rast_transform = transform
             
+            # get data and desribe
+            arr = src.read(1)
+            print ('%s raster stats are:\n sum = %s \n mean = %s \n min = %s \n max = %s \n st dev = %s'%(surface_type,
+                                                                                                          np.nansum(arr),
+                                                                                                          np.nanmean(arr),
+                                                                                                          np.nanmin(arr),
+                                                                                                          np.nanmax(arr),
+                                                                                                          np.nanstd(arr)))            
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_mag", (height, width), dtype='f4')
-            self.hdf5['environment/vel_mag'][:, :] = src.read(1)  
+            env_data.create_dataset("vel_mag", (height, width), dtype='f4')#, data = src.read(1))
+            self.hdf5['environment/vel_mag'][:, :] = arr
             
         self.width = width
         self.height = height
@@ -1530,7 +1593,7 @@ class simulation():
         - values: array of sampled raster values
         """
         # Get the row, col indices for the coordinates
-        rows, cols = geo_to_pixel(self.X, self.Y, self.arr, transform)
+        rows, cols = geo_to_pixel(self.X, self.Y, transform)
 
         # Use the already open HDF5 file object to read the specified raster dataset
         raster_dataset = self.hdf5['environment/%s'%(raster_name)][:]  # Adjust the path as needed
@@ -1564,7 +1627,7 @@ class simulation():
         - self.max_practical_sog: The maximum practical speed over ground for each agent as a 2D vector (m/s).
         """
         # get the x, y position of the agent 
-        row, col = geo_to_pixel(self.X, self.Y, self.arr, self.vel_dir_rast_transform)
+        row, col = geo_to_pixel(self.X, self.Y, self.vel_dir_rast_transform)
             
         # get the initial heading values
         values = self.sample_environment(self.vel_dir_rast_transform,'vel_dir')
@@ -1592,7 +1655,7 @@ class simulation():
         The mental map is stored in an HDF5 dataset with shape (num_agents, width, height), where each 'slice' corresponds to an agent's mental map.
         """
         # Convert geographic coordinates to pixel coordinates for each agent
-        rows, cols = geo_to_pixel(self.X, self.Y, self.arr, self.vel_dir_rast_transform)
+        rows, cols = geo_to_pixel(self.X, self.Y, self.vel_dir_rast_transform)
     
         # Ensure rows and cols are within the bounds of the mental map
         rows = self.arr.clip(rows, 0, self.height - 1)
@@ -1670,7 +1733,7 @@ class simulation():
         x, y = (self.X, self.Y)
         
         # find the row and column in the direction raster
-        rows, cols = geo_to_pixel(x, y, self.arr, self.depth_rast_transform)
+        rows, cols = geo_to_pixel(x, y, self.depth_rast_transform)
         
         # Construct an index array for advanced indexing
         agent_indices = np.arange(self.num_agents)
@@ -1869,7 +1932,7 @@ class simulation():
         x, y = (self.X, self.Y)
         
         # find the row and column in the direction raster
-        rows, cols = geo_to_pixel(x, y, self.arr, self.depth_rast_transform)
+        rows, cols = geo_to_pixel(x, y, self.depth_rast_transform)
         
         # Access the velocity dataset from the HDF5 file by slicing and dicing
         
@@ -2018,7 +2081,7 @@ class simulation():
         x, y = (self.X, self.Y)
     
         # find the row and column in the direction raster
-        rows, cols = geo_to_pixel(x, y, self.arr, self.depth_rast_transform)
+        rows, cols = geo_to_pixel(x, y, self.depth_rast_transform)
     
         # calculate array slice bounds for each agent
         xmin = cols - buff
@@ -2174,7 +2237,7 @@ class simulation():
         x, y = (self.X, self.Y)
     
         # find the row and column in the direction raster
-        rows, cols = geo_to_pixel(x, y, self.arr, self.depth_rast_transform)
+        rows, cols = geo_to_pixel(x, y, self.depth_rast_transform)
     
         # calculate array slice bounds for each agent
         xmin = cols - buff
@@ -2485,9 +2548,9 @@ class simulation():
             collision = self.collision_cue(1)
         else:
             rheotaxis = self.rheo_cue(20000)       # 10000
-            shallow = self.shallow_cue(10000)      # 10000
-            wave_drag = self.wave_drag_cue(2500)   # 5000
-            low_speed = self.vel_cue(1000)         # 8000 
+            shallow = self.shallow_cue(5000)      # 10000
+            wave_drag = self.wave_drag_cue(1000)   # 5000
+            low_speed = self.vel_cue(1)         # 8000 
             avoid = self.already_been_here(5000, t)# 3000
             school = self.school_cue(5000)         # 9000
             collision = self.collision_cue(9000)   # 2500 
@@ -3265,9 +3328,14 @@ class simulation():
         # # # Calculate ttf for prolonged and sprint swimming modes
         mask_prolonged = np.where((self.max_s_U < bl_s) & (bl_s <= self.max_p_U),True,False)
         mask_sprint = np.where(bl_s > self.max_p_U,True,False)
+        mask_sustained = bl_s <= self.max_s_U 
+
+        # Implement T Castro Santos (2005)
         # ttf = np.where(mask_prolonged, np.exp((self.a_p + swim_speeds/self.length * self.b_p)),ttf)
         # ttf = np.where(mask_sprint, np.exp((self.a_s + swim_speeds/self.length * self.b_s)),ttf)
-        def time_to_fatigue(body_lengths_per_second, species = 'Salmon and Walleye Group'):
+        
+        # implement Katapodis 2016
+        def time_to_fatigue(body_lengths_per_second, mask, species = 'Salmon and Walleye Group'):
             # Regression parameters extracted from the document, indexed by species or group
             regression_params = {
                 'Catfish and Sunfish Group': {'k': 2.176, 'b': -0.202},
@@ -3285,28 +3353,13 @@ class simulation():
                 return None
             
             # Calculate time to fatigue using the regression equation
-            time_to_fatigue = (body_lengths_per_second * k) + b
+            time_to_fatigue = np.zeros(self.num_agents)
+            time_to_fatigue[mask] = (body_lengths_per_second[mask] * k) + b
             
             return time_to_fatigue
         
-        ttf = time_to_fatigue(bl_s)
-        
-        # g = 9.81
+        ttf = time_to_fatigue(bl_s, ~mask_sustained)
 
-        # swim_speed_dimensionless = swim_speeds / np.sqrt(g * (self.length / 1000.))
-        
-        # # Constants from the regression equation
-        # a = 1.276
-        # b = -0.246
-        # K = np.exp(a)  # Calculate K
-        
-        # # Calculate dimensionless time-to-fatigue using the swim speed
-        # time_to_fatigue_dimensionless = K * swim_speed_dimensionless ** b 
-        
-        # # Convert dimensionless time-to-fatigue to time-to-fatigue in seconds
-        # # Ensure length is in meters when multiplying by the square root of (g * length)
-        # ttf = time_to_fatigue_dimensionless * np.sqrt(g * (self.length / 1000.))
-              
         # ttf_f = np.vectorize(time_to_fatigue, excluded = (2,3))
         # ttf2 = ttf_f(swim_speeds,self.length/1000.,self.a,self.b)
     
@@ -3324,7 +3377,6 @@ class simulation():
         per_rec = rec1 - rec0
     
         # Update battery levels for sustained swimming mode
-        mask_sustained = bl_s <= self.max_s_U 
         if mask_sustained.ndim == 2:
             mask_sustained = mask_sustained.squeeze()
         if self.num_agents > 1:
@@ -3829,7 +3881,8 @@ class simulation():
                                            extent = [dataset.bounds[0],
                                                       dataset.bounds[2],
                                                       dataset.bounds[1],
-                                                      dataset.bounds[3]])
+                                                      dataset.bounds[3]],
+                                           cmap = 'gray')
         
                     #agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
                     agent_scatter = ax.scatter([], [], s=1)
@@ -3865,7 +3918,7 @@ class simulation():
                             agent_scatter.set_facecolor(colors)
                             
                             # agent_pts.set_data(self.X,
-                            #                    self.Y)
+                            #                     self.Y)
         
                             # write frame
                             writer.grab_frame()
