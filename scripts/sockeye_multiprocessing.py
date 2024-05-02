@@ -25,7 +25,7 @@ import time
 model_name = 'val_TEST'
 
 # identify directories
-model_dir = os.path.join(r"C:\Users\EMuhlestein\Documents\ABM_TEST",model_name)
+model_dir = os.path.join(r"C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST",model_name)
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
@@ -40,17 +40,17 @@ bbox = (549466.69,549520.48,6641583.35,6641625.48)                             #
 
 
 # how many agents in the simulation?
-n = 5        #Agents need to be in 5 or 10 or by 5's
+n = 10        #Agents need to be in 5 or 10 or by 5's
 
 # what is the delta t
 dt = 1
 
 # how many timesteps in the model?
-hours = 0.005
+hours = 3
 ts = 3600. * hours / dt
 
 # what is the water temp?
-water_temp = 20.
+water_temp = 40.
 
 # what is the basin that we are simulating passage in?
 basin = "Nushagak River"
@@ -97,7 +97,7 @@ def run_simulation(i, model_dir, crs, basin, water_temp, bbox, ts, n, use_gpu=Fa
 if __name__ == "__main__":
     real_start_time = time.time()
     #Number of simulations you wish to run
-    num_simulations=100
+    num_simulations=6
 
     # Execute simulations in parallel
     results = Parallel(n_jobs=-1)(delayed(run_simulation)(i, model_dir, crs, basin, water_temp, bbox, ts, n) for i in range(1, num_simulations + 1))
