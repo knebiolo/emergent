@@ -4,7 +4,7 @@ save_data_on_exit = True
 save_history = True
 save_non_project_files = False
 project_type = 'empty-project-type'
-recent_files = ['emergent\\sockeye_SoA.py', 'scripts\\summ_test.py']
+recent_files = ['emergent\\ship.py', 'emergent\\ship_SOA.py', '..\\MSS\\MSS\\VESSELS\\shipModels\\dataContainer.m', '..\\MSS\\MSS\\VESSELS\\container.m', 'scripts\\sockeye_validation.py', 'emergent\\sockeye_SoA.py']
 
 [main]
 version = 0.2.0
