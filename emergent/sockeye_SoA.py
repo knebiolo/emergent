@@ -1160,14 +1160,15 @@ class simulation():
         self.prev_Y = self.Y
         
         # create short term memory for eddy escpement 
-        max_timesteps = 360  # Maximum number of timesteps to track
+        max_timesteps = 300  # Maximum number of timesteps to track
 
         self.swim_speeds = np.full((num_agents, max_timesteps), np.nan)
         self.past_longitudes = np.full((num_agents, max_timesteps), np.nan)
+        self.current_longitudes = np.zeros_like(self.X)
 
         self.in_eddy = np.zeros_like(self.X)
         self.time_since_eddy_escape = np.zeros_like(self.X)
-        self.max_eddy_escape_seconds = 20.
+        self.max_eddy_escape_seconds = 60.
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
@@ -1567,6 +1568,12 @@ class simulation():
         # Load the shapefile with the longitudinal line
         line_gdf = gpd.read_file(shapefile)
         self.longitudinal = line_gdf.geometry[0]  # Assuming there's only one line feature
+        
+    def compute_linear_positions(self, line):
+        # Assuming you have numpy arrays `x` and `y` for the coordinates of agents
+        points = np.array([Point(x, y) for x, y in zip(self.X, self.Y)])
+        '''Vectorized function to compute linear distance along the longitudinal line'''
+        return np.array([line.project(point) for point in points])
 
     def boundary_surface(self):
         
@@ -1796,11 +1803,12 @@ class simulation():
         self.y_vel = self.sample_environment(self.vel_y_rast_transform, 'vel_y')
         self.wet = self.sample_environment(self.wetted_transform, 'wetted')
         self.distance_to = self.sample_environment(self.depth_rast_transform, 'distance_to')
+        self.current_longitudes = self.compute_linear_positions(self.longitudinal)
         
     
         # Avoid divide by zero by setting zero velocities to a small number
-        self.x_vel[self.x_vel == 0.0] = 0.0001
-        self.y_vel[self.y_vel == 0.0] = 0.0001
+        # self.x_vel[self.x_vel == 0.0] = 0.0001
+        # self.y_vel[self.y_vel == 0.0] = 0.0001
     
         # keep track of the amount of time a fish spends out of water
         self.time_out_of_water = np.where(self.depth < self.too_shallow, 
@@ -1815,6 +1823,21 @@ class simulation():
         self.dead = np.where(self.wet != 1., 
                              1,
                              self.dead)
+        
+        if np.any(self.dead):
+            print ('why did they die?')
+            print ('wet status: %s'%(self.wet))
+            sys.exit()
+            
+            
+        
+        # For dead fish, zero out positions and velocity
+        self.x_vel = np.where(self.dead,np.zeros_like(self.x_vel), self.x_vel)
+        self.y_vel = np.where(self.dead,np.zeros_like(self.y_vel), self.y_vel)
+        self.X = np.where(self.dead,np.zeros_like(self.X), self.X)
+        self.Y = np.where(self.dead,np.zeros_like(self.Y), self.Y)
+
+        
         
         clean_x = self.X.flatten()[~np.isnan(self.X.flatten())]
         clean_y = self.Y.flatten()[~np.isnan(self.Y.flatten())]
@@ -1845,8 +1868,6 @@ class simulation():
 
         # Extract the distance to the closest agent, excluding self
         nearest_neighbor_distances = np.where(distances[:, 1] != np.inf, distances[:, 1], np.nan)
-        if len(agents_within_radius) != self.num_agents:
-            print ('why not equal?')
 
         # Now `agents_within_buffers_dict` is a dictionary where each key is an agent index
         self.agents_within_buffers = agents_within_radius
@@ -3119,8 +3140,13 @@ class simulation():
             delta_x = np.zeros(self.simulation.X.shape)
             delta_y = np.zeros(self.simulation.Y.shape)
             
-            delta_x = max_x - self.simulation.X
-            delta_y = max_y - self.simulation.Y
+            # delta_x = self.simulation.X - max_x
+            # delta_y = self.simulation.Y - max_y
+            
+            # rather than being repelled here, we are actually attracted to the furthest point from the border
+            delta_x = max_x - self.simulation.X 
+            delta_y = max_y - self.simulation.Y 
+            
             dist = np.sqrt(np.power(delta_x, 2) + np.power(delta_y, 2))
             
             # check if fish is in the center of the channel?
@@ -3129,8 +3155,13 @@ class simulation():
             self.simulation.current_distances = current_distances
         
             # Identify agents that are too close to the border 
-            too_close = (current_distances < self.simulation.length / 1000.)# & \
-                #(self.simulation.in_eddy != 1)
+            too_close = np.where(current_distances <= 1,1,0)# self.simulation.length / 1000.) #| \
+                #(self.simulation.in_eddy == 1)
+                
+            if np.any(too_close == 1):
+                print ('boundary force needed')
+                
+            too_close = np.where(self.simulation.in_eddy == 1,1,too_close)
             
             # calculate repulsive force
             repulse_x = np.where(too_close, 
@@ -3139,7 +3170,7 @@ class simulation():
             repulse_y = np.where(too_close,
                                  weight * delta_y / dist,
                                  np.zeros_like(delta_y))
-            
+
             return np.array([repulse_x, repulse_y])
 
 
@@ -3631,35 +3662,31 @@ class simulation():
               you might call it at a timestep `t` as follows:
                 simulation.is_in_eddy(t=100)
             """
-
             
-            # Assuming you have numpy arrays `x` and `y` for the coordinates of agents
-            points = np.array([Point(x, y) for x, y in zip(self.simulation.X, self.simulation.Y)])
-            
-            # Vectorized function to compute linear distance along the longitudinal line
-            def compute_linear_positions(points, line):
-                return np.array([line.project(point) for point in points])
-            
-            linear_positions = compute_linear_positions(points, self.simulation.longitudinal)
+            linear_positions = self.simulation.compute_linear_positions(self.simulation.longitudinal)
+            self.current_longitudes = linear_positions
             # Shift data to the left
             self.simulation.past_longitudes[:, :-1] = self.simulation.past_longitudes[:, 1:]
+            self.simulation.swim_speeds[:, :-1] = self.simulation.swim_speeds[:, 1:]
+
         
             # Insert new position data at the last column
             self.simulation.past_longitudes[:, -1] = linear_positions
+            self.simulation.swim_speeds[:, -1] = self.simulation.sog
                       
             # Check for valid entries in both the first and last columns
             valid_entries = ~np.isnan(self.simulation.swim_speeds[:, 0]) & ~np.isnan(self.simulation.swim_speeds[:, -1])
             
             # initialize and calculate average speeds
             avg_speeds = np.full(self.simulation.swim_speeds.shape[0], np.nan)
-            avg_speeds[valid_entries] = np.median(self.simulation.swim_speeds[valid_entries], axis = -1)
+            avg_speeds[valid_entries] = np.max(self.simulation.swim_speeds[valid_entries], axis = -1)
             
             # total displacements
             total_displacement = np.full(self.simulation.past_longitudes.shape[0], np.nan)
             total_displacement[valid_entries] = self.simulation.past_longitudes[valid_entries,-1] - self.simulation.past_longitudes[valid_entries,0]
             
             # calculate the change in longitude, length of memory, and expected displacement given avg velocity
-            delta = self.simulation.past_longitudes[valid_entries,-2] - self.simulation.past_longitudes[valid_entries,-1]
+            delta = self.simulation.past_longitudes[valid_entries,0] - self.simulation.past_longitudes[valid_entries,-1]
             dt = self.simulation.past_longitudes.shape[1]
             expected_displacement = avg_speeds * dt
 
@@ -3668,15 +3695,15 @@ class simulation():
                 # stuck_conditions = (expected_displacement >= 2* total_displacement) & \
                 #     (self.simulation.swim_mode == 1) & (np.sign(delta) > 0) 
                     
-                stuck_conditions = (expected_displacement >= 2* total_displacement) & \
-                    (np.sign(delta) > 0) 
+                stuck_conditions = (expected_displacement >= 2* np.abs(total_displacement)) & \
+                    (np.sign(delta) > 0) | (self.simulation.in_eddy == True) 
             else:
                 stuck_conditions = np.zeros_like(self.simulation.X)
             
             # calculate chnge in longitudinal position
             delta = self.simulation.past_longitudes[:,-2] - self.simulation.past_longitudes[:,-1]
             
-            not_in_eddy_anymore = self.simulation.time_since_eddy_escape > 15
+            not_in_eddy_anymore = self.simulation.time_since_eddy_escape >= self.simulation.max_eddy_escape_seconds
             # Set a specific value (9999) for past positions and swim speeds where not in eddy anymore
             self.simulation.swim_speeds[not_in_eddy_anymore, :] = np.nan
             self.simulation.past_longitudes[not_in_eddy_anymore, :] = np.nan
@@ -3687,6 +3714,9 @@ class simulation():
 
             self.simulation.in_eddy = np.where(stuck_conditions, True, False) 
             self.simulation.in_eddy[not_in_eddy_anymore] = False
+            
+            if np.any(self.simulation.in_eddy):
+                print ('check eddy escape calcs')
             
         def arbitrate(self,t):
 
@@ -3736,7 +3766,7 @@ class simulation():
             else:
                 rheotaxis = self.rheo_cue(22000)        # 10000
                 border = self.border_cue(50000, t)
-                shallow = self.shallow_cue(25000)       # 10000
+                shallow = self.shallow_cue(1)       # 10000
                 wave_drag = self.wave_drag_cue(1)       # 5000
                 low_speed = self.vel_cue(2000)          # 8000 
                 avoid = self.already_been_here(15000, t)# 3000
@@ -4258,6 +4288,10 @@ class simulation():
                             np.sqrt(np.power(self.X - self.prev_X,2)+ np.power(self.Y - self.prev_Y,2)) / dt)
         
         if np.any(np.isnan(self.X)):
+            print ('fish off map - why?')
+            print ('dxdy swim: %s'%(dxdy_swim))
+            print ('dxdy jump: %s'%(dxdy_jump))
+            sys.exit()
             self.dead = np.where(np.isnan(self.X),1,self.dead)
             
         # Calculate mileage
@@ -4337,7 +4371,7 @@ class simulation():
                 cmap.set_bad(color='tan')  # This sets the color for 'masked' values; adjust as needed
                 # Fixed frame size in data units - this will be the size of the view window
                 initial_frame_size = 100  # Adjust as needed
-                min_zoom_level = 1.0  # No zoom (closest view)
+                min_zoom_level = 5.0  # No zoom (closest view)
                 max_zoom_level = 7.0  # Maximum zoom out level
                 
                 ax.imshow(depth_masked,
@@ -4366,7 +4400,7 @@ class simulation():
                 half_subsample_y = (extent[3] - extent[2]) / height / subsample_factor / 2
                 
                 # Adjust subsampled meshgrid coordinates to center the quiver arrows
-                subsampled_x_centered = subsampled_x + subsample_factor / 2. # half_subsample_x
+                subsampled_x_centered = subsampled_x - subsample_factor / 2. # half_subsample_x
                 subsampled_y_centered = subsampled_y + subsample_factor #/ 2. # half_subsample_y
                 
                 ax.quiver(subsampled_x_centered,
@@ -4413,10 +4447,25 @@ class simulation():
                     pid_controller.interp_PID()
                     for i in range(int(n)):
                         self.timestep(i, dt, g, pid_controller)
+                        # we want to follow the top performing fish - calculate the top 25% by longitude
                         
-                        # Calculate the spread of agents using standard deviation
-                        spread_x = np.std(self.X[self.dead == 0])
-                        spread_y = np.std(self.Y[self.dead == 0])
+                        # Step 1: Determine the threshold for the top 25%
+                        sorted_indices = np.argsort(self.current_longitudes)  # Get indices that would sort the array
+                        # top_25_percent_index = int(len(self.current_longitudes) * 0.75)  # Index to slice the top 25%
+                        # threshold_value = self.current_longitudes[sorted_indices[top_25_percent_index]]
+                        top_50_percent_index = int(len(self.current_longitudes) * 0.50)  # Index to slice the top 25%
+                        threshold_value = self.current_longitudes[sorted_indices[top_50_percent_index]]
+                        
+                        # Step 2: Create a mask for the top 25%
+                        mask = (self.current_longitudes >= threshold_value) & (self.dead != 1)
+                        
+                        # Step 3: Calculate the mean x and y positions for the top 25%
+                        center_x = np.mean(self.X[mask])
+                        center_y = np.mean(self.Y[mask])
+                        
+                        # Step 4: Calculate the spread of agents using standard deviation
+                        spread_x = np.std(self.X[mask])
+                        spread_y = np.std(self.Y[mask])
                         spread = max(spread_x, spread_y)  # Use the larger spread in case the distribution is elongated
                 
                         # Map the spread to a zoom level within the defined range
@@ -4425,10 +4474,7 @@ class simulation():
                         
                         # Calculate dynamic frame size based on the zoom level
                         dynamic_frame_size = initial_frame_size * zoom_level
-                        
-                        # Calculate the center of all agents
-                        center_x = np.nanmedian(self.X[self.dead == 0])
-                        center_y = np.nanmedian(self.Y[self.dead == 0])
+                    
                         
                         # Dynamic span for the x-axis based on zoom level or data distribution
                         x_span = dynamic_frame_size  # This can be adjusted based on your zoom logic
