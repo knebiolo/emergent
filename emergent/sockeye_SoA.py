@@ -1172,13 +1172,14 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_adjustment = 0.1
+        adult_slope_adjustment = 0.1
+        adult_intercept_adjustment = 2.1
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
-        self.max_p_U = 4.43 + 2.  # maximum prolonged swim speed
-        self.a_p = 8.643 + 2.1    # prolonged intercept
-        self.b_p = -2.0894 * adult_adjustment  # prolonged slope
-        self.a_s = 0.1746  + 2.1    # sprint intercept
-        self.b_s = -0.1806 * adult_adjustment   # sprint slope
+        self.max_p_U = 4.43 + adult_intercept_adjustment  # maximum prolonged swim speed
+        self.a_p = 8.643 + adult_slope_adjustment   # prolonged intercept
+        self.b_p = -2.0894 * adult_slope_adjustment  # prolonged slope
+        self.a_s = 0.1746  + adult_slope_adjustment    # sprint intercept
+        self.b_s = -0.1806 * adult_slope_adjustment   # sprint slope
         
         # initialize movement parameters
         self.drag = self.arr.zeros(num_agents)           # computed theoretical drag
@@ -1223,7 +1224,7 @@ class simulation():
         self.boundary_surface()
 
         # initialize mental map
-        self.avoid_cell_size = 50.
+        self.avoid_cell_size = 5.
         self.initialize_mental_map()
         
         # initialize heading
@@ -1293,6 +1294,7 @@ class simulation():
         self.sog = self.length/1000. #* 0.8  # sog = speed over ground - assume fish maintain 1 body length per second
         self.ideal_sog = self.length/1000. # self.sog
         self.opt_sog = self.length/1000. #* 0.8
+        self.school_sog = self.length/1000.
        # self.swim_speed = self.length/1000.        # set initial swim speed
         self.ucrit = self.sog * 7.    # TODO - what is the ucrit for sockeye?
         
@@ -1815,19 +1817,19 @@ class simulation():
                                           self.time_out_of_water + 1, 
                                           self.time_out_of_water)
 
-        # self.dead = np.where(np.logical_or(self.time_out_of_water > 10,
-        #                                    self.wet != 1.), 
+        self.dead = np.where(np.logical_or(self.time_out_of_water > 30,
+                                            self.wet != 1.), 
+                              1,
+                              self.dead)
+                
+        # self.dead = np.where(self.wet != 1., 
         #                      1,
         #                      self.dead)
-                
-        self.dead = np.where(self.wet != 1., 
-                             1,
-                             self.dead)
         
-        if np.any(self.dead):
-            print ('why did they die?')
-            print ('wet status: %s'%(self.wet))
-            sys.exit()
+        # if np.any(self.dead):
+        #     print ('why did they die?')
+        #     print ('wet status: %s'%(self.wet))
+        #     # sys.exit()
             
             
         
@@ -1938,7 +1940,9 @@ class simulation():
         mg_O2 = per_capita_swim_cost * self.weight
         # Brett (1973) used a mean oxycalorific equivalent of 3.36 cal/ mg O2 (RQ = 0.8) 
         kcal = mg_O2 * (3.36 / 1000)
-            
+        
+        if np.any(kcal < 0):
+            print ('why kcal negative')
         # Update kilocalories burned
         self.kcal += kcal
         
@@ -1968,6 +1972,9 @@ class simulation():
                 self.simulation.depth < self.simulation.body_depth * 3 / 100.,
                 self.simulation.depth + self.simulation.too_shallow,
                 self.simulation.body_depth * 3 / 100.)
+            
+            # make sure 
+            self.simulation.z = np.where(self.simulation.z < 0,0,self.simulation.z)
         
         def thrust_fun(self, mask, t, dt, fish_velocities = None):
             """
@@ -2817,7 +2824,7 @@ class simulation():
                                                             self.simulation.depth_rast_transform)
         
             # Define buffer zone around current positions
-            buff = 2
+            buff = 10
             row_min = np.clip(mental_map_rows - buff, 0, None)
             row_max = np.clip(mental_map_rows + buff + 1, None,
                               self.simulation.hdf5['memory/0'].shape[0])
@@ -3155,11 +3162,11 @@ class simulation():
             self.simulation.current_distances = current_distances
         
             # Identify agents that are too close to the border 
-            too_close = np.where(current_distances <= 1,1,0)# self.simulation.length / 1000.) #| \
+            too_close = np.where(current_distances <= 1 * (self.simulation.length/1000.),1,0)# self.simulation.length / 1000.) #| \
                 #(self.simulation.in_eddy == 1)
                 
-            if np.any(too_close == 1):
-                print ('boundary force needed')
+            # if np.any(too_close == 1):
+            #     print ('boundary force needed')
                 
             too_close = np.where(self.simulation.in_eddy == 1,1,too_close)
             
@@ -3447,88 +3454,175 @@ class simulation():
             
             return np.array([attract_x,attract_y])
 
+        # def school_cue(self, weight):
+        #     """
+        #     Calculate the attractive force towards the centroid of the school for 
+        #     each agent.
+        
+        #     This function applies a vectorized custom function that computes the 
+        #     centroid of the neighboring agents within a specified buffer and determines 
+        #     the attractive force exerted by the school on each agent towards this 
+        #     centroid. The force is inversely proportional to the square of the distance 
+        #     to the centroid, scaled by a weight.
+        
+        #     Parameters:
+        #     - weight (float): The weighting factor to scale the attractive force.
+        #     - agents_within_buffers_dict (dict): A dictionary where the key is the 
+        #     index of an agent and the value
+        #       is a list of indices of agents within its buffer.
+        
+        #     Returns:
+        #     - np.ndarray: An array of attractive force vectors towards the centroid 
+        #     of the school for each agent.
+        
+        #     Notes:
+        #     - The function assumes that `self.X` and `self.Y` are arrays containing 
+        #     the x and y coordinates of all agents.
+        #     - The `school_attraction` method, which must be defined elsewhere in the 
+        #     class, is vectorized and applied to each agent.
+        #     - The `excluded` parameter in `np.vectorize` is used to prevent certain 
+        #     arguments from being broadcasted, allowing
+        #       them to be passed as-is to the vectorized function. In this case, 
+        #       indices 4 to 7 in the argument list are excluded
+        #       from broadcasting, which likely corresponds to the `agents_within_buffers_dict`,
+        #       `self.X`, and `self.Y` arguments.
+        #     - The function returns an array where each element is the calculated 
+        #     attractive force for the corresponding agent.
+        #     - The vectorization allows for the calculation of forces for multiple agents 
+        #     simultaneously, improving performance over a loop-based approach.
+        #     """       
+        #     # Initialize arrays for centroids
+        #     centroid_x = np.zeros(self.simulation.num_agents)
+        #     centroid_y = np.zeros(self.simulation.num_agents)
+
+        #     # Initialize arrays for school cue
+        #     school_cue_array = np.zeros((self.simulation.num_agents, 2))
+
+        #     # Flatten the list of neighbor indices and create a corresponding array of agent indices
+        #     neighbor_indices = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
+        #     try:
+        #         agent_indices = np.repeat(np.arange(self.simulation.num_agents), [len(neighbors) for neighbors in self.simulation.agents_within_buffers]).astype(np.int32)
+        #     except ValueError:
+        #         print ('the number of agents is %s \n the number of agents within buffers is %s'%(self.simulation.num_agents,len(self.simulation.agents_within_buffers)))
+        #     # Aggregate X and Y coordinates of all neighbors
+        #     x_neighbors = self.simulation.X[neighbor_indices]
+        #     y_neighbors = self.simulation.Y[neighbor_indices]
+            
+        #     # Calculate the means; use np.add.at for unbuffered in-place operation
+        #     centroid_x = np.zeros(self.simulation.num_agents)
+        #     centroid_y = np.zeros(self.simulation.num_agents)
+        #     centroid_x = np.array([np.mean(self.simulation.X[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.simulation.num_agents)])
+        #     centroid_y = np.array([np.mean(self.simulation.Y[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.simulation.num_agents)])
+            
+        #     # Calculate vectors to centroids
+        #     vectors_to_centroid_x = centroid_x - self.simulation.X
+        #     vectors_to_centroid_y = centroid_y - self.simulation.Y 
+            
+        #     # Calculate distances to centroids
+        #     distances = np.sqrt(vectors_to_centroid_x**2 + vectors_to_centroid_y**2)
+            
+        #     # Normalize vectors (add a small epsilon to distances to avoid division by zero)
+        #     epsilon = 1e-10
+        #     v_hat_x = np.divide(vectors_to_centroid_x, distances + epsilon, out=np.zeros_like(self.simulation.X), where=distances+epsilon != 0)
+        #     v_hat_y = np.divide(vectors_to_centroid_y, distances + epsilon, out=np.zeros_like(self.simulation.Y), where=distances+epsilon != 0)
+            
+        #     # Calculate attractive forces
+        #     school_cue_array[:, 0] = weight * v_hat_x 
+        #     school_cue_array[:, 1] = weight * v_hat_y
+            
+        #     #TODO - we also need to perform velocity matching so.... update ideal_sog
+        #     # Calcaluate a new ideal_sog based on the minimum optimum sogs of those fish around me - we are as strong as our weakest link
+        #     sogs =  np.array([np.min(self.simulation.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.simulation.num_agents)])
+        #     self.simulation.school_sog = sogs
+            
+        #     return np.nan_to_num(school_cue_array)
+        
         def school_cue(self, weight):
             """
-            Calculate the attractive force towards the centroid of the school for 
-            each agent.
+            Calculate the attractive force towards the average heading of the school for each agent.
         
-            This function applies a vectorized custom function that computes the 
-            centroid of the neighboring agents within a specified buffer and determines 
-            the attractive force exerted by the school on each agent towards this 
-            centroid. The force is inversely proportional to the square of the distance 
-            to the centroid, scaled by a weight.
+            This function applies a vectorized custom function that computes the average 
+            heading of the neighboring agents within a specified buffer and determines the 
+            attractive force exerted by the school on each agent towards this average heading.
+            The force is scaled by a weight.
         
             Parameters:
             - weight (float): The weighting factor to scale the attractive force.
-            - agents_within_buffers_dict (dict): A dictionary where the key is the 
-            index of an agent and the value
-              is a list of indices of agents within its buffer.
         
             Returns:
-            - np.ndarray: An array of attractive force vectors towards the centroid 
-            of the school for each agent.
+            - np.ndarray: An array of attractive force vectors towards the average heading 
+              of the school for each agent.
         
             Notes:
-            - The function assumes that `self.X` and `self.Y` are arrays containing 
-            the x and y coordinates of all agents.
-            - The `school_attraction` method, which must be defined elsewhere in the 
-            class, is vectorized and applied to each agent.
-            - The `excluded` parameter in `np.vectorize` is used to prevent certain 
-            arguments from being broadcasted, allowing
-              them to be passed as-is to the vectorized function. In this case, 
-              indices 4 to 7 in the argument list are excluded
-              from broadcasting, which likely corresponds to the `agents_within_buffers_dict`,
-              `self.X`, and `self.Y` arguments.
-            - The function returns an array where each element is the calculated 
-            attractive force for the corresponding agent.
-            - The vectorization allows for the calculation of forces for multiple agents 
-            simultaneously, improving performance over a loop-based approach.
-            """       
-            # Initialize arrays for centroids
-            centroid_x = np.zeros(self.simulation.num_agents)
-            centroid_y = np.zeros(self.simulation.num_agents)
-
-            # Initialize arrays for school cue
-            school_cue_array = np.zeros((self.simulation.num_agents, 2))
-
+            - The function assumes that `self.X` and `self.Y` are arrays containing the x and y coordinates of all agents.
+            - The function assumes that `self.x_vel` and `self.y_vel` are arrays containing the x and y components of velocity for all agents.
+            - The function returns an array where each element is the calculated attractive force for the corresponding agent.
+            """
+            num_agents = self.simulation.num_agents
+        
             # Flatten the list of neighbor indices and create a corresponding array of agent indices
             neighbor_indices = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
-            try:
-                agent_indices = np.repeat(np.arange(self.simulation.num_agents), [len(neighbors) for neighbors in self.simulation.agents_within_buffers]).astype(np.int32)
-            except ValueError:
-                print ('the number of agents is %s \n the number of agents within buffers is %s'%(self.simulation.num_agents,len(self.simulation.agents_within_buffers)))
-            # Aggregate X and Y coordinates of all neighbors
+            agent_indices = np.repeat(np.arange(num_agents), [len(neighbors) for neighbors in self.simulation.agents_within_buffers]).astype(np.int32)
+            
+            # Aggregate X and Y coordinates and headings of all neighbors
             x_neighbors = self.simulation.X[neighbor_indices]
             y_neighbors = self.simulation.Y[neighbor_indices]
+            headings_neighbors = self.simulation.heading[neighbor_indices]
             
-            # Calculate the means; use np.add.at for unbuffered in-place operation
-            centroid_x = np.zeros(self.simulation.num_agents)
-            centroid_y = np.zeros(self.simulation.num_agents)
-            centroid_x = np.array([np.mean(self.simulation.X[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.simulation.num_agents)])
-            centroid_y = np.array([np.mean(self.simulation.Y[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.simulation.num_agents)])
+            # Calculate vectors from agents to their neighbors
+            vectors_to_neighbors_x = x_neighbors - self.simulation.X[agent_indices]
+            vectors_to_neighbors_y = y_neighbors - self.simulation.Y[agent_indices]
+        
+            # Calculate agent velocity vectors
+            agent_velocities_x = self.simulation.x_vel[agent_indices]
+            agent_velocities_y = self.simulation.y_vel[agent_indices]
+        
+            # Calculate dot products
+            dot_products = vectors_to_neighbors_x * agent_velocities_x + vectors_to_neighbors_y * agent_velocities_y
+        
+            # Filter out neighbors that are behind the agent
+            valid_neighbors_mask = dot_products > 0
+        
+            # Filter valid neighbor indices and their corresponding agent indices
+            valid_neighbor_indices = neighbor_indices[valid_neighbors_mask]
+            valid_agent_indices = agent_indices[valid_neighbors_mask]
+        
+            # Calculate average headings for valid neighbors
+            avg_heading = np.zeros(num_agents)
+            np.add.at(avg_heading, valid_agent_indices, headings_neighbors[valid_neighbors_mask])
             
-            # Calculate vectors to centroids
-            vectors_to_centroid_x = centroid_x - self.simulation.X
-            vectors_to_centroid_y = centroid_y - self.simulation.Y 
-            
-            # Calculate distances to centroids
-            distances = np.sqrt(vectors_to_centroid_x**2 + vectors_to_centroid_y**2)
-            
+            counts = np.bincount(valid_agent_indices, minlength=num_agents)
+            avg_heading /= counts + (counts == 0)  # Avoid division by zero
+            no_school = np.where(avg_heading == 0.,0.,1.)
+
+            # Calculate unit vectors for average headings
+            avg_heading_x = np.cos(avg_heading)
+            avg_heading_y = np.sin(avg_heading)
+        
+            # Calculate vectors to average headings
+            vectors_to_heading_x = avg_heading_x - self.simulation.x_vel
+            vectors_to_heading_y = avg_heading_y - self.simulation.y_vel
+        
+            # Calculate distances to average headings
+            distances = np.sqrt(vectors_to_heading_x**2 + vectors_to_heading_y**2)
+        
             # Normalize vectors (add a small epsilon to distances to avoid division by zero)
             epsilon = 1e-10
-            v_hat_x = np.divide(vectors_to_centroid_x, distances + epsilon, out=np.zeros_like(self.simulation.X), where=distances+epsilon != 0)
-            v_hat_y = np.divide(vectors_to_centroid_y, distances + epsilon, out=np.zeros_like(self.simulation.Y), where=distances+epsilon != 0)
-            
+            v_hat_x = np.divide(vectors_to_heading_x, distances + epsilon, out=np.zeros_like(self.simulation.x_vel), where=distances+epsilon != 0)
+            v_hat_y = np.divide(vectors_to_heading_y, distances + epsilon, out=np.zeros_like(self.simulation.y_vel), where=distances+epsilon != 0)
+        
             # Calculate attractive forces
-            school_cue_array[:, 0] = weight * v_hat_x 
-            school_cue_array[:, 1] = weight * v_hat_y
-            
-            #TODO - we also need to perform velocity matching so.... update ideal_sog
-            # Calcaluate a new ideal_sog based on the average sogs of those fish around me
-            sogs =  np.array([np.mean(self.simulation.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.simulation.num_agents)])
+            school_cue_array = np.zeros((num_agents, 2))
+            school_cue_array[:, 0] = weight * v_hat_x * no_school
+            school_cue_array[:, 1] = weight * v_hat_y * no_school
+        
+            # Calculate a new ideal_sog based on the minimum optimum sogs of those fish around
+            sogs = np.array([np.min(self.simulation.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
             self.simulation.school_sog = sogs
-            
+        
             return np.nan_to_num(school_cue_array)
+
+
             
         def collision_cue(self, weight):
             """
@@ -3609,9 +3703,9 @@ class simulation():
                                 out=np.zeros_like(closest_2_self[:,1]), where=safe_distances!=0)
                             
             # Calculate collision cue components
-            collision_cue_x = np.divide(weight * v_hat_x, safe_distances, 
+            collision_cue_x = np.divide(weight * v_hat_x, safe_distances**2, 
                                         out=np.zeros_like(v_hat_x), where=safe_distances!=0) #* same_quad_multiplier
-            collision_cue_y = np.divide(weight * v_hat_y, safe_distances, 
+            collision_cue_y = np.divide(weight * v_hat_y, safe_distances**2, 
                                         out=np.zeros_like(v_hat_y), where=safe_distances!=0) #* same_quad_multiplier
             
             # Optional: Combine the components into a single array
@@ -3689,31 +3783,31 @@ class simulation():
             delta = self.simulation.past_longitudes[valid_entries,0] - self.simulation.past_longitudes[valid_entries,-1]
             dt = self.simulation.past_longitudes.shape[1]
             expected_displacement = avg_speeds * dt
+            
+            # calculate chnge in longitudinal position
+            long_dir = self.simulation.past_longitudes[:,-2] - self.simulation.past_longitudes[:,-1]
 
             # Check if agents have moved less than expected, if they are moving backwards, and if they are sustained swimming mode
             if delta.shape == total_displacement.shape:
                 # stuck_conditions = (expected_displacement >= 2* total_displacement) & \
                 #     (self.simulation.swim_mode == 1) & (np.sign(delta) > 0) 
                     
-                stuck_conditions = (expected_displacement >= 2* np.abs(total_displacement)) & \
-                    (np.sign(delta) > 0) | (self.simulation.in_eddy == True) 
+                stuck_conditions = (expected_displacement >= 2.5 * np.abs(total_displacement)) & \
+                        (np.sign(long_dir) > 0)   
             else:
                 stuck_conditions = np.zeros_like(self.simulation.X)
-            
-            # calculate chnge in longitudinal position
-            delta = self.simulation.past_longitudes[:,-2] - self.simulation.past_longitudes[:,-1]
             
             not_in_eddy_anymore = self.simulation.time_since_eddy_escape >= self.simulation.max_eddy_escape_seconds
             # Set a specific value (9999) for past positions and swim speeds where not in eddy anymore
             self.simulation.swim_speeds[not_in_eddy_anymore, :] = np.nan
             self.simulation.past_longitudes[not_in_eddy_anymore, :] = np.nan
-            self.simulation.time_since_eddy_escape[not_in_eddy_anymore] = 0
+            self.simulation.time_since_eddy_escape[not_in_eddy_anymore] = 0.0
                                  
             # Update in_eddy status based on conditions
-            self.simulation.time_since_eddy_escape[self.simulation.in_eddy == 1] += 1
-
-            self.simulation.in_eddy = np.where(stuck_conditions, True, False) 
+            already_in_eddy = self.simulation.in_eddy == True
+            self.simulation.in_eddy = np.where(np.logical_or(stuck_conditions,already_in_eddy), True, False) 
             self.simulation.in_eddy[not_in_eddy_anymore] = False
+            self.simulation.time_since_eddy_escape[self.simulation.in_eddy == True] += 1
             
             if np.any(self.simulation.in_eddy):
                 print ('check eddy escape calcs')
@@ -3766,22 +3860,22 @@ class simulation():
             else:
                 rheotaxis = self.rheo_cue(22000)        # 10000
                 border = self.border_cue(50000, t)
-                shallow = self.shallow_cue(1)       # 10000
-                wave_drag = self.wave_drag_cue(1)       # 5000
-                low_speed = self.vel_cue(2000)          # 8000 
-                avoid = self.already_been_here(15000, t)# 3000
-                school = self.school_cue(1000)         # 9000
-                collision = self.collision_cue(8000)    # 2500 
+                shallow = self.shallow_cue(50000)       # 10000
+                wave_drag = self.wave_drag_cue(0)       # 5000
+                low_speed = self.vel_cue(3000)          # 8000 
+                avoid = self.already_been_here(20000, t)# 3000
+                school = self.school_cue(25000)         # 9000
+                collision = self.collision_cue(10000)    # 2500 
             
             # Create dictionary that has order of behavioral cues
-            order_dict = {0: shallow,
-                          1: border.T,
-                          2: avoid,
-                          3: collision, 
-                          4: school, 
-                          5: rheotaxis, 
-                          6: low_speed.T, 
-                          7: wave_drag.T}
+            order_dict = {0: 'shallow',
+                          1: 'border',
+                          2: 'avoid',
+                          3: 'collision', 
+                          4: 'school', 
+                          5: 'rheotaxis', 
+                          6: 'low_speed', 
+                          7: 'wave_drag'}
             
             # Create dictionary that holds all steering cues
             cue_dict = {'rheotaxis': rheotaxis, 
@@ -3800,18 +3894,37 @@ class simulation():
             tolerance = 25000
             
             # add up vectors, but make sure it's not greater than the tolerance
-            vec_sum = np.zeros_like(rheotaxis)
+            vec_sum_in_school = np.zeros_like(rheotaxis)
+            vec_sum_solo = np.zeros_like(rheotaxis)
             for i in np.arange(0,8,1):
-                vec = order_dict[i]
-                #if i != 1:
-                vec_sum = np.where(np.linalg.norm(vec_sum, axis = -1)[:,np.newaxis] < tolerance,
-                                   vec_sum + vec,
-                                   vec_sum)
+                cue = order_dict[i]
+                vec = cue_dict[cue]
+                if cue != 'school':
+                    #print ('solo cue:%s'%(cue))
+                    vec_sum_solo = np.where(np.linalg.norm(vec_sum_solo, axis = -1)[:,np.newaxis] < tolerance,
+                                       vec_sum_solo + vec,
+                                       vec_sum_solo)
+                    
+            for i in np.arange(0,8,1):
+                cue = order_dict[i]
+                vec = cue_dict[cue]
+                if cue != 'rheotaxis':
+                    if cue != 'low_speed':
+                        #print ('in school cue:%s'%(cue))
+                        vec_sum_in_school = np.where(np.linalg.norm(vec_sum_in_school, axis = -1)[:,np.newaxis] < tolerance,
+                                           vec_sum_in_school + vec,
+                                           vec_sum_in_school)
             
             head_vec = np.zeros_like(rheotaxis)
             
-            head_vec = np.where(self.simulation.swim_behav[:,np.newaxis] == 1,
-                                vec_sum,
+            head_vec = np.where(np.logical_and(self.simulation.swim_behav[:,np.newaxis] == 1,
+                                               school != np.zeros_like(school)),
+                                vec_sum_in_school,
+                                head_vec)
+            
+            head_vec = np.where(np.logical_and(self.simulation.swim_behav[:,np.newaxis] == 1,
+                                               school == np.zeros_like(school)),
+                                vec_sum_solo,
                                 head_vec)
             
             head_vec = np.where(self.simulation.swim_behav[:,np.newaxis] == 2, 
@@ -4111,7 +4224,7 @@ class simulation():
             mask_high_battery = battery_state_dict['high'] 
             
             self.simulation.ideal_sog[mask_high_battery] = np.where(self.simulation.battery[mask_high_battery] == 1., 
-                                                                    self.simulation.opt_sog[mask_high_battery], 
+                                                                    self.simulation.school_sog[mask_high_battery], 
                                                                     np.round((self.simulation.opt_sog[mask_high_battery] * \
                                                                              self.simulation.battery[mask_high_battery])/2, 2)
                                                                     )
