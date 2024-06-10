@@ -1172,8 +1172,8 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.1
-        adult_intercept_adjustment = 2.1
+        adult_slope_adjustment = 0.5 # 0.5 or 0.1
+        adult_intercept_adjustment = 1.5 # 1.5 or 2.1
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43 + adult_intercept_adjustment  # maximum prolonged swim speed
         self.a_p = 8.643 + adult_slope_adjustment   # prolonged intercept
@@ -1223,9 +1223,11 @@ class simulation():
         # boundary_surface
         self.boundary_surface()
 
-        # initialize mental map
+        # initialize mental maps
         self.avoid_cell_size = 5.
         self.initialize_mental_map()
+        self.refugia_cell_size = 1.
+        self.initialize_refugia_map()
         
         # initialize heading
         self.initial_heading()
@@ -1632,6 +1634,39 @@ class simulation():
                                            self.depth_rast_transform.f)
            
         self.hdf5.flush()
+        
+    def initialize_refugia_map(self):
+        """
+        Initializes the velocity map for each agent.
+        
+        The velocity map is a 3D array where each row corresponds to an agent, 
+        and each agent's row is a 2D raster of shape (self.width, self.height).
+        The values in the raster represent veloicty refugia.
+        
+        Attributes:
+            map (ndarray): A 3D array representing the mental maps of all agents.
+                           Shape: (self.num_agents, self.width, self.height)
+        """
+
+        # Create groups for organization (optional)
+        mem_data = self.hdf5.create_group("refugia")
+        refugia_height = np.round(self.height/self.refugia_cell_size,0).astype(np.int32) + 1
+        refugia_width = np.round(self.width/self.refugia_cell_size,0).astype(np.int32) + 1
+        # create a memory map array
+        for i in np.arange(self.num_agents):
+            mem_data.create_dataset('%s'%(i), (refugia_height, refugia_width), dtype = 'f4')
+            self.hdf5['refugia/%s'%(i)][:, :] = self.arr.zeros((refugia_height, 
+                                                               refugia_width))
+
+        # Apply the scaling
+        self.refugia_map_transform = Affine(self.refugia_cell_size, 
+                                           self.depth_rast_transform.b, 
+                                           self.depth_rast_transform.c,
+                                           self.depth_rast_transform.d,
+                                           -self.refugia_cell_size,
+                                           self.depth_rast_transform.f)
+           
+        self.hdf5.flush()
  
     def sample_environment(self, transform, raster_name):
         """
@@ -1763,7 +1798,42 @@ class simulation():
         
         self.hdf5.flush()
 
+    def update_refugia_map(self, current_velocity):
+        """
+        Update the mental map for each agent in the HDF5 dataset.
+    
+        This function performs the following steps:
+        - Converts the geographic coordinates (X and Y) of each agent to pixel coordinates.
+        - Updates the mental map for each agent in the HDF5 dataset at the corresponding pixel location with the current timestep.
+    
+        Parameters:
+        - current_timestep: The current timestep to record in the mental map.
+    
+        The mental map is stored in an HDF5 dataset with shape (num_agents, width, height), where each 'slice' corresponds to an agent's mental map.
+        """
+        # Convert geographic coordinates to pixel coordinates for each agent
+        rows, cols = geo_to_pixel(self.X, self.Y, self.refugia_map_transform)
+    
+        # Ensure rows and cols are within the bounds of the mental map
+        rows = self.arr.clip(rows, 0, self.height - 1)
+        cols = self.arr.clip(cols, 0, self.width - 1)
 
+        # identify velocity refugia, if current velocity is less than the maximum sustained swim speed, it's a velocity refugia
+        refugia = np.where(current_velocity < self.max_s_U,1,0)
+        
+        # get velocity and coords raster per agent
+        for i in np.arange(self.num_agents):
+            if self.num_agents > 1:
+                try:
+                    self.hdf5['refugia/%s'%(i)][rows[i],cols[i]] = refugia
+                except:
+                    pass
+            else:
+                single_arr = np.array([self.hdf5['refugia/%s'%(i)]])
+                single_arr[0,rows,cols] = refugia
+                self.hdf5['refugia/%s'%(i)][:, :] = single_arr
+        
+        self.hdf5.flush()
 
     def environment(self):
         """
@@ -1803,6 +1873,7 @@ class simulation():
         self.depth = self.sample_environment(self.depth_rast_transform, 'depth')
         self.x_vel = self.sample_environment(self.vel_x_rast_transform, 'vel_x')
         self.y_vel = self.sample_environment(self.vel_y_rast_transform, 'vel_y')
+        self.vel_mag = self.sample_environment(self.vel_mag_rast_transform, 'vel_mag')
         self.wet = self.sample_environment(self.wetted_transform, 'wetted')
         self.distance_to = self.sample_environment(self.depth_rast_transform, 'distance_to')
         self.current_longitudes = self.compute_linear_positions(self.longitudinal)
@@ -2902,6 +2973,79 @@ class simulation():
         
             return np.array([total_x_force, total_y_force])    
         
+        def find_nearest_refuge(self, weight):
+            """
+            Calculate the attractive force towards the nearest refuge cell for agents.
+        
+            Parameters:
+            - weight: float, the weight of the attraction force.
+        
+            Returns:
+            - np.array: Array containing the x and y components of the attraction force for the agents.
+            """
+            # Step 1: Get the x, y position of the agents
+            x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
+        
+            # Step 2: Convert these positions to mental map's pixel indices
+            refugia_map_rows, refugia_map_cols = geo_to_pixel(x, y, self.simulation.refugia_map_transform)
+        
+            # Define buffer zone around current positions
+            buff = 100
+        
+            row_min = np.clip(refugia_map_rows - buff, 0, None)
+            row_max = np.clip(refugia_map_rows + buff + 1, None, self.simulation.hdf5['refugia/0'].shape[0])
+            col_min = np.clip(refugia_map_cols - buff, 0, None)
+            col_max = np.clip(refugia_map_cols + buff + 1, None, self.simulation.hdf5['refugia/0'].shape[1])
+        
+            # Using list comprehension to access the relevant sections from the mental map and calculate forces
+            attractive_forces_per_agent = np.array([
+                self._calculate_attractive_force(agent_idx, rmin, rmax, cmin, cmax, weight)
+                for agent_idx, rmin, rmax, cmin, cmax in zip(np.arange(self.simulation.num_agents), row_min, row_max, col_min, col_max)
+            ])
+            
+            return attractive_forces_per_agent
+            
+        def _calculate_attractive_force(self, agent_idx, row_min, row_max, col_min, col_max, weight):
+            # Access the relevant section from the mental map
+            refugia_section = self.simulation.hdf5['refugia/%s'% agent_idx][row_min:row_max, col_min:col_max]
+        
+            # Create a binary mask for the refuge cells
+            refuge_mask = (refugia_section == 1)
+        
+            if np.any(refuge_mask):
+                # Compute the distance transform
+                distances = distance_transform_edt(~refuge_mask)
+            
+                # Find the coordinates of the nearest refuge cell
+                nearest_refuge_coords = np.unravel_index(np.argmin(distances), distances.shape)
+            
+                # Convert pixel coordinates to geographic coordinates
+                ref_xy = pixel_to_geo(self.simulation.refugia_map_transform,
+                                      nearest_refuge_coords[0],
+                                      nearest_refuge_coords[1])
+            
+                # Calculate the attraction force
+                delta_x = ref_xy[0] - self.simulation.X
+                delta_y = ref_xy[1] - self.simulation.Y
+            
+                magnitudes = np.sqrt(delta_x**2 + delta_y**2)
+                magnitudes[magnitudes == 0] = 0.000001  # Avoid division by zero
+            
+                # Unit vectors and attractive force
+                unit_vector_x = delta_x / magnitudes
+                unit_vector_y = delta_y / magnitudes
+                x_force = (weight * unit_vector_x) / magnitudes**2
+                y_force = (weight * unit_vector_y) / magnitudes**2
+            
+                # Sum forces for this agent
+                attract_x = np.nansum(x_force)
+                attract_y = np.nansum(y_force)
+            
+                return np.array([attract_x, attract_y])
+            
+            else:
+                return np.array([0,0])
+        
         def vel_cue(self, weight):
             """
             Calculate the velocity cue for each agent based on the surrounding water velocity.
@@ -3858,14 +4002,15 @@ class simulation():
                 school = self.school_cue(1)
                 collision = self.collision_cue(1)
             else:
-                rheotaxis = self.rheo_cue(22000)        # 10000
+                rheotaxis = self.rheo_cue(24000)        # 10000
                 border = self.border_cue(50000, t)
                 shallow = self.shallow_cue(50000)       # 10000
                 wave_drag = self.wave_drag_cue(0)       # 5000
-                low_speed = self.vel_cue(3000)          # 8000 
+                low_speed = self.vel_cue(1000)          # 8000 
                 avoid = self.already_been_here(20000, t)# 3000
                 school = self.school_cue(25000)         # 9000
-                collision = self.collision_cue(10000)    # 2500 
+                collision = self.collision_cue(15000)    # 2500 
+                refugia = self.find_nearest_refuge(25000)
             
             # Create dictionary that has order of behavioral cues
             order_dict = {0: 'shallow',
@@ -3885,7 +4030,12 @@ class simulation():
                         'low_speed': low_speed.T, 
                         'avoid': avoid, 
                         'school': school, 
-                        'collision': collision}
+                        'collision': collision,
+                        'refugia': refugia}
+            
+            low_bat_cue_dict = {0:'shallow',
+                                1:'border',
+                                2:'refugia'}
             
             self.is_in_eddy()
             
@@ -3896,6 +4046,8 @@ class simulation():
             # add up vectors, but make sure it's not greater than the tolerance
             vec_sum_in_school = np.zeros_like(rheotaxis)
             vec_sum_solo = np.zeros_like(rheotaxis)
+            vec_sum_tired = np.zeros_like(rheotaxis)
+            
             for i in np.arange(0,8,1):
                 cue = order_dict[i]
                 vec = cue_dict[cue]
@@ -3914,27 +4066,40 @@ class simulation():
                         vec_sum_in_school = np.where(np.linalg.norm(vec_sum_in_school, axis = -1)[:,np.newaxis] < tolerance,
                                            vec_sum_in_school + vec,
                                            vec_sum_in_school)
-            
+                        
+            for i in np.arange(0,3,1):
+                cue = low_bat_cue_dict[i]
+                vec = cue_dict[cue]
+                vec_sum_tired = np.where(np.linalg.norm(vec_sum_tired, axis = -1)[:,np.newaxis] < tolerance,
+                                   vec_sum_tired + vec,
+                                   vec_sum_tired)
+                        
+            # now creating a heading vector for each fish - which is complicated because they are in different behavioral modes 
             head_vec = np.zeros_like(rheotaxis)
             
+            #when actively migrating and not in a school
             head_vec = np.where(np.logical_and(self.simulation.swim_behav[:,np.newaxis] == 1,
                                                school != np.zeros_like(school)),
                                 vec_sum_in_school,
                                 head_vec)
             
+            # when actively migrating and in a school
             head_vec = np.where(np.logical_and(self.simulation.swim_behav[:,np.newaxis] == 1,
                                                school == np.zeros_like(school)),
                                 vec_sum_solo,
                                 head_vec)
             
+            # when fish is tired and looking for refugia
             head_vec = np.where(self.simulation.swim_behav[:,np.newaxis] == 2, 
-                                cue_dict['border'] + cue_dict['collision'] + cue_dict['low_speed'],
+                                vec_sum_tired,
                                 head_vec)
             
+            # when fish is tired and recovering
             head_vec = np.where(self.simulation.swim_behav[:,np.newaxis] == 3, 
                                 cue_dict['rheotaxis'],
                                 head_vec)
-                
+            
+            # for those unfortunate souls lost in eddies
             head_vec = np.where(self.simulation.in_eddy[:,np.newaxis] == 1, 
                                 cue_dict['border'] + cue_dict['shallow'],
                                 head_vec)
@@ -4231,7 +4396,7 @@ class simulation():
 
             # Set ideal speed over ground based on battery level
             self.simulation.ideal_sog[mask_low_battery] = 0.0
-            self.simulation.ideal_sog[mask_mid_battery] = 0.02
+            self.simulation.ideal_sog[mask_mid_battery] = 0.1
             
             # if np.any(mask_dict['sprint']):
             #     print ('fuck')
@@ -4349,7 +4514,10 @@ class simulation():
         
         # Sense the environment
         self.environment()
-            
+        
+        # update refugia map
+        self.update_refugia_map(self.vel_mag)
+
         # Optimize vertical position
         movement.find_z()
         
@@ -4406,7 +4574,7 @@ class simulation():
             print ('dxdy jump: %s'%(dxdy_jump))
             sys.exit()
             self.dead = np.where(np.isnan(self.X),1,self.dead)
-            
+    
         # Calculate mileage
         self.odometer(t=t, dt = dt)  
         
@@ -4564,10 +4732,14 @@ class simulation():
                         
                         # Step 1: Determine the threshold for the top 25%
                         sorted_indices = np.argsort(self.current_longitudes)  # Get indices that would sort the array
-                        # top_25_percent_index = int(len(self.current_longitudes) * 0.75)  # Index to slice the top 25%
+                        top_25_percent_index = int(len(self.current_longitudes) * 0.75)  # Index to slice the top 25%
                         # threshold_value = self.current_longitudes[sorted_indices[top_25_percent_index]]
+
                         top_50_percent_index = int(len(self.current_longitudes) * 0.50)  # Index to slice the top 25%
-                        threshold_value = self.current_longitudes[sorted_indices[top_50_percent_index]]
+                        # threshold_value = self.current_longitudes[sorted_indices[top_50_percent_index]]
+
+                        top_75_percent_index = int(len(self.current_longitudes) * 0.25)  # Index to slice the top 25%
+                        threshold_value = self.current_longitudes[sorted_indices[top_75_percent_index]]                        
                         
                         # Step 2: Create a mask for the top 25%
                         mask = (self.current_longitudes >= threshold_value) & (self.dead != 1)

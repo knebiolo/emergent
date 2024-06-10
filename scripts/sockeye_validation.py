@@ -20,10 +20,10 @@ import os
 
 
 # identify input and output model names
-model_name = 'val_33'
+model_name = 'sense_3'
 
 # identify directories
-model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\abm_simulations\simulations",model_name)
+model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\abm_simulations\sensitivity",model_name)
 
 #%% Set model parameters
 # identify the coordinate reference system for the model
@@ -33,14 +33,15 @@ crs = 32604
 # W,E,S,N
 #bbox = (550424,550468.32,6641598.45,6641591.97)                                # downstream river left
 #bbox = (550424,550468.32,6641475.45,6641470.97)                                # downstream river right
+bbox = (550424,550468.32,6641475.45,6641591.97)                                 # downstream
 #bbox = (549835.46,549842.26,6641360.92,6641350.85)                             # about halfway up
-bbox = (549642.3,549652.,6641551.5,6641541.3)                                  # eddy 
+#bbox = (549642.3,549652.,6641551.5,6641541.3)                                  # eddy 
 #bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # kinda near the falls
 #bbox = (549466.69,549520.48,6641583.35,6641625.48)                             # starting box right near the falls
 
 
 # how many agents in the simulation?
-n = 100
+n = 1000
 
 # what is the delta t
 dt = 1
