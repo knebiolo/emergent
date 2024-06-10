@@ -28,9 +28,9 @@ import re
 
 
 #Identify the directory path
-directory_path = r"J:\2819\005\Calcs\ABM\Output\Multi_TEST"
-exports_path=r'J:\2819\005\Calcs\ABM\Output\Multi_TEST'
-Data_output=r'J:\2819\005\Calcs\ABM\Output\Multi_TEST'
+directory_path = r"C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST"
+exports_path=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST'
+Data_output=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST'
 tif_path=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST\elev.tif'
 shapefile_path=r'J:\2819\005\Calcs\ABM\Output\Multi_TEST\Rectangle.shp'
 

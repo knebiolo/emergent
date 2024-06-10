@@ -9,8 +9,9 @@ Script Intent: test out simulation intialization methods
 #%% Import emergent
 # software directory
 import sys
-sys.path.append(r"C:\Users\EMuhlestein\OneDrive - Kleinschmidt Associates, Inc\Software\emergent")
+#sys.path.append(r"C:\Users\EMuhlestein\OneDrive - Kleinschmidt Associates, Inc\Software\emergent")
 #sys.path.append(r"C:\Users\Isha Deo\OneDrive - Kleinschmidt Associates, Inc\GitHub\emergent\emergent")
+sys.path.append(r"C:\Users\knebiolo\OneDrive - Kleinschmidt Associates, Inc\Software\emergent")
 
 
 #%% Import dpeendencies
@@ -18,8 +19,9 @@ sys.path.append(r"C:\Users\EMuhlestein\OneDrive - Kleinschmidt Associates, Inc\S
 import emergent as sockeye
 import os
 import shutil
-from joblib import Parallel, delayed
-import time
+import multiprocessing
+import dask
+from dask.distributed import Client, LocalCluster
 
 # identify input and output model names
 model_name = 'val_TEST'
@@ -38,86 +40,83 @@ bbox = (550402.28,550533.22,6641508.09,6641584.47)                             #
 #bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # kinda near the falls
 #bbox = (549466.69,549520.48,6641583.35,6641625.48)                             # starting box right near the falls
 
+#How many simulations?
+num_simulations=25
 
 # how many agents in the simulation?
-n = 25        #Agents need to be in 5 or 10 or by 5's
+n = 100       #Agents need to be in 5 or 10 or by 5's
 
 # what is the delta t
 dt = 1
 
 # how many timesteps in the model?
-hours = 12
+hours = 2
 ts = 3600. * hours / dt
 
 # what is the water temp?
-water_temp = 42.
+water_temp = 35.
 
 # what is the basin that we are simulating passage in?
 basin = "Nushagak River"
 
+# Get the number of available CPU cores
+num_cores = multiprocessing.cpu_count()
+print(f"Number of available CPU cores: {num_cores}")
 
-#How many simulations?
-num_simulations=2
+# Number of cores to use (e.g., use all available cores)
+n_jobs = num_cores  # You can adjust this if you want to leave some cores free
 
+
+# identify background environmental files
+env_files = {'wsel':'wsel.tif',
+             'depth':'depth.tif',
+             'x_vel':'vel_x.tif',
+             'y_vel':'vel_y.tif',
+             'vel_dir':'vel_dir.tif',
+             'vel_mag':'vel_mag.tif',
+             'elev':'elev.tif',
+             'wetted':'wetted_perimeter.tif'}
+
+# identify longitudinal profile shapefile
+longitudinal = os.path.join(model_dir,'longitudinal.shp')
+
+# File extensions to copy and delete
+file_extensions = [
+    ".tif", ".prj", ".cpg", ".dbf", ".sbn", ".sbx", ".html"
+]
 #%% create a simulation object 
-def run_simulation(i, model_dir, crs, basin, water_temp, bbox, ts, n, use_gpu=False, pid_tuning=False):
-    start_time = time.time()
+def run_simulation(i):
     model_name = f'val_TEST_{i}'
     simulation_dir = os.path.join(model_dir, model_name)
 
     if not os.path.exists(simulation_dir):
         os.makedirs(simulation_dir)
 
-    # Copy TIF files
+    # Copy relevant files
     for file in os.listdir(model_dir):
-        if file.endswith(".tif"):
+        if any(file.endswith(ext) for ext in file_extensions):
             src_file = os.path.join(model_dir, file)
             dst_file = os.path.join(simulation_dir, file)
             shutil.copy(src_file, dst_file)
 
     # Run the simulation
-    sim = sockeye.simulation(simulation_dir, model_name, crs, basin, water_temp, bbox, None, ts, n, use_gpu, pid_tuning)
+    sim = sockeye.simulation(simulation_dir, model_name, crs, basin, water_temp, bbox, env_files, longitudinal, None, ts, n, use_gpu=False, pid_tuning=False)
     print(f'Simulation object for {model_name} created in {simulation_dir}')
     sim.run(model_name, ts, dt, video=False)
 
-    # Create a movie file for this simulation
-    #sockeye.movie_maker(simulation_dir, model_name, crs, dt, sim.depth_rast_transform)
-    #print(f'Movie file for {model_name} created in {simulation_dir}')
-
-    # After movie creation, delete the TIF files in the simulation directory
+    # Delete the copied files
     for file in os.listdir(simulation_dir):
-        if file.endswith(".tif"):
+        if any(file.endswith(ext) for ext in file_extensions):
             os.remove(os.path.join(simulation_dir, file))
 
-    end_time = time.time()
-    execution_time = end_time - start_time
-    mins, secs = divmod(execution_time, 60)
-    print(f"ABM {model_name}: {int(mins)} minutes {secs:.2f} seconds.")
-
-    return model_name, execution_time
-
-# Assuming the necessary variables (model_dir, crs, basin, water_temp, bbox, ts, dt, n) are defined
 if __name__ == "__main__":
-    real_start_time = time.time()
-    #Number of simulations you wish to run
-    num_simulations
+    # Set up the Dask local cluster
+    cluster = LocalCluster(n_workers=n_jobs, threads_per_worker=1, memory_limit='2GB')
+    client = Client(cluster)
 
-    # Execute simulations in parallel
-    results = Parallel(n_jobs=-1)(delayed(run_simulation)(i, model_dir, crs, basin, water_temp, bbox, ts, n) for i in range(1, num_simulations + 1))
+    futures = [dask.delayed(run_simulation)(i) for i in range(1, num_simulations + 1)]
 
-    real_end_time = time.time()
-    real_elapsed_time = real_end_time - real_start_time
-    real_elapsed_mins, real_elapsed_secs = divmod(real_elapsed_time, 60)
+    # Compute all futures
+    dask.compute(*futures)
 
-    # Log individual and total simulation times
-    time_log_path = os.path.join(model_dir, "simulation_times.txt")
-    with open(time_log_path, "w") as f:
-        total_time = 0
-        for model_name, execution_time in results:
-            mins, secs = divmod(execution_time, 60)
-            f.write(f"{model_name}: {int(mins)} minutes {secs:.2f} seconds\n")
-            total_time += execution_time
-        total_mins, total_secs = divmod(total_time, 60)
-        f.write(f"\nTotal sum of simulation times: {int(total_mins)} minutes {total_secs:.2f} seconds.\n")
-        f.write(f"Real elapsed time for all simulations: {int(real_elapsed_mins)} minutes {real_elapsed_secs:.2f} seconds.")
-    print(f"Execution times written to {time_log_path}")      
+    print("All simulations completed.")
