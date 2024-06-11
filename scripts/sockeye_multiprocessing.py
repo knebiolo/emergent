@@ -20,11 +20,10 @@ import emergent as sockeye
 import os
 import shutil
 import multiprocessing
-import dask
-from dask.distributed import Client, LocalCluster
+from joblib import Parallel, delayed
 
 # identify input and output model names
-model_name = 'val_TEST'
+model_name = 'Simulation_5k'
 
 # identify directories
 model_dir = os.path.join(r"C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST",model_name)
@@ -44,17 +43,17 @@ bbox = (550402.28,550533.22,6641508.09,6641584.47)                             #
 num_simulations=25
 
 # how many agents in the simulation?
-n = 100       #Agents need to be in 5 or 10 or by 5's
+n = 5       #Agents need to be in 5 or 10 or by 5's
 
 # what is the delta t
 dt = 1
 
 # how many timesteps in the model?
-hours = 2
+hours = 0.25
 ts = 3600. * hours / dt
 
 # what is the water temp?
-water_temp = 35.
+water_temp = 40.
 
 # what is the basin that we are simulating passage in?
 basin = "Nushagak River"
@@ -68,13 +67,13 @@ n_jobs = num_cores  # You can adjust this if you want to leave some cores free
 
 
 # identify background environmental files
-env_files = {'wsel':'wsel.tif',
-             'depth':'depth.tif',
-             'x_vel':'vel_x.tif',
-             'y_vel':'vel_y.tif',
-             'vel_dir':'vel_dir.tif',
-             'vel_mag':'vel_mag.tif',
-             'elev':'elev.tif',
+env_files = {'wsel':'wsel_mask_mosaic.tif',
+             'depth':'depth_mask_mosaic.tif',
+             'x_vel':'x_vel_mask_mosaic.tif',
+             'y_vel':'y_vel_mask_mosaic.tif',
+             'vel_dir':'vel_dir_mask_mosaic.tif',
+             'vel_mag':'vel_mag_mask_mosaic.tif',
+             'elev':'elev_mask_mosaic.tif',
              'wetted':'wetted_perimeter.tif'}
 
 # identify longitudinal profile shapefile
@@ -110,13 +109,7 @@ def run_simulation(i):
             os.remove(os.path.join(simulation_dir, file))
 
 if __name__ == "__main__":
-    # Set up the Dask local cluster
-    cluster = LocalCluster(n_workers=n_jobs, threads_per_worker=1, memory_limit='2GB')
-    client = Client(cluster)
-
-    futures = [dask.delayed(run_simulation)(i) for i in range(1, num_simulations + 1)]
-
-    # Compute all futures
-    dask.compute(*futures)
+    # Execute simulations in parallel using Joblib
+    Parallel(n_jobs=n_jobs)(delayed(run_simulation)(i) for i in range(1, num_simulations + 1))
 
     print("All simulations completed.")
