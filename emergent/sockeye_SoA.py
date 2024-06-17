@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 Created on Wed May 10 20:30:21 2023
@@ -1160,7 +1161,7 @@ class simulation():
         self.prev_Y = self.Y
         
         # create short term memory for eddy escpement 
-        max_timesteps = 300  # Maximum number of timesteps to track
+        max_timesteps = 600  # Maximum number of timesteps to track
 
         self.swim_speeds = np.full((num_agents, max_timesteps), np.nan)
         self.past_longitudes = np.full((num_agents, max_timesteps), np.nan)
@@ -1168,17 +1169,17 @@ class simulation():
 
         self.in_eddy = np.zeros_like(self.X)
         self.time_since_eddy_escape = np.zeros_like(self.X)
-        self.max_eddy_escape_seconds = 60.
+        self.max_eddy_escape_seconds = 45.
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.5 # 0.5 or 0.1
-        adult_intercept_adjustment = 1.5 # 1.5 or 2.1
+        adult_slope_adjustment = 0.1 # 0.5 or 0.1
+        adult_intercept_adjustment = 2.1 # 1.5 or 2.1
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43 + adult_intercept_adjustment  # maximum prolonged swim speed
-        self.a_p = 8.643 + adult_slope_adjustment   # prolonged intercept
+        self.a_p = 8.643 + adult_intercept_adjustment   # prolonged intercept
         self.b_p = -2.0894 * adult_slope_adjustment  # prolonged slope
-        self.a_s = 0.1746  + adult_slope_adjustment    # sprint intercept
+        self.a_s = 0.1746  + adult_intercept_adjustment    # sprint intercept
         self.b_s = -0.1806 * adult_slope_adjustment   # sprint slope
         
         # initialize movement parameters
@@ -1224,7 +1225,7 @@ class simulation():
         self.boundary_surface()
 
         # initialize mental maps
-        self.avoid_cell_size = 5.
+        self.avoid_cell_size = 10.
         self.initialize_mental_map()
         self.refugia_cell_size = 1.
         self.initialize_refugia_map()
@@ -1928,7 +1929,8 @@ class simulation():
             sys.exit()
         
         # Radius for nearest neighbors search
-        radius = 2.
+        #TODO changed from 2 to xx
+        radius = 5.
         
         # Find agents within the specified radius for each agent
         agents_within_radius = tree.query_ball_tree(tree, r=radius)
@@ -3409,8 +3411,8 @@ class simulation():
             depth_multiplier = np.where(depths < min_depth[:,np.newaxis,np.newaxis], 1, 0)
 
             # Calculate the difference vectors
-            #delta_x = x_coords - self.X[:,np.newaxis,np.newaxis]
-            #delta_y = y_coords - self.Y[:,np.newaxis,np.newaxis]
+            # delta_x = x_coords - self.simulation.X[:,np.newaxis,np.newaxis]
+            # delta_y = y_coords - self.simulation.Y[:,np.newaxis,np.newaxis]
             
             delta_x =  self.simulation.X[:,np.newaxis,np.newaxis] - x_coords
             delta_y =  self.simulation.Y[:,np.newaxis,np.newaxis] - y_coords
@@ -3597,110 +3599,21 @@ class simulation():
             attract_y = weight * delta_y/dist
             
             return np.array([attract_x,attract_y])
-
-        # def school_cue(self, weight):
-        #     """
-        #     Calculate the attractive force towards the centroid of the school for 
-        #     each agent.
         
-        #     This function applies a vectorized custom function that computes the 
-        #     centroid of the neighboring agents within a specified buffer and determines 
-        #     the attractive force exerted by the school on each agent towards this 
-        #     centroid. The force is inversely proportional to the square of the distance 
-        #     to the centroid, scaled by a weight.
-        
-        #     Parameters:
-        #     - weight (float): The weighting factor to scale the attractive force.
-        #     - agents_within_buffers_dict (dict): A dictionary where the key is the 
-        #     index of an agent and the value
-        #       is a list of indices of agents within its buffer.
-        
-        #     Returns:
-        #     - np.ndarray: An array of attractive force vectors towards the centroid 
-        #     of the school for each agent.
-        
-        #     Notes:
-        #     - The function assumes that `self.X` and `self.Y` are arrays containing 
-        #     the x and y coordinates of all agents.
-        #     - The `school_attraction` method, which must be defined elsewhere in the 
-        #     class, is vectorized and applied to each agent.
-        #     - The `excluded` parameter in `np.vectorize` is used to prevent certain 
-        #     arguments from being broadcasted, allowing
-        #       them to be passed as-is to the vectorized function. In this case, 
-        #       indices 4 to 7 in the argument list are excluded
-        #       from broadcasting, which likely corresponds to the `agents_within_buffers_dict`,
-        #       `self.X`, and `self.Y` arguments.
-        #     - The function returns an array where each element is the calculated 
-        #     attractive force for the corresponding agent.
-        #     - The vectorization allows for the calculation of forces for multiple agents 
-        #     simultaneously, improving performance over a loop-based approach.
-        #     """       
-        #     # Initialize arrays for centroids
-        #     centroid_x = np.zeros(self.simulation.num_agents)
-        #     centroid_y = np.zeros(self.simulation.num_agents)
-
-        #     # Initialize arrays for school cue
-        #     school_cue_array = np.zeros((self.simulation.num_agents, 2))
-
-        #     # Flatten the list of neighbor indices and create a corresponding array of agent indices
-        #     neighbor_indices = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
-        #     try:
-        #         agent_indices = np.repeat(np.arange(self.simulation.num_agents), [len(neighbors) for neighbors in self.simulation.agents_within_buffers]).astype(np.int32)
-        #     except ValueError:
-        #         print ('the number of agents is %s \n the number of agents within buffers is %s'%(self.simulation.num_agents,len(self.simulation.agents_within_buffers)))
-        #     # Aggregate X and Y coordinates of all neighbors
-        #     x_neighbors = self.simulation.X[neighbor_indices]
-        #     y_neighbors = self.simulation.Y[neighbor_indices]
-            
-        #     # Calculate the means; use np.add.at for unbuffered in-place operation
-        #     centroid_x = np.zeros(self.simulation.num_agents)
-        #     centroid_y = np.zeros(self.simulation.num_agents)
-        #     centroid_x = np.array([np.mean(self.simulation.X[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.simulation.num_agents)])
-        #     centroid_y = np.array([np.mean(self.simulation.Y[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.simulation.num_agents)])
-            
-        #     # Calculate vectors to centroids
-        #     vectors_to_centroid_x = centroid_x - self.simulation.X
-        #     vectors_to_centroid_y = centroid_y - self.simulation.Y 
-            
-        #     # Calculate distances to centroids
-        #     distances = np.sqrt(vectors_to_centroid_x**2 + vectors_to_centroid_y**2)
-            
-        #     # Normalize vectors (add a small epsilon to distances to avoid division by zero)
-        #     epsilon = 1e-10
-        #     v_hat_x = np.divide(vectors_to_centroid_x, distances + epsilon, out=np.zeros_like(self.simulation.X), where=distances+epsilon != 0)
-        #     v_hat_y = np.divide(vectors_to_centroid_y, distances + epsilon, out=np.zeros_like(self.simulation.Y), where=distances+epsilon != 0)
-            
-        #     # Calculate attractive forces
-        #     school_cue_array[:, 0] = weight * v_hat_x 
-        #     school_cue_array[:, 1] = weight * v_hat_y
-            
-        #     #TODO - we also need to perform velocity matching so.... update ideal_sog
-        #     # Calcaluate a new ideal_sog based on the minimum optimum sogs of those fish around me - we are as strong as our weakest link
-        #     sogs =  np.array([np.min(self.simulation.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(self.simulation.num_agents)])
-        #     self.simulation.school_sog = sogs
-            
-        #     return np.nan_to_num(school_cue_array)
-        
-        def school_cue(self, weight):
+        def cohesion_cue(self, weight, consider_front_only=False):
             """
-            Calculate the attractive force towards the average heading of the school for each agent.
-        
-            This function applies a vectorized custom function that computes the average 
-            heading of the neighboring agents within a specified buffer and determines the 
-            attractive force exerted by the school on each agent towards this average heading.
-            The force is scaled by a weight.
+            Calculate the attractive force towards the average position (cohesion) of the school for each agent.
         
             Parameters:
             - weight (float): The weighting factor to scale the attractive force.
+            - consider_front_only (bool): If True, consider only the fish in front of each agent.
         
             Returns:
-            - np.ndarray: An array of attractive force vectors towards the average heading 
-              of the school for each agent.
+            - np.ndarray: An array of attractive force vectors towards the average position of the school for each agent.
         
             Notes:
-            - The function assumes that `self.X` and `self.Y` are arrays containing the x and y coordinates of all agents.
-            - The function assumes that `self.x_vel` and `self.y_vel` are arrays containing the x and y components of velocity for all agents.
-            - The function returns an array where each element is the calculated attractive force for the corresponding agent.
+            - The function assumes that `self.simulation.X` and `self.simulation.Y` are arrays 
+              containing the x and y coordinates of all agents.
             """
             num_agents = self.simulation.num_agents
         
@@ -3708,24 +3621,106 @@ class simulation():
             neighbor_indices = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
             agent_indices = np.repeat(np.arange(num_agents), [len(neighbors) for neighbors in self.simulation.agents_within_buffers]).astype(np.int32)
             
-            # Aggregate X and Y coordinates and headings of all neighbors
+            # Aggregate X and Y coordinates of all neighbors
             x_neighbors = self.simulation.X[neighbor_indices]
             y_neighbors = self.simulation.Y[neighbor_indices]
-            headings_neighbors = self.simulation.heading[neighbor_indices]
             
             # Calculate vectors from agents to their neighbors
             vectors_to_neighbors_x = x_neighbors - self.simulation.X[agent_indices]
             vectors_to_neighbors_y = y_neighbors - self.simulation.Y[agent_indices]
         
-            # Calculate agent velocity vectors
-            agent_velocities_x = self.simulation.x_vel[agent_indices]
-            agent_velocities_y = self.simulation.y_vel[agent_indices]
+            if consider_front_only:
+                # Calculate agent velocity vectors
+                agent_velocities_x = self.simulation.x_vel[agent_indices]
+                agent_velocities_y = self.simulation.y_vel[agent_indices]
+                
+                # Calculate dot products
+                dot_products = vectors_to_neighbors_x * agent_velocities_x + vectors_to_neighbors_y * agent_velocities_y
         
-            # Calculate dot products
-            dot_products = vectors_to_neighbors_x * agent_velocities_x + vectors_to_neighbors_y * agent_velocities_y
+                # Filter out neighbors that are behind the agent
+                valid_neighbors_mask = dot_products > 0
+            else:
+                # Consider all neighbors
+                valid_neighbors_mask = np.ones_like(neighbor_indices, dtype=bool)
         
-            # Filter out neighbors that are behind the agent
-            valid_neighbors_mask = dot_products > 0
+            # Filter valid neighbor indices and their corresponding agent indices
+            valid_neighbor_indices = neighbor_indices[valid_neighbors_mask]
+            valid_agent_indices = agent_indices[valid_neighbors_mask]
+        
+            # Calculate Cohesion vectors
+            
+            # Calculate centroid for cohesion
+            center_x = np.zeros(num_agents)
+            center_y = np.zeros(num_agents)
+            np.add.at(center_x, valid_agent_indices, x_neighbors[valid_neighbors_mask])
+            np.add.at(center_y, valid_agent_indices, y_neighbors[valid_neighbors_mask])
+            counts = np.bincount(valid_agent_indices, minlength=num_agents)
+            center_x /= counts + (counts == 0)  # Avoid division by zero
+            center_y /= counts + (counts == 0)  # Avoid division by zero
+            
+            # Calculate vectors to average position (centroid)
+            vectors_to_center_x = center_x - self.simulation.X
+            vectors_to_center_y = center_y - self.simulation.Y
+        
+            # Calculate distances to average position (centroid)
+            distances_to_center = np.sqrt(vectors_to_center_x**2 + vectors_to_center_y**2)
+        
+            # Normalize vectors (add a small epsilon to distances to avoid division by zero)
+            epsilon = 1e-10
+            v_hat_center_x = np.divide(vectors_to_center_x, distances_to_center + epsilon, out=np.zeros_like(self.simulation.x_vel), where=distances_to_center+epsilon != 0)
+            v_hat_center_y = np.divide(vectors_to_center_y, distances_to_center + epsilon, out=np.zeros_like(self.simulation.y_vel), where=distances_to_center+epsilon != 0)
+        
+            # Calculate attractive forces
+            cohesion_array = np.zeros((num_agents, 2))
+            cohesion_array[:, 0] = weight * v_hat_center_x
+            cohesion_array[:, 1] = weight * v_hat_center_y
+            
+    
+            return np.nan_to_num(cohesion_array)
+        
+        def alignment_cue(self, weight, consider_front_only=False):
+            """
+            Calculate the attractive force towards the average heading (alignment) of the school for each agent.
+        
+            Parameters:
+            - weight (float): The weighting factor to scale the attractive force.
+            - consider_front_only (bool): If True, consider only the fish in front of each agent.
+        
+            Returns:
+            - np.ndarray: An array of attractive force vectors towards the average heading of the school for each agent.
+        
+            Notes:
+            - The function assumes that `self.simulation.heading` is an array 
+              containing the heading angles of all agents.
+            - The function assumes that `self.simulation.x_vel` and `self.simulation.y_vel` are arrays 
+              containing the x and y components of velocity for all agents.
+            """
+            num_agents = self.simulation.num_agents
+        
+            # Flatten the list of neighbor indices and create a corresponding array of agent indices
+            neighbor_indices = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
+            agent_indices = np.repeat(np.arange(num_agents), [len(neighbors) for neighbors in self.simulation.agents_within_buffers]).astype(np.int32)
+            
+            # Aggregate headings of all neighbors
+            headings_neighbors = self.simulation.heading[neighbor_indices]
+            
+            # Calculate vectors from agents to their neighbors
+            vectors_to_neighbors_x = self.simulation.X[neighbor_indices] - self.simulation.X[agent_indices]
+            vectors_to_neighbors_y = self.simulation.Y[neighbor_indices] - self.simulation.Y[agent_indices]
+        
+            if consider_front_only:
+                # Calculate agent velocity vectors
+                agent_velocities_x = self.simulation.x_vel[agent_indices]
+                agent_velocities_y = self.simulation.y_vel[agent_indices]
+                
+                # Calculate dot products
+                dot_products = vectors_to_neighbors_x * agent_velocities_x + vectors_to_neighbors_y * agent_velocities_y
+        
+                # Filter out neighbors that are behind the agent
+                valid_neighbors_mask = dot_products > 0
+            else:
+                # Consider all neighbors
+                valid_neighbors_mask = np.ones_like(neighbor_indices, dtype=bool)
         
             # Filter valid neighbor indices and their corresponding agent indices
             valid_neighbor_indices = neighbor_indices[valid_neighbors_mask]
@@ -3734,11 +3729,10 @@ class simulation():
             # Calculate average headings for valid neighbors
             avg_heading = np.zeros(num_agents)
             np.add.at(avg_heading, valid_agent_indices, headings_neighbors[valid_neighbors_mask])
-            
             counts = np.bincount(valid_agent_indices, minlength=num_agents)
             avg_heading /= counts + (counts == 0)  # Avoid division by zero
-            no_school = np.where(avg_heading == 0.,0.,1.)
-
+            no_school = np.where(avg_heading == 0., 0., 1.)
+        
             # Calculate unit vectors for average headings
             avg_heading_x = np.cos(avg_heading)
             avg_heading_y = np.sin(avg_heading)
@@ -3752,22 +3746,28 @@ class simulation():
         
             # Normalize vectors (add a small epsilon to distances to avoid division by zero)
             epsilon = 1e-10
-            v_hat_x = np.divide(vectors_to_heading_x, distances + epsilon, out=np.zeros_like(self.simulation.x_vel), where=distances+epsilon != 0)
-            v_hat_y = np.divide(vectors_to_heading_y, distances + epsilon, out=np.zeros_like(self.simulation.y_vel), where=distances+epsilon != 0)
+            v_hat_align_x = np.divide(vectors_to_heading_x, distances + epsilon, out=np.zeros_like(self.simulation.x_vel), where=distances+epsilon != 0)
+            v_hat_align_y = np.divide(vectors_to_heading_y, distances + epsilon, out=np.zeros_like(self.simulation.y_vel), where=distances+epsilon != 0)
         
             # Calculate attractive forces
-            school_cue_array = np.zeros((num_agents, 2))
-            school_cue_array[:, 0] = weight * v_hat_x * no_school
-            school_cue_array[:, 1] = weight * v_hat_y * no_school
-        
-            # Calculate a new ideal_sog based on the minimum optimum sogs of those fish around
-            sogs = np.array([np.min(self.simulation.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
+            alignment_array = np.zeros((num_agents, 2))
+            alignment_array[:, 0] = weight * v_hat_align_x * no_school
+            alignment_array[:, 1] = weight * v_hat_align_y * no_school
+            
+            # Calculate a new ideal speed based on the mean speed of those fish around
+            sogs = np.array([np.mean(self.simulation.sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
+            #sogs = np.array([np.mean(self.simulation.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
+            #sogs = np.array([np.min(self.simulation.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
+
+            # make sure sogs don't get too low
+            sogs = np.where(sogs < 0.5 * self.simulation.length / 1000,
+                            0.5 * self.simulation.length / 1000,
+                            sogs)
+            
             self.simulation.school_sog = sogs
         
-            return np.nan_to_num(school_cue_array)
+            return np.nan_to_num(alignment_array)
 
-
-            
         def collision_cue(self, weight):
             """
             Generates an array of repulsive force vectors for each agent to avoid collisions,
@@ -3936,8 +3936,8 @@ class simulation():
                 # stuck_conditions = (expected_displacement >= 2* total_displacement) & \
                 #     (self.simulation.swim_mode == 1) & (np.sign(delta) > 0) 
                     
-                stuck_conditions = (expected_displacement >= 2.5 * np.abs(total_displacement)) & \
-                        (np.sign(long_dir) > 0)   
+                stuck_conditions = (expected_displacement >= 2.75 * np.abs(total_displacement)) & \
+                        (np.sign(long_dir) > 0) & (self.simulation.swim_behav == 1)
             else:
                 stuck_conditions = np.zeros_like(self.simulation.X)
             
@@ -3995,32 +3995,31 @@ class simulation():
             # calculate behavioral cues
             if self.simulation.pid_tuning == True:
                 rheotaxis = self.rheo_cue(50000)
-                shallow = self.shallow_cue(1)
-                wave_drag = self.wave_drag_cue(1)
-                low_speed = self.vel_cue(1)
-                avoid = self.already_been_here(1, t)
-                school = self.school_cue(1)
-                collision = self.collision_cue(1)
+
             else:
-                rheotaxis = self.rheo_cue(24000)        # 10000
+                # calculate attractive forces
+                rheotaxis = self.rheo_cue(16000)        # 10000
+                alignment = self.alignment_cue(22000)
+                cohesion = self.cohesion_cue(10000)
+                low_speed = self.vel_cue(2000)          # 8000 
+                wave_drag = self.wave_drag_cue(0)       # 5000                
+                refugia = self.find_nearest_refuge(50000)
+                # calculate high priority repusive forces
                 border = self.border_cue(50000, t)
-                shallow = self.shallow_cue(50000)       # 10000
-                wave_drag = self.wave_drag_cue(0)       # 5000
-                low_speed = self.vel_cue(1000)          # 8000 
-                avoid = self.already_been_here(20000, t)# 3000
-                school = self.school_cue(25000)         # 9000
-                collision = self.collision_cue(15000)    # 2500 
-                refugia = self.find_nearest_refuge(25000)
+                shallow = self.shallow_cue(100000)       # 10000
+                avoid = self.already_been_here(10000, t)# 3000
+                collision = self.collision_cue(20000)    # 2500 
             
             # Create dictionary that has order of behavioral cues
             order_dict = {0: 'shallow',
                           1: 'border',
                           2: 'avoid',
                           3: 'collision', 
-                          4: 'school', 
-                          5: 'rheotaxis', 
-                          6: 'low_speed', 
-                          7: 'wave_drag'}
+                          4: 'alignment', 
+                          5: 'cohesion',
+                          6: 'rheotaxis', 
+                          7: 'low_speed', 
+                          8: 'wave_drag'}
             
             # Create dictionary that holds all steering cues
             cue_dict = {'rheotaxis': rheotaxis, 
@@ -4029,7 +4028,8 @@ class simulation():
                         'wave_drag': wave_drag.T, 
                         'low_speed': low_speed.T, 
                         'avoid': avoid, 
-                        'school': school, 
+                        'alignment': alignment,
+                        'cohesion': cohesion,
                         'collision': collision,
                         'refugia': refugia}
             
@@ -4041,31 +4041,20 @@ class simulation():
             
             # Arbitrate between different behaviors
             # how many f4cks does this fish have?
-            tolerance = 25000
+            tolerance = 50000
             
             # add up vectors, but make sure it's not greater than the tolerance
-            vec_sum_in_school = np.zeros_like(rheotaxis)
-            vec_sum_solo = np.zeros_like(rheotaxis)
+            vec_sum_migratory = np.zeros_like(rheotaxis)
             vec_sum_tired = np.zeros_like(rheotaxis)
-            
-            for i in np.arange(0,8,1):
-                cue = order_dict[i]
-                vec = cue_dict[cue]
-                if cue != 'school':
-                    #print ('solo cue:%s'%(cue))
-                    vec_sum_solo = np.where(np.linalg.norm(vec_sum_solo, axis = -1)[:,np.newaxis] < tolerance,
-                                       vec_sum_solo + vec,
-                                       vec_sum_solo)
                     
-            for i in np.arange(0,8,1):
+            for i in order_dict.keys():
                 cue = order_dict[i]
                 vec = cue_dict[cue]
-                if cue != 'rheotaxis':
-                    if cue != 'low_speed':
-                        #print ('in school cue:%s'%(cue))
-                        vec_sum_in_school = np.where(np.linalg.norm(vec_sum_in_school, axis = -1)[:,np.newaxis] < tolerance,
-                                           vec_sum_in_school + vec,
-                                           vec_sum_in_school)
+                if cue != 'refugia':
+                    #print ('in school cue:%s'%(cue))
+                    vec_sum_migratory = np.where(np.linalg.norm(vec_sum_migratory, axis = -1)[:,np.newaxis] < tolerance,
+                                       vec_sum_migratory + vec,
+                                       vec_sum_migratory)
                         
             for i in np.arange(0,3,1):
                 cue = low_bat_cue_dict[i]
@@ -4077,16 +4066,9 @@ class simulation():
             # now creating a heading vector for each fish - which is complicated because they are in different behavioral modes 
             head_vec = np.zeros_like(rheotaxis)
             
-            #when actively migrating and not in a school
-            head_vec = np.where(np.logical_and(self.simulation.swim_behav[:,np.newaxis] == 1,
-                                               school != np.zeros_like(school)),
-                                vec_sum_in_school,
-                                head_vec)
-            
-            # when actively migrating and in a school
-            head_vec = np.where(np.logical_and(self.simulation.swim_behav[:,np.newaxis] == 1,
-                                               school == np.zeros_like(school)),
-                                vec_sum_solo,
+            # when actively migrating
+            head_vec = np.where(self.simulation.swim_behav[:,np.newaxis] == 1,
+                                vec_sum_migratory,
                                 head_vec)
             
             # when fish is tired and looking for refugia
@@ -4096,7 +4078,7 @@ class simulation():
             
             # when fish is tired and recovering
             head_vec = np.where(self.simulation.swim_behav[:,np.newaxis] == 3, 
-                                cue_dict['rheotaxis'],
+                                vec_sum_tired,
                                 head_vec)
             
             # for those unfortunate souls lost in eddies
@@ -4730,21 +4712,25 @@ class simulation():
                         self.timestep(i, dt, g, pid_controller)
                         # we want to follow the top performing fish - calculate the top 25% by longitude
                         
-                        # Step 1: Determine the threshold for the top 25%
+                        # Step 1: Determine the threshold for the top X%
                         sorted_indices = np.argsort(self.current_longitudes)  # Get indices that would sort the array
-                        top_25_percent_index = int(len(self.current_longitudes) * 0.75)  # Index to slice the top 25%
-                        # threshold_value = self.current_longitudes[sorted_indices[top_25_percent_index]]
-
-                        top_50_percent_index = int(len(self.current_longitudes) * 0.50)  # Index to slice the top 25%
-                        # threshold_value = self.current_longitudes[sorted_indices[top_50_percent_index]]
-
-                        top_75_percent_index = int(len(self.current_longitudes) * 0.25)  # Index to slice the top 25%
-                        threshold_value = self.current_longitudes[sorted_indices[top_75_percent_index]]                        
                         
-                        # Step 2: Create a mask for the top 25%
-                        mask = (self.current_longitudes >= threshold_value) & (self.dead != 1)
+                        # Index to slice the top 25%
+                        top_25_percent_index = int(len(self.current_longitudes) * 0.75)
+                        threshold_top_25 = self.current_longitudes[sorted_indices[top_25_percent_index]]
                         
-                        # Step 3: Calculate the mean x and y positions for the top 25%
+                        # Index to slice the top 50%
+                        top_50_percent_index = int(len(self.current_longitudes) * 0.50)
+                        threshold_top_50 = self.current_longitudes[sorted_indices[top_50_percent_index]]
+                        
+                        # Index to slice the top 75%
+                        top_75_percent_index = int(len(self.current_longitudes) * 0.25)
+                        threshold_top_75 = self.current_longitudes[sorted_indices[top_75_percent_index]]
+                        
+                        # Step 2: Create a mask for the top 75%
+                        mask = (self.current_longitudes >= threshold_top_75) & (self.dead != 1)
+                        
+                        # Step 3: Calculate the mean x and y positions for the top 75%
                         center_x = np.mean(self.X[mask])
                         center_y = np.mean(self.Y[mask])
                         
