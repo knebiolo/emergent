@@ -28,15 +28,15 @@ import re
 
 
 #Identify the directory path
-directory_path = r"C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST"
-exports_path=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST'
-Data_output=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST'
-tif_path=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\val_TEST\elev.tif'
+directory_path = r"C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\Simulation"
+exports_path=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\Simulation'
+Data_output=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\Simulation'
+tif_path=r'C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST\elev.tif'
 shapefile_path=r'J:\2819\005\Calcs\ABM\Output\Multi_TEST\Rectangle.shp'
 
                                                                               #Cell width and cell height are measured in meters
 class Multi_Summarization:
-    def __init__(self, directory_path, tif_path, Data_output, shapefile_path, cell_width=5, cell_height=5):
+    def __init__(self, directory_path, tif_path, Data_output, shapefile_path, cell_width=2, cell_height=2):
         self.directory_path = directory_path
         self.tif_path = tif_path
         self.Data_output = Data_output
@@ -131,7 +131,7 @@ class Multi_Summarization:
                         else:
                             print(f"No length values found for {sex_label}.")
     
-        print(f"Plots saved to: {pdf_filepath}")
+
         
             
         
@@ -170,7 +170,7 @@ class Multi_Summarization:
                         sex_label = 'Male' if sex == 0 else 'Female'
                         output_file.write(f"No valid length values found for {sex_label}.\n\n")
 
-        print(f"Results written to: {stats_file_path}")
+
 
 
     # class weights
@@ -220,7 +220,7 @@ class Multi_Summarization:
                             else:
                                 print(f"No weight values found for {sex_label} in {base_name}.")
 
-        print(f"Plots saved to: {pdf_filepath}")
+
     
     
 
@@ -259,7 +259,7 @@ class Multi_Summarization:
                         sex_label = 'Male' if sex == 0 else 'Female'
                         output_file.write(f"No valid weight values found for {sex_label}.\n\n")
 
-        print(f"Results written to: {stats_file_path}")
+
 
 
 
@@ -305,7 +305,7 @@ class Multi_Summarization:
                             else:
                                 print(f"No body depth values found for {sex_label} in {base_name}.")
 
-        print(f"Plots saved to: {pdf_filepath}")
+
     
 
     # Calculate Statistics
@@ -343,7 +343,7 @@ class Multi_Summarization:
                         sex_label = 'Male' if sex == 0 else 'Female'
                         output_file.write(f"No valid body depth values found for {sex_label}.\n\n")
 
-        print(f"Results written to: {stats_file_path}")
+
     
  
                           
@@ -379,8 +379,7 @@ class Multi_Summarization:
                             print(f"Results written to: {max_bout_file_path}")
                         else:
                             print("No valid 'bout_no' data found for any agent.")
-                else:
-                    print("No 'bout_no' data found in 'agent_data'.")
+
                     
                     
     def bout_no_statistics(self, hdf_path):
@@ -418,8 +417,8 @@ class Multi_Summarization:
                         print(f"Results written to: {stats_file_path}")
                 else:
                     print("No valid 'bout_no' data found for any agent.")
-            else:
-                print("No 'bout_no' data found in 'agent_data'.")
+
+
                 
 
     def kcal_statistics(self, hdf_path):
@@ -505,7 +504,6 @@ class Multi_Summarization:
                 else:
                     output_file.write(f"No valid kcal values found for {sex_label}.\n\n")
         
-        print(f"Cumulative results written to: {stats_file_path}")
            
         
     def kcal_histograms_directory(self):
@@ -574,7 +572,6 @@ class Multi_Summarization:
                 pdf.savefig(fig)
                 plt.close(fig)
 
-        print(f"Cumulative histograms saved to: {pdf_filename}")
 
         # New functionality to create individual histograms for each agent
         agent_data = {'Male': {}, 'Female': {}}
@@ -658,7 +655,7 @@ class Multi_Summarization:
                     pdf.savefig(fig)
                     plt.close(fig)
 
-        print(f"Individual histograms saved to: {pdf_filename_individual}")
+
         
         
         
@@ -738,8 +735,7 @@ class Multi_Summarization:
             for entry in entries:
                 txt_file.write(f"Agent ID {entry['agent_id']} entered at timestep {entry['timestep']} with coordinates {entry['coordinates']}\n")
 
-        print(f"Plot saved to: {pdf_filepath}")
-        print(f"Details of agents entering the shapefile area written to: {txt_filepath}")
+
                    
             
 #  AgentVisualizer     
@@ -767,7 +763,7 @@ class Multi_Summarization:
             pdf.savefig(fig)
             plt.close(fig)
 
-        print(f"Efficient plot saved to: {pdf_filepath}")
+
 
 
 
@@ -806,7 +802,7 @@ class Multi_Summarization:
             plt.savefig(tiff_output_path, dpi=150)
             plt.close(fig)
 
-            print(f"Optimized plot saved to {pdf_filepath} and {tiff_output_path}")
+
                 
 
     # Heatmap of ALL Agents
@@ -838,24 +834,24 @@ class Multi_Summarization:
             pdf.savefig(fig)  # Consider specifying dpi if needed
             plt.close(fig)
 
-        print(f"Optimized results written to: {pdf_filepath}")
+
         
         
 
 
     
-    def process_agents(self, hdf_path):
+    def process_agents(self, hdf_path, chunk_size=100):
         base_name = os.path.splitext(os.path.basename(hdf_path))[0]
         output_folder = os.path.dirname(hdf_path)
         tiff_output_path = os.path.join(output_folder, f'{base_name}_Agents_Locations.tif')
         txt_output_path = os.path.join(output_folder, f'{base_name}_Agents_Per_Cell_Stats.txt')
         combined_heatmap_tiff_output_path = os.path.join(output_folder, f'{base_name}_2-Band-Avg_STD.tif')
-    
+
         # Ensure output directory exists
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
             print(f"Created output directory: {output_folder}")
-    
+
         # Load the TIFF image
         try:
             with rasterio.open(self.tif_path) as tiff:
@@ -866,77 +862,75 @@ class Multi_Summarization:
         except Exception as e:
             print(f"Error loading TIFF image: {e}")
             return
-    
-        # Load agent data from HDF5 file
-        try:
-            with h5py.File(hdf_path, 'r') as hdf:
-                x_data = hdf['agent_data']['X'][:]
-                y_data = hdf['agent_data']['Y'][:]
-                num_timesteps = x_data.shape[1]
-        except Exception as e:
-            print(f"Error loading HDF5 data: {e}")
-            return
-    
-        # Process grid lines and cells without plotting them
-        x_min, y_min = tiff_bounds.left, tiff_bounds.bottom
-        x_max, y_max = tiff_bounds.right, tiff_bounds.top
-        x_ticks = np.arange(x_min, x_max, self.cell_width)
-        y_ticks = np.arange(y_min, y_max, self.cell_height)
-        num_cells_x = len(x_ticks) - 1
-        num_cells_y = len(y_ticks) - 1
-    
-        # Create a new TIFF file for agent locations
-        try:
-            agent_data = np.zeros_like(tiff_data, dtype=np.uint8)
-            agent_coords = np.vstack((x_data.flatten(), y_data.flatten())).T
-            agent_pixel_coords = np.array([~tiff_transform * coord for coord in agent_coords]).astype(int)
-            valid_idx = (
-                (agent_pixel_coords[:, 0] >= 0) & (agent_pixel_coords[:, 0] < tiff_data.shape[1]) &
-                (agent_pixel_coords[:, 1] >= 0) & (agent_pixel_coords[:, 1] < tiff_data.shape[0])
-            )
-            valid_coords = agent_pixel_coords[valid_idx]
-            agent_data[valid_coords[:, 1], valid_coords[:, 0]] = 255
-            tiff_meta.update({'count': 1, 'dtype': 'uint8', 'nodata': 0})
-            with rasterio.open(tiff_output_path, 'w', **tiff_meta) as dst:
-                dst.write(agent_data, 1)
-            print(f"Agent locations TIFF saved to {tiff_output_path}")
-        except Exception as e:
-            print(f"Error creating agent locations TIFF: {e}")
-            return
-    
-        # Calculate the number of agents per grid cell per timestep
-        agent_counts = np.zeros((num_timesteps, num_cells_y, num_cells_x), dtype=int)
-    
-        for timestep in range(num_timesteps):
-            x_coords = x_data[:, timestep]
-            y_coords = y_data[:, timestep]
-            for x, y in zip(x_coords, y_coords):
-                if np.isnan(x) or np.isnan(y):
-                    continue
-                cell_x = int((x - x_min) / self.cell_width)
-                cell_y = int((y - y_min) / self.cell_height)
-                if 0 <= cell_x < num_cells_x and 0 <= cell_y < num_cells_y:
-                    agent_counts[timestep, cell_y, cell_x] += 1
-    
-        # Calculate the average and standard deviation of agents per grid cell
-        avg_agent_counts = np.mean(agent_counts, axis=0)
-        std_agent_counts = np.std(agent_counts, axis=0)
-    
+
+        # Initialize accumulators
+        avg_agent_counts_accum = None
+        std_agent_counts_accum = None
+        count_accum = 0
+
+        # Initialize agent location data
+        agent_data = np.zeros_like(tiff_data, dtype=np.uint8)
+
+        # Process the data in chunks
+        with h5py.File(hdf_path, 'r') as hdf:
+            x_data = hdf['agent_data']['X']
+            y_data = hdf['agent_data']['Y']
+            num_agents, num_timesteps = x_data.shape
+
+            x_min, y_min = tiff_bounds.left, tiff_bounds.bottom
+            x_max, y_max = tiff_bounds.right, tiff_bounds.top
+            x_ticks = np.arange(x_min, x_max, self.cell_width)
+            y_ticks = np.arange(y_min, y_max, self.cell_height)
+            num_cells_x = len(x_ticks) - 1
+            num_cells_y = len(y_ticks) - 1
+
+            for start in range(0, num_timesteps, chunk_size):
+                end = min(start + chunk_size, num_timesteps)
+                x_chunk = x_data[:, start:end]
+                y_chunk = y_data[:, start:end]
+
+                agent_counts_chunk = np.zeros((num_cells_y, num_cells_x), dtype=int)
+                for agent in range(num_agents):
+                    x_coords = x_chunk[agent]
+                    y_coords = y_chunk[agent]
+                    for x, y in zip(x_coords, y_coords):
+                        if np.isnan(x) or np.isnan(y):
+                            continue
+                        cell_x = int((x - x_min) / self.cell_width)
+                        cell_y = int((y - y_min) / self.cell_height)
+                        if 0 <= cell_x < num_cells_x and 0 <= cell_y < num_cells_y:
+                            agent_counts_chunk[cell_y, cell_x] += 1
+                            # Update agent locations TIFF data
+                            agent_coords = np.array([~tiff_transform * (x, y)]).astype(int)
+                            if 0 <= agent_coords[0][0] < agent_data.shape[1] and 0 <= agent_coords[0][1] < agent_data.shape[0]:
+                                agent_data[agent_coords[0][1], agent_coords[0][0]] = 255
+
+                if avg_agent_counts_accum is None:
+                    avg_agent_counts_accum = np.zeros_like(agent_counts_chunk, dtype=float)
+                    std_agent_counts_accum = np.zeros_like(agent_counts_chunk, dtype=float)
+
+                avg_agent_counts_accum += agent_counts_chunk
+                std_agent_counts_accum += agent_counts_chunk ** 2
+                count_accum += 1
+
+        # Finalize the accumulators to get the averages and standard deviations
+        avg_agent_counts = avg_agent_counts_accum / count_accum
+        std_agent_counts = np.sqrt((std_agent_counts_accum / count_accum) - (avg_agent_counts ** 2))
+
         # Save the average and standard deviation statistics to a text file
         try:
             with open(txt_output_path, 'w') as txt_file:
                 txt_file.write("\n\nAverage and Standard Deviation of Cell Counts across All Timesteps:\n\n")
                 cell_id = 1
-                for y in range(num_cells_y):
-                    for x in range(num_cells_x):
+                for y in range(avg_agent_counts.shape[0]):
+                    for x in range(avg_agent_counts.shape[1]):
                         if avg_agent_counts[y, x] > 0 or std_agent_counts[y, x] > 0:  # Only write cells with agents
                             txt_file.write(f"  Cell {cell_id:5}:    Avg Agents: {avg_agent_counts[y, x]:10.2f}    Std Agents: {std_agent_counts[y, x]:10.2f}\n")
                         cell_id += 1
-            print(f"Agent per cell statistics saved to {txt_output_path}")
         except Exception as e:
             print(f"Error saving agent statistics to text file: {e}")
             return
-    
+
         # Create a combined 2-band TIFF file for average and standard deviation of agent presence
         # Band 1 is average agents per cell and band 2 is standard deviation of agents per cell
         try:
@@ -952,10 +946,20 @@ class Multi_Summarization:
                 flipped_std_band = np.flipud(std_band)
                 dst.write(flipped_avg_band, 1)
                 dst.write(flipped_std_band, 2)
-            print(f"2-Band Avg_STD heatmap TIFF saved to {combined_heatmap_tiff_output_path}")
         except Exception as e:
             print(f"Error creating combined heatmap TIFF: {e}")
             return
+
+        # Save the agent locations TIFF
+        try:
+            tiff_meta.update({'count': 1, 'dtype': 'uint8', 'nodata': 0})
+            with rasterio.open(tiff_output_path, 'w', **tiff_meta) as dst:
+                dst.write(agent_data, 1)
+            print(f"Agent locations TIFF saved to {tiff_output_path}")
+        except Exception as e:
+            print(f"Error creating agent locations TIFF: {e}")
+            return
+
     
 
     
@@ -985,8 +989,6 @@ class Multi_Summarization:
                                         cell_data[cell_id] = {'avg_agents': [], 'std_agents': []}
                                     cell_data[cell_id]['avg_agents'].append(avg_agents)
                                     cell_data[cell_id]['std_agents'].append(std_agents)
-                                else:
-                                    print(f"Skipping line due to unexpected format: {line.strip()}")
                     except Exception as e:
                         print(f"Error loading text file {txt_path}: {e}")
                         continue
@@ -995,7 +997,6 @@ class Multi_Summarization:
             print("No valid data found in any text file.")
             return
 
-        print("Aggregating data for cells...")  # Debug print
         # Calculate the overall average and standard deviation for each cell
         aggregated_data = {}
         for cell_id, data in cell_data.items():
@@ -1003,7 +1004,6 @@ class Multi_Summarization:
             std_agents = np.mean(data['std_agents'])
             aggregated_data[cell_id] = (avg_agents, std_agents)
 
-        print(f"Aggregated data: {aggregated_data}")  # Debug print
 
         # Save the aggregated data to a new text file
         aggregated_txt_output_path = os.path.join(self.directory_path, 'Aggregated_Agents_Per_Cell_Stats.txt')
@@ -1012,7 +1012,6 @@ class Multi_Summarization:
                 txt_file.write("\n\nAverage and Standard Deviation of Cell Counts across All Timesteps:\n\n")
                 for cell_id, (avg_agents, std_agents) in aggregated_data.items():
                     txt_file.write(f"  Cell {cell_id:5}:    Avg Agents: {avg_agents:10.2f}    Std Agents: {std_agents:10.2f}\n")
-            print(f"Aggregated data saved to {aggregated_txt_output_path}")
         except Exception as e:
             print(f"Error saving aggregated data to text file: {e}")
             return
@@ -1052,7 +1051,6 @@ class Multi_Summarization:
                 flipped_std_band = np.flipud(std_band)
                 dst.write(flipped_avg_band, 1)
                 dst.write(flipped_std_band, 2)
-            print(f"Cumulative 2-Band Avg_STD heatmap TIFF saved to {combined_heatmap_tiff_output_path}")
         except Exception as e:
             print(f"Error creating cumulative heatmap TIFF: {e}")
             return
@@ -1083,8 +1081,8 @@ class Multi_Summarization:
        self.weight_statistics(hdf_path)
        self.plot_body_depths(hdf_path)
        self.body_depth_statistics(hdf_path)
-       self.max_bout_no(hdf_path)
-       self.bout_no_statistics(hdf_path)
+       #self.max_bout_no(hdf_path)
+       #self.bout_no_statistics(hdf_path)
        self.kcal_statistics(hdf_path)
        self.Agent_Plot_Rectangle(self.shapefile_path, hdf_path)
        self.plot_agent_locations(hdf_path)
