@@ -1062,7 +1062,7 @@ class simulation():
                  crs, 
                  basin, 
                  water_temp, 
-                 starting_box,
+                 start_polygon,
                  env_files,
                  longitudinal_profile,
                  fish_length = None,
@@ -1150,12 +1150,27 @@ class simulation():
         self.time_of_abandon = self.arr.repeat(0.0, num_agents)
         self.time_since_abandon = self.arr.repeat(0.0, num_agents)
         self.dead = np.zeros(num_agents)
-        if pid_tuning != True:
-            self.X = self.arr.random.uniform(starting_box[0], starting_box[1],num_agents)
-            self.Y = self.arr.random.uniform(starting_box[2], starting_box[3],num_agents)
-        else:
-            self.X = np.array([starting_box[0]])
-            self.Y = np.array([starting_box[1]])
+        
+        # create initial positions
+        gdf = gpd.read_file(start_polygon)
+
+        # Get the geometry of the shapefile
+        geometry = gdf.geometry.unary_union
+        
+        minx, miny, maxx, maxy = geometry.bounds
+        X = []
+        Y = []
+
+        while len(X) <= self.num_agents:
+            random_points = np.random.uniform([minx, miny], [maxx, maxy], size=(self.num_agents*2, 2))
+            for x, y in random_points:
+                pnt = Point(x, y)
+                if geometry.contains(pnt):
+                    X.append(x)
+                    Y.append(y)
+
+        self.X = np.array(X)[:self.num_agents]
+        self.Y = np.array(Y)[:self.num_agents]
             
         self.prev_X = self.X
         self.prev_Y = self.Y
@@ -3381,8 +3396,9 @@ class simulation():
             # Initialize an array to hold the repulsive forces for each agent
             repulsive_forces = np.zeros((self.simulation.num_agents,2), dtype=float)
             
-            min_depth = (self.simulation.body_depth * 1.1) / 100.# Use advanced indexing to create a boolean mask for the slices
-                
+            #min_depth = (self.simulation.body_depth * 1.1) / 100.# Use advanced indexing to create a boolean mask for the slices
+            min_depth = self.simulation.too_shallow
+            
             # Create slices
             slices = [(agent, slice(y0, y1), slice(x0, x1)) 
                       for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),  
@@ -3860,7 +3876,7 @@ class simulation():
             
             return collision_cue_mm     
         
-        def is_in_eddy(self):
+        def is_in_eddy(self,t):
             """
             Assess whether each agent is in an eddy based on several conditions,
             including displacement and behavioral states. This function updates the
@@ -3932,7 +3948,7 @@ class simulation():
             long_dir = self.simulation.past_longitudes[:,-2] - self.simulation.past_longitudes[:,-1]
 
             # Check if agents have moved less than expected, if they are moving backwards, and if they are sustained swimming mode
-            if delta.shape == total_displacement.shape:
+            if delta.shape == total_displacement.shape and t >= 1800.:
                 # stuck_conditions = (expected_displacement >= 2* total_displacement) & \
                 #     (self.simulation.swim_mode == 1) & (np.sign(delta) > 0) 
                     
@@ -3998,10 +4014,10 @@ class simulation():
 
             else:
                 # calculate attractive forces
-                rheotaxis = self.rheo_cue(16000)        # 10000
-                alignment = self.alignment_cue(22000)
-                cohesion = self.cohesion_cue(10000)
-                low_speed = self.vel_cue(2000)          # 8000 
+                rheotaxis = self.rheo_cue(17000)        # 10000
+                alignment = self.alignment_cue(18000)
+                cohesion = self.cohesion_cue(12000)
+                low_speed = self.vel_cue(3000)          # 8000 
                 wave_drag = self.wave_drag_cue(0)       # 5000                
                 refugia = self.find_nearest_refuge(50000)
                 # calculate high priority repusive forces
@@ -4037,7 +4053,7 @@ class simulation():
                                 1:'border',
                                 2:'refugia'}
             
-            self.is_in_eddy()
+            self.is_in_eddy(t)
             
             # Arbitrate between different behaviors
             # how many f4cks does this fish have?
