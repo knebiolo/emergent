@@ -1188,10 +1188,11 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.3 # 0.5 or 0.1
-        adult_intercept_adjustment = 2.1 # 1.5 or 2.1
+        adult_slope_adjustment = 1.0 # 0.5 or 0.1
+        adult_intercept_adjustment = 0.0 # 1.5 or 2.1
+        prolonged_swim_speed_adjustment = 2.1
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
-        self.max_p_U = 4.43 + adult_intercept_adjustment  # maximum prolonged swim speed
+        self.max_p_U = 4.43 + prolonged_swim_speed_adjustment  # maximum prolonged swim speed
         self.a_p = 8.643 + adult_intercept_adjustment   # prolonged intercept
         self.b_p = -2.0894 * adult_slope_adjustment  # prolonged slope
         self.a_s = 0.1746  + adult_intercept_adjustment    # sprint intercept
@@ -3776,8 +3777,8 @@ class simulation():
             #sogs = np.array([np.min(self.simulation.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
 
             # make sure sogs don't get too low
-            sogs = np.where(sogs < 0.5 * self.simulation.length / 1000,
-                            0.5 * self.simulation.length / 1000,
+            sogs = np.where(sogs < 0.1 * self.simulation.length / 1000,
+                            0.1 * self.simulation.length / 1000,
                             sogs)
             
             self.simulation.school_sog = sogs
@@ -4015,8 +4016,8 @@ class simulation():
             else:
                 # calculate attractive forces
                 rheotaxis = self.rheo_cue(25000)        # 10000
-                alignment = self.alignment_cue(25000)
-                cohesion = self.cohesion_cue(15000)
+                alignment = self.alignment_cue(15000)
+                cohesion = self.cohesion_cue(20000)
                 low_speed = self.vel_cue(5000)          # 8000 
                 wave_drag = self.wave_drag_cue(0)       # 5000                
                 refugia = self.find_nearest_refuge(50000)
