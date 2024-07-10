@@ -1188,7 +1188,7 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.1 # 0.5 or 0.1
+        adult_slope_adjustment = 0.3 # 0.5 or 0.1
         adult_intercept_adjustment = 2.1 # 1.5 or 2.1
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43 + adult_intercept_adjustment  # maximum prolonged swim speed
@@ -3007,7 +3007,7 @@ class simulation():
             refugia_map_rows, refugia_map_cols = geo_to_pixel(x, y, self.simulation.refugia_map_transform)
         
             # Define buffer zone around current positions
-            buff = 100
+            buff = 20
         
             row_min = np.clip(refugia_map_rows - buff, 0, None)
             row_max = np.clip(refugia_map_rows + buff + 1, None, self.simulation.hdf5['refugia/0'].shape[0])
@@ -4014,17 +4014,17 @@ class simulation():
 
             else:
                 # calculate attractive forces
-                rheotaxis = self.rheo_cue(17000)        # 10000
-                alignment = self.alignment_cue(18000)
-                cohesion = self.cohesion_cue(12000)
-                low_speed = self.vel_cue(3000)          # 8000 
+                rheotaxis = self.rheo_cue(25000)        # 10000
+                alignment = self.alignment_cue(25000)
+                cohesion = self.cohesion_cue(15000)
+                low_speed = self.vel_cue(5000)          # 8000 
                 wave_drag = self.wave_drag_cue(0)       # 5000                
                 refugia = self.find_nearest_refuge(50000)
                 # calculate high priority repusive forces
                 border = self.border_cue(50000, t)
                 shallow = self.shallow_cue(100000)       # 10000
                 avoid = self.already_been_here(10000, t)# 3000
-                collision = self.collision_cue(20000)    # 2500 
+                collision = self.collision_cue(25000)    # 2500 
             
             # Create dictionary that has order of behavioral cues
             order_dict = {0: 'shallow',
@@ -4033,8 +4033,8 @@ class simulation():
                           3: 'collision', 
                           4: 'alignment', 
                           5: 'cohesion',
-                          6: 'rheotaxis', 
-                          7: 'low_speed', 
+                          6: 'low_speed',
+                          7: 'rheotaxis',  
                           8: 'wave_drag'}
             
             # Create dictionary that holds all steering cues
@@ -4222,11 +4222,11 @@ class simulation():
                 
                 # Implement T Castro Santos (2005)
                 ttf = np.where(mask_dict['prolonged'], 
-                               np.exp(a_p + swim_speeds/lengths * b_p),
+                               np.exp(a_p + swim_speeds * b_p),
                                ttf)
                 
                 ttf = np.where(mask_dict['sprint'], 
-                               np.exp(a_s + swim_speeds/lengths * b_s),
+                               np.exp(a_s + swim_speeds * b_s),
                                ttf)
                 
                 return ttf
@@ -4453,7 +4453,7 @@ class simulation():
             self.bout_distance()
             
             # assess time to fatigue
-            ttf = self.time_to_fatigue(swim_speeds, mask_dict)
+            ttf = self.time_to_fatigue(bl_s, mask_dict)
             
             # set swim mode
             self.set_swim_mode(mask_dict)
@@ -4537,7 +4537,7 @@ class simulation():
         
         # Create a boolean mask for the fish that should jump
         should_jump = (sog_to_water_vel_ratio <= 0.10) & \
-            (time_since_jump > 30) & \
+            (time_since_jump > 60) & \
                 (self.battery >= 0.25)
         
         # Apply the jump or swim functions based on the condition

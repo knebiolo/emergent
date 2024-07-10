@@ -20,7 +20,7 @@ import os
 
 
 # identify input and output model names
-model_name = 'sense_6'
+model_name = 'sense_10'
 
 # identify directories
 model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\abm_simulations\sensitivity",model_name)
@@ -30,7 +30,7 @@ model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\abm_simulations\sensitivity
 crs = 32604
 
 # create a starting box - aka where are all the fish starting from?
-start_polygon = os.path.join(model_dir,'starting.shp')  
+start_polygon = os.path.join(model_dir,'river_left.shp')  
 
 # how many agents in the simulation?
 n = 1000
@@ -39,7 +39,7 @@ n = 1000
 dt = 1
 
 # how many timesteps in the model?
-hours = 4
+hours = 2
 ts = 3600. * hours / dt
 
 # what is the water temp?
