@@ -4017,8 +4017,8 @@ class simulation():
                 # calculate attractive forces
                 rheotaxis = self.rheo_cue(25000)        # 10000
                 alignment = self.alignment_cue(8000)
-                cohesion = self.cohesion_cue(8000)
-                low_speed = self.vel_cue(10000)          # 8000 
+                cohesion = self.cohesion_cue(11000)
+                low_speed = self.vel_cue(7000)          # 8000 
                 wave_drag = self.wave_drag_cue(0)       # 5000                
                 refugia = self.find_nearest_refuge(50000)
                 # calculate high priority repusive forces
