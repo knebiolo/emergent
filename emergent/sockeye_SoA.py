@@ -42,7 +42,7 @@ import pandas as pd
 # from pysal.model import spreg
 from affine import Affine as AffineTransform
 import rasterio
-from rasterio.transform import Affine
+from rasterio.transform import Affine, from_origin
 from rasterio.mask import mask
 from rasterio.crs import CRS
 from rasterio.warp import reproject, calculate_default_transform
@@ -4911,9 +4911,16 @@ class summary:
                 tiff_dataset.crs, desired_crs, tiff_dataset.width, tiff_dataset.height,
                 *tiff_dataset.bounds)
             
-            self.transform = transform
-            self.width = width
-            self.height = height
+            # Calculate the new transform for 10x10 meter resolution
+            new_transform = from_origin(transform.c, transform.f, 10, 10)
+            
+            # Calculate new width and height
+            new_width = int((tiff_dataset.bounds.right - tiff_dataset.bounds.left) / 10)
+            new_height = int((tiff_dataset.bounds.top - tiff_dataset.bounds.bottom) / 10)
+            
+            self.transform = new_transform
+            self.width = new_width
+            self.height = new_height
 
             # Reproject the TIFF image to the desired CRS
             image_data, _ = reproject(
@@ -4940,6 +4947,9 @@ class summary:
             # create a full path object
             full_path = os.path.join(self.parent_directory, item)
             
+            if full_path.endswith('.h5'):
+                h5_files.append(full_path)
+            
             # if full path is a directory and not a file - we found a child
             if os.path.isdir(full_path):
                 child_dirs.append(full_path)
@@ -4954,10 +4964,10 @@ class summary:
         return h5_files
         
     # Collect, rearrange, and manage data
-    def get_data(self):
+    def get_data(self, h5_files):
 
         # Iterate through each HDF5 file in the specified directory and get data
-        for filename in self.h5_files:
+        for filename in h5_files:
 
             with h5py.File(filename, 'r') as hdf:
                 cell_center_x = pd.DataFrame(hdf['x_coords'][:])
@@ -5008,6 +5018,7 @@ class summary:
                     ts = pd.merge(ts, melted_Hz, on = ['agent','timestep'])
                     ts['filename'] = filename
                     
+                    print ('Data Imported ')
                     # turn ts into a geodataframe and find the fish that passed
                     geometry = [Point(xy) for xy in zip(ts['X'], ts['Y'])]
                     geo_ts = gpd.GeoDataFrame(ts, geometry=geometry)            
@@ -5061,7 +5072,7 @@ class summary:
                                             pass_time_90,
                                             pass_time_100]
             
-    def emergence(self):
+    def emergence(self,filename):
         '''Method quantifies emergent spatial properties of the agent based model.
         
         Our problem is 5D, 2 spatial dimensions, 1 temporal dimension, iterations, 
@@ -5102,8 +5113,9 @@ class summary:
                 data_2d = np.full((self.height, self.width), timestep)
         
                 t_dat = dat[dat.timestep == timestep]
+                
                 # Convert geographic coordinates to pixel indices using your function
-                rows, cols = geo_to_pixel(t_dat.X, t_dat.Y, np, transform)
+                rows, cols = geo_to_pixel(t_dat.X, t_dat.Y, transform)
                 
                 # Combine row and column indices to get unique cell identifiers
                 cell_indices = np.stack((cols, rows), axis=1)
@@ -5124,14 +5136,30 @@ class summary:
                 
                 # Insert the 2D array into the pre-allocated 3D array
                 data_over_time[timestep, :, :] = agent_counts_grid
-                print ('file %s timestep %s complete')
+                print ('file %s timestep %s complete'%(filename,timestep))
                 
             # calculate the average and st dev count per cell per time
-            average_per_cell = np.mean(data_over_time, axis = 0)
-            sd_per_cell = np.std(data_over_time, axis = 0)
+            self.average_per_cell = np.mean(data_over_time, axis = 0)
+            self.sd_per_cell = np.std(data_over_time, axis = 0)
             
             # create dual band raster and write to output directory
-                
+            output_file = f'{filename}_dual_band.tif'
+            
+            # Create dual band raster and write to output directory
+            with rasterio.open(
+                output_file, 'w',
+                driver='GTiff',
+                height=self.height,
+                width=self.width,
+                count=2,  # Two bands
+                dtype=self.average_per_cell.dtype,
+                crs=self.transform.crs,
+                transform=self.transform
+            ) as dst:
+                dst.write(self.average_per_cell, 1)  # Write the average to the first band
+                dst.write(self.sd_per_cell, 2)       # Write the standard deviation to the second band
+            
+            print(f'Dual band raster {output_file} created successfully.')                
             # add data to dictionary to hold all data
-            iterations[filename] = data_over_time
+            #iterations[filename] = data_over_time
             
