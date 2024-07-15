@@ -33,13 +33,13 @@ crs = 32604
 start_polygon = os.path.join(model_dir,'river_left.shp')  
 
 # how many agents in the simulation?
-n = 1000
+n = 500
 
 # what is the delta t
 dt = 1
 
 # how many timesteps in the model?
-hours = 2
+hours = 3
 ts = 3600. * hours / dt
 
 # what is the water temp?

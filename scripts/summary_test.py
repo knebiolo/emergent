@@ -18,14 +18,14 @@ import emergent as sockeye
 import os
 
 #%% Identify Workspace to Summarize
-inputWS = r'C:\Users\knebiolo\Desktop\abm_simulations\sensitivity\sense_9'
+inputWS = r'C:\Users\knebiolo\Desktop\abm_simulations\sensitivity\sense_10'
 tiffWS = r'C:\Users\knebiolo\Desktop\abm_simulations\sensitivity\sense_10\depth_mask_mosaic.tif'
 crs = 32604
-filename = os.path.join(inputWS,'sense_9')
+filename = os.path.join(inputWS,'sense_10')
 
 #%% Summarize
 model_summary = sockeye.summary(inputWS,tiffWS)
 image_data, tiff_extent = model_summary.load_tiff(crs)
 h5_files = model_summary.find_h5_files()
 model_summary.get_data(h5_files)
-model_summary.emergence(filename)
+model_summary.emergence(filename,crs)

@@ -1188,7 +1188,7 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.5 # 0.5 or 0.1
+        adult_slope_adjustment = 0.3 # 0.5 or 0.1
         adult_intercept_adjustment = 1.5 # 1.5 or 2.1
         prolonged_swim_speed_adjustment = 2.1
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
@@ -1946,7 +1946,7 @@ class simulation():
         
         # Radius for nearest neighbors search
         #TODO changed from 2 to xx
-        radius = 5.
+        radius = 6.
         
         # Find agents within the specified radius for each agent
         agents_within_radius = tree.query_ball_tree(tree, r=radius)
@@ -3375,7 +3375,7 @@ class simulation():
             the overhead of Python loops.
             """
 
-            buff = 2 #* self.length / 1000.  # 2 meters
+            buff = 4 #* self.length / 1000.  # 2 meters
         
             # get the x, y position of the agent 
             x, y = (self.simulation.X, self.simulation.Y)
@@ -3953,8 +3953,8 @@ class simulation():
                 # stuck_conditions = (expected_displacement >= 2* total_displacement) & \
                 #     (self.simulation.swim_mode == 1) & (np.sign(delta) > 0) 
                     
-                stuck_conditions = (expected_displacement >= 2.75 * np.abs(total_displacement)) & \
-                        (np.sign(long_dir) > 0) & (self.simulation.swim_behav == 1)
+                stuck_conditions = (expected_displacement >= 5. * np.abs(total_displacement)) \
+                    & (self.simulation.swim_behav == 1)
             else:
                 stuck_conditions = np.zeros_like(self.simulation.X)
             
@@ -4016,16 +4016,16 @@ class simulation():
             else:
                 # calculate attractive forces
                 rheotaxis = self.rheo_cue(25000)        # 10000
-                alignment = self.alignment_cue(8000)
+                alignment = self.alignment_cue(20500)
                 cohesion = self.cohesion_cue(11000)
-                low_speed = self.vel_cue(7000)          # 8000 
+                low_speed = self.vel_cue(500)          # 8000 
                 wave_drag = self.wave_drag_cue(0)       # 5000                
                 refugia = self.find_nearest_refuge(50000)
                 # calculate high priority repusive forces
                 border = self.border_cue(50000, t)
                 shallow = self.shallow_cue(100000)       # 10000
-                avoid = self.already_been_here(10000, t)# 3000
-                collision = self.collision_cue(25000)    # 2500 
+                avoid = self.already_been_here(25000, t)# 3000
+                collision = self.collision_cue(50000)    # 2500 
             
             # Create dictionary that has order of behavioral cues
             order_dict = {0: 'shallow',
@@ -4911,12 +4911,13 @@ class summary:
                 tiff_dataset.crs, desired_crs, tiff_dataset.width, tiff_dataset.height,
                 *tiff_dataset.bounds)
             
+            cell_size = 5.
             # Calculate the new transform for 10x10 meter resolution
-            new_transform = from_origin(transform.c, transform.f, 10, 10)
+            new_transform = from_origin(transform.c, transform.f, cell_size, cell_size)
             
             # Calculate new width and height
-            new_width = int((tiff_dataset.bounds.right - tiff_dataset.bounds.left) / 10)
-            new_height = int((tiff_dataset.bounds.top - tiff_dataset.bounds.bottom) / 10)
+            new_width = int((tiff_dataset.bounds.right - tiff_dataset.bounds.left) / cell_size)
+            new_height = int((tiff_dataset.bounds.top - tiff_dataset.bounds.bottom) / cell_size)
             
             self.transform = new_transform
             self.width = new_width
@@ -5072,7 +5073,7 @@ class summary:
                                             pass_time_90,
                                             pass_time_100]
             
-    def emergence(self,filename):
+    def emergence(self,filename,crs):
         '''Method quantifies emergent spatial properties of the agent based model.
         
         Our problem is 5D, 2 spatial dimensions, 1 temporal dimension, iterations, 
@@ -5153,7 +5154,7 @@ class summary:
                 width=self.width,
                 count=2,  # Two bands
                 dtype=self.average_per_cell.dtype,
-                crs=self.transform.crs,
+                crs=crs,
                 transform=self.transform
             ) as dst:
                 dst.write(self.average_per_cell, 1)  # Write the average to the first band
