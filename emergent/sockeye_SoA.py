@@ -1188,7 +1188,7 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.3 # 0.5 or 0.1
+        adult_slope_adjustment = 0.2 # 0.5 or 0.1
         adult_intercept_adjustment = 1.5 # 1.5 or 2.1
         prolonged_swim_speed_adjustment = 2.1
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
@@ -3375,7 +3375,7 @@ class simulation():
             the overhead of Python loops.
             """
 
-            buff = 4 #* self.length / 1000.  # 2 meters
+            buff = 3 #* self.length / 1000.  # 2 meters
         
             # get the x, y position of the agent 
             x, y = (self.simulation.X, self.simulation.Y)
