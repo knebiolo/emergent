@@ -5139,28 +5139,35 @@ class summary:
                 data_over_time[timestep, :, :] = agent_counts_grid
                 print ('file %s timestep %s complete'%(filename,timestep))
                 
-            # calculate the average and st dev count per cell per time
-            self.average_per_cell = np.mean(data_over_time, axis = 0)
-            self.sd_per_cell = np.std(data_over_time, axis = 0)
             
-            # create dual band raster and write to output directory
-            output_file = f'{filename}_dual_band.tif'
-            
-            # Create dual band raster and write to output directory
-            with rasterio.open(
-                output_file, 'w',
-                driver='GTiff',
-                height=self.height,
-                width=self.width,
-                count=2,  # Two bands
-                dtype=self.average_per_cell.dtype,
-                crs=crs,
-                transform=self.transform
-            ) as dst:
-                dst.write(self.average_per_cell, 1)  # Write the average to the first band
-                dst.write(self.sd_per_cell, 2)       # Write the standard deviation to the second band
-            
-            print(f'Dual band raster {output_file} created successfully.')                
             # add data to dictionary to hold all data
-            #iterations[filename] = data_over_time
+            iterations[filename] = data_over_time
+            
+        # Concatenate all data from different iterations
+        all_data = np.array(list(iterations.values()))
+        
+        # Calculate the average and standard deviation count per cell per time
+        self.average_per_cell = np.mean(all_data, axis=0).astype(np.float32)
+        self.sd_per_cell = np.std(all_data, axis=0).astype(np.float32)
+
+        # create dual band raster and write to output directory
+        output_file = f'{filename}_dual_band.tif'
+        
+        # Create dual band raster and write to output directory
+        with rasterio.open(
+            output_file, 'w',
+            driver='GTiff',
+            height=self.height,
+            width=self.width,
+            count=2,  # Two bands
+            dtype=self.average_per_cell.dtype,
+            crs=crs,
+            transform=self.transform
+        ) as dst:
+            dst.write(self.average_per_cell, 1)  # Write the average to the first band
+            dst.write(self.sd_per_cell, 2)       # Write the standard deviation to the second band
+    
+        
+        print(f'Dual band raster {output_file} created successfully.')                
+            
             
