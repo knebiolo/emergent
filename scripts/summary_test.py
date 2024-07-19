@@ -22,10 +22,11 @@ inputWS = r'C:\Users\knebiolo\Desktop\abm_simulations\sensitivity\sense_10'
 tiffWS = r'C:\Users\knebiolo\Desktop\abm_simulations\sensitivity\sense_10\depth_mask_mosaic.tif'
 crs = 32604
 filename = os.path.join(inputWS,'sense_10')
+scenario_name = 'cfs14000'
 
 #%% Summarize
 model_summary = sockeye.summary(inputWS,tiffWS)
 image_data, tiff_extent = model_summary.load_tiff(crs)
 h5_files = model_summary.find_h5_files()
 model_summary.get_data(h5_files)
-model_summary.emergence(filename,crs)
+model_summary.emergence(h5_files,scenario_name,crs)

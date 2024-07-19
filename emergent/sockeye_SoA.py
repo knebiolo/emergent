@@ -32,6 +32,7 @@ and swimming mode.
 # import dependencies
 #import cupy as cp
 import h5py
+import dask.array as da
 import geopandas as gpd
 import numpy as np
 import numpy.ma as ma
@@ -3375,7 +3376,7 @@ class simulation():
             the overhead of Python loops.
             """
 
-            buff = 3 #* self.length / 1000.  # 2 meters
+            buff = 2 #* self.length / 1000.  # 2 meters
         
             # get the x, y position of the agent 
             x, y = (self.simulation.X, self.simulation.Y)
@@ -4911,7 +4912,7 @@ class summary:
                 tiff_dataset.crs, desired_crs, tiff_dataset.width, tiff_dataset.height,
                 *tiff_dataset.bounds)
             
-            cell_size = 5.
+            cell_size = 2.
             # Calculate the new transform for 10x10 meter resolution
             new_transform = from_origin(transform.c, transform.f, cell_size, cell_size)
             
@@ -5073,7 +5074,7 @@ class summary:
                                             pass_time_90,
                                             pass_time_100]
             
-    def emergence(self,filename,crs):
+    def emergence(self,filename,scenario,crs):
         '''Method quantifies emergent spatial properties of the agent based model.
         
         Our problem is 5D, 2 spatial dimensions, 1 temporal dimension, iterations, 
@@ -5096,66 +5097,68 @@ class summary:
         '''
         # Agent coordinates and rasterio affine transform
         x_coords = self.ts.X  # X coordinates of agents
-        y_coords = self.ts.Y # Y coordinates of agents
+        y_coords = self.ts.Y  # Y coordinates of agents
         transform = self.transform  # affine transform from your rasterio dataset
         
-        iterations = dict()
+        hdf5_filename = 'intermediate_results.h5'
         
-        for filename in self.ts.filename.unique():
-            dat = self.ts[self.ts.filename == filename]
-            num_timesteps = self.ts.timestep.max()
+        with h5py.File(os.path.join(self.parent_directory,hdf5_filename), 'w') as hdf5_file:
+            for filename in self.ts.filename.unique():
+                dat = self.ts[self.ts.filename == filename]
+                num_timesteps = self.ts.timestep.max() + 1
+                num_iterations = len(self.ts.filename.unique())
+                
+                # Create a dataset for each filename
+                data_over_time = hdf5_file.create_dataset(
+                    filename,
+                    shape=(num_timesteps, self.height, self.width),
+                    dtype=np.float32,
+                    chunks=(1, self.height, self.width),
+                    compression="gzip"
+                )
+                
+                for timestep in range(num_timesteps):
+                    t_dat = dat[dat.timestep == timestep]
+                    
+                    # Convert geographic coordinates to pixel indices using your function
+                    rows, cols = geo_to_pixel(t_dat.X, t_dat.Y, transform)
+                    
+                    # Combine row and column indices to get unique cell identifiers
+                    cell_indices = np.stack((cols, rows), axis=1)
+                    
+                    # Count unique cells
+                    unique_cells, counts = np.unique(cell_indices, axis=0, return_counts=True)
+                    valid_rows, valid_cols = unique_cells[:, 1], unique_cells[:, 0]  # Unpack the unique cell indices
+                    
+                    # Initialize a 2D array with zeros
+                    agent_counts_grid = np.zeros((self.height, self.width), dtype=int)
+                    
+                    # Ensure the indices are within the grid bounds and update the agent_counts_grid
+                    within_bounds = (valid_rows >= 0) & (valid_rows < self.height) & (valid_cols >= 0) & (valid_cols < self.width)
+                    agent_counts_grid[valid_rows[within_bounds], valid_cols[within_bounds]] = counts[within_bounds]            
+                    
+                    # Insert the 2D array into the pre-allocated 3D array in HDF5
+                    data_over_time[timestep, :, :] = agent_counts_grid
+                    print(f'file {filename} timestep {timestep} complete')
             
-            # Pre-allocate a 3D numpy array with zeros
-            data_over_time = np.zeros((num_timesteps, self.height, self.width))
+            # Now aggregate results from HDF5
+            all_data = []
+            for filename in self.ts.filename.unique():
+                data = da.from_array(hdf5_file[filename], chunks=(1, self.height, self.width))
+                all_data.append(data)
             
-            for timestep in range(num_timesteps):
-                # Your calculation here that results in a 2D array for this timestep
-                # For demonstration, we'll just fill with the timestep value
-                data_2d = np.full((self.height, self.width), timestep)
-        
-                t_dat = dat[dat.timestep == timestep]
-                
-                # Convert geographic coordinates to pixel indices using your function
-                rows, cols = geo_to_pixel(t_dat.X, t_dat.Y, transform)
-                
-                # Combine row and column indices to get unique cell identifiers
-                cell_indices = np.stack((cols, rows), axis=1)
-                
-                # Count unique cells
-                unique_cells, counts = np.unique(cell_indices, axis=0, return_counts=True)
-                valid_rows, valid_cols = unique_cells[:, 1], unique_cells[:, 0]  # Unpack the unique cell indices
-                
-                # Assuming the size of your raster grid
-                grid_rows, grid_cols = self.height, self.width  # Actual size of your raster grid
-                
-                # Initialize a 2D array with zeros
-                agent_counts_grid = np.zeros((grid_rows, grid_cols), dtype=int)
-                
-                # Ensure the indices are within the grid bounds and update the agent_counts_grid
-                within_bounds = (valid_rows >= 0) & (valid_rows < grid_rows) & (valid_cols >= 0) & (valid_cols < grid_cols)
-                agent_counts_grid[valid_rows[within_bounds], valid_cols[within_bounds]] = counts[within_bounds]            
-                
-                # Insert the 2D array into the pre-allocated 3D array
-                data_over_time[timestep, :, :] = agent_counts_grid
-                print ('file %s timestep %s complete'%(filename,timestep))
-                
+            all_data = da.stack(all_data, axis=0)  # Stack along the new iteration axis
             
-            # add data to dictionary to hold all data
-            iterations[filename] = data_over_time
-            
-        # Concatenate all data from different iterations
-        all_data = np.array(list(iterations.values()))
-        
-        # Calculate the average and standard deviation count per cell per time
-        self.average_per_cell = np.mean(all_data, axis=0).astype(np.float32)
-        self.sd_per_cell = np.std(all_data, axis=0).astype(np.float32)
-
-        # create dual band raster and write to output directory
-        output_file = f'{filename}_dual_band.tif'
+            # Calculate the average and standard deviation count per cell over all iterations and timesteps
+            self.average_per_cell = da.mean(all_data, axis=(0, 1)).astype(np.float32).compute()
+            self.sd_per_cell = da.std(all_data, axis=(0, 1)).astype(np.float32).compute()
         
         # Create dual band raster and write to output directory
+        output_file = f'{scenario}_dual_band.tif'
+        
         with rasterio.open(
-            output_file, 'w',
+            os.path.join(self.parent_directory,output_file),
+            'w',
             driver='GTiff',
             height=self.height,
             width=self.width,
@@ -5166,8 +5169,5 @@ class summary:
         ) as dst:
             dst.write(self.average_per_cell, 1)  # Write the average to the first band
             dst.write(self.sd_per_cell, 2)       # Write the standard deviation to the second band
-    
         
-        print(f'Dual band raster {output_file} created successfully.')                
-            
-            
+        print(f'Dual band raster {output_file} created successfully.')
