@@ -20,10 +20,11 @@ import emergent as sockeye
 import os
 import shutil
 import multiprocessing
-from joblib import Parallel, delayed
+import dask
+from dask import delayed, compute
 
 # identify input and output model names
-model_name = 'Simulation_5k'
+model_name = 'Simulation'
 
 # identify directories
 model_dir = os.path.join(r"C:\Users\EMuhlestein\Documents\ABM_TEST\val_TEST",model_name)
@@ -34,16 +35,16 @@ crs = 32604
 
 # create a starting box - aka where are all the fish starting from?
 # W,E,S,N
-bbox = (550402.28,550533.22,6641508.09,6641584.47)                             # starting box way downstream
+#bbox = (550402.28,550533.22,6641508.09,6641584.47)                             # starting box way downstream
 #bbox = (549857.46,550072.26,6641405.92,6641347.85)                             # about halfway up
 #bbox = (549505.65,549589.76,6641553.32,6641564.74)                             # kinda near the falls
-#bbox = (549466.69,549520.48,6641583.35,6641625.48)                             # starting box right near the falls
+bbox = (549466.69,549520.48,6641583.35,6641625.48)                             # starting box right near the falls
 
 #How many simulations?
-num_simulations=25
+num_simulations=4
 
 # how many agents in the simulation?
-n = 5       #Agents need to be in 5 or 10 or by 5's
+n = 25       #Agents need to be in 5 or 10 or by 5's
 
 # what is the delta t
 dt = 1
@@ -109,7 +110,7 @@ def run_simulation(i):
             os.remove(os.path.join(simulation_dir, file))
 
 if __name__ == "__main__":
-    # Execute simulations in parallel using Joblib
-    Parallel(n_jobs=n_jobs)(delayed(run_simulation)(i) for i in range(1, num_simulations + 1))
-
-    print("All simulations completed.")
+    # Execute simulations in parallel using Dask
+    tasks = [delayed(run_simulation)(i) for i in range(1, num_simulations + 1)]
+    dask.compute(*tasks)
+    print("All Simulations Completed.")
