@@ -4893,6 +4893,9 @@ class summary:
         # where are the background tiffs stored?
         self.tif_path = tif_path
         
+        #set input WS as parent_directory for compatibility with methods
+        self.inputWS = parent_directory
+        
         # get h5 files associated with this model
         self.h5_files = self.find_h5_files()
         
@@ -5035,6 +5038,467 @@ class summary:
                                                   ignore_index = True) 
                     
                     print ('File %s imported'%(filename))
+                    
+                    
+                    
+    # Collect histograms of agent lengths
+    def plot_lengths(self):
+        hdf_files = self.find_hdf_files()
+        for hdf_file in hdf_files:
+            base_name = os.path.splitext(os.path.basename(hdf_file))[0]
+            output_folder = os.path.dirname(hdf_file)
+            pdf_filename = f"{base_name}_Lengths_By_Sex_Comparison.pdf"
+            pdf_filepath = os.path.join(output_folder, pdf_filename)
+
+            with PdfPages(pdf_filepath) as pdf:
+                with h5py.File(hdf_file, 'r') as file:
+                    if 'agent_data' in file:
+                        lengths = file['/agent_data/length'][:]
+                        sexes = file['/agent_data/sex'][:]
+
+                        for sex in np.unique(sexes):
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            sex_mask = sexes == sex
+                            lengths_by_sex = lengths[sex_mask]
+                            lengths_by_sex = lengths_by_sex[~np.isnan(lengths_by_sex)]
+
+                            if lengths_by_sex.size > 0:
+                                fig, ax = plt.subplots(figsize=(10, 6))
+                                try:
+                                    q75, q25 = np.percentile(lengths_by_sex, [75, 25])
+                                    bin_width = 2 * (q75 - q25) * len(lengths_by_sex) ** (-1 / 3)
+
+                                    if bin_width <= 0 or np.isnan(bin_width):
+                                        bin_width = (max(lengths_by_sex) - min(lengths_by_sex)) / 10
+
+                                    bins = max(1, round((max(lengths_by_sex) - min(lengths_by_sex)) / bin_width))
+                                    ax.hist(lengths_by_sex, bins=bins, alpha=0.7, color='blue' if sex == 0 else 'pink')
+                                except Exception as e:
+                                    print(f"Error in calculating histogram for {sex_label}: {e}")
+                                    continue
+
+                                ax.set_title(f'{base_name} - {sex_label} Agent Lengths')
+                                ax.set_xlabel('Length (mm)')
+                                ax.set_ylabel('Frequency')
+                                plt.tight_layout()
+                                pdf.savefig(fig)
+                                plt.close()
+                            else:
+                                print(f"No length values found for {sex_label}.")
+
+    def length_statistics(self):
+        hdf_files = self.find_hdf_files()
+        for hdf_file in hdf_files:
+            base_name = os.path.splitext(os.path.basename(hdf_file))[0]
+            output_folder = os.path.dirname(hdf_file)
+            stats_file_name = f"{base_name}_length_statistics_by_sex.txt"
+            stats_file_path = os.path.join(output_folder, stats_file_name)
+
+            with h5py.File(hdf_file, 'r') as file, open(stats_file_path, 'w') as output_file:
+                if 'agent_data' in file:
+                    lengths = file['/agent_data/length'][:]
+                    sexes = file['/agent_data/sex'][:]
+
+                    for sex in np.unique(sexes):
+                        sex_mask = sexes == sex
+                        lengths_by_sex = lengths[sex_mask]
+                        lengths_by_sex = lengths_by_sex[~np.isnan(lengths_by_sex)]
+
+                        if lengths_by_sex.size > 1:
+                            mean_length = np.mean(lengths_by_sex)
+                            median_length = np.median(lengths_by_sex)
+                            std_dev_length = np.std(lengths_by_sex, ddof=1)
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            output_file.write(f"Statistics for {sex_label}:\n")
+                            output_file.write(f"  Average (Mean) Length: {mean_length:.2f}\n")
+                            output_file.write(f"  Median Length: {median_length:.2f}\n")
+                            output_file.write(f"  Standard Deviation of Length: {std_dev_length:.2f}\n\n")
+                        elif lengths_by_sex.size == 1:
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            output_file.write(f"Statistics for {sex_label} (only one data point):\n")
+                            output_file.write(f"  Length: {lengths_by_sex[0]:.2f}\n\n")
+                        else:
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            output_file.write(f"No valid length values found for {sex_label}.\n\n")
+
+    def plot_weights(self):
+        hdf_files = self.find_hdf_files()
+        for hdf_file in hdf_files:
+            base_directory = os.path.dirname(hdf_file)
+            base_name = os.path.splitext(os.path.basename(hdf_file))[0]
+            pdf_filename = f"{base_name}_Weights_By_Sex_Comparison.pdf"
+            pdf_filepath = os.path.join(base_directory, pdf_filename)
+
+            with PdfPages(pdf_filepath) as pdf:
+                with h5py.File(hdf_file, 'r') as file:
+                    if 'agent_data' in file:
+                        weights = file['/agent_data/weight'][:]
+                        sexes = file['/agent_data/sex'][:]
+
+                        for sex in np.unique(sexes):
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            sex_mask = sexes == sex
+                            weights_by_sex = weights[sex_mask]
+                            weights_by_sex = weights_by_sex[~np.isnan(weights_by_sex)]
+
+                            if weights_by_sex.size > 0:
+                                fig, ax = plt.subplots(figsize=(10, 6))
+                                try:
+                                    q75, q25 = np.percentile(weights_by_sex, [75, 25])
+                                    iqr = q75 - q25
+                                    if iqr > 0:
+                                        bin_width = 2 * iqr * len(weights_by_sex) ** (-1 / 3)
+                                        bins = max(1, round((max(weights_by_sex) - min(weights_by_sex)) / bin_width))
+                                    else:
+                                        bins = 10
+
+                                    ax.hist(weights_by_sex, bins=bins, edgecolor='black', color='blue' if sex == 0 else 'pink')
+                                    ax.set_title(f'{base_name} - {sex_label} Agent Weights')
+                                    ax.set_xlabel('Weight')
+                                    ax.set_ylabel('Frequency')
+                                    plt.tight_layout()
+                                    pdf.savefig(fig)
+                                    plt.close()
+                                except Exception as e:
+                                    print(f"Error in calculating histogram for {sex_label}: {e}")
+                                    plt.close(fig)
+                            else:
+                                print(f"No weight values found for {sex_label} in {base_name}.")
+                                
+                                
+    def weight_statistics(self):
+        for hdf_path in self.h5_files:
+            base_name = os.path.splitext(os.path.basename(hdf_path))[0]
+            output_folder = os.path.dirname(hdf_path)
+            stats_file_name = f"{base_name}_weight_statistics_by_sex.txt"
+            stats_file_path = os.path.join(output_folder, stats_file_name)
+
+            with h5py.File(hdf_path, 'r') as file, open(stats_file_path, 'w') as output_file:
+                if 'agent_data' in file:
+                    weights = file['/agent_data/weight'][:]
+                    sexes = file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
+
+                    for sex in np.unique(sexes):
+                        sex_mask = sexes == sex
+                        weights_by_sex = weights[sex_mask]
+                        weights_by_sex = weights_by_sex[~np.isnan(weights_by_sex)]  # Filter out NaN values
+
+                        if weights_by_sex.size > 1:  # Ensure there's more than one value for statistical calculations
+                            mean_weight = np.mean(weights_by_sex)
+                            median_weight = np.median(weights_by_sex)
+                            std_dev_weight = np.std(weights_by_sex, ddof=1)  # ddof=1 for sample standard deviation
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            output_file.write(f"Statistics for {sex_label}:\n")
+                            output_file.write(f"  Average (Mean) Weight: {mean_weight:.2f}\n")
+                            output_file.write(f"  Median Weight: {median_weight:.2f}\n")
+                            output_file.write(f"  Standard Deviation of Weight: {std_dev_weight:.2f}\n\n")
+                        elif weights_by_sex.size == 1:
+                            # Handle single value case
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            output_file.write(f"Statistics for {sex_label} (only one data point):\n")
+                            output_file.write(f"  Weight: {weights_by_sex[0]:.2f}\n\n")
+                        else:
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            output_file.write(f"No valid weight values found for {sex_label}.\n\n")
+
+    def plot_body_depths(self):
+        for hdf_path in self.h5_files:
+            base_name = os.path.splitext(os.path.basename(hdf_path))[0]
+            output_folder = os.path.dirname(hdf_path)
+            pdf_filename = f"{base_name}_Body_Depths_By_Sex_Comparison.pdf"
+            pdf_filepath = os.path.join(output_folder, pdf_filename)
+
+            with PdfPages(pdf_filepath) as pdf:
+                with h5py.File(hdf_path, 'r') as file:
+                    if 'agent_data' in file:
+                        body_depths = file['/agent_data/body_depth'][:]
+                        sexes = file['/agent_data/sex'][:]
+
+                        for sex in np.unique(sexes):
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            sex_mask = sexes == sex
+                            body_depths_by_sex = body_depths[sex_mask]
+                            body_depths_by_sex = body_depths_by_sex[~np.isnan(body_depths_by_sex)]
+
+                            if body_depths_by_sex.size > 0:
+                                fig, ax = plt.subplots(figsize=(10, 6))
+                                try:
+                                    q75, q25 = np.percentile(body_depths_by_sex, [75, 25])
+                                    iqr = q75 - q25
+                                    if iqr > 0:
+                                        bin_width = 2 * iqr * len(body_depths_by_sex) ** (-1 / 3)
+                                    else:
+                                        bin_width = (max(body_depths_by_sex) - min(body_depths_by_sex)) / max(10, len(body_depths_by_sex))  # Avoid zero division
+
+                                    bins = max(1, round((max(body_depths_by_sex) - min(body_depths_by_sex)) / bin_width))
+                                    ax.hist(body_depths_by_sex, bins=bins, edgecolor='black', color='blue' if sex == 0 else 'pink')
+                                    ax.set_title(f'{base_name} - {sex_label} Body Depths')
+                                    ax.set_xlabel('Body Depth')
+                                    ax.set_ylabel('Frequency')
+                                    plt.tight_layout()
+                                    pdf.savefig(fig)
+                                    plt.close()
+                                except Exception as e:
+                                    print(f"Error in calculating histogram for {sex_label}: {e}")
+                                    plt.close(fig)
+                            else:
+                                print(f"No body depth values found for {sex_label} in {base_name}.")
+
+    def body_depth_statistics(self):
+        for hdf_path in self.h5_files:
+            base_name = os.path.splitext(os.path.basename(hdf_path))[0]
+            output_folder = os.path.dirname(hdf_path)
+            stats_file_name = f"{base_name}_body_depth_statistics_by_sex.txt"
+            stats_file_path = os.path.join(output_folder, stats_file_name)
+
+            with h5py.File(hdf_path, 'r') as file, open(stats_file_path, 'w') as output_file:
+                if 'agent_data' in file:
+                    body_depths = file['/agent_data/body_depth'][:]
+                    sexes = file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
+
+                    for sex in np.unique(sexes):
+                        sex_mask = sexes == sex
+                        body_depths_by_sex = body_depths[sex_mask]
+                        body_depths_by_sex = body_depths_by_sex[~np.isnan(body_depths_by_sex)]  # Filter out NaN values
+
+                        if body_depths_by_sex.size > 1:  # Ensure there's more than one value for statistical calculations
+                            mean_body_depth = np.mean(body_depths_by_sex)
+                            median_body_depth = np.median(body_depths_by_sex)
+                            std_dev_body_depth = np.std(body_depths_by_sex, ddof=1)  # ddof=1 for sample standard deviation
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            output_file.write(f"Statistics for {sex_label}:\n")
+                            output_file.write(f"  Average (Mean) Body Depth: {mean_body_depth:.2f}\n")
+                            output_file.write(f"  Median Body Depth: {median_body_depth:.2f}\n")
+                            output_file.write(f"  Standard Deviation of Body Depth: {std_dev_body_depth:.2f}\n\n")
+                        elif body_depths_by_sex.size == 1:
+                            # Handle single value case
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            output_file.write(f"Statistics for {sex_label} (only one data point):\n")
+                            output_file.write(f"  Body Depth: {body_depths_by_sex[0]:.2f}\n\n")
+                        else:
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            output_file.write(f"No valid body depth values found for {sex_label}.\n\n")     
+                            
+                            
+                            
+    def kcal_statistics(self):
+        for hdf_path in self.h5_files:
+            base_name = os.path.splitext(os.path.basename(hdf_path))[0]
+            output_folder = os.path.dirname(hdf_path)
+            stats_file_name = f"{base_name}_kcal_statistics_by_sex.txt"
+            stats_file_path = os.path.join(output_folder, stats_file_name)
+
+            with h5py.File(hdf_path, 'r') as file, open(stats_file_path, 'w') as output_file:
+                if 'agent_data' in file:
+                    kcals = file['/agent_data/kcal'][:]
+                    sexes = file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
+
+                    for i, (kcal, sex) in enumerate(zip(kcals, sexes)):
+                        kcal_values = kcal[~np.isnan(kcal)]  # Remove NaN values
+
+                        if kcal_values.size > 0:
+                            mean_kcal = np.mean(kcal_values)
+                            median_kcal = np.median(kcal_values)
+                            std_dev_kcal = np.std(kcal_values, ddof=1)  # Use ddof=1 for sample standard deviation
+                            min_kcal = np.min(kcal_values)
+                            max_kcal = np.max(kcal_values)
+                            sex_label = 'Male' if sex == 0 else 'Female'
+
+                            output_file.write(f"Agent {i + 1} ({sex_label}):\n")
+                            output_file.write(f"  Average (Mean) Kcal: {mean_kcal:.2f}\n")
+                            output_file.write(f"  Median Kcal: {median_kcal:.2f}\n")
+                            output_file.write(f"  Standard Deviation of Kcal: {std_dev_kcal:.2f}\n")
+                            output_file.write(f"  Minimum Kcal: {min_kcal:.2f}\n")
+                            output_file.write(f"  Maximum Kcal: {max_kcal:.2f}\n\n")
+                        else:
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            output_file.write(f"No valid kcal values found for Agent {i + 1} ({sex_label}).\n\n")
+                            
+                            
+    def kcal_statistics_directory(self):
+        # Prepare to collect cumulative statistics
+        cumulative_stats = {}
+
+        # Iterate through all HDF5 files in the directory
+        for hdf_path in self.h5_files:
+            with h5py.File(hdf_path, 'r') as hdf_file:
+                if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
+                    kcals = hdf_file['/agent_data/kcal'][:]
+                    sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
+
+                    for sex in np.unique(sexes):
+                        sex_label = 'Male' if sex == 0 else 'Female'
+                        if sex_label not in cumulative_stats:
+                            cumulative_stats[sex_label] = []
+
+                        sex_mask = sexes == sex
+                        kcals_by_sex = kcals[sex_mask]
+                        kcals_by_sex = kcals_by_sex[~np.isnan(kcals_by_sex)]  # Remove NaN values
+
+                        cumulative_stats[sex_label].extend(kcals_by_sex)
+
+        # Compute and print cumulative statistics
+        stats_file_path = os.path.join(self.inputWS, "kcal_statistics_directory.txt")
+        with open(stats_file_path, 'w') as output_file:
+            for sex_label, values in cumulative_stats.items():
+                if values:
+                    values = np.array(values)
+                    mean_kcal = np.mean(values)
+                    median_kcal = np.median(values)
+                    std_dev_kcal = np.std(values, ddof=1)
+                    min_kcal = np.min(values)
+                    max_kcal = np.max(values)
+
+                    output_file.write(f"Cumulative Statistics for {sex_label}:\n")
+                    output_file.write(f"  Average (Mean) Kcal: {mean_kcal:.2f}\n")
+                    output_file.write(f"  Median Kcal: {median_kcal:.2f}\n")
+                    output_file.write(f"  Standard Deviation of Kcal: {std_dev_kcal:.2f}\n")
+                    output_file.write(f"  Minimum Kcal: {min_kcal:.2f}\n")
+                    output_file.write(f"  Maximum Kcal: {max_kcal:.2f}\n\n")
+                else:
+                    output_file.write(f"No valid kcal values found for {sex_label}.\n\n")
+
+                          
+    def kcal_histograms_directory(self):
+        # Dictionary to hold data for males and females
+        kcal_data = {'Male': {'Mean': [], 'Median': [], 'Std Dev': [], 'Min': [], 'Max': []},
+                     'Female': {'Mean': [], 'Median': [], 'Std Dev': [], 'Min': [], 'Max': []}}
+
+        # Collect cumulative statistics from all HDF5 files
+        for hdf_path in self.h5_files:
+            with h5py.File(hdf_path, 'r') as hdf_file:
+                if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
+                    kcals = hdf_file['/agent_data/kcal'][:]
+                    sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
+
+                    for sex in np.unique(sexes):
+                        sex_label = 'Male' if sex == 0 else 'Female'
+
+                        sex_mask = sexes == sex
+                        kcals_by_sex = kcals[sex_mask]
+                        kcals_by_sex = kcals_by_sex[~np.isnan(kcals_by_sex)]  # Remove NaN values
+
+                        if kcals_by_sex.size > 0:
+                            kcal_data[sex_label]['Mean'].append(np.mean(kcals_by_sex))
+                            kcal_data[sex_label]['Median'].append(np.median(kcals_by_sex))
+                            kcal_data[sex_label]['Std Dev'].append(np.std(kcals_by_sex, ddof=1))
+                            kcal_data[sex_label]['Min'].append(np.min(kcals_by_sex))
+                            kcal_data[sex_label]['Max'].append(np.max(kcals_by_sex))
+
+        # Create a PDF to save the cumulative histograms
+        pdf_filename = os.path.join(self.inputWS, "kcal_histograms.pdf")
+        with PdfPages(pdf_filename) as pdf:
+            for sex, data in kcal_data.items():
+                fig, ax = plt.subplots(figsize=(10, 6))
+
+                # Colors for the different data types
+                colors = {'Mean': 'blue', 'Median': 'green', 'Std Dev': 'orange', 'Min': 'red', 'Max': 'purple'}
+
+                # Plot each data type
+                for dtype, values in data.items():
+                    if values:
+                        ax.hist(values, bins=50, alpha=0.7, edgecolor='black', color=colors[dtype], label=dtype)
+
+                ax.set_title(f"Kcal Distribution for {sex} Agents")
+                ax.set_xlabel("Kcal")
+                ax.set_ylabel("Frequency")
+                ax.legend()
+
+                # Add statistics as text on the plot
+                mean_kcal = np.mean(data['Mean']) if data['Mean'] else 0
+                median_kcal = np.median(data['Median']) if data['Median'] else 0
+                std_dev_kcal = np.mean(data['Std Dev']) if data['Std Dev'] else 0
+                min_kcal = np.min(data['Min']) if data['Min'] else 0
+                max_kcal = np.max(data['Max']) if data['Max'] else 0
+
+                stats_text = (
+                    f"Mean: {mean_kcal:.2f}\n"
+                    f"Median: {median_kcal:.2f}\n"
+                    f"Std Dev: {std_dev_kcal:.2f}\n"
+                    f"Min: {min_kcal:.2f}\n"
+                    f"Max: {max_kcal:.2f}"
+                )
+                plt.figtext(0.15, 0.7, stats_text, bbox={"facecolor": "white", "alpha": 0.5, "pad": 5})
+
+                pdf.savefig(fig)
+                plt.close(fig)
+
+        # New functionality to create individual histograms for each agent
+        agent_data = {'Male': {}, 'Female': {}}
+
+        # Collect individual agent statistics from all HDF5 files
+        for hdf_path in self.h5_files:
+            with h5py.File(hdf_path, 'r') as hdf_file:
+                if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
+                    kcals = hdf_file['/agent_data/kcal'][:]
+                    sexes = hdf_file['/agent_data/sex'][:]
+
+                    for i, (kcal, sex) in enumerate(zip(kcals, sexes)):
+                        kcal_values = kcal[~np.isnan(kcal)]  # Remove NaN values
+                        sex_label = 'Male' if sex == 0 else 'Female'
+
+                        if i not in agent_data[sex_label]:
+                            agent_data[sex_label][i] = {'Mean': [], 'Median': [], 'Std Dev': [], 'Min': [], 'Max': []}
+
+                        if kcal_values.size > 0:
+                            agent_data[sex_label][i]['Mean'].append(np.mean(kcal_values))
+                            agent_data[sex_label][i]['Median'].append(np.median(kcal_values))
+                            agent_data[sex_label][i]['Std Dev'].append(np.std(kcal_values, ddof=1))
+                            agent_data[sex_label][i]['Min'].append(np.min(kcal_values))
+                            agent_data[sex_label][i]['Max'].append(np.max(kcal_values))
+
+        # Calculate the average values for each agent
+        averaged_data = {'Male': {}, 'Female': {}}
+        for sex, agents in agent_data.items():
+            for agent, values in agents.items():
+                averaged_data[sex][agent] = {
+                    'Mean': np.mean(values['Mean']) if values['Mean'] else 0,
+                    'Median': np.mean(values['Median']) if values['Median'] else 0,
+                    'Std Dev': np.mean(values['Std Dev']) if values['Std Dev'] else 0,
+                    'Min': np.mean(values['Min']) if values['Min'] else 0,
+                    'Max': np.mean(values['Max']) if values['Max'] else 0
+                }
+
+        # Find the maximum recorded kcal average across all agents for the y-axis limit
+        max_kcal_value = max(
+            max(kcal_data['Male']['Max']) if kcal_data['Male']['Max'] else 0,
+            max(kcal_data['Female']['Max']) if kcal_data['Female']['Max'] else 0
+        )
+
+        # Create a PDF to save the individual histograms
+        pdf_filename_individual = os.path.join(self.inputWS, "individual_kcal_histograms.pdf")
+        with PdfPages(pdf_filename_individual) as pdf:
+            for sex, agents in averaged_data.items():
+                for agent, values in agents.items():
+                    fig, ax = plt.subplots(figsize=(10, 6))
+
+                    # Colors for the different data types
+                    colors = ['blue', 'green', 'orange', 'red', 'purple']
+                    labels = ['Mean', 'Median', 'Std Dev', 'Min', 'Max']
+                    agent_values = [values[label] for label in labels]
+
+                    # Plot the agent's data
+                    ax.bar(labels, agent_values, color=colors, alpha=0.7, edgecolor='black')
+
+                    ax.set_title(f"Kcal Distribution for Agent {agent} ({sex})")
+                    ax.set_xlabel("Kcal Type")
+                    ax.set_ylabel("Value")
+                    ax.set_ylim([0, max_kcal_value])  # Set y-axis limit
+
+                    # Add statistics as text on the plot
+                    stats_text = (
+                        f"Mean: {values['Mean']:.2f}\n"
+                        f"Median: {values['Median']:.2f}\n"
+                        f"Std Dev: {values['Std Dev']:.2f}\n"
+                        f"Min: {values['Min']:.2f}\n"
+                        f"Max: {values['Max']:.2f}"
+                    )
+                    plt.figtext(0.15, 0.7, stats_text, bbox={"facecolor": "white", "alpha": 0.5, "pad": 5})
+
+                    pdf.savefig(fig)
+                    plt.close(fig)
+
+                    
                     
     def passage_success(self,finish_line):
         '''find the fish that are successful'''
