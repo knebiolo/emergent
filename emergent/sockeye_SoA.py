@@ -1316,7 +1316,7 @@ class simulation():
         self.opt_sog = self.length/1000. #* 0.8
         self.school_sog = self.length/1000.
        # self.swim_speed = self.length/1000.        # set initial swim speed
-        self.ucrit = self.sog * 7.    # TODO - what is the ucrit for sockeye?
+        self.ucrit = self.sog * 1.6    # TODO - what is the ucrit for sockeye?
         
     def sim_weight(self):
         '''function simulates a fish weight out of the user provided basin and 
@@ -2016,13 +2016,13 @@ class simulation():
             swim_cost = sr_o2_rate + self.wave_drag * (
                 self.arr.exp(np.log(sr_o2_rate) + self.swim_speed * (
                     (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
-                )) - sr_o2_rate
+                ) - sr_o2_rate)
             )
         else:
             swim_cost = sr_o2_rate + self.wave_drag.flatten() * (
                 self.arr.exp(np.log(sr_o2_rate) + np.linalg.norm(self.swim_speed.flatten(), axis = -1) * (
                     (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
-                )) - sr_o2_rate
+                ) - sr_o2_rate)
             )
         # swim cost is expressed in mg O2 _kg _hr.  convert to mg O2 _ kg
         hours = dt * (1./3600.)
@@ -3177,7 +3177,7 @@ class simulation():
             attract_y = weight * delta_y/dist
             return np.array([attract_x,attract_y])
 
-        def rheo_cue(self, weight):
+        def rheo_cue(self, weight, downstream = False):
             """
             Calculate the rheotactic heading command for each agent.
         
@@ -3204,11 +3204,18 @@ class simulation():
             # Convert self.length to a NumPy array if it's a CuPy array
             length_numpy = self.simulation.length#.get() if isinstance(self.length, cp.ndarray) else self.length
         
-            # Sample the environment to get the velocity direction and adjust to point upstream
-            x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform,
-                                                       'vel_x') * -1
-            y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform,
-                                                       'vel_y') * -1
+            if downstream == False:
+                # Sample the environment to get the velocity direction and adjust to point upstream
+                x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform,
+                                                           'vel_x') * -1
+                y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform,
+                                                           'vel_y') * -1
+            else:
+                # Sample the environment to get the velocity direction and adjust to point upstream
+                x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform,
+                                                           'vel_x')
+                y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform,
+                                                           'vel_y')
             
             # Calculate the unit vector in the upstream direction
             v = np.column_stack([x_vel, y_vel])  
@@ -4016,17 +4023,17 @@ class simulation():
 
             else:
                 # calculate attractive forces
-                rheotaxis = self.rheo_cue(25000)        # 10000
-                alignment = self.alignment_cue(20500)
-                cohesion = self.cohesion_cue(11000)
-                low_speed = self.vel_cue(500)          # 8000 
-                wave_drag = self.wave_drag_cue(0)       # 5000                
-                refugia = self.find_nearest_refuge(50000)
+                rheotaxis = self.rheo_cue(25000)          # 25000
+                alignment = self.alignment_cue(0)     # 20500
+                cohesion = self.cohesion_cue(0)       # 11000
+                low_speed = self.vel_cue(500)             # 500 
+                wave_drag = self.wave_drag_cue(0)         # 0                
+                refugia = self.find_nearest_refuge(50000) # 50000
                 # calculate high priority repusive forces
-                border = self.border_cue(50000, t)
-                shallow = self.shallow_cue(100000)       # 10000
-                avoid = self.already_been_here(25000, t)# 3000
-                collision = self.collision_cue(50000)    # 2500 
+                border = self.border_cue(50000, t)        # 50000
+                shallow = self.shallow_cue(100000)        # 100000
+                avoid = self.already_been_here(25000, t)  # 25000
+                collision = self.collision_cue(50000)     # 50000 
             
             # Create dictionary that has order of behavioral cues
             order_dict = {0: 'shallow',
