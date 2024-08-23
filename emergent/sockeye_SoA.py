@@ -2983,8 +2983,8 @@ class simulation():
             # Unit vectors and repulsive force
             unit_vector_x = delta_x / magnitudes
             unit_vector_y = delta_y / magnitudes
-            x_force = (weight * unit_vector_x) / magnitudes**2 * multiplier
-            y_force = (weight * unit_vector_y) / magnitudes**2 * multiplier
+            x_force = ((weight * unit_vector_x) / magnitudes) * multiplier
+            y_force = ((weight * unit_vector_y) / magnitudes) * multiplier
         
             # Sum forces for this agent
             total_x_force = np.nansum(x_force)
@@ -3009,7 +3009,7 @@ class simulation():
             refugia_map_rows, refugia_map_cols = geo_to_pixel(x, y, self.simulation.refugia_map_transform)
         
             # Define buffer zone around current positions
-            buff = 20
+            buff = 50
         
             row_min = np.clip(refugia_map_rows - buff, 0, None)
             row_max = np.clip(refugia_map_rows + buff + 1, None, self.simulation.hdf5['refugia/0'].shape[0])
@@ -3053,8 +3053,8 @@ class simulation():
                 # Unit vectors and attractive force
                 unit_vector_x = delta_x / magnitudes
                 unit_vector_y = delta_y / magnitudes
-                x_force = (weight * unit_vector_x) / magnitudes**2
-                y_force = (weight * unit_vector_y) / magnitudes**2
+                x_force = (weight * unit_vector_x)
+                y_force = (weight * unit_vector_y)
             
                 # Sum forces for this agent
                 attract_x = np.nansum(x_force)
@@ -4024,9 +4024,9 @@ class simulation():
             else:
                 # calculate attractive forces
                 rheotaxis = self.rheo_cue(25000)          # 25000
-                alignment = self.alignment_cue(0)     # 20500
-                cohesion = self.cohesion_cue(0)       # 11000
-                low_speed = self.vel_cue(500)             # 500 
+                alignment = self.alignment_cue(20500)     # 20500
+                cohesion = self.cohesion_cue(11000)       # 11000
+                low_speed = self.vel_cue(1500)             # 500 
                 wave_drag = self.wave_drag_cue(0)         # 0                
                 refugia = self.find_nearest_refuge(50000) # 50000
                 # calculate high priority repusive forces
