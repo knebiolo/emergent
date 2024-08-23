@@ -67,6 +67,9 @@ import warnings
 import sys
 import random
 from collections import deque
+from sksurv.nonparametric import kaplan_meier_estimator
+
+
 warnings.filterwarnings("ignore")
 
 np.set_printoptions(suppress=True)
@@ -5050,15 +5053,15 @@ class summary:
                     
     # Collect histograms of agent lengths
     def plot_lengths(self):
-        hdf_files = self.find_hdf_files()
-        for hdf_file in hdf_files:
-            base_name = os.path.splitext(os.path.basename(hdf_file))[0]
-            output_folder = os.path.dirname(hdf_file)
+        h5_files = self.h5_files
+        for h5_file in h5_files:
+            base_name = os.path.splitext(os.path.basename(h5_file))[0]
+            output_folder = os.path.dirname(h5_file)
             pdf_filename = f"{base_name}_Lengths_By_Sex_Comparison.pdf"
             pdf_filepath = os.path.join(output_folder, pdf_filename)
 
             with PdfPages(pdf_filepath) as pdf:
-                with h5py.File(hdf_file, 'r') as file:
+                with h5py.File(h5_file, 'r') as file:
                     if 'agent_data' in file:
                         lengths = file['/agent_data/length'][:]
                         sexes = file['/agent_data/sex'][:]
@@ -5094,14 +5097,14 @@ class summary:
                                 print(f"No length values found for {sex_label}.")
 
     def length_statistics(self):
-        hdf_files = self.find_hdf_files()
-        for hdf_file in hdf_files:
-            base_name = os.path.splitext(os.path.basename(hdf_file))[0]
-            output_folder = os.path.dirname(hdf_file)
+        h5_files = self.h5_files
+        for h5_file in h5_files:
+            base_name = os.path.splitext(os.path.basename(h5_file))[0]
+            output_folder = os.path.dirname(h5_file)
             stats_file_name = f"{base_name}_length_statistics_by_sex.txt"
             stats_file_path = os.path.join(output_folder, stats_file_name)
 
-            with h5py.File(hdf_file, 'r') as file, open(stats_file_path, 'w') as output_file:
+            with h5py.File(h5_file, 'r') as file, open(stats_file_path, 'w') as output_file:
                 if 'agent_data' in file:
                     lengths = file['/agent_data/length'][:]
                     sexes = file['/agent_data/sex'][:]
@@ -5129,15 +5132,15 @@ class summary:
                             output_file.write(f"No valid length values found for {sex_label}.\n\n")
 
     def plot_weights(self):
-        hdf_files = self.find_hdf_files()
-        for hdf_file in hdf_files:
-            base_directory = os.path.dirname(hdf_file)
-            base_name = os.path.splitext(os.path.basename(hdf_file))[0]
+        h5_files = self.h5_files
+        for h5_file in h5_files:
+            base_directory = os.path.dirname(h5_file)
+            base_name = os.path.splitext(os.path.basename(h5_file))[0]
             pdf_filename = f"{base_name}_Weights_By_Sex_Comparison.pdf"
             pdf_filepath = os.path.join(base_directory, pdf_filename)
 
             with PdfPages(pdf_filepath) as pdf:
-                with h5py.File(hdf_file, 'r') as file:
+                with h5py.File(h5_file, 'r') as file:
                     if 'agent_data' in file:
                         weights = file['/agent_data/weight'][:]
                         sexes = file['/agent_data/sex'][:]
@@ -5171,10 +5174,10 @@ class summary:
                                     plt.close(fig)
                             else:
                                 print(f"No weight values found for {sex_label} in {base_name}.")
-                                
-                                
+
     def weight_statistics(self):
-        for hdf_path in self.h5_files:
+        h5_files = self.h5_files
+        for hdf_path in h5_files:
             base_name = os.path.splitext(os.path.basename(hdf_path))[0]
             output_folder = os.path.dirname(hdf_path)
             stats_file_name = f"{base_name}_weight_statistics_by_sex.txt"
@@ -5209,7 +5212,8 @@ class summary:
                             output_file.write(f"No valid weight values found for {sex_label}.\n\n")
 
     def plot_body_depths(self):
-        for hdf_path in self.h5_files:
+        h5_files = self.h5_files
+        for hdf_path in h5_files:
             base_name = os.path.splitext(os.path.basename(hdf_path))[0]
             output_folder = os.path.dirname(hdf_path)
             pdf_filename = f"{base_name}_Body_Depths_By_Sex_Comparison.pdf"
@@ -5252,7 +5256,8 @@ class summary:
                                 print(f"No body depth values found for {sex_label} in {base_name}.")
 
     def body_depth_statistics(self):
-        for hdf_path in self.h5_files:
+        h5_files = self.h5_files
+        for hdf_path in h5_files:
             base_name = os.path.splitext(os.path.basename(hdf_path))[0]
             output_folder = os.path.dirname(hdf_path)
             stats_file_name = f"{base_name}_body_depth_statistics_by_sex.txt"
@@ -5284,12 +5289,11 @@ class summary:
                             output_file.write(f"  Body Depth: {body_depths_by_sex[0]:.2f}\n\n")
                         else:
                             sex_label = 'Male' if sex == 0 else 'Female'
-                            output_file.write(f"No valid body depth values found for {sex_label}.\n\n")     
-                            
-                            
-                            
+                            output_file.write(f"No valid body depth values found for {sex_label}.\n\n")
+
     def kcal_statistics(self):
-        for hdf_path in self.h5_files:
+        h5_files = self.h5_files
+        for hdf_path in h5_files:
             base_name = os.path.splitext(os.path.basename(hdf_path))[0]
             output_folder = os.path.dirname(hdf_path)
             stats_file_name = f"{base_name}_kcal_statistics_by_sex.txt"
@@ -5365,7 +5369,6 @@ class summary:
                 else:
                     output_file.write(f"No valid kcal values found for {sex_label}.\n\n")
 
-                          
     def kcal_histograms_directory(self):
         # Dictionary to hold data for males and females
         kcal_data = {'Male': {'Mean': [], 'Median': [], 'Std Dev': [], 'Min': [], 'Max': []},
@@ -5504,6 +5507,77 @@ class summary:
 
                     pdf.savefig(fig)
                     plt.close(fig)
+
+
+
+    def kaplan_curve(self, shapefile_path, tiffWS):
+        h5_files = self.h5_files
+        for h5_file in h5_files:
+            base_name = os.path.splitext(os.path.basename(h5_file))[0]
+            output_folder = os.path.dirname(h5_file)
+            jpeg_filename = f"{base_name}_Kaplan_Meier_Curve.jpeg"
+            jpeg_filepath = os.path.join(output_folder, jpeg_filename)
+
+            # Load shapefile
+            gdf = gpd.read_file(shapefile_path)
+            if gdf.empty:
+                continue
+
+            # Load TIFF data for coordinate reference
+            with rasterio.open(tiffWS) as tif:
+                tif_crs = tif.crs
+
+            # Adjust shapefile CRS if needed
+            if gdf.crs != tif_crs:
+                gdf = gdf.to_crs(tif_crs)
+
+            # Filter self.ts for the current HDF5 file
+            ts_filtered = self.ts[self.ts['filename'] == h5_file]
+
+            # Perform spatial intersection with the shapefile
+            intersection = gpd.overlay(ts_filtered, gdf, how='intersection')
+
+            # Get the list of all agent IDs in the filtered data
+            all_agents = ts_filtered['agent'].unique()
+            total_agents = len(all_agents)
+
+            if intersection.empty:
+                print(f"No agents intersected the rectangle - skipping {base_name}.")
+                continue
+
+            # Get the unique list of agents that are found within the rectangle
+            unique_agents_in_rectangle = intersection['agent'].unique()
+            num_agents_in_rectangle = len(unique_agents_in_rectangle)
+
+            # Print the comparison
+            print(f"File: {base_name}")
+            print(f"Total agents in data: {total_agents}")
+            print(f"Number of unique agents found within the rectangle: {num_agents_in_rectangle}")
+
+            # Prepare the first entry times for each agent
+            entry_times = {agent: intersection[intersection['agent'] == agent]['timestep'].min()
+                           for agent in unique_agents_in_rectangle}
+
+            # Convert to arrays for Kaplan-Meier analysis
+            entry_times_array = np.array(list(entry_times.values()))
+
+            # Create the survival data array (True if entered the rectangle, False if not)
+            survival_data = np.array([(True, time) for time in entry_times_array], dtype=[('event', bool), ('time', int)])
+
+            # Perform Kaplan-Meier estimation
+            time, survival_prob = kaplan_meier_estimator(survival_data['event'], survival_data['time'])
+
+            # Plot the Kaplan-Meier survival curve
+            plt.figure(figsize=(10, 6))
+            plt.step(time, survival_prob, where="post", label=f"Agents Entering Rectangle: {num_agents_in_rectangle}/{total_agents}")
+            plt.xlabel("Time (Timesteps)")
+            plt.ylabel("Proportion of Agents Remaining Outside the Rectangle")
+            plt.title(f"Kaplan-Meier Curve\n{num_agents_in_rectangle} Agents Entered Rectangle out of {total_agents}")
+            plt.legend()
+
+            # Save the plot as a JPEG image
+            plt.savefig(jpeg_filepath, format='jpeg')
+            plt.close()
 
                     
                     
