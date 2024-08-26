@@ -5373,54 +5373,56 @@ class summary:
         # Dictionary to hold data for males and females
         kcal_data = {'Male': {'Mean': [], 'Median': [], 'Std Dev': [], 'Min': [], 'Max': []},
                      'Female': {'Mean': [], 'Median': [], 'Std Dev': [], 'Min': [], 'Max': []}}
-
+    
         # Collect cumulative statistics from all HDF5 files
         for hdf_path in self.h5_files:
             with h5py.File(hdf_path, 'r') as hdf_file:
                 if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
                     kcals = hdf_file['/agent_data/kcal'][:]
                     sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
-
+    
                     for sex in np.unique(sexes):
                         sex_label = 'Male' if sex == 0 else 'Female'
-
+    
                         sex_mask = sexes == sex
                         kcals_by_sex = kcals[sex_mask]
                         kcals_by_sex = kcals_by_sex[~np.isnan(kcals_by_sex)]  # Remove NaN values
-
+    
                         if kcals_by_sex.size > 0:
                             kcal_data[sex_label]['Mean'].append(np.mean(kcals_by_sex))
                             kcal_data[sex_label]['Median'].append(np.median(kcals_by_sex))
                             kcal_data[sex_label]['Std Dev'].append(np.std(kcals_by_sex, ddof=1))
                             kcal_data[sex_label]['Min'].append(np.min(kcals_by_sex))
                             kcal_data[sex_label]['Max'].append(np.max(kcals_by_sex))
-
+    
         # Create a PDF to save the cumulative histograms
         pdf_filename = os.path.join(self.inputWS, "kcal_histograms.pdf")
         with PdfPages(pdf_filename) as pdf:
             for sex, data in kcal_data.items():
                 fig, ax = plt.subplots(figsize=(10, 6))
-
+    
                 # Colors for the different data types
                 colors = {'Mean': 'blue', 'Median': 'green', 'Std Dev': 'orange', 'Min': 'red', 'Max': 'purple'}
-
+    
                 # Plot each data type
                 for dtype, values in data.items():
-                    if values:
-                        ax.hist(values, bins=50, alpha=0.7, edgecolor='black', color=colors[dtype], label=dtype)
-
+                    # Ensure all values are finite before plotting
+                    finite_values = [v for v in values if np.isfinite(v)]
+                    if finite_values:
+                        ax.hist(finite_values, bins=50, alpha=0.7, edgecolor='black', color=colors[dtype], label=dtype)
+    
                 ax.set_title(f"Kcal Distribution for {sex} Agents")
                 ax.set_xlabel("Kcal")
                 ax.set_ylabel("Frequency")
                 ax.legend()
-
+    
                 # Add statistics as text on the plot
                 mean_kcal = np.mean(data['Mean']) if data['Mean'] else 0
                 median_kcal = np.median(data['Median']) if data['Median'] else 0
                 std_dev_kcal = np.mean(data['Std Dev']) if data['Std Dev'] else 0
                 min_kcal = np.min(data['Min']) if data['Min'] else 0
                 max_kcal = np.max(data['Max']) if data['Max'] else 0
-
+    
                 stats_text = (
                     f"Mean: {mean_kcal:.2f}\n"
                     f"Median: {median_kcal:.2f}\n"
@@ -5429,34 +5431,34 @@ class summary:
                     f"Max: {max_kcal:.2f}"
                 )
                 plt.figtext(0.15, 0.7, stats_text, bbox={"facecolor": "white", "alpha": 0.5, "pad": 5})
-
+    
                 pdf.savefig(fig)
                 plt.close(fig)
-
+    
         # New functionality to create individual histograms for each agent
         agent_data = {'Male': {}, 'Female': {}}
-
+    
         # Collect individual agent statistics from all HDF5 files
         for hdf_path in self.h5_files:
             with h5py.File(hdf_path, 'r') as hdf_file:
                 if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
                     kcals = hdf_file['/agent_data/kcal'][:]
                     sexes = hdf_file['/agent_data/sex'][:]
-
+    
                     for i, (kcal, sex) in enumerate(zip(kcals, sexes)):
                         kcal_values = kcal[~np.isnan(kcal)]  # Remove NaN values
                         sex_label = 'Male' if sex == 0 else 'Female'
-
+    
                         if i not in agent_data[sex_label]:
                             agent_data[sex_label][i] = {'Mean': [], 'Median': [], 'Std Dev': [], 'Min': [], 'Max': []}
-
+    
                         if kcal_values.size > 0:
                             agent_data[sex_label][i]['Mean'].append(np.mean(kcal_values))
                             agent_data[sex_label][i]['Median'].append(np.median(kcal_values))
                             agent_data[sex_label][i]['Std Dev'].append(np.std(kcal_values, ddof=1))
                             agent_data[sex_label][i]['Min'].append(np.min(kcal_values))
                             agent_data[sex_label][i]['Max'].append(np.max(kcal_values))
-
+    
         # Calculate the average values for each agent
         averaged_data = {'Male': {}, 'Female': {}}
         for sex, agents in agent_data.items():
@@ -5468,45 +5470,54 @@ class summary:
                     'Min': np.mean(values['Min']) if values['Min'] else 0,
                     'Max': np.mean(values['Max']) if values['Max'] else 0
                 }
-
+    
         # Find the maximum recorded kcal average across all agents for the y-axis limit
         max_kcal_value = max(
             max(kcal_data['Male']['Max']) if kcal_data['Male']['Max'] else 0,
             max(kcal_data['Female']['Max']) if kcal_data['Female']['Max'] else 0
         )
-
+    
+        # Ensure max_kcal_value is finite
+        if not np.isfinite(max_kcal_value):
+            max_kcal_value = None  # or set to a default value, e.g., max_kcal_value = 10
+    
         # Create a PDF to save the individual histograms
         pdf_filename_individual = os.path.join(self.inputWS, "individual_kcal_histograms.pdf")
         with PdfPages(pdf_filename_individual) as pdf:
             for sex, agents in averaged_data.items():
                 for agent, values in agents.items():
                     fig, ax = plt.subplots(figsize=(10, 6))
-
+    
                     # Colors for the different data types
                     colors = ['blue', 'green', 'orange', 'red', 'purple']
                     labels = ['Mean', 'Median', 'Std Dev', 'Min', 'Max']
                     agent_values = [values[label] for label in labels]
-
-                    # Plot the agent's data
-                    ax.bar(labels, agent_values, color=colors, alpha=0.7, edgecolor='black')
-
-                    ax.set_title(f"Kcal Distribution for Agent {agent} ({sex})")
-                    ax.set_xlabel("Kcal Type")
-                    ax.set_ylabel("Value")
-                    ax.set_ylim([0, max_kcal_value])  # Set y-axis limit
-
-                    # Add statistics as text on the plot
-                    stats_text = (
-                        f"Mean: {values['Mean']:.2f}\n"
-                        f"Median: {values['Median']:.2f}\n"
-                        f"Std Dev: {values['Std Dev']:.2f}\n"
-                        f"Min: {values['Min']:.2f}\n"
-                        f"Max: {values['Max']:.2f}"
-                    )
-                    plt.figtext(0.15, 0.7, stats_text, bbox={"facecolor": "white", "alpha": 0.5, "pad": 5})
-
-                    pdf.savefig(fig)
-                    plt.close(fig)
+    
+                    # Ensure all values are finite before plotting
+                    agent_values = [v for v in agent_values if np.isfinite(v)]
+    
+                    if agent_values:
+                        # Plot the agent's data
+                        ax.bar(labels, agent_values, color=colors, alpha=0.7, edgecolor='black')
+    
+                        ax.set_title(f"Kcal Distribution for Agent {agent} ({sex})")
+                        ax.set_xlabel("Kcal Type")
+                        ax.set_ylabel("Value")
+                        if max_kcal_value is not None:
+                            ax.set_ylim([0, max_kcal_value])  # Set y-axis limit if max_kcal_value is finite
+    
+                        # Add statistics as text on the plot
+                        stats_text = (
+                            f"Mean: {values['Mean']:.2f}\n"
+                            f"Median: {values['Median']:.2f}\n"
+                            f"Std Dev: {values['Std Dev']:.2f}\n"
+                            f"Min: {values['Min']:.2f}\n"
+                            f"Max: {values['Max']:.2f}"
+                        )
+                        plt.figtext(0.15, 0.7, stats_text, bbox={"facecolor": "white", "alpha": 0.5, "pad": 5})
+    
+                        pdf.savefig(fig)
+                        plt.close(fig)
 
 
 
