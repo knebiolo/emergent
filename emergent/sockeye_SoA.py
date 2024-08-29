@@ -5290,7 +5290,6 @@ class summary:
                         else:
                             sex_label = 'Male' if sex == 0 else 'Female'
                             output_file.write(f"No valid body depth values found for {sex_label}.\n\n")
-
     def kcal_statistics(self):
         h5_files = self.h5_files
         for hdf_path in h5_files:
@@ -5298,24 +5297,28 @@ class summary:
             output_folder = os.path.dirname(hdf_path)
             stats_file_name = f"{base_name}_kcal_statistics_by_sex.txt"
             stats_file_path = os.path.join(output_folder, stats_file_name)
-
+    
             with h5py.File(hdf_path, 'r') as file, open(stats_file_path, 'w') as output_file:
                 if 'agent_data' in file:
-                    kcals = file['/agent_data/kcal'][:]
-                    sexes = file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
-
-                    for i, (kcal, sex) in enumerate(zip(kcals, sexes)):
-                        kcal_values = kcal[~np.isnan(kcal)]  # Remove NaN values
-
-                        if kcal_values.size > 0:
-                            mean_kcal = np.mean(kcal_values)
-                            median_kcal = np.median(kcal_values)
-                            std_dev_kcal = np.std(kcal_values, ddof=1)  # Use ddof=1 for sample standard deviation
-                            min_kcal = np.min(kcal_values)
-                            max_kcal = np.max(kcal_values)
+                    kcals = file['/agent_data/kcal'][:]  # Get kcal data for all agents and timesteps
+                    sexes = file['/agent_data/sex'][:]    # Get sex data for all agents
+    
+                    # Sum kcal data across all timesteps for each agent
+                    total_kcals_per_agent = np.nansum(kcals, axis=1)  # Sum along the timestep axis, ignoring NaNs
+    
+                    # Perform statistics on the total kcal data across all agents
+                    mean_kcal = np.mean(total_kcals_per_agent)
+                    median_kcal = np.median(total_kcals_per_agent)
+                    std_dev_kcal = np.std(total_kcals_per_agent, ddof=1)  # Use ddof=1 for sample standard deviation
+                    min_kcal = np.min(total_kcals_per_agent)
+                    max_kcal = np.max(total_kcals_per_agent)
+    
+                    for i, (total_kcal, sex) in enumerate(zip(total_kcals_per_agent, sexes)):
+                        if not np.isnan(total_kcal):  # Check if the total kcal is a valid number
                             sex_label = 'Male' if sex == 0 else 'Female'
-
+    
                             output_file.write(f"Agent {i + 1} ({sex_label}):\n")
+                            output_file.write(f"  Total Kcal: {total_kcal:.2f}\n")
                             output_file.write(f"  Average (Mean) Kcal: {mean_kcal:.2f}\n")
                             output_file.write(f"  Median Kcal: {median_kcal:.2f}\n")
                             output_file.write(f"  Standard Deviation of Kcal: {std_dev_kcal:.2f}\n")
@@ -5325,29 +5328,30 @@ class summary:
                             sex_label = 'Male' if sex == 0 else 'Female'
                             output_file.write(f"No valid kcal values found for Agent {i + 1} ({sex_label}).\n\n")
                             
-                            
     def kcal_statistics_directory(self):
         # Prepare to collect cumulative statistics
         cumulative_stats = {}
-
+    
         # Iterate through all HDF5 files in the directory
         for hdf_path in self.h5_files:
             with h5py.File(hdf_path, 'r') as hdf_file:
                 if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
                     kcals = hdf_file['/agent_data/kcal'][:]
                     sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
-
+    
                     for sex in np.unique(sexes):
                         sex_label = 'Male' if sex == 0 else 'Female'
                         if sex_label not in cumulative_stats:
                             cumulative_stats[sex_label] = []
-
+    
                         sex_mask = sexes == sex
                         kcals_by_sex = kcals[sex_mask]
-                        kcals_by_sex = kcals_by_sex[~np.isnan(kcals_by_sex)]  # Remove NaN values
-
-                        cumulative_stats[sex_label].extend(kcals_by_sex)
-
+    
+                        # Sum kcal data across all timesteps for each agent
+                        total_kcals_by_sex = np.nansum(kcals_by_sex, axis=1)  # Sum along the timestep axis, ignoring NaNs
+    
+                        cumulative_stats[sex_label].extend(total_kcals_by_sex)
+    
         # Compute and print cumulative statistics
         stats_file_path = os.path.join(self.inputWS, "kcal_statistics_directory.txt")
         with open(stats_file_path, 'w') as output_file:
@@ -5359,7 +5363,7 @@ class summary:
                     std_dev_kcal = np.std(values, ddof=1)
                     min_kcal = np.min(values)
                     max_kcal = np.max(values)
-
+    
                     output_file.write(f"Cumulative Statistics for {sex_label}:\n")
                     output_file.write(f"  Average (Mean) Kcal: {mean_kcal:.2f}\n")
                     output_file.write(f"  Median Kcal: {median_kcal:.2f}\n")
@@ -5368,158 +5372,8 @@ class summary:
                     output_file.write(f"  Maximum Kcal: {max_kcal:.2f}\n\n")
                 else:
                     output_file.write(f"No valid kcal values found for {sex_label}.\n\n")
-
-    def kcal_histograms_directory(self):
-        # Dictionary to hold data for males and females
-        kcal_data = {'Male': {'Mean': [], 'Median': [], 'Std Dev': [], 'Min': [], 'Max': []},
-                     'Female': {'Mean': [], 'Median': [], 'Std Dev': [], 'Min': [], 'Max': []}}
-    
-        # Collect cumulative statistics from all HDF5 files
-        for hdf_path in self.h5_files:
-            with h5py.File(hdf_path, 'r') as hdf_file:
-                if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
-                    kcals = hdf_file['/agent_data/kcal'][:]
-                    sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
-    
-                    for sex in np.unique(sexes):
-                        sex_label = 'Male' if sex == 0 else 'Female'
-    
-                        sex_mask = sexes == sex
-                        kcals_by_sex = kcals[sex_mask]
-                        kcals_by_sex = kcals_by_sex[~np.isnan(kcals_by_sex)]  # Remove NaN values
-    
-                        if kcals_by_sex.size > 0:
-                            kcal_data[sex_label]['Mean'].append(np.mean(kcals_by_sex))
-                            kcal_data[sex_label]['Median'].append(np.median(kcals_by_sex))
-                            kcal_data[sex_label]['Std Dev'].append(np.std(kcals_by_sex, ddof=1))
-                            kcal_data[sex_label]['Min'].append(np.min(kcals_by_sex))
-                            kcal_data[sex_label]['Max'].append(np.max(kcals_by_sex))
-    
-        # Create a PDF to save the cumulative histograms
-        pdf_filename = os.path.join(self.inputWS, "kcal_histograms.pdf")
-        with PdfPages(pdf_filename) as pdf:
-            for sex, data in kcal_data.items():
-                fig, ax = plt.subplots(figsize=(10, 6))
-    
-                # Colors for the different data types
-                colors = {'Mean': 'blue', 'Median': 'green', 'Std Dev': 'orange', 'Min': 'red', 'Max': 'purple'}
-    
-                # Plot each data type
-                for dtype, values in data.items():
-                    # Ensure all values are finite before plotting
-                    finite_values = [v for v in values if np.isfinite(v)]
-                    if finite_values:
-                        ax.hist(finite_values, bins=50, alpha=0.7, edgecolor='black', color=colors[dtype], label=dtype)
-    
-                ax.set_title(f"Kcal Distribution for {sex} Agents")
-                ax.set_xlabel("Kcal")
-                ax.set_ylabel("Frequency")
-                ax.legend()
-    
-                # Add statistics as text on the plot
-                mean_kcal = np.mean(data['Mean']) if data['Mean'] else 0
-                median_kcal = np.median(data['Median']) if data['Median'] else 0
-                std_dev_kcal = np.mean(data['Std Dev']) if data['Std Dev'] else 0
-                min_kcal = np.min(data['Min']) if data['Min'] else 0
-                max_kcal = np.max(data['Max']) if data['Max'] else 0
-    
-                stats_text = (
-                    f"Mean: {mean_kcal:.2f}\n"
-                    f"Median: {median_kcal:.2f}\n"
-                    f"Std Dev: {std_dev_kcal:.2f}\n"
-                    f"Min: {min_kcal:.2f}\n"
-                    f"Max: {max_kcal:.2f}"
-                )
-                plt.figtext(0.15, 0.7, stats_text, bbox={"facecolor": "white", "alpha": 0.5, "pad": 5})
-    
-                pdf.savefig(fig)
-                plt.close(fig)
-    
-        # New functionality to create individual histograms for each agent
-        agent_data = {'Male': {}, 'Female': {}}
-    
-        # Collect individual agent statistics from all HDF5 files
-        for hdf_path in self.h5_files:
-            with h5py.File(hdf_path, 'r') as hdf_file:
-                if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
-                    kcals = hdf_file['/agent_data/kcal'][:]
-                    sexes = hdf_file['/agent_data/sex'][:]
-    
-                    for i, (kcal, sex) in enumerate(zip(kcals, sexes)):
-                        kcal_values = kcal[~np.isnan(kcal)]  # Remove NaN values
-                        sex_label = 'Male' if sex == 0 else 'Female'
-    
-                        if i not in agent_data[sex_label]:
-                            agent_data[sex_label][i] = {'Mean': [], 'Median': [], 'Std Dev': [], 'Min': [], 'Max': []}
-    
-                        if kcal_values.size > 0:
-                            agent_data[sex_label][i]['Mean'].append(np.mean(kcal_values))
-                            agent_data[sex_label][i]['Median'].append(np.median(kcal_values))
-                            agent_data[sex_label][i]['Std Dev'].append(np.std(kcal_values, ddof=1))
-                            agent_data[sex_label][i]['Min'].append(np.min(kcal_values))
-                            agent_data[sex_label][i]['Max'].append(np.max(kcal_values))
-    
-        # Calculate the average values for each agent
-        averaged_data = {'Male': {}, 'Female': {}}
-        for sex, agents in agent_data.items():
-            for agent, values in agents.items():
-                averaged_data[sex][agent] = {
-                    'Mean': np.mean(values['Mean']) if values['Mean'] else 0,
-                    'Median': np.mean(values['Median']) if values['Median'] else 0,
-                    'Std Dev': np.mean(values['Std Dev']) if values['Std Dev'] else 0,
-                    'Min': np.mean(values['Min']) if values['Min'] else 0,
-                    'Max': np.mean(values['Max']) if values['Max'] else 0
-                }
-    
-        # Find the maximum recorded kcal average across all agents for the y-axis limit
-        max_kcal_value = max(
-            max(kcal_data['Male']['Max']) if kcal_data['Male']['Max'] else 0,
-            max(kcal_data['Female']['Max']) if kcal_data['Female']['Max'] else 0
-        )
-    
-        # Ensure max_kcal_value is finite
-        if not np.isfinite(max_kcal_value):
-            max_kcal_value = None  # or set to a default value, e.g., max_kcal_value = 10
-    
-        # Create a PDF to save the individual histograms
-        pdf_filename_individual = os.path.join(self.inputWS, "individual_kcal_histograms.pdf")
-        with PdfPages(pdf_filename_individual) as pdf:
-            for sex, agents in averaged_data.items():
-                for agent, values in agents.items():
-                    fig, ax = plt.subplots(figsize=(10, 6))
-    
-                    # Colors for the different data types
-                    colors = ['blue', 'green', 'orange', 'red', 'purple']
-                    labels = ['Mean', 'Median', 'Std Dev', 'Min', 'Max']
-                    agent_values = [values[label] for label in labels]
-    
-                    # Ensure all values are finite before plotting
-                    agent_values = [v for v in agent_values if np.isfinite(v)]
-    
-                    if agent_values:
-                        # Plot the agent's data
-                        ax.bar(labels, agent_values, color=colors, alpha=0.7, edgecolor='black')
-    
-                        ax.set_title(f"Kcal Distribution for Agent {agent} ({sex})")
-                        ax.set_xlabel("Kcal Type")
-                        ax.set_ylabel("Value")
-                        if max_kcal_value is not None:
-                            ax.set_ylim([0, max_kcal_value])  # Set y-axis limit if max_kcal_value is finite
-    
-                        # Add statistics as text on the plot
-                        stats_text = (
-                            f"Mean: {values['Mean']:.2f}\n"
-                            f"Median: {values['Median']:.2f}\n"
-                            f"Std Dev: {values['Std Dev']:.2f}\n"
-                            f"Min: {values['Min']:.2f}\n"
-                            f"Max: {values['Max']:.2f}"
-                        )
-                        plt.figtext(0.15, 0.7, stats_text, bbox={"facecolor": "white", "alpha": 0.5, "pad": 5})
-    
-                        pdf.savefig(fig)
-                        plt.close(fig)
-
-
+                    
+                    
 
     def kaplan_curve(self, shapefile_path, tiffWS):
         h5_files = self.h5_files
@@ -5528,68 +5382,110 @@ class summary:
             output_folder = os.path.dirname(h5_file)
             jpeg_filename = f"{base_name}_Kaplan_Meier_Curve.jpeg"
             jpeg_filepath = os.path.join(output_folder, jpeg_filename)
-
+            txt_filename = f"{base_name}_Kaplan_Meier_Statistics.txt"
+            txt_filepath = os.path.join(output_folder, txt_filename)
+    
             # Load shapefile
             gdf = gpd.read_file(shapefile_path)
             if gdf.empty:
                 continue
-
+    
             # Load TIFF data for coordinate reference
             with rasterio.open(tiffWS) as tif:
                 tif_crs = tif.crs
-
+    
             # Adjust shapefile CRS if needed
             if gdf.crs != tif_crs:
                 gdf = gdf.to_crs(tif_crs)
-
+    
             # Filter self.ts for the current HDF5 file
             ts_filtered = self.ts[self.ts['filename'] == h5_file]
-
+    
             # Perform spatial intersection with the shapefile
             intersection = gpd.overlay(ts_filtered, gdf, how='intersection')
-
+    
             # Get the list of all agent IDs in the filtered data
             all_agents = ts_filtered['agent'].unique()
             total_agents = len(all_agents)
-
+    
             if intersection.empty:
-                print(f"No agents intersected the rectangle - skipping {base_name}.")
                 continue
-
+    
             # Get the unique list of agents that are found within the rectangle
             unique_agents_in_rectangle = intersection['agent'].unique()
             num_agents_in_rectangle = len(unique_agents_in_rectangle)
-
-            # Print the comparison
-            print(f"File: {base_name}")
-            print(f"Total agents in data: {total_agents}")
-            print(f"Number of unique agents found within the rectangle: {num_agents_in_rectangle}")
-
+    
             # Prepare the first entry times for each agent
             entry_times = {agent: intersection[intersection['agent'] == agent]['timestep'].min()
                            for agent in unique_agents_in_rectangle}
-
+    
             # Convert to arrays for Kaplan-Meier analysis
             entry_times_array = np.array(list(entry_times.values()))
-
+    
             # Create the survival data array (True if entered the rectangle, False if not)
             survival_data = np.array([(True, time) for time in entry_times_array], dtype=[('event', bool), ('time', int)])
-
+    
             # Perform Kaplan-Meier estimation
             time, survival_prob = kaplan_meier_estimator(survival_data['event'], survival_data['time'])
-
-            # Plot the Kaplan-Meier survival curve
-            plt.figure(figsize=(10, 6))
-            plt.step(time, survival_prob, where="post", label=f"Agents Entering Rectangle: {num_agents_in_rectangle}/{total_agents}")
-            plt.xlabel("Time (Timesteps)")
-            plt.ylabel("Proportion of Agents Remaining Outside the Rectangle")
-            plt.title(f"Kaplan-Meier Curve\n{num_agents_in_rectangle} Agents Entered Rectangle out of {total_agents}")
-            plt.legend()
-
-            # Save the plot as a JPEG image
-            plt.savefig(jpeg_filepath, format='jpeg')
+    
+            # Calculate the standard error and confidence intervals (95% CI)
+            n = len(survival_data)
+            se = np.sqrt((survival_prob * (1 - survival_prob)) / n)
+            lower_ci = survival_prob - 1.96 * se
+            upper_ci = survival_prob + 1.96 * se
+    
+            # Ensure CI bounds are within [0, 1]
+            lower_ci = np.maximum(lower_ci, 0)
+            upper_ci = np.minimum(upper_ci, 1)
+    
+            # Determine time points for various completion percentages
+            completion_times = {
+                10: time[np.where(survival_prob <= 0.9)[0][0]],
+                30: time[np.where(survival_prob <= 0.7)[0][0]],
+                50: time[np.where(survival_prob <= 0.5)[0][0]],
+                70: time[np.where(survival_prob <= 0.3)[0][0]],
+                90: time[np.where(survival_prob <= 0.1)[0][0]],
+            }
+            final_time = time[-1]
+            completion_percentage = (num_agents_in_rectangle / total_agents) * 100
+    
+            # Write the statistics and explanation to a text file
+            with open(txt_filepath, 'w') as txt_file:
+                txt_file.write(f"Kaplan-Meier Statistics for {base_name}\n")
+                txt_file.write("-" * 33 + "\n")
+                for perc, comp_time in completion_times.items():
+                    txt_file.write(f"Time at which {perc}% of agents completed passage: {comp_time}\n")
+                txt_file.write(f"Last timestep the final agent crosses into the rectangle: {final_time}\n")
+                txt_file.write(f"Percentage of agents that complete passage: {completion_percentage:.2f}%\n\n")
+                txt_file.write("Explanation of the Confidence Interval:\n")
+                txt_file.write("The confidence interval represents the range within which we expect the true proportion of agents\n")
+                txt_file.write("remaining outside the rectangle to fall, with 95% confidence. The interval is calculated based on\n")
+                txt_file.write("the observed data, and it provides a measure of uncertainty around the Kaplan-Meier estimate.\n")
+                txt_file.write("A narrower confidence interval indicates greater certainty in the estimate, while a wider interval\n")
+                txt_file.write("indicates more uncertainty. The shaded area around the Kaplan-Meier curve on the plot represents\n")
+                txt_file.write("this confidence interval.\n")
+                txt_file.write("\nWhat the Confidence Interval Says About This Data:\n")
+                txt_file.write("In this data set, the confidence interval shows how consistent the agents' behavior is in relation to entering\n")
+                txt_file.write("the specified rectangle. A narrow interval suggests that most agents have similar entry times, indicating\n")
+                txt_file.write("uniform behavior. Conversely, a wide interval suggests that agent behavior is more varied, with significant\n")
+                txt_file.write("differences in when agents enter the rectangle. This variability could be due to differences in individual\n")
+                txt_file.write("agent characteristics, external influences, or random factors.\n")
+    
+            # Plot the Kaplan-Meier survival curve with confidence intervals
+            plt.figure(figsize=(3.5, 2.5))  # Slightly larger figure to avoid chopping off the y-axis
+            plt.step(time, survival_prob, where="post", label="Kaplan Meier Curve")
+            plt.fill_between(time, lower_ci, upper_ci, color='gray', alpha=0.3, step="post", label="Confidence Interval")
+            plt.xlabel("Time (Timesteps)", fontsize=6)
+            plt.ylabel("Proportion of Agents Remaining Outside the Rectangle", fontsize=6)
+            plt.title(f"Kaplan-Meier Curve\n{num_agents_in_rectangle} Agents Entered Rectangle out of {total_agents}", fontsize=6)
+    
+            # Add legend in the top right corner
+            plt.legend(loc="upper right", fontsize=6)
+    
+            # Adjust layout and save the plot as a JPEG image
+            plt.tight_layout()
+            plt.savefig(jpeg_filepath, format='jpeg', dpi=300, bbox_inches='tight')
             plt.close()
-
                     
                     
     def passage_success(self,finish_line):
