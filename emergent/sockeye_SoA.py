@@ -5330,41 +5330,53 @@ class summary:
                             output_file.write(f"No valid kcal values found for Agent {i + 1} ({sex_label}).\n\n")
                             
     def kcal_statistics_directory(self):
-            # Prepare to collect cumulative statistics
-            cumulative_stats = {}
-        
-            # Iterate through all HDF5 files in the directory
-            for hdf_path in self.h5_files:
-                with h5py.File(hdf_path, 'r') as hdf_file:
-                    if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
-                        kcals = hdf_file['/agent_data/kcal'][:]
-                        sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
-        
-                        for sex in np.unique(sexes):
-                            sex_label = 'Male' if sex == 0 else 'Female'
-                            if sex_label not in cumulative_stats:
-                                cumulative_stats[sex_label] = []
-        
-                            sex_mask = sexes == sex
-                            kcals_by_sex = kcals[sex_mask]
-        
-                            # Sum kcal data across all timesteps for each agent
-                            total_kcals_by_sex = np.nansum(kcals_by_sex, axis=1)  # Sum along the timestep axis, ignoring NaNs
-        
-                            cumulative_stats[sex_label].extend(total_kcals_by_sex)
-        
-            # Compute and print cumulative statistics
-            stats_file_path = os.path.join(self.inputWS, "kcal_statistics_directory.txt")
-            with open(stats_file_path, 'w') as output_file:
-                for sex_label, values in cumulative_stats.items():
-                    if values:
-                        values = np.array(values)
+        # Prepare to collect cumulative statistics
+        cumulative_stats = {}
+    
+        # Iterate through all HDF5 files in the directory
+        for hdf_path in self.h5_files:
+            with h5py.File(hdf_path, 'r') as hdf_file:
+                if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
+                    kcals = hdf_file['/agent_data/kcal'][:]
+                    sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
+    
+                    for sex in np.unique(sexes):
+                        sex_label = 'Male' if sex == 0 else 'Female'
+                        if sex_label not in cumulative_stats:
+                            cumulative_stats[sex_label] = []
+    
+                        sex_mask = sexes == sex
+                        kcals_by_sex = kcals[sex_mask]
+    
+                        # Process each agent's kcal data, ignoring inf and NaN values at each timestep
+                        total_kcals_by_sex = []
+                        for kcal_values in kcals_by_sex:
+                            valid_kcals = kcal_values[np.isfinite(kcal_values)]  # Filter out inf and NaN values
+                            total_kcal = np.sum(valid_kcals)  # Sum the remaining valid kcal values
+                            
+                            # Ignore NaN, inf, or total kcal values of 0
+                            if np.isfinite(total_kcal) and total_kcal > 0:
+                                total_kcals_by_sex.append(total_kcal)
+    
+                        cumulative_stats[sex_label].extend(total_kcals_by_sex)
+    
+        # Compute and print cumulative statistics
+        stats_file_path = os.path.join(self.inputWS, "kcal_statistics_directory.txt")
+        with open(stats_file_path, 'w') as output_file:
+            for sex_label, values in cumulative_stats.items():
+                if values:
+                    values = np.array(values)
+                    
+                    # Further ensure no inf or NaN values are in the array
+                    values = values[np.isfinite(values)]
+                    
+                    if len(values) > 0:
                         mean_kcal = np.mean(values)
                         median_kcal = np.median(values)
                         std_dev_kcal = np.std(values, ddof=1)
                         min_kcal = np.min(values)
                         max_kcal = np.max(values)
-        
+    
                         output_file.write(f"Cumulative Statistics for {sex_label}:\n")
                         output_file.write(f"  Average (Mean) Kcal: {mean_kcal:.2f}\n")
                         output_file.write(f"  Median Kcal: {median_kcal:.2f}\n")
@@ -5373,7 +5385,9 @@ class summary:
                         output_file.write(f"  Maximum Kcal: {max_kcal:.2f}\n\n")
                     else:
                         output_file.write(f"No valid kcal values found for {sex_label}.\n\n")
-       
+                else:
+                    output_file.write(f"No valid kcal values found for {sex_label}.\n\n")
+           
 
         
     def Kcal_histogram_by_timestep_intervals_for_all_simulations(self):
