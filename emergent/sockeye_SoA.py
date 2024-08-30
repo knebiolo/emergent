@@ -68,7 +68,7 @@ import sys
 import random
 from collections import deque
 from sksurv.nonparametric import kaplan_meier_estimator
-
+from PyPDF2 import PdfReader, PdfWriter
 
 warnings.filterwarnings("ignore")
 
@@ -4906,6 +4906,7 @@ class summary:
         #set input WS as parent_directory for compatibility with methods
         self.inputWS = parent_directory
         
+        
         # get h5 files associated with this model
         self.h5_files = self.find_h5_files()
         
@@ -5329,52 +5330,117 @@ class summary:
                             output_file.write(f"No valid kcal values found for Agent {i + 1} ({sex_label}).\n\n")
                             
     def kcal_statistics_directory(self):
-        # Prepare to collect cumulative statistics
-        cumulative_stats = {}
-    
-        # Iterate through all HDF5 files in the directory
-        for hdf_path in self.h5_files:
-            with h5py.File(hdf_path, 'r') as hdf_file:
-                if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
-                    kcals = hdf_file['/agent_data/kcal'][:]
-                    sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
-    
-                    for sex in np.unique(sexes):
-                        sex_label = 'Male' if sex == 0 else 'Female'
-                        if sex_label not in cumulative_stats:
-                            cumulative_stats[sex_label] = []
-    
-                        sex_mask = sexes == sex
-                        kcals_by_sex = kcals[sex_mask]
-    
-                        # Sum kcal data across all timesteps for each agent
-                        total_kcals_by_sex = np.nansum(kcals_by_sex, axis=1)  # Sum along the timestep axis, ignoring NaNs
-    
-                        cumulative_stats[sex_label].extend(total_kcals_by_sex)
-    
-        # Compute and print cumulative statistics
-        stats_file_path = os.path.join(self.inputWS, "kcal_statistics_directory.txt")
-        with open(stats_file_path, 'w') as output_file:
-            for sex_label, values in cumulative_stats.items():
-                if values:
-                    values = np.array(values)
-                    mean_kcal = np.mean(values)
-                    median_kcal = np.median(values)
-                    std_dev_kcal = np.std(values, ddof=1)
-                    min_kcal = np.min(values)
-                    max_kcal = np.max(values)
-    
-                    output_file.write(f"Cumulative Statistics for {sex_label}:\n")
-                    output_file.write(f"  Average (Mean) Kcal: {mean_kcal:.2f}\n")
-                    output_file.write(f"  Median Kcal: {median_kcal:.2f}\n")
-                    output_file.write(f"  Standard Deviation of Kcal: {std_dev_kcal:.2f}\n")
-                    output_file.write(f"  Minimum Kcal: {min_kcal:.2f}\n")
-                    output_file.write(f"  Maximum Kcal: {max_kcal:.2f}\n\n")
-                else:
-                    output_file.write(f"No valid kcal values found for {sex_label}.\n\n")
-                    
-                    
+            # Prepare to collect cumulative statistics
+            cumulative_stats = {}
+        
+            # Iterate through all HDF5 files in the directory
+            for hdf_path in self.h5_files:
+                with h5py.File(hdf_path, 'r') as hdf_file:
+                    if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
+                        kcals = hdf_file['/agent_data/kcal'][:]
+                        sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
+        
+                        for sex in np.unique(sexes):
+                            sex_label = 'Male' if sex == 0 else 'Female'
+                            if sex_label not in cumulative_stats:
+                                cumulative_stats[sex_label] = []
+        
+                            sex_mask = sexes == sex
+                            kcals_by_sex = kcals[sex_mask]
+        
+                            # Sum kcal data across all timesteps for each agent
+                            total_kcals_by_sex = np.nansum(kcals_by_sex, axis=1)  # Sum along the timestep axis, ignoring NaNs
+        
+                            cumulative_stats[sex_label].extend(total_kcals_by_sex)
+        
+            # Compute and print cumulative statistics
+            stats_file_path = os.path.join(self.inputWS, "kcal_statistics_directory.txt")
+            with open(stats_file_path, 'w') as output_file:
+                for sex_label, values in cumulative_stats.items():
+                    if values:
+                        values = np.array(values)
+                        mean_kcal = np.mean(values)
+                        median_kcal = np.median(values)
+                        std_dev_kcal = np.std(values, ddof=1)
+                        min_kcal = np.min(values)
+                        max_kcal = np.max(values)
+        
+                        output_file.write(f"Cumulative Statistics for {sex_label}:\n")
+                        output_file.write(f"  Average (Mean) Kcal: {mean_kcal:.2f}\n")
+                        output_file.write(f"  Median Kcal: {median_kcal:.2f}\n")
+                        output_file.write(f"  Standard Deviation of Kcal: {std_dev_kcal:.2f}\n")
+                        output_file.write(f"  Minimum Kcal: {min_kcal:.2f}\n")
+                        output_file.write(f"  Maximum Kcal: {max_kcal:.2f}\n\n")
+                    else:
+                        output_file.write(f"No valid kcal values found for {sex_label}.\n\n")
+       
 
+        
+    def Kcal_histogram_by_timestep_intervals_for_all_simulations(self):
+        """
+        Generates histograms for the total kcal consumed by all agents in the folder that
+        inputWS is pointing to and saves them to two separate PDFs: one for males and one for females.
+        The titles reflect the folder name (e.g., 'left' or 'right') and the base name of the HDF5 file.
+        """
+        # Get the folder name from inputWS
+        folder_name = os.path.basename(os.path.normpath(self.inputWS))
+    
+        # Prepare the output PDF paths for male and female
+        male_pdf_output_path = os.path.join(self.inputWS, f"{folder_name}_male_kcal_histograms_by_timestep_intervals.pdf")
+        female_pdf_output_path = os.path.join(self.inputWS, f"{folder_name}_female_kcal_histograms_by_timestep_intervals.pdf")
+    
+        # Create PDF files to store all the histograms
+        with PdfPages(male_pdf_output_path) as male_pdf, PdfPages(female_pdf_output_path) as female_pdf:
+            # Iterate through all HDF5 files in the directory
+            for hdf_path in self.h5_files:
+                base_name = os.path.splitext(os.path.basename(hdf_path))[0]
+    
+                with h5py.File(hdf_path, 'r') as hdf_file:
+                    if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
+                        kcals = hdf_file['/agent_data/kcal'][:]
+                        sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
+    
+                        # Separate male and female data
+                        male_kcals = kcals[sexes == 0]
+                        female_kcals = kcals[sexes == 1]
+    
+                        # Calculate total kcal for each agent across all timesteps
+                        male_total_kcal = np.nansum(male_kcals, axis=1)
+                        female_total_kcal = np.nansum(female_kcals, axis=1)
+    
+                        # Replace inf and NaN values with zero
+                        male_total_kcal = np.where(np.isfinite(male_total_kcal), male_total_kcal, 0)
+                        female_total_kcal = np.where(np.isfinite(female_total_kcal), female_total_kcal, 0)
+    
+                        # Create a figure for the male histograms
+                        plt.figure(figsize=(12, 6))
+                        plt.hist(male_total_kcal, bins=20, color='blue', alpha=0.7)
+                        plt.title(f"{folder_name} - {base_name} Male Kcal Distribution (Total)", fontsize=10)
+                        plt.xlabel("Total Kcal", fontsize=8)
+                        plt.ylabel("Frequency", fontsize=8)
+                        plt.tight_layout()
+    
+                        # Save the male histogram figure to the PDF
+                        male_pdf.savefig()
+                        plt.close()
+    
+                        # Create a figure for the female histograms
+                        plt.figure(figsize=(12, 6))
+                        plt.hist(female_total_kcal, bins=20, color='red', alpha=0.7)
+                        plt.title(f"{folder_name} - {base_name} Female Kcal Distribution (Total)", fontsize=10)
+                        plt.xlabel("Total Kcal", fontsize=8)
+                        plt.ylabel("Frequency", fontsize=8)
+                        plt.tight_layout()
+    
+                        # Save the female histogram figure to the PDF
+                        female_pdf.savefig()
+                        plt.close()
+    
+        print(f"Kcal histograms saved to {male_pdf_output_path} and {female_pdf_output_path}")
+        
+
+
+                    
     def kaplan_curve(self, shapefile_path, tiffWS):
         h5_files = self.h5_files
         for h5_file in h5_files:
@@ -5419,6 +5485,10 @@ class summary:
             entry_times = {agent: intersection[intersection['agent'] == agent]['timestep'].min()
                            for agent in unique_agents_in_rectangle}
     
+            # Calculate total kcal consumed by each successful agent
+            total_kcal = {agent: ts_filtered[ts_filtered['agent'] == agent]['kcal'].sum()
+                          for agent in unique_agents_in_rectangle}
+    
             # Convert to arrays for Kaplan-Meier analysis
             entry_times_array = np.array(list(entry_times.values()))
     
@@ -5449,7 +5519,13 @@ class summary:
             final_time = time[-1]
             completion_percentage = (num_agents_in_rectangle / total_agents) * 100
     
-            # Write the statistics and explanation to a text file
+            # Calculate kcal statistics for successful agents
+            kcal_values = np.array(list(total_kcal.values()))
+            min_kcal = np.min(kcal_values)
+            max_kcal = np.max(kcal_values)
+            avg_kcal = np.mean(kcal_values)
+    
+            # Write the statistics and kcal information to a text file
             with open(txt_filepath, 'w') as txt_file:
                 txt_file.write(f"Kaplan-Meier Statistics for {base_name}\n")
                 txt_file.write("-" * 33 + "\n")
@@ -5457,6 +5533,19 @@ class summary:
                     txt_file.write(f"Time at which {perc}% of agents completed passage: {comp_time}\n")
                 txt_file.write(f"Last timestep the final agent crosses into the rectangle: {final_time}\n")
                 txt_file.write(f"Percentage of agents that complete passage: {completion_percentage:.2f}%\n\n")
+                
+                # New section: Kilocalories consumed by successful agents
+                txt_file.write("Kilocalories Consumed by Successful Agents:\n")
+                txt_file.write("-" * 33 + "\n")
+                for agent, kcal in total_kcal.items():
+                    txt_file.write(f"Agent {agent}: {kcal:.2f} kcal\n")
+                
+                # New section: Kilocalories statistics
+                txt_file.write("\nKilocalories Statistics:\n")
+                txt_file.write(f"Minimum kcal: {min_kcal:.2f}\n")
+                txt_file.write(f"Maximum kcal: {max_kcal:.2f}\n")
+                txt_file.write(f"Average kcal: {avg_kcal:.2f}\n\n")
+    
                 txt_file.write("Explanation of the Confidence Interval:\n")
                 txt_file.write("The confidence interval represents the range within which we expect the true proportion of agents\n")
                 txt_file.write("remaining outside the rectangle to fall, with 95% confidence. The interval is calculated based on\n")
@@ -5486,6 +5575,9 @@ class summary:
             plt.tight_layout()
             plt.savefig(jpeg_filepath, format='jpeg', dpi=300, bbox_inches='tight')
             plt.close()
+
+
+
                     
                     
     def passage_success(self,finish_line):
