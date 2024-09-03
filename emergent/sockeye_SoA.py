@@ -5392,25 +5392,40 @@ class summary:
         
     def Kcal_histogram_by_timestep_intervals_for_all_simulations(self):
         """
-        Generates histograms for the total kcal consumed by all agents in the folder that
-        inputWS is pointing to and saves them to two separate PDFs: one for males and one for females.
-        The titles reflect the folder name (e.g., 'left' or 'right') and the base name of the HDF5 file.
+        Generates a single histogram for the total kcal consumed by all agents in the folder that
+        inputWS is pointing to and saves them as two separate JPEGs: one for males and one for females.
         """
+        import os
+        import h5py
+        import numpy as np
+        import matplotlib.pyplot as plt
+    
         # Get the folder name from inputWS
         folder_name = os.path.basename(os.path.normpath(self.inputWS))
+        
+        # Determine if "left" or "right" should be included in the title
+        direction = "left" if "left" in folder_name.lower() else "right" if "right" in folder_name.lower() else ""
     
-        # Prepare the output PDF paths for male and female
-        male_pdf_output_path = os.path.join(self.inputWS, f"{folder_name}_male_kcal_histograms_by_timestep_intervals.pdf")
-        female_pdf_output_path = os.path.join(self.inputWS, f"{folder_name}_female_kcal_histograms_by_timestep_intervals.pdf")
-    
-        # Create PDF files to store all the histograms
-        with PdfPages(male_pdf_output_path) as male_pdf, PdfPages(female_pdf_output_path) as female_pdf:
-            # Iterate through all HDF5 files in the directory
-            for hdf_path in self.h5_files:
-                base_name = os.path.splitext(os.path.basename(hdf_path))[0]
-    
+        # Prepare the output paths for male and female histograms
+        male_histogram_path = os.path.join(self.inputWS, f"{folder_name}_male_kcal_histogram.jpg")
+        female_histogram_path = os.path.join(self.inputWS, f"{folder_name}_female_kcal_histogram.jpg")
+        
+        # Initialize lists to collect kcal data across all HDF5 files
+        all_male_kcals = []
+        all_female_kcals = []
+        
+        # Set common plot parameters
+        plt.rcParams.update({
+            'font.size': 6,
+            'font.family': 'serif',
+            'figure.figsize': (3, 2)  # width, height in inches
+        })
+        
+        # Iterate through all HDF5 files in the directory
+        for hdf_path in self.h5_files:
+            try:
                 with h5py.File(hdf_path, 'r') as hdf_file:
-                    if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys():
+                    if 'agent_data' in hdf_file and 'kcal' in hdf_file['agent_data'].keys() and 'sex' in hdf_file['agent_data'].keys():
                         kcals = hdf_file['/agent_data/kcal'][:]
                         sexes = hdf_file['/agent_data/sex'][:]  # Assumes 0 and 1 encoding for sexes
     
@@ -5426,32 +5441,39 @@ class summary:
                         male_total_kcal = np.where(np.isfinite(male_total_kcal), male_total_kcal, 0)
                         female_total_kcal = np.where(np.isfinite(female_total_kcal), female_total_kcal, 0)
     
-                        # Create a figure for the male histograms
-                        plt.figure(figsize=(12, 6))
-                        plt.hist(male_total_kcal, bins=20, color='blue', alpha=0.7)
-                        plt.title(f"{folder_name} - {base_name} Male Kcal Distribution (Total)", fontsize=10)
-                        plt.xlabel("Total Kcal", fontsize=8)
-                        plt.ylabel("Frequency", fontsize=8)
-                        plt.tight_layout()
+                        # Append the total kcal data to the lists
+                        all_male_kcals.extend(male_total_kcal)
+                        all_female_kcals.extend(female_total_kcal)
     
-                        # Save the male histogram figure to the PDF
-                        male_pdf.savefig()
-                        plt.close()
+            except Exception as e:
+                print(f"Failed to process {hdf_path}: {e}")
     
-                        # Create a figure for the female histograms
-                        plt.figure(figsize=(12, 6))
-                        plt.hist(female_total_kcal, bins=20, color='red', alpha=0.7)
-                        plt.title(f"{folder_name} - {base_name} Female Kcal Distribution (Total)", fontsize=10)
-                        plt.xlabel("Total Kcal", fontsize=8)
-                        plt.ylabel("Frequency", fontsize=8)
-                        plt.tight_layout()
+        # Convert lists to numpy arrays for histogram plotting
+        all_male_kcals = np.array(all_male_kcals)
+        all_female_kcals = np.array(all_female_kcals)
     
-                        # Save the female histogram figure to the PDF
-                        female_pdf.savefig()
-                        plt.close()
+        # Create and save male histogram as JPEG
+        plt.figure()
+        plt.hist(all_male_kcals, bins=20, color='blue', alpha=0.7)
+        plt.title(f"Male Total Kcal Usage ({direction})", fontsize=6)
+        plt.xlabel("Total Kcal", fontsize=6)
+        plt.ylabel("Frequency", fontsize=6)
+        plt.tight_layout()
+        plt.savefig(male_histogram_path, format='jpeg', dpi=300)
+        plt.close()
     
-        print(f"Kcal histograms saved to {male_pdf_output_path} and {female_pdf_output_path}")
-        
+        # Create and save female histogram as JPEG
+        plt.figure()
+        plt.hist(all_female_kcals, bins=20, color='red', alpha=0.7)
+        plt.title(f"Female Total Kcal Usage ({direction})", fontsize=6)
+        plt.xlabel("Total Kcal", fontsize=6)
+        plt.ylabel("Probability Density", fontsize=6)
+        plt.tight_layout()
+        plt.savefig(female_histogram_path, format='jpeg', dpi=300)
+        plt.close()
+    
+        print(f"Kcal histograms saved to {male_histogram_path} and {female_histogram_path}")
+            
 
 
                     
@@ -5583,7 +5605,7 @@ class summary:
             plt.title(f"Kaplan-Meier Curve\n{num_agents_in_rectangle} Agents Entered Rectangle out of {total_agents}", fontsize=6)
     
             # Add legend in the top right corner
-            plt.legend(loc="upper right", fontsize=6)
+            plt.legend(loc="upper right",  fontsize=6)
     
             # Adjust layout and save the plot as a JPEG image
             plt.tight_layout()
