@@ -2700,11 +2700,21 @@ class simulation():
             # fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
             #                       fish_vel_0 + acc_ini * dt + pid_adjustment,
             #                       fish_vel_0 + acc_ini * dt)
+            
             water_velocity = np.where(self.simulation.wet[:,np.newaxis] == -9999.0,
                                       np.zeros_like(np.vstack((self.simulation.x_vel,self.simulation.y_vel)).T),
                                       np.vstack((self.simulation.x_vel,self.simulation.y_vel)).T)
-                                                                                    
             
+            if np.any(np.linalg.norm(water_velocity, axis=1) > 10):
+                # Get a mask of which velocities exceed a magnitude of 10
+                too_big = np.linalg.norm(water_velocity, axis=1) > 10
+                
+                # Normalize the water velocity vectors that exceed the limit
+                norms = np.linalg.norm(water_velocity[too_big], axis=1, keepdims=True)
+                
+                # Scale those velocities to have a norm of 10 while preserving their direction
+                water_velocity[too_big] = (water_velocity[too_big] / norms) * 10
+
             fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
                                   ideal_vel,
                                   water_velocity)
