@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 Created on Wed May 10 20:30:21 2023
@@ -160,7 +159,8 @@ def pixel_to_geo(transform, rows, cols):
 
     return xs, ys
 
-def standardize_shape(arr, target_shape=(5, 5), fill_value=np.nan):
+def standardize_shape(arr, target_shape= (5, 5), fill_value=np.nan):
+    target_shape= arr.shape
     if arr.shape != target_shape:
         # Create a new array with the target shape, filled with the fill value
         standardized_arr = np.full(target_shape, fill_value)
@@ -302,192 +302,84 @@ def movie_maker(directory, model_name, crs, dt, depth_rast_transform):
     # clean up
     writer.finish()
     
-def HECRAS (model_dir, HECRAS_dir, resolution, crs):
+def HECRAS(model_dir, HECRAS_dir, resolution, crs, timestep_range = None):
     """
-    Import environment data from a HECRAS model and generate raster files.
-    
-    This method extracts data from a HECRAS model stored in HDF format and 
-    interpolates the data to generate raster files for various environmental 
-    parameters such as velocity, water surface elevation, and bathymetry.
+    Import environment data from a HECRAS model, process selected timesteps, 
+    and store results in a new HDF5 file.
     
     Parameters:
-    - HECRAS_model (str): Path to the HECRAS model in HDF format.
+    - model_dir (str): Directory to save the output files.
+    - HECRAS_dir (str): Path to the HECRAS model in HDF format.
     - resolution (float): Desired resolution for the interpolated rasters.
-    
-    Attributes set:
-    
-    Notes:
-    - The method reads data from the HECRAS model, interpolates the data to the 
-      desired resolution, and then writes the interpolated data to raster files.
-    - The generated raster files are saved in the model directory with names corresponding 
-      to the environmental parameter they represent (e.g., 'elev.tif', 'wsel.tif').
-    - The method uses LinearNDInterpolator for interpolation and rasterio for raster 
-      generation and manipulation.
+    - crs (str): Coordinate reference system for the geospatial data.
+    - timestep_range (list or None): List of timesteps to process. If None, only the last timestep is processed.
+    - output_hdf_path (str): Path to the output HDF5 file where processed data is stored.
+
     """
-    # Initialization Part 1: Connect to HECRAS model and import environment
-    hdf = h5py.File(HECRAS_dir,'r')
-    
-    # Extract Data from HECRAS HDF model
-    print ("Extracting Model Geometry and Results")
-    
+    hdf = h5py.File(HECRAS_dir, 'r')
     pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
-    vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
-    vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
-    wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1]
     elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
-    
+
+    # If no timestep range is provided, default to the last timestep
+    if timestep_range is None:
+        timestep_range = [-1]
+
+    with h5py.File(model_dir, 'a') as output_hdf:
+        for timestep in timestep_range:
+            print(f"Processing timestep: {timestep}")
+            
+            vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][timestep]
+            vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][timestep]
+            wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][timestep]
+
+            geom = list(tuple(zip(pts[:, 0], pts[:, 1])))
+            df = pd.DataFrame.from_dict({
+                'index': np.arange(0, len(pts), 1),
+                'geom_tup': geom,
+                'vel_x': vel_x,
+                'vel_y': vel_y,
+                'wsel': wsel,
+                'elev': elev
+            })
+            df['geometry'] = df.geom_tup.apply(Point)
+            gdf = gpd.GeoDataFrame(df, crs=crs)
+
+            vel_x_interp = LinearNDInterpolator(pts, gdf.vel_x)
+            vel_y_interp = LinearNDInterpolator(pts, gdf.vel_y)
+            wsel_interp = LinearNDInterpolator(pts, gdf.wsel)
+            elev_interp = LinearNDInterpolator(pts, gdf.elev)
+
+            xmin = np.min(pts[:, 0])
+            xmax = np.max(pts[:, 0])
+            ymin = np.min(pts[:, 1])
+            ymax = np.max(pts[:, 1])
+
+            xint = np.arange(xmin, xmax, resolution)
+            yint = np.arange(ymax, ymin, resolution * -1.)
+            xnew, ynew = np.meshgrid(xint, yint, sparse=True)
+
+            vel_x_new = vel_x_interp(xnew, ynew)
+            vel_y_new = vel_y_interp(xnew, ynew)
+            wsel_new = wsel_interp(xnew, ynew)
+            elev_new = elev_interp(xnew, ynew)
+
+            depth = wsel_new - elev_new
+            vel_mag = np.sqrt(np.power(vel_x_new, 2) + np.power(vel_y_new, 2))
+            vel_dir = np.arctan2(vel_y_new, vel_x_new)
+
+            # Store the results in the output HDF5 file
+            timestep_key = f'timestep_{timestep}'
+
+            output_hdf.create_dataset(f'{timestep_key}/elev', data=elev_new)
+            output_hdf.create_dataset(f'{timestep_key}/wsel', data=wsel_new)
+            output_hdf.create_dataset(f'{timestep_key}/depth', data=depth)
+            output_hdf.create_dataset(f'{timestep_key}/vel_mag', data=vel_mag)
+            output_hdf.create_dataset(f'{timestep_key}/vel_dir', data=vel_dir)
+            output_hdf.create_dataset(f'{timestep_key}/vel_x', data=vel_x_new)
+            output_hdf.create_dataset(f'{timestep_key}/vel_y', data=vel_y_new)
+
     hdf.close()
-    
-    # create list of xy tuples
-    geom = list(tuple(zip(pts[:,0],pts[:,1])))
-    
-    # create a dataframe with geom column and observations
-    df = pd.DataFrame.from_dict({'index':np.arange(0,len(pts),1),
-                                 'geom_tup':geom,
-                                 'vel_x':vel_x,
-                                 'vel_y':vel_y,
-                                 'wsel':wsel,
-                                 'elev':elev})
-    
-    # add a geometry column
-    df['geometry'] = df.geom_tup.apply(Point)
-    
-    # convert into a geodataframe
-    gdf = gpd.GeoDataFrame(df,crs = crs)
-    
-    print ("Create multidimensional interpolator functions for velocity, wsel, elev")
-    
-    vel_x_interp = LinearNDInterpolator(pts,gdf.vel_x)
-    vel_y_interp = LinearNDInterpolator(pts,gdf.vel_y)
-    wsel_interp = LinearNDInterpolator(pts,gdf.wsel)
-    elev_interp = LinearNDInterpolator(pts,gdf.elev)
-    
-    # first identify extents of image
-    xmin = np.min(pts[:,0])
-    xmax = np.max(pts[:,0])
-    ymin = np.min(pts[:,1])
-    ymax = np.max(pts[:,1])
-    
-    # interpoate velocity, wsel, and elevation at new xy's
-    ## TODO ISHA TO CHECK IF RASTER OUTPUTS LOOK DIFFERENT AT 0.5m vs 1m
-    xint = np.arange(xmin,xmax,resolution)
-    yint = np.arange(ymax,ymin,resolution * -1.)
-    xnew, ynew = np.meshgrid(xint,yint, sparse = True)
-    
-    print ("Interpolate Velocity East")
-    vel_x_new = vel_x_interp(xnew, ynew)
-    print ("Interpolate Velocity North")
-    vel_y_new = vel_y_interp(xnew, ynew)
-    print ("Interpolate WSEL")
-    wsel_new = wsel_interp(xnew, ynew)
-    print ("Interpolate bathymetry")
-    elev_new = elev_interp(xnew, ynew)
-    
-    # create a depth raster
-    depth = wsel_new - elev_new
-    
-    # calculate velocity magnitude
-    vel_mag = np.sqrt((np.power(vel_x_new,2)+np.power(vel_y_new,2)))
-    
-    # calculate velocity direction in radians
-    vel_dir = np.arctan2(vel_y_new,vel_x_new)
-    
-    print ("Exporting Rasters")
-
-    # create raster properties
-    driver = 'GTiff'
-    width = elev_new.shape[1]
-    height = elev_new.shape[0]
-    count = 1
-    crs = crs
-    #transform = Affine.translation(xnew[0][0] - 0.5, ynew[0][0] - 0.5) * Affine.scale(1,-1)
-    transform = Affine.translation(xnew[0][0] - 0.5 * resolution, ynew[0][0] - 0.5 * resolution)\
-        * Affine.scale(resolution,-1 * resolution)
-
-    # write elev raster
-    with rasterio.open(os.path.join(model_dir,'elev.tif'),
-                       mode = 'w',
-                       driver = driver,
-                       width = width,
-                       height = height,
-                       count = count,
-                       dtype = 'float64',
-                       crs = crs,
-                       transform = transform) as elev_rast:
-        elev_rast.write(elev_new,1)
-    
-    # write wsel raster
-    with rasterio.open(os.path.join(model_dir,'wsel.tif'),
-                       mode = 'w',
-                       driver = driver,
-                       width = width,
-                       height = height,
-                       count = count,
-                       dtype = 'float64',
-                       crs = crs,
-                       transform = transform) as wsel_rast:
-        wsel_rast.write(wsel_new,1)
-                    
-    # write depth raster
-    with rasterio.open(os.path.join(model_dir,'depth.tif'),
-                       mode = 'w',
-                       driver = driver,
-                       width = width,
-                       height = height,
-                       count = count,
-                       dtype = 'float64',
-                       crs = crs,
-                       transform = transform) as depth_rast:
-        depth_rast.write(depth,1)
-        
-    # write velocity dir raster
-    with rasterio.open(os.path.join(model_dir,'vel_dir.tif'),
-                       mode = 'w',
-                       driver = driver,
-                       width = width,
-                       height = height,
-                       count = count,
-                       dtype = 'float64',
-                       crs = crs,
-                       transform = transform) as vel_dir_rast:
-        vel_dir_rast.write(vel_dir,1)
-                    
-    # write velocity .mag raster
-    with rasterio.open(os.path.join(model_dir,'vel_mag.tif'),
-                       mode = 'w',
-                       driver = driver,
-                       width = width,
-                       height = height,
-                       count = count,
-                       dtype = 'float64',
-                       crs = crs,
-                       transform = transform) as vel_mag_rast:
-        vel_mag_rast.write(vel_mag,1)
-                
-    # write velocity x raster
-    with rasterio.open(os.path.join(model_dir,'vel_x.tif'),
-                       mode = 'w',
-                       driver = driver,
-                       width = width,
-                       height = height,
-                       count = count,
-                       dtype = 'float64',
-                       crs = crs,
-                       transform = transform) as vel_x_rast:
-        vel_x_rast.write(vel_x_new,1)
-                    
-    # write velocity y raster
-    with rasterio.open(os.path.join(model_dir,'vel_y.tif'),
-                       mode = 'w',
-                       driver = driver,
-                       width = width,
-                       height = height,
-                       count = count,
-                       dtype = 'float64',
-                       crs = crs,
-                       transform = transform) as vel_y_rast:
-        vel_y_rast.write(vel_y_new,1)
-
+    print(f"Finished processing and saving timesteps to {HECRAS_dir}")
 
 class PID_controller:
     def __init__(self, n_agents, k_p = 0., k_i = 0., k_d = 0., tau_d = 1):
@@ -2748,7 +2640,8 @@ class simulation():
                 fish_vel_0_y = (self.simulation.Y - self.simulation.prev_Y)/dt
                 fish_vel_0 = np.stack((fish_vel_0_x,fish_vel_0_y)).T
             
-            
+            if np.any(self.simulation.ideal_sog > 1.):
+                print ('check')
             
             ideal_vel_x = np.where(mask, self.simulation.ideal_sog * np.cos(self.simulation.heading),0) 
             ideal_vel_y = np.where(mask, self.simulation.ideal_sog * np.sin(self.simulation.heading),0)  
@@ -2806,9 +2699,17 @@ class simulation():
             self.simulation.pid_adjustment = pid_adjustment
             
             # Step 6: add adjustment to original velocity computation       
+            # fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
+            #                       fish_vel_0 + acc_ini * dt + pid_adjustment,
+            #                       fish_vel_0 + acc_ini * dt)
+            water_velocity = np.where(self.simulation.wet[:,np.newaxis] == -9999.0,
+                                      np.zeros_like(np.vstack((self.simulation.x_vel,self.simulation.y_vel)).T),
+                                      np.vstack((self.simulation.x_vel,self.simulation.y_vel)).T)
+                                                                                    
+            
             fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
-                                  fish_vel_0 + acc_ini * dt + pid_adjustment,
-                                  fish_vel_0 + acc_ini * dt)
+                                  ideal_vel,
+                                  water_velocity)
             
             fish_vel_1 = np.where(self.simulation.dead[:,np.newaxis] == 1,
                                   fish_vel_1 * 0,
@@ -2817,8 +2718,8 @@ class simulation():
             # Step 7: Prepare for position update
             dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
                 
-            # if np.any(np.linalg.norm(fish_vel_1,axis = -1) > 2* self.ideal_sog):
-            #     print ('fuck - why')
+            if np.any(np.linalg.norm(fish_vel_1,axis = -1) > 2* self.simulation.ideal_sog):
+                print ('fuck - why')
             return dxdy
                             
         def jump(self, t, g, mask):
@@ -2986,8 +2887,15 @@ class simulation():
             # Unit vectors and repulsive force
             unit_vector_x = delta_x / magnitudes
             unit_vector_y = delta_y / magnitudes
-            x_force = ((weight * unit_vector_x) / magnitudes) * multiplier
-            y_force = ((weight * unit_vector_y) / magnitudes) * multiplier
+            try:
+                x_force = ((weight * unit_vector_x) / magnitudes) * multiplier
+                y_force = ((weight * unit_vector_y) / magnitudes) * multiplier
+            except ValueError:
+                print (f'unit vector x: {unit_vector_x}')
+                print (f'magnitudes: {magnitudes}')
+                print (f'multiplier: {multiplier}')
+                print (f'species status: {self.simulation.dead}')
+                sys.exit()
         
             # Sum forces for this agent
             total_x_force = np.nansum(x_force)
@@ -3019,6 +2927,11 @@ class simulation():
             col_min = np.clip(refugia_map_cols - buff, 0, None)
             col_max = np.clip(refugia_map_cols + buff + 1, None, self.simulation.hdf5['refugia/0'].shape[1])
         
+            if np.any(row_min < 0) or \
+                np.any(row_max < 0) or \
+                    np.any(col_min < 0) or \
+                        np.any(col_max) < 0:
+                print ('fuck')
             # Using list comprehension to access the relevant sections from the mental map and calculate forces
             attractive_forces_per_agent = np.array([
                 self._calculate_attractive_force(agent_idx, rmin, rmax, cmin, cmax, weight)
@@ -3131,7 +3044,10 @@ class simulation():
                       ]
 
             # get velocity and coords raster per agent
-            vel3d = np.stack([standardize_shape(self.simulation.hdf5['environment/vel_mag'][sl[-2:]]) for sl in slices])
+            try:
+                vel3d = np.stack([standardize_shape(self.simulation.hdf5['environment/vel_mag'][sl[-2:]]) for sl in slices])
+            except:
+                print ('check')
             x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]]) for sl in slices])
             y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]]) for sl in slices])
             
@@ -3258,8 +3174,9 @@ class simulation():
             length_numpy = self.simulation.length  # .get() if isinstance(self.length, cp.ndarray) else self.length
             
             # For simplicity, let's use a fixed buffer size. You can adjust this as needed.
-            buff = 2  # This could be dynamic based on your requirements
-        
+            buff = 5  # This could be dynamic based on your requirements
+            #buff = 2  # This could be dynamic based on your requirements
+
             # get the x, y position of the agent 
             x, y = (np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y))
             
@@ -4548,10 +4465,12 @@ class simulation():
         time_since_jump = t - self.time_of_jump
         
         # Create a boolean mask for the fish that should jump
-        should_jump = (sog_to_water_vel_ratio <= 0.10) & \
-            (time_since_jump > 60) & \
-                (self.battery >= 0.25)
-        
+        should_jump = (self.wet == -9999.0) | (
+            (sog_to_water_vel_ratio <= 0.10) &
+            (time_since_jump > 60) &
+            (self.battery >= 0.25)
+        )
+
         # Apply the jump or swim functions based on the condition
         # For each fish that should jump
         dxdy_jump = movement.jump(t=t, g = g, mask=should_jump)
@@ -4756,11 +4675,11 @@ class simulation():
                         threshold_top_75 = self.current_longitudes[sorted_indices[top_75_percent_index]]
                         
                         # Step 2: Create a mask for the top 75%
-                        mask = (self.current_longitudes >= threshold_top_75) & (self.dead != 1)
+                        mask = (self.current_longitudes >= threshold_top_50) & (self.dead != 1)
                         
                         # Step 3: Calculate the mean x and y positions for the top 75%
-                        center_x = np.mean(self.X[mask])
-                        center_y = np.mean(self.Y[mask])
+                        center_x = np.median(self.X[mask])
+                        center_y = np.median(self.Y[mask])
                         
                         # Step 4: Calculate the spread of agents using standard deviation
                         spread_x = np.std(self.X[mask])
