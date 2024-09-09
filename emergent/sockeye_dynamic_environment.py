@@ -1802,7 +1802,7 @@ class simulation():
                                           self.time_out_of_water + 1, 
                                           self.time_out_of_water)
 
-        self.dead = np.where(self.time_out_of_water > 30,
+        self.dead = np.where(self.time_out_of_water > 3600,
                               1,
                               self.dead)
                 
@@ -1818,13 +1818,11 @@ class simulation():
             
         
         # For dead fish, zero out positions and velocity
-        self.x_vel = np.where(self.dead,np.zeros_like(self.x_vel), self.x_vel)
-        self.y_vel = np.where(self.dead,np.zeros_like(self.y_vel), self.y_vel)
-        self.X = np.where(self.dead,np.zeros_like(self.X), self.X)
-        self.Y = np.where(self.dead,np.zeros_like(self.Y), self.Y)
+        # self.x_vel = np.where(self.dead,np.zeros_like(self.x_vel), self.x_vel)
+        # self.y_vel = np.where(self.dead,np.zeros_like(self.y_vel), self.y_vel)
+        # self.X = np.where(self.dead,np.zeros_like(self.X), self.X)
+        # self.Y = np.where(self.dead,np.zeros_like(self.Y), self.Y)
 
-        
-        
         clean_x = self.X.flatten()[~np.isnan(self.X.flatten())]
         clean_y = self.Y.flatten()[~np.isnan(self.Y.flatten())]
         
@@ -2712,7 +2710,7 @@ class simulation():
                                   water_velocity)
             
             fish_vel_1 = np.where(self.simulation.dead[:,np.newaxis] == 1,
-                                  fish_vel_1 * 0,
+                                  water_velocity,
                                   fish_vel_1)
             
             # Step 7: Prepare for position update
@@ -3044,10 +3042,7 @@ class simulation():
                       ]
 
             # get velocity and coords raster per agent
-            try:
-                vel3d = np.stack([standardize_shape(self.simulation.hdf5['environment/vel_mag'][sl[-2:]]) for sl in slices])
-            except:
-                print ('check')
+            vel3d = np.stack([standardize_shape(self.simulation.hdf5['environment/vel_mag'][sl[-2:]]) for sl in slices])
             x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]]) for sl in slices])
             y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]]) for sl in slices])
             
