@@ -4479,13 +4479,10 @@ class simulation():
         self.prev_Y = self.Y.copy()
         
         # Move fish that are not successful
-        success_mask = self.X < success_line_x  # Fish that have crossed the success line
+        success_mask = (self.X < success_line_x) | (self.X > 550450)  # Fish that have crossed the success line
         self.X = np.where(success_mask, self.X, self.X + dxdy_swim[:, 0] + dxdy_jump[:, 0])
         self.Y = np.where(success_mask, self.Y, self.Y + dxdy_swim[:, 1] + dxdy_jump[:, 1])
-        fallback_mask = self.X > 550400
-        self.X = np.where(fallback_mask, self.X, self.X + dxdy_swim[:, 0] + dxdy_jump[:, 0])
-        self.Y = np.where(fallback_mask, self.Y, self.Y + dxdy_swim[:, 1] + dxdy_jump[:, 1])
-        
+
         # Stop fish that have crossed the success line
         self.sog = np.where(success_mask, 0, np.sqrt(np.power(self.X - self.prev_X, 2) + np.power(self.Y - self.prev_Y, 2)) / dt)
         
