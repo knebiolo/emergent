@@ -2705,15 +2705,15 @@ class simulation():
                                       np.zeros_like(np.vstack((self.simulation.x_vel,self.simulation.y_vel)).T),
                                       np.vstack((self.simulation.x_vel,self.simulation.y_vel)).T)
             
-            if np.any(np.linalg.norm(water_velocity, axis=1) > 10):
+            if np.any(np.linalg.norm(water_velocity, axis=1) > 6):
                 # Get a mask of which velocities exceed a magnitude of 10
-                too_big = np.linalg.norm(water_velocity, axis=1) > 10
+                too_big = np.linalg.norm(water_velocity, axis=1) > 6
                 
                 # Normalize the water velocity vectors that exceed the limit
                 norms = np.linalg.norm(water_velocity[too_big], axis=1, keepdims=True)
                 
                 # Scale those velocities to have a norm of 10 while preserving their direction
-                water_velocity[too_big] = (water_velocity[too_big] / norms) * 10
+                water_velocity[too_big] = (water_velocity[too_big] / norms) * 6
 
             fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
                                   ideal_vel,
@@ -2726,8 +2726,8 @@ class simulation():
             # Step 7: Prepare for position update
             dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
                 
-            if np.any(np.linalg.norm(fish_vel_1,axis = -1) > 2* self.simulation.ideal_sog):
-                print ('fuck - why')
+            # if np.any(np.linalg.norm(fish_vel_1,axis = -1) > 2* self.simulation.ideal_sog):
+            #     print ('fuck - why')
             return dxdy
                             
         def jump(self, t, g, mask):
@@ -4417,26 +4417,19 @@ class simulation():
             # perform PID checks if we are optimizing controller
             self.PID_checks()
             
-    def timestep(self, t, dt, g, pid_controller):
+    def timestep(self, t, dt, g, pid_controller, success_line_x):
         """
         Simulates a single time step for all fish in the simulation.
-    
+        
         Parameters:
         - t: Current simulation time.
         - dt: Time step duration.
-    
+        - success_line_x: The easting boundary (longitude) that determines success.
+        
         The method performs the following operations for each fish:
-        1. Updates the mental map based on the current time.
-        2. Senses the environment to gather necessary data.
-        3. Optimizes vertical position within the water column.
-        4. Calculates the wave drag multiplier based on environmental conditions.
-        5. Assesses fatigue levels to determine energy reserves and swimming capabilities.
-        6. Arbitrates among behavioral cues to decide on actions.
-        7. Decides whether each fish should jump or swim based on their speed, heading, and energy levels.
-        8. Calculates the energy expenditure for the time step.
-        9. Logs the simulation data for the current time step.
+        ...
         """
-        # create movement, behavior, and fatigue objects
+        # Create movement, behavior, and fatigue objects
         movement = self.movement(self)
         behavior = self.behavior(t, self)
         fatigue = self.fatigue(t, dt, self)
@@ -4447,9 +4440,9 @@ class simulation():
         # Sense the environment
         self.environment()
         
-        # update refugia map
+        # Update refugia map
         self.update_refugia_map(self.vel_mag)
-
+    
         # Optimize vertical position
         movement.find_z()
         
@@ -4462,10 +4455,6 @@ class simulation():
         # Calculate the ratio of ideal speed over ground to the magnitude of water velocity
         sog_to_water_vel_ratio = self.sog / np.linalg.norm(np.stack((self.x_vel, self.y_vel)).T, axis=-1)
         
-        # Calculate the sign of the heading and the water flow direction
-        heading_sign = np.sign(self.heading)
-        water_flow_direction_sign = np.sign(np.arctan2(self.y_vel, self.x_vel))
-        
         # Calculate the time since the last jump
         time_since_jump = t - self.time_of_jump
         
@@ -4475,47 +4464,44 @@ class simulation():
             (time_since_jump > 60) &
             (self.battery >= 0.25)
         )
-
+        
         # Apply the jump or swim functions based on the condition
-        # For each fish that should jump
-        dxdy_jump = movement.jump(t=t, g = g, mask=should_jump)
+        dxdy_jump = movement.jump(t=t, g=g, mask=should_jump)
+        movement.drag_fun(mask=~should_jump, t=t, dt=dt)
+        movement.thrust_fun(mask=~should_jump, t=t, dt=dt)
+        dxdy_swim = movement.swim(t, dt, pid_controller=pid_controller, mask=~should_jump)
         
-        # For each fish that should swim
-        movement.drag_fun(mask=~should_jump, t = t, dt = dt)
-        #self.frequency(mask=~should_jump, t = t, dt = dt)
-        movement.thrust_fun(mask=~should_jump, t = t, dt = dt)
-        dxdy_swim = movement.swim(t, dt, pid_controller = pid_controller, mask=~should_jump)
-        
-        # Arbitrate amongst behavioral cues
-        tolerance = 0.1  # A small tolerance level to account for floating-point arithmetic issues
-        #if abs(self.cumulative_time % 1) < tolerance or abs(self.cumulative_time % 1 - 1) < tolerance:
+        # Arbitrate among behavioral cues
         self.heading = behavior.arbitrate(t)
-            
-        # move
-        self.prev_X = self.X.copy() #np.where(mask,self.X.copy(),self.prev_X)
-        self.prev_Y = self.Y.copy() #np.where(mask,self.Y.copy(),self.prev_Y)
-            
-        self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
-        self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
         
-        self.sog = np.where(should_jump,
-                            self.ideal_sog,
-                            np.sqrt(np.power(self.X - self.prev_X,2)+ np.power(self.Y - self.prev_Y,2)) / dt)
+        # Store previous positions
+        self.prev_X = self.X.copy()
+        self.prev_Y = self.Y.copy()
+        
+        # Move fish that are not successful
+        success_mask = self.X < success_line_x  # Fish that have crossed the success line
+        self.X = np.where(success_mask, self.X, self.X + dxdy_swim[:, 0] + dxdy_jump[:, 0])
+        self.Y = np.where(success_mask, self.Y, self.Y + dxdy_swim[:, 1] + dxdy_jump[:, 1])
+        
+        # Stop fish that have crossed the success line
+        self.sog = np.where(success_mask, 0, np.sqrt(np.power(self.X - self.prev_X, 2) + np.power(self.Y - self.prev_Y, 2)) / dt)
         
         if np.any(np.isnan(self.X)):
-            print ('fish off map - why?')
-            print ('dxdy swim: %s'%(dxdy_swim))
-            print ('dxdy jump: %s'%(dxdy_jump))
+            print('fish off map - why?')
+            bad_fish = np.argmax(np.linalg.norm(dxdy_swim, axis = 1))
+            print('dxdy swim:', np.linalg.norm(dxdy_swim, axis = 1).max())
+            print('dxdy jump:', np.linalg.norm(dxdy_jump, axis = 1).max())
+            print(f'fish {bad_fish} in {self.swim_mode} swimming mode exhibiting {self.swim_behav} behavior')
+            print(f'fish {bad_fish} was previously at {self.prev_X},{self.prev_Y} and landed on: {self.X},{self.Y}')
             sys.exit()
-            self.dead = np.where(np.isnan(self.X),1,self.dead)
-    
+        
         # Calculate mileage
-        self.odometer(t=t, dt = dt)  
+        self.odometer(t=t, dt=dt)
         
         # Log the timestep data
         self.timestep_flush(t)
         
-        # accumulate time
+        # Accumulate time
         self.cumulative_time = self.cumulative_time + dt
           
     def run(self, model_name, n, dt, video = False, k_p = None, k_i = None, k_d = None):
@@ -4661,7 +4647,7 @@ class simulation():
                     
                     pid_controller.interp_PID()
                     for i in range(int(n)):
-                        self.timestep(i, dt, g, pid_controller)
+                        self.timestep(i, dt, g, pid_controller,548700)
                         # we want to follow the top performing fish - calculate the top 25% by longitude
                         
                         # Step 1: Determine the threshold for the top X%
@@ -4771,7 +4757,7 @@ class simulation():
                 
                 # iterate over timesteps 
                 for i in range(int(n)):
-                    self.timestep(i, dt, g, pid_controller)
+                    self.timestep(i, dt, g, pid_controller,548700)
                     print ('Time Step %s complete'%(i))
                     
                 # close and cleanup
@@ -4785,7 +4771,7 @@ class simulation():
                                             k_i, 
                                             k_d)
             for i in range(n):
-                self.timestep(i, dt, g, pid_controller)
+                self.timestep(i, dt, g, pid_controller,548700)
                 
                 print ('Time Step %s %s %s %s %s %s complete'%(i,i,i,i,i,i))
                 
