@@ -4069,6 +4069,8 @@ class simulation():
             self.t = t
             self.dt = dt
             self.simulation = simulation_object
+            self.fatigued_once = np.zeros(self.simulation.num_agents, dtype=bool)
+            
             
         def swim_speeds(self):
             '''
@@ -4218,29 +4220,34 @@ class simulation():
         def recovery(self):
             '''
             Calculates the recovery percentage for each fish at the beginning 
-            and end of the time step.
+            and end of the time step, with a faster recovery at first that slows down 
+            as the fish's battery approaches full charge.
             
             Returns:
                 numpy.ndarray: Array of recovery percentages for each fish.
             '''
+            recovery_duration = 30 * 60  # 45 minutes in seconds
+        
             # Calculate recovery at the beginning and end of the time step
-            rec0 = self.simulation.recovery(self.simulation.recover_stopwatch) / 100.
+            battery_level = self.simulation.battery  # Current battery level for each fish
+            rec0 = (1 - battery_level) * np.exp(-self.simulation.recover_stopwatch / recovery_duration)
             rec0[rec0 < 0.0] = 0.0
-            rec1 = self.simulation.recovery(self.simulation.recover_stopwatch + self.dt) / 100.
-            rec1[rec1 > 1.0] = 1.0
-            rec1[rec1 < 0.] = 0.0
-            per_rec = rec1 - rec0
             
+            rec1 = (1 - battery_level) * np.exp(-(self.simulation.recover_stopwatch + self.dt) / recovery_duration)
+            rec1[rec1 > 1.0] = 1.0
+            rec1[rec1 < 0.0] = 0.0
+            
+            per_rec = rec1 - rec0
+        
             # Recovery for fish that are station holding
             mask_station_holding = self.simulation.swim_behav == 3
-            #self.bout_no[mask_station_holding] += 1.
             self.simulation.bout_dur[mask_station_holding] = 0.0
             self.simulation.dist_per_bout[mask_station_holding] = 0.0
             self.simulation.battery[mask_station_holding] += per_rec[mask_station_holding]
             self.simulation.recover_stopwatch[mask_station_holding] += self.dt
-            
-            return per_rec
         
+            return per_rec
+
         def calc_battery(self, per_rec, ttf, mask_dict):
             '''
             Updates the battery levels for each fish based on their swimming mode
@@ -4359,7 +4366,37 @@ class simulation():
                 if np.any(self.simulation.swim_behav == 3):
                     print('error no longer counts, fatigued')
                     sys.exit()
-                    
+
+        def handle_fatigue_recovery(self, battery_dict):
+            '''
+            Updates swim behavior of fish based on battery levels and fatigue history.
+            
+            Fish that have fatigued will stay in station holding (swim_behav == 3) until
+            their battery reaches 10%, then switch to swim behavior 2.
+            Fish will stay in swim behavior 2 until their battery reaches 85%, then switch to swim behavior 1.
+            The first time fish fatigue, they are allowed to fully drain their battery.
+            '''
+            # Masks for fish that are recovering and have been fatigued before
+            mask_station_holding = self.simulation.swim_behav == 3
+            mask_recovering_low = (self.simulation.battery > 0.30) & (self.simulation.battery < 0.85)  # Battery between 10% and 85%
+            mask_ready_to_swim = self.simulation.battery >= 0.85  # Battery above 85%
+            mask_fatigued_once = self.fatigued_once
+            
+            # Fish that have been fatigued once and have a battery above 10% but less than 85% should switch to swim behavior 2
+            mask_switch_to_swim_2 = mask_fatigued_once & mask_station_holding & mask_recovering_low
+            self.simulation.swim_behav[mask_switch_to_swim_2] = 2  # Switch to swim behavior 2
+        
+            # Fish that have recovered to 85% or more and were previously in swim behavior 2 can start swimming (behavior 1)
+            mask_switch_to_swim_1 = mask_fatigued_once & (self.simulation.battery >= 0.85)
+            self.simulation.swim_behav[mask_switch_to_swim_1] = 1  # Switch to swim behavior 1
+        
+            # Fish that are fatigued and have battery less than or equal to 10% stay in swim behavior 3 (station holding)
+            mask_stay_station_holding = mask_fatigued_once & (self.simulation.battery <= 0.10)
+            self.simulation.swim_behav[mask_stay_station_holding] = 3  # Stay in station holding
+        
+            # Update the fatigued_once array: If a fish has drained its battery to 0, it marks the first fatigue
+            self.fatigued_once[self.simulation.battery <= 0.0] = True
+
         def assess_fatigue(self):
             '''
             Comprehensive method to assess fatigue based on swim speeds, 
@@ -4383,7 +4420,7 @@ class simulation():
             
             mask_dict['sustained'] = bl_s <= self.simulation.max_s_U
             
-            # calculate how far this fish has travelled this bout
+            # calculate how far this fish has traveled this bout
             self.bout_distance()
             
             # assess time to fatigue
@@ -4396,19 +4433,18 @@ class simulation():
             per_rec = self.recovery()
             
             # check battery
-            self.calc_battery(per_rec, ttf,  mask_dict)
+            self.calc_battery(per_rec, ttf, mask_dict)
             
             # set battery masks
             battery_dict = dict()
             battery_dict['low'] = self.simulation.battery <= 0.1
             battery_dict['mid'] = (self.simulation.battery > 0.1) & (self.simulation.battery <= 0.3)
-            battery_dict['high'] = self.simulation.battery > 0.3
+            battery_dict['high'] = self.simulation.battery > 0.4
             
-            # set swim behavior
-            self.set_swim_behavior(battery_dict)
-            
+            # Handle swim behavior based on battery and fatigue state
+            self.handle_fatigue_recovery(battery_dict)
+        
             # calculate ideal speed over ground
-            #self.simulation.ideal_sog = self.set_ideal_sog(mask_dict, battery_dict)
             self.set_ideal_sog(mask_dict, battery_dict)
             
             # are fatigued fish ready to move?
@@ -4416,8 +4452,9 @@ class simulation():
             
             # perform PID checks if we are optimizing controller
             self.PID_checks()
+        
             
-    def timestep(self, t, dt, g, pid_controller, success_line_x):
+    def timestep(self, t, dt, g, pid_controller, success_line_x, fallback_line_x):
         """
         Simulates a single time step for all fish in the simulation.
         
@@ -4479,7 +4516,7 @@ class simulation():
         self.prev_Y = self.Y.copy()
         
         # Move fish that are not successful
-        success_mask = (self.X < success_line_x) | (self.X > 550450)  # Fish that have crossed the success line
+        success_mask = (self.X < success_line_x) | (self.X > fallback_line_x)  # Fish that have crossed the success line
         self.X = np.where(success_mask, self.X, self.X + dxdy_swim[:, 0] + dxdy_jump[:, 0])
         self.Y = np.where(success_mask, self.Y, self.Y + dxdy_swim[:, 1] + dxdy_jump[:, 1])
 
@@ -4647,7 +4684,7 @@ class simulation():
                     
                     pid_controller.interp_PID()
                     for i in range(int(n)):
-                        self.timestep(i, dt, g, pid_controller,548700)
+                        self.timestep(i, dt, g, pid_controller,548700,550450)
                         # we want to follow the top performing fish - calculate the top 25% by longitude
                         
                         # Step 1: Determine the threshold for the top X%

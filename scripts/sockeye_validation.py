@@ -30,10 +30,10 @@ model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\abm_simulations\sensitivity
 crs = 32604
 
 # create a starting box - aka where are all the fish starting from?
-start_polygon = os.path.join(model_dir,'river_right.shp')  
+start_polygon = os.path.join(model_dir,'river_left.shp')  
 
 # how many agents in the simulation?
-n = 1000
+n = 10
 
 # what is the delta t
 dt = 3
