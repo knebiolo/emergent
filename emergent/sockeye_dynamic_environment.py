@@ -2760,7 +2760,9 @@ class simulation():
             self.simulation.time_of_jump = np.where(mask,t,self.simulation.time_of_jump)
         
             # Get jump angle for each fish
-            jump_angles = np.where(mask,np.random.choice([np.radians(45), np.radians(60)], size=self.simulation.ucrit.shape),0)
+            jump_angles = np.repeat(45.,self.simulation.ucrit.shape)
+            
+            #np.where(mask,np.random.choice([np.radians(45), np.radians(60)], size=self.simulation.ucrit.shape),0)
         
             # Calculate time airborne for each fish
             time_airborne = np.where(mask,(2 * self.simulation.ucrit * np.sin(jump_angles)) / g, 0)
@@ -4511,6 +4513,7 @@ class simulation():
         
         # Apply the jump or swim functions based on the condition
         dxdy_jump = movement.jump(t=t, g=g, mask=should_jump)
+        dxdy_jump = np.nan_to_num(dxdy_jump, nan=0.0)
         movement.drag_fun(mask=~should_jump, t=t, dt=dt)
         movement.thrust_fun(mask=~should_jump, t=t, dt=dt)
         dxdy_swim = movement.swim(t, dt, pid_controller=pid_controller, mask=~should_jump)
@@ -4535,7 +4538,7 @@ class simulation():
             bad_fish = np.where(np.isnan(self.X))[0]
             print('dxdy swim:', dxdy_swim[bad_fish])
             print('dxdy jump:', dxdy_jump[bad_fish])
-            print(f'fish {bad_fish} in {self.swim_mode} swimming mode exhibiting {self.swim_behav} behavior')
+            print(f'fish {bad_fish} in {self.swim_mode[bad_fish]} swimming mode exhibiting {self.swim_behav[bad_fish]} behavior')
             print(f'fish {bad_fish} was previously at {self.prev_X[bad_fish]},{self.prev_Y[bad_fish]} and landed on: {self.X[bad_fish]},{self.Y[bad_fish]}')
             sys.exit()
         
