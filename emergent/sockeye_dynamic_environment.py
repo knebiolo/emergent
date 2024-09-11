@@ -2717,7 +2717,7 @@ class simulation():
 
             fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
                                   fish_vel_0 + acc_ini * dt + pid_adjustment,
-                                  water_velocity)
+                                  water_velocity /2.)
             
             fish_vel_1 = np.where(self.simulation.dead[:,np.newaxis] == 1,
                                   water_velocity,
@@ -4216,37 +4216,43 @@ class simulation():
             self.simulation.swim_mode = np.where(~(mask_prolonged | mask_sprint), 
                                                  1, 
                                                  self.simulation.swim_mode)
-            
+        
         def recovery(self):
             '''
-            Calculates the recovery percentage for each fish at the beginning 
-            and end of the time step, with a faster recovery at first that slows down 
-            as the fish's battery approaches full charge.
-            
-            Returns:
-                numpy.ndarray: Array of recovery percentages for each fish.
+            Calculates the recovery percentage for each fish with two linear recovery rates:
+            - Fast recovery from 0% to 10% over 30 seconds.
+            - Slower recovery from 10% to 85% over a specified duration.
             '''
-            recovery_duration = 30 * 60  # 45 minutes in seconds
+            recovery_duration_stage2 = 2700  # 45 minutes in seconds for total recovery
+            fast_recovery_duration = 30      # 30 seconds for recovery from 0% to 10%
         
-            # Calculate recovery at the beginning and end of the time step
-            battery_level = self.simulation.battery  # Current battery level for each fish
-            rec0 = (1 - battery_level) * np.exp(-self.simulation.recover_stopwatch / recovery_duration)
-            rec0[rec0 < 0.0] = 0.0
+            # Current battery level for each fish (NumPy array)
+            battery_level = self.simulation.battery
             
-            rec1 = (1 - battery_level) * np.exp(-(self.simulation.recover_stopwatch + self.dt) / recovery_duration)
-            rec1[rec1 > 1.0] = 1.0
-            rec1[rec1 < 0.0] = 0.0
+            # Initialize recovery
+            rec0 = np.copy(battery_level)
             
-            per_rec = rec1 - rec0
-        
-            # Recovery for fish that are station holding
-            mask_station_holding = self.simulation.swim_behav == 3
-            self.simulation.bout_dur[mask_station_holding] = 0.0
-            self.simulation.dist_per_bout[mask_station_holding] = 0.0
-            self.simulation.battery[mask_station_holding] += per_rec[mask_station_holding]
-            self.simulation.recover_stopwatch[mask_station_holding] += self.dt
-        
-            return per_rec
+            # Stage 1: Fast recovery for battery levels < 10%
+            fast_recovery_rate = 0.1 / fast_recovery_duration  # 10% over 30 seconds
+            mask_stage1 = battery_level < 0.1  # Mask for fish recovering in Stage 1
+            rec0[mask_stage1] += fast_recovery_rate * self.dt
+            
+            # Stage 2: Slower recovery for battery levels between 10% and 85%
+            remaining_time_stage2 = recovery_duration_stage2 - fast_recovery_duration
+            slow_recovery_rate = (0.85 - 0.1) / remaining_time_stage2  # 75% over the remaining time
+            mask_stage2 = (battery_level >= 0.1) & (battery_level < 0.85)  # Mask for fish recovering in Stage 2
+            rec0[mask_stage2] += slow_recovery_rate * self.dt
+            
+            # Stage 3: No recovery for battery levels >= 85%
+            # No need to modify rec0 for this stage, as they are already recovering at full speed
+            
+            # Clip the recovery to ensure battery levels are between 0 and 1
+            rec0 = np.clip(rec0, 0.0, 1.0)
+            
+            # Return the amount of recovery that happened during this time step
+            return rec0 - battery_level
+
+
 
         def calc_battery(self, per_rec, ttf, mask_dict):
             '''
@@ -4329,13 +4335,13 @@ class simulation():
             
             self.simulation.ideal_sog[mask_high_battery] = np.where(self.simulation.battery[mask_high_battery] == 1., 
                                                                     self.simulation.school_sog[mask_high_battery], 
-                                                                    np.round((self.simulation.opt_sog[mask_high_battery] * \
-                                                                             self.simulation.battery[mask_high_battery])/2, 2)
+                                                                    np.round(self.simulation.opt_sog[mask_high_battery] * \
+                                                                             self.simulation.battery[mask_high_battery], 2)
                                                                     )
 
             # Set ideal speed over ground based on battery level
             self.simulation.ideal_sog[mask_low_battery] = 0.0
-            self.simulation.ideal_sog[mask_mid_battery] = 0.1
+            self.simulation.ideal_sog[mask_mid_battery] = self.simulation.opt_sog[mask_mid_battery] / 2.
             
             # if np.any(mask_dict['sprint']):
             #     print ('fuck')
@@ -4446,6 +4452,7 @@ class simulation():
         
             # calculate ideal speed over ground
             self.set_ideal_sog(mask_dict, battery_dict)
+            self.set_swim_behavior(battery_dict)
             
             # are fatigued fish ready to move?
             self.ready_to_move()
@@ -4525,11 +4532,11 @@ class simulation():
         
         if np.any(np.isnan(self.X)):
             print('fish off map - why?')
-            bad_fish = np.argmax(np.linalg.norm(dxdy_swim, axis = 1))
-            print('dxdy swim:', np.linalg.norm(dxdy_swim, axis = 1).max())
-            print('dxdy jump:', np.linalg.norm(dxdy_jump, axis = 1).max())
+            bad_fish = np.where(np.isnan(self.X))[0]
+            print('dxdy swim:', dxdy_swim[bad_fish])
+            print('dxdy jump:', dxdy_jump[bad_fish])
             print(f'fish {bad_fish} in {self.swim_mode} swimming mode exhibiting {self.swim_behav} behavior')
-            print(f'fish {bad_fish} was previously at {self.prev_X},{self.prev_Y} and landed on: {self.X},{self.Y}')
+            print(f'fish {bad_fish} was previously at {self.prev_X[bad_fish]},{self.prev_Y[bad_fish]} and landed on: {self.X[bad_fish]},{self.Y[bad_fish]}')
             sys.exit()
         
         # Calculate mileage
