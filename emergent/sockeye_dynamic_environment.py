@@ -2716,7 +2716,7 @@ class simulation():
                 water_velocity[too_big] = (water_velocity[too_big] / norms) * 6
 
             fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
-                                  ideal_vel,
+                                  fish_vel_0 + acc_ini * dt + pid_adjustment,
                                   water_velocity)
             
             fish_vel_1 = np.where(self.simulation.dead[:,np.newaxis] == 1,
