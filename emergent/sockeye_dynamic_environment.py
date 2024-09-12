@@ -4022,7 +4022,7 @@ class simulation():
                 cue = low_bat_cue_dict[i]
                 vec = cue_dict[cue]
                 if cue == 'collision':
-                    vec - vec * 0.01
+                    vec - vec * 0.00001
                 vec_sum_tired = np.where(np.linalg.norm(vec_sum_tired, axis = -1)[:,np.newaxis] < tolerance,
                                    vec_sum_tired + vec,
                                    vec_sum_tired)
