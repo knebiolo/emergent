@@ -1211,7 +1211,7 @@ class simulation():
         self.opt_sog = self.length/1000. #* 0.8
         self.school_sog = self.length/1000.
        # self.swim_speed = self.length/1000.        # set initial swim speed
-        self.ucrit = self.sog * 1.6    # TODO - what is the ucrit for sockeye?
+        self.ucrit = self.length/1000. / 0.4267     # TODO - what is the ucrit for sockeye?
         
     def sim_weight(self):
         '''function simulates a fish weight out of the user provided basin and 
@@ -4022,7 +4022,7 @@ class simulation():
                 cue = low_bat_cue_dict[i]
                 vec = cue_dict[cue]
                 if cue == 'collision':
-                    vec - vec * 0.0000
+                    vec = vec * 0.0
                 vec_sum_tired = np.where(np.linalg.norm(vec_sum_tired, axis = -1)[:,np.newaxis] < tolerance,
                                    vec_sum_tired + vec,
                                    vec_sum_tired)
