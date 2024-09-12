@@ -3996,7 +3996,8 @@ class simulation():
             
             low_bat_cue_dict = {0:'shallow',
                                 1:'border',
-                                2:'refugia'}
+                                2:'collision',
+                                3:'refugia'}
             
             self.is_in_eddy(t)
             
@@ -4017,9 +4018,11 @@ class simulation():
                                        vec_sum_migratory + vec,
                                        vec_sum_migratory)
                         
-            for i in np.arange(0,3,1):
+            for i in np.arange(0,4,1):
                 cue = low_bat_cue_dict[i]
                 vec = cue_dict[cue]
+                if cue == 'collision':
+                    vec - vec * 0.01
                 vec_sum_tired = np.where(np.linalg.norm(vec_sum_tired, axis = -1)[:,np.newaxis] < tolerance,
                                    vec_sum_tired + vec,
                                    vec_sum_tired)
