@@ -1084,7 +1084,7 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.15 # 0.5 or 0.1
+        adult_slope_adjustment = 0.1 # 0.5 or 0.1
         adult_intercept_adjustment = 1.5 # 1.5 or 2.1
         prolonged_swim_speed_adjustment = 2.1
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
@@ -3221,6 +3221,7 @@ class simulation():
                 print (f'nans in x xmax: np.any(np.isnan(xmax))')
                 print (f'nans in y min: np.any(np.isnan(ymin))')
                 print (f'nans in y max: np.any(np.isnan(ymax))')
+                sys.exit()
 
                 
                 
