@@ -1084,7 +1084,7 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.2 # 0.5 or 0.1
+        adult_slope_adjustment = 0.15 # 0.5 or 0.1
         adult_intercept_adjustment = 1.5 # 1.5 or 2.1
         prolonged_swim_speed_adjustment = 2.1
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
@@ -3211,11 +3211,19 @@ class simulation():
                                                        xmax.flatten()
                                                        )
                       ]
-            x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]],
-                                                   target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices]) 
-            y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]],
-                                                   target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices])       
+            try:
+                x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]],
+                                                       target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices]) 
+                y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]],
+                                                       target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices])       
+            except:
+                print (f'nans in x xmin: np.any(np.isnan(xmin))')
+                print (f'nans in x xmax: np.any(np.isnan(xmax))')
+                print (f'nans in y min: np.any(np.isnan(ymin))')
+                print (f'nans in y max: np.any(np.isnan(ymax))')
 
+                
+                
             front_multiplier = calculate_front_masks(self.simulation.heading,
                                                      x_coords,
                                                      y_coords,
