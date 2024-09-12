@@ -3969,7 +3969,7 @@ class simulation():
                 border = self.border_cue(50000, t)        # 50000
                 shallow = self.shallow_cue(100000)        # 100000
                 avoid = self.already_been_here(25000, t)  # 25000
-                collision = self.collision_cue(50000)     # 50000 
+                collision = self.collision_cue(25000)     # 50000 
             
             # Create dictionary that has order of behavioral cues
             order_dict = {0: 'shallow',
