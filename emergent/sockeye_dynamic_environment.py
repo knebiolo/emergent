@@ -3899,7 +3899,7 @@ class simulation():
                 # stuck_conditions = (expected_displacement >= 2* total_displacement) & \
                 #     (self.simulation.swim_mode == 1) & (np.sign(delta) > 0) 
                     
-                stuck_conditions = (expected_displacement >= 5. * np.abs(total_displacement)) \
+                stuck_conditions = (np.abs(total_displacement) < (expected_displacement * 0.5) ) \
                     & (self.simulation.swim_behav == 1)
             else:
                 stuck_conditions = np.zeros_like(self.simulation.X)
@@ -4255,7 +4255,7 @@ class simulation():
             - Fast recovery from 0% to 10% over 30 seconds.
             - Slower recovery from 10% to 85% over a specified duration.
             '''
-            recovery_duration_stage2 = 90  # 45 minutes in seconds for total recovery
+            recovery_duration_stage2 = 2700  # 45 minutes in seconds for total recovery
             fast_recovery_duration = 30      # 30 seconds for recovery from 0% to 10%
         
             # Current battery level for each fish (NumPy array)
