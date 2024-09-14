@@ -1086,9 +1086,9 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.1 # 0.5 or 0.1
-        adult_intercept_adjustment = 1.5 # 1.5 or 2.1
-        prolonged_swim_speed_adjustment = 2.5
+        adult_slope_adjustment = 0.2 # 0.5 or 0.1
+        adult_intercept_adjustment = 1.75 # 1.5 or 2.1
+        prolonged_swim_speed_adjustment = 2.6
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43 + prolonged_swim_speed_adjustment  # maximum prolonged swim speed
         self.a_p = 8.643 + adult_intercept_adjustment   # prolonged intercept
@@ -3970,7 +3970,7 @@ class simulation():
                 # calculate high priority repusive forces
                 border = self.border_cue(50000, t)        # 50000
                 shallow = self.shallow_cue(100000)        # 100000
-                avoid = self.already_been_here(25000, t)  # 25000
+                avoid = self.already_been_here(0, t)  # 25000
                 collision = self.collision_cue(25000)     # 50000 
             
             # Create dictionary that has order of behavioral cues
@@ -4002,8 +4002,7 @@ class simulation():
             
             just_recovered_dict = {0:'shallow',
                                     1:'border',
-                                    2:'collision',
-                                    3:'rheotaxis'}
+                                    2:'rheotaxis'}
             
             self.is_in_eddy(t)
             
@@ -4032,7 +4031,7 @@ class simulation():
                                    vec_sum_tired + vec,
                                    vec_sum_tired)
                 
-            for i in np.arange(0,4,1):
+            for i in np.arange(0,3,1):
                 cue = just_recovered_dict[i]
                 vec = cue_dict[cue]
                 vec_sum_recovered = np.where(np.linalg.norm(vec_sum_tired, axis = -1)[:,np.newaxis] < tolerance,
@@ -4064,8 +4063,8 @@ class simulation():
             
             # for those just recovered
             head_vec = np.where(np.logical_and(self.simulation.just_recovered[:,np.newaxis] == 1,
-                                               t - self.simulation.recovery_time[:,np.newaxis] <= 15.),
-                                vec_sum_recovered,
+                                               self.simulation.recovery_time[:,np.newaxis] <= 30.),
+                                cue_dict['border'] + cue_dict['shallow'],
                                 head_vec)
             
             
@@ -4256,7 +4255,7 @@ class simulation():
             - Fast recovery from 0% to 10% over 30 seconds.
             - Slower recovery from 10% to 85% over a specified duration.
             '''
-            recovery_duration_stage2 = 2700  # 45 minutes in seconds for total recovery
+            recovery_duration_stage2 = 90  # 45 minutes in seconds for total recovery
             fast_recovery_duration = 30      # 30 seconds for recovery from 0% to 10%
         
             # Current battery level for each fish (NumPy array)
