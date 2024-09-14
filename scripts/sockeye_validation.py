@@ -20,7 +20,7 @@ import os
 
 
 # identify input and output model names
-model_name = 'sense_15'
+model_name = 'sense_11'
 
 # identify directories
 model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\abm_simulations\sensitivity",model_name)
@@ -30,43 +30,33 @@ model_dir = os.path.join(r"C:\Users\knebiolo\Desktop\abm_simulations\sensitivity
 crs = 32604
 
 # create a starting box - aka where are all the fish starting from?
-start_polygon = os.path.join(model_dir,'river_left.shp')  
+start_polygon = os.path.join(model_dir,'river_right.shp')  
 
 # how many agents in the simulation?
-n = 10
+n = 1000
 
 # what is the delta t
-dt = 3
+dt = 1
 
 # how many timesteps in the model?
-hours = 18
+hours = 4
 ts = 3600. * hours / dt
 
 # what is the water temp?
-water_temp = 10.
+water_temp = 18.
 
 # what is the basin that we are simulating passage in?
 basin = "Nushagak River"
 
 # identify background environmental files
 env_files = {'wsel':'wsel_mask_mosaic.tif',
-              'depth':'depth_mask_mosaic.tif',
-              'x_vel':'x_vel_mask_mosaic.tif',
-              'y_vel':'y_vel_mask_mosaic.tif',
-              'vel_dir':'vel_dir_mask_mosaic.tif',
-              'vel_mag':'vel_mag_mask_mosaic.tif',
-              'elev':'elev_mask_mosaic.tif',
-              'wetted':'wetted_perimeter.tif'}
-
-# # identify background environmental files
-# env_files = {'wsel':'wsel_19900_05_mosaic.tif',
-#               'depth':'depth_19900_05_mosaic.tif',
-#               'x_vel':'vel_x_19900_05_mosaic.tif',
-#               'y_vel':'vel_y_19900_05_mosaic.tif',
-#               'vel_dir':'vel_dir_19900_05_mosaic.tif',
-#               'vel_mag':'vel_mag_19900_05_mosaic.tif',
-#               'elev':'elev_19900_05_mosaic.tif',
-#               'wetted':'wetted_perimeter.tif'}
+             'depth':'depth_mask_mosaic.tif',
+             'x_vel':'x_vel_mask_mosaic.tif',
+             'y_vel':'y_vel_mask_mosaic.tif',
+             'vel_dir':'vel_dir_mask_mosaic.tif',
+             'vel_mag':'vel_mag_mask_mosaic.tif',
+             'elev':'elev_mask_mosaic.tif',
+             'wetted':'wetted_perimeter.tif'}
 
 # identify longitudinal profile shapefile
 longitudinal = os.path.join(model_dir,'longitudinal.shp')
