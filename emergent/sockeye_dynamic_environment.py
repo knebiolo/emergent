@@ -4063,7 +4063,7 @@ class simulation():
             
             # for those just recovered
             head_vec = np.where(np.logical_and(self.simulation.just_recovered[:,np.newaxis] == 1,
-                                               self.simulation.recovery_time[:,np.newaxis] <= 30.),
+                                               self.simulation.recovery_time[:,np.newaxis] <= 2700.),
                                 cue_dict['border'] + cue_dict['shallow'],
                                 head_vec)
             
