@@ -1041,6 +1041,8 @@ class simulation():
         self.swim_mode = self.arr.repeat(1, num_agents)      # 1 = sustained, 2 = prolonged, 3 = sprint
         self.battery = self.arr.repeat(1.0, num_agents)
         self.recover_stopwatch = self.arr.repeat(0.0, num_agents)
+        self.just_recovered = self.arr.repeat(0.0, num_agents)
+        self.recovery_time = self.arr.repeat(0.0, num_agents)
         self.ttfr = self.arr.repeat(0.0, num_agents)
         self.time_out_of_water = self.arr.repeat(0.0, num_agents)
         self.time_of_abandon = self.arr.repeat(0.0, num_agents)
@@ -1084,9 +1086,9 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.1 # 0.5 or 0.1
-        adult_intercept_adjustment = 1.5 # 1.5 or 2.1
-        prolonged_swim_speed_adjustment = 2.1
+        adult_slope_adjustment = 0.2 # 0.5 or 0.1
+        adult_intercept_adjustment = 1.75 # 1.5 or 2.1
+        prolonged_swim_speed_adjustment = 2.6
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43 + prolonged_swim_speed_adjustment  # maximum prolonged swim speed
         self.a_p = 8.643 + adult_intercept_adjustment   # prolonged intercept
@@ -1211,7 +1213,7 @@ class simulation():
         self.opt_sog = self.length/1000. #* 0.8
         self.school_sog = self.length/1000.
        # self.swim_speed = self.length/1000.        # set initial swim speed
-        self.ucrit = self.sog * 1.6    # TODO - what is the ucrit for sockeye?
+        self.ucrit = self.length/1000. / 0.4267     # TODO - what is the ucrit for sockeye?
         
     def sim_weight(self):
         '''function simulates a fish weight out of the user provided basin and 
@@ -3898,7 +3900,7 @@ class simulation():
                 # stuck_conditions = (expected_displacement >= 2* total_displacement) & \
                 #     (self.simulation.swim_mode == 1) & (np.sign(delta) > 0) 
                     
-                stuck_conditions = (expected_displacement >= 5. * np.abs(total_displacement)) \
+                stuck_conditions = (np.abs(total_displacement) < (expected_displacement * 0.5) ) \
                     & (self.simulation.swim_behav == 1)
             else:
                 stuck_conditions = np.zeros_like(self.simulation.X)
@@ -3969,7 +3971,7 @@ class simulation():
                 # calculate high priority repusive forces
                 border = self.border_cue(50000, t)        # 50000
                 shallow = self.shallow_cue(100000)        # 100000
-                avoid = self.already_been_here(25000, t)  # 25000
+                avoid = self.already_been_here(0, t)  # 25000
                 collision = self.collision_cue(25000)     # 50000 
             
             # Create dictionary that has order of behavioral cues
@@ -3997,8 +3999,11 @@ class simulation():
             
             low_bat_cue_dict = {0:'shallow',
                                 1:'border',
-                                2:'collision',
-                                3:'refugia'}
+                                2:'refugia'}
+            
+            just_recovered_dict = {0:'shallow',
+                                    1:'border',
+                                    2:'rheotaxis'}
             
             self.is_in_eddy(t)
             
@@ -4009,6 +4014,7 @@ class simulation():
             # add up vectors, but make sure it's not greater than the tolerance
             vec_sum_migratory = np.zeros_like(rheotaxis)
             vec_sum_tired = np.zeros_like(rheotaxis)
+            vec_sum_recovered = np.zeros_like(rheotaxis)
                     
             for i in order_dict.keys():
                 cue = order_dict[i]
@@ -4019,12 +4025,17 @@ class simulation():
                                        vec_sum_migratory + vec,
                                        vec_sum_migratory)
                         
-            for i in np.arange(0,4,1):
+            for i in np.arange(0,3,1):
                 cue = low_bat_cue_dict[i]
                 vec = cue_dict[cue]
-                if cue == 'collision':
-                    vec - vec * 0.0000
                 vec_sum_tired = np.where(np.linalg.norm(vec_sum_tired, axis = -1)[:,np.newaxis] < tolerance,
+                                   vec_sum_tired + vec,
+                                   vec_sum_tired)
+                
+            for i in np.arange(0,3,1):
+                cue = just_recovered_dict[i]
+                vec = cue_dict[cue]
+                vec_sum_recovered = np.where(np.linalg.norm(vec_sum_tired, axis = -1)[:,np.newaxis] < tolerance,
                                    vec_sum_tired + vec,
                                    vec_sum_tired)
                         
@@ -4050,6 +4061,13 @@ class simulation():
             head_vec = np.where(self.simulation.in_eddy[:,np.newaxis] == 1, 
                                 cue_dict['border'] + cue_dict['shallow'],
                                 head_vec)
+            
+            # for those just recovered
+            head_vec = np.where(np.logical_and(self.simulation.just_recovered[:,np.newaxis] == 1,
+                                               self.simulation.recovery_time[:,np.newaxis] <= 2700.),
+                                cue_dict['border'] + cue_dict['shallow'],
+                                head_vec)
+            
             
             if len(head_vec.shape) == 2:
                 return np.arctan2(head_vec[:, 1], head_vec[:, 0])
@@ -4406,15 +4424,21 @@ class simulation():
             # Fish that have been fatigued once and have a battery above 10% but less than 85% should switch to swim behavior 2
             mask_switch_to_swim_2 = mask_fatigued_once & mask_station_holding & mask_recovering_low
             self.simulation.swim_behav[mask_switch_to_swim_2] = 2  # Switch to swim behavior 2
-        
+            self.simulation.recovery_time[mask_switch_to_swim_2] = 0.0
+            self.simulation.just_recovered[mask_switch_to_swim_2] = 0
+
             # Fish that have recovered to 85% or more and were previously in swim behavior 2 can start swimming (behavior 1)
             mask_switch_to_swim_1 = mask_fatigued_once & (self.simulation.battery >= 0.85)
             self.simulation.swim_behav[mask_switch_to_swim_1] = 1  # Switch to swim behavior 1
-        
+            self.simulation.just_recovered[mask_switch_to_swim_1] = 1
+            self.simulation.recovery_time[mask_switch_to_swim_1] += 1
+
             # Fish that are fatigued and have battery less than or equal to 10% stay in swim behavior 3 (station holding)
             mask_stay_station_holding = mask_fatigued_once & (self.simulation.battery <= 0.10)
             self.simulation.swim_behav[mask_stay_station_holding] = 3  # Stay in station holding
-        
+            self.simulation.recovery_time[mask_stay_station_holding] = 0.0
+            self.simulation.just_recovered[mask_stay_station_holding] = 0
+
             # Update the fatigued_once array: If a fish has drained its battery to 0, it marks the first fatigue
             self.fatigued_once[self.simulation.battery <= 0.0] = True
 
