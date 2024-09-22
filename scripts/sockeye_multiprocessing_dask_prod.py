@@ -70,7 +70,7 @@ n = 1000       #Agents need to be in 5 or 10 or by 5's
 dt = 3
 
 # how many timesteps in the model?
-hours = 18
+hours = 6
 ts = 3600. * hours / dt
 
 # what is the water temp?
