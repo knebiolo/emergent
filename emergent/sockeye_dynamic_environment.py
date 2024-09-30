@@ -3902,7 +3902,7 @@ class simulation():
             long_dir = self.simulation.past_longitudes[:,-2] - self.simulation.past_longitudes[:,-1]
 
             # Check if agents have moved less than expected, if they are moving backwards, and if they are sustained swimming mode
-            if delta.shape == total_displacement.shape and t >= 1800.:
+            if delta.shape == total_displacement.shape and t >= 900.:
                 # stuck_conditions = (expected_displacement >= 2* total_displacement) & \
                 #     (self.simulation.swim_mode == 1) & (np.sign(delta) > 0) 
                     
