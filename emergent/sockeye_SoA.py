@@ -67,8 +67,8 @@ import warnings
 import sys
 import random
 from collections import deque
-from sksurv.nonparametric import kaplan_meier_estimator
-from PyPDF2 import PdfReader, PdfWriter
+#from sksurv.nonparametric import kaplan_meier_estimator
+#from PyPDF2 import PdfReader, PdfWriter
 
 warnings.filterwarnings("ignore")
 

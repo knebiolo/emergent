@@ -1074,8 +1074,8 @@ class simulation():
         self.prev_Y = self.Y
         
         # create short term memory for eddy escpement 
-        max_timesteps = 600  # Maximum number of timesteps to track
-
+        max_timesteps = 600 / 3. # Maximum number of timesteps to track
+        
         self.swim_speeds = np.full((num_agents, max_timesteps), np.nan)
         self.past_longitudes = np.full((num_agents, max_timesteps), np.nan)
         self.current_longitudes = np.zeros_like(self.X)
@@ -1086,9 +1086,9 @@ class simulation():
         
         # Time to Fatigue values for Sockeye digitized from Bret 1964
         #TODO - we need to scale these numbers by size, way too big for tiny fish
-        adult_slope_adjustment = 0.2 # 0.5 or 0.1
+        adult_slope_adjustment = 0.1 # 0.5 or 0.1
         adult_intercept_adjustment = 1.75 # 1.5 or 2.1
-        prolonged_swim_speed_adjustment = 2.6
+        prolonged_swim_speed_adjustment = 2.5
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43 + prolonged_swim_speed_adjustment  # maximum prolonged swim speed
         self.a_p = 8.643 + adult_intercept_adjustment   # prolonged intercept
@@ -1213,7 +1213,7 @@ class simulation():
         self.opt_sog = self.length/1000. #* 0.8
         self.school_sog = self.length/1000.
        # self.swim_speed = self.length/1000.        # set initial swim speed
-        self.ucrit = self.length/1000. / 0.4267     # TODO - what is the ucrit for sockeye?
+        self.ucrit = 0.601 # self.length/1000. / 0.4267     # TODO - what is the ucrit for sockeye?
         
     def sim_weight(self):
         '''function simulates a fish weight out of the user provided basin and 
@@ -2716,14 +2716,19 @@ class simulation():
                 
                 # Scale those velocities to have a norm of 10 while preserving their direction
                 water_velocity[too_big] = (water_velocity[too_big] / norms) * 6
-
+            
             fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
                                   fish_vel_0 + acc_ini * dt + pid_adjustment,
-                                  water_velocity /2.)
+                                  water_velocity)
+            
+            
             
             fish_vel_1 = np.where(self.simulation.dead[:,np.newaxis] == 1,
                                   water_velocity,
                                   fish_vel_1)
+            
+            if np.any(~self.simulation.swim_behav == 1):
+                print ('check')
             
             # Step 7: Prepare for position update
             dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
@@ -2762,7 +2767,7 @@ class simulation():
             self.simulation.time_of_jump = np.where(mask,t,self.simulation.time_of_jump)
         
             # Get jump angle for each fish
-            jump_angles = np.repeat(45.,self.simulation.ucrit.shape)
+            jump_angles = np.repeat(60.,self.simulation.ucrit.shape)
             
             #np.where(mask,np.random.choice([np.radians(45), np.radians(60)], size=self.simulation.ucrit.shape),0)
         
@@ -4063,8 +4068,14 @@ class simulation():
             
             # for those just recovered
             head_vec = np.where(np.logical_and(self.simulation.just_recovered[:,np.newaxis] == 1,
-                                               self.simulation.recovery_time[:,np.newaxis] <= 2700.),
+                                               self.simulation.recovery_time[:,np.newaxis] <= 60.),
                                 cue_dict['border'] + cue_dict['shallow'],
+                                head_vec)
+            
+            head_vec = np.where(np.logical_and(self.simulation.just_recovered[:,np.newaxis] == 1,
+                                               self.simulation.recovery_time[:,np.newaxis] > 60.,
+                                               self.simulation.recover_time[:,np.newaxis] <= 600),
+                                vec_sum_recovered,
                                 head_vec)
             
             
@@ -4483,7 +4494,7 @@ class simulation():
             battery_dict = dict()
             battery_dict['low'] = self.simulation.battery <= 0.1
             battery_dict['mid'] = (self.simulation.battery > 0.1) & (self.simulation.battery <= 0.3)
-            battery_dict['high'] = self.simulation.battery > 0.4
+            battery_dict['high'] = self.simulation.battery > 0.3
             
             # Handle swim behavior based on battery and fatigue state
             self.handle_fatigue_recovery(battery_dict)
@@ -4544,7 +4555,7 @@ class simulation():
         should_jump = (self.wet == -9999.0) | (
             (sog_to_water_vel_ratio <= 0.10) &
             (time_since_jump > 60) &
-            (self.battery >= 0.25)
+            (self.battery >= 0.3)
         )
         
         # Apply the jump or swim functions based on the condition
