@@ -1089,6 +1089,7 @@ class simulation():
         adult_slope_adjustment = 0.1 # 0.5 or 0.1
         adult_intercept_adjustment = 1.75 # 1.5 or 2.1
         prolonged_swim_speed_adjustment = 9.0
+
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43 + prolonged_swim_speed_adjustment  # maximum prolonged swim speed
         self.a_p = 8.643 + adult_intercept_adjustment   # prolonged intercept
@@ -3188,11 +3189,12 @@ class simulation():
             length_numpy = self.simulation.length  # .get() if isinstance(self.length, cp.ndarray) else self.length
             
             # For simplicity, let's use a fixed buffer size. You can adjust this as needed.
-            buff = 5  # This could be dynamic based on your requirements
-            #buff = 2  # This could be dynamic based on your requirements
+            #buff = 5  # This could be dynamic based on your requirements
+            buff = 2  # This could be dynamic based on your requirements
 
             # get the x, y position of the agent 
             x, y = (np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y))
+            # if errors - check for nan's
             
             # find the row and column in the direction raster
             rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
@@ -3224,10 +3226,10 @@ class simulation():
                 y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]],
                                                        target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices])       
             except:
-                print (f'nans in x xmin: np.any(np.isnan(xmin))')
-                print (f'nans in x xmax: np.any(np.isnan(xmax))')
-                print (f'nans in y min: np.any(np.isnan(ymin))')
-                print (f'nans in y max: np.any(np.isnan(ymax))')
+                print (f'nans in x min: {np.any(np.isnan(xmin))}')
+                print (f'nans in x max: {np.any(np.isnan(xmax))}')
+                print (f'nans in y min: {np.any(np.isnan(ymin))}')
+                print (f'nans in y max: {np.any(np.isnan(ymax))}')
                 sys.exit()
 
                 
@@ -4851,7 +4853,7 @@ class simulation():
                 
                 # iterate over timesteps 
                 for i in range(int(n)):
-                    self.timestep(i, dt, g, pid_controller,548700)
+                    self.timestep(i, dt, g, pid_controller,548700,550450)
                     print ('Time Step %s complete'%(i))
                     
                 # close and cleanup
@@ -4865,7 +4867,7 @@ class simulation():
                                             k_i, 
                                             k_d)
             for i in range(n):
-                self.timestep(i, dt, g, pid_controller,548700)
+                self.timestep(i, dt, g, pid_controller,548700,550450)
                 
                 print ('Time Step %s %s %s %s %s %s complete'%(i,i,i,i,i,i))
                 
