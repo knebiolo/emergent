@@ -1074,7 +1074,7 @@ class simulation():
         self.prev_Y = self.Y
         
         # create short term memory for eddy escpement 
-        max_timesteps = 600 / 3. # Maximum number of timesteps to track
+        max_timesteps = 200 # Maximum number of timesteps to track
         
         self.swim_speeds = np.full((num_agents, max_timesteps), np.nan)
         self.past_longitudes = np.full((num_agents, max_timesteps), np.nan)
@@ -1088,7 +1088,7 @@ class simulation():
         #TODO - we need to scale these numbers by size, way too big for tiny fish
         adult_slope_adjustment = 0.1 # 0.5 or 0.1
         adult_intercept_adjustment = 1.75 # 1.5 or 2.1
-        prolonged_swim_speed_adjustment = 2.5
+        prolonged_swim_speed_adjustment = 9.0
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43 + prolonged_swim_speed_adjustment  # maximum prolonged swim speed
         self.a_p = 8.643 + adult_intercept_adjustment   # prolonged intercept
@@ -2767,7 +2767,7 @@ class simulation():
             self.simulation.time_of_jump = np.where(mask,t,self.simulation.time_of_jump)
         
             # Get jump angle for each fish
-            jump_angles = np.repeat(60.,self.simulation.ucrit.shape)
+            jump_angles = np.repeat(60.,len(self.simulation.heading))
             
             #np.where(mask,np.random.choice([np.radians(45), np.radians(60)], size=self.simulation.ucrit.shape),0)
         
@@ -3969,14 +3969,14 @@ class simulation():
                 rheotaxis = self.rheo_cue(25000)          # 25000
                 alignment = self.alignment_cue(20500)     # 20500
                 cohesion = self.cohesion_cue(11000)       # 11000
-                low_speed = self.vel_cue(1500)             # 500 
+                low_speed = self.vel_cue(3000)             # 500 
                 wave_drag = self.wave_drag_cue(0)         # 0                
                 refugia = self.find_nearest_refuge(50000) # 50000
                 # calculate high priority repusive forces
                 border = self.border_cue(50000, t)        # 50000
                 shallow = self.shallow_cue(100000)        # 100000
                 avoid = self.already_been_here(0, t)  # 25000
-                collision = self.collision_cue(25000)     # 50000 
+                collision = self.collision_cue(10000)     # 50000 
             
             # Create dictionary that has order of behavioral cues
             order_dict = {0: 'shallow',
@@ -4074,7 +4074,7 @@ class simulation():
             
             head_vec = np.where(np.logical_and(self.simulation.just_recovered[:,np.newaxis] == 1,
                                                self.simulation.recovery_time[:,np.newaxis] > 60.,
-                                               self.simulation.recover_time[:,np.newaxis] <= 600),
+                                               self.simulation.recovery_time[:,np.newaxis] <= 600),
                                 vec_sum_recovered,
                                 head_vec)
             
