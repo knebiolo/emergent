@@ -1088,7 +1088,7 @@ class simulation():
         #TODO - we need to scale these numbers by size, way too big for tiny fish
         adult_slope_adjustment = 0.1 # 0.5 or 0.1
         adult_intercept_adjustment = 1.75 # 1.5 or 2.1
-        prolonged_swim_speed_adjustment = 9.0
+        prolonged_swim_speed_adjustment = 3.0
 
         self.max_s_U = 2.77      # maximum sustained swim speed in bl/s
         self.max_p_U = 4.43 + prolonged_swim_speed_adjustment  # maximum prolonged swim speed
@@ -5053,7 +5053,7 @@ class summary:
                     self.ts = pd.concat([self.ts,geo_ts], ignore_index = True)
                     self.morphometrics = pd.concat([self.morphometrics,morphometrics], 
                                                   ignore_index = True) 
-                    
+                    self.ts.set_crs(epsg=32604, inplace=True)
                     print ('File %s imported'%(filename))
                     
                     
