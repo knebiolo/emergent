@@ -145,8 +145,7 @@ def north_south_current(state, t, speed=0.4):
     n = state.shape[1]
     # u = 0  ,  v = –speed  (all vessels)
     a = np.tile(np.array([[0.0], [-speed]]), (1, n))
-    return np.zeros_like(a)
-
+    return a #np.zeros_like(a)
 
 def playful_wind(state, t,
                  base=1.0,
@@ -164,7 +163,7 @@ def playful_wind(state, t,
     theta = 0.25 * t * np.pi / 180.0           # ~0.25° s-¹ rotation
     wx, wy = speed * np.cos(theta), speed * np.sin(theta)
     a= np.tile(np.array([[wx], [wy]]), (1, n))
-    return np.zeros_like(a)
+    return a #np.zeros_like(a)
 
 def tide_fn(t):
     return 1.5 * np.sin(2 * np.pi / 12.42 * (t / 3600)) 
@@ -1180,7 +1179,7 @@ class simulation:
         if getattr(self, "test_mode", None) == "zigzag":      # ← NEW
             return                                            # skip routing
         #tol = getattr(self, 'wp_tol', self.L * 2.)
-        tol = getattr(self, 'wp_tol', self.L)
+        tol = getattr(self, 'wp_tol', self.L * 2.)
 
         for i in range(self.n):
             wpts = self.waypoints[i]

@@ -8,7 +8,7 @@ setup(
     version="0.0.1",
     package_dir={"": "src"},
     packages=find_packages(where="src"),
-    install_requires=[
+    install_requires=["git",
         "numpy>=1.20",
         "pandas>=1.3",
         "geopandas>=0.9",

@@ -103,6 +103,7 @@ class ship_viewer(QtWidgets.QWidget):
         # Placeholder on the right for controls / buttons and graphics panel
         ctrl_layout = QtWidgets.QVBoxLayout()
         layout.addLayout(ctrl_layout, stretch=1)
+
         # graphics panel for compass rose and vanes
         self.panel_widget = pg.GraphicsLayoutWidget()
         ctrl_layout.addWidget(self.panel_widget)
@@ -197,6 +198,11 @@ class ship_viewer(QtWidgets.QWidget):
         self.btn_start_sim = QtWidgets.QPushButton("Start Simulation")
         self.btn_start_sim.clicked.connect(self._start_simulation)
         ctrl_layout.addWidget(self.btn_start_sim)
+        # Kill switch button to randomly cut power of an agent
+        self.btn_kill_power = QtWidgets.QPushButton("Kill Power")
+        self.btn_kill_power.clicked.connect(self._on_kill_power)
+        ctrl_layout.addWidget(self.btn_kill_power)
+        
         if test_mode == "zigzag":
             self.btn_start_sim.setEnabled(True)   # auto-enabled
         
@@ -267,11 +273,20 @@ class ship_viewer(QtWidgets.QWidget):
         rect = QtCore.QRectF(x0 - width/2, y0 - height/2, width, height)
         self.view.setRange(rect, padding=0.02)
         print(f"   view centered at {x0:.0f},{y0:.0f} ±{width/2}")
-        
+                    
         # 4) start the animation timer
         self.timer.start(int(self.sim.dt * 1000))
         self.btn_start_sim.setEnabled(False)
         self.btn_define_route.setEnabled(False)
+        # enable kill switch during simulation
+        self.btn_kill_power.setEnabled(True)
+        
+    def _on_kill_power(self):
+        """
+        Randomly cut power to one vessel via the simulation's kill switch.
+        """
+        # Delegate to core simulation method
+        self.sim._cut_random_power()
 
     def _draw_ais(self, start_date, end_date, cell_size=100.0):
         """
@@ -537,7 +552,6 @@ class ship_viewer(QtWidgets.QWidget):
                 self.btn_start_sim.setEnabled(True)
                 self._status_label.setText("All routes set — ready to simulate.")
 
-
     def _start_route_mode(self):
         """Enable click‑to‑collect‑waypoints mode for per-agent routing."""
         # Reset routing state
@@ -599,6 +613,10 @@ class ship_viewer(QtWidgets.QWidget):
         # compute heading, speed, rudder commands (arrays of length n)
         hd_cmds, sp_cmds, rud_cmds = self.sim._compute_controls_and_update(
             self.sim.state[[0,1,3]], t)   # pass a view; no fresh vstack
+        # disable rudder for vessels that have lost power
+        # (recognize cut-power by commanded_rpm == 0)
+        cut_mask = (self.sim.ship.commanded_rpm == 0)
+        rud_cmds = np.where(cut_mask, 0.0, rud_cmds)
 
         # ── DEBUG ───────────────────────────────────────────────────────────────
         # Extract the primary agent’s values as scalars
@@ -621,11 +639,33 @@ class ship_viewer(QtWidgets.QWidget):
 
         # advance the time
         self.sim.t += self.sim.dt
+
+        t = self.sim.t
+        # 1) Ship–ship collisions
+        for i in range(self.sim.n):
+            poly_i = self.sim._current_hull_poly(i)
+            for j in range(i+1, self.sim.n):
+                poly_j = self.sim._current_hull_poly(j)
+                if poly_i.intersects(poly_j):
+                    inter = poly_i.intersection(poly_j)
+                    if inter.area > self.sim.collision_tol_area:
+                        # cut power on both vessels
+                        self.sim.ship.cut_power(i)
+                        self.sim.ship.cut_power(j)
+                        print(f"Collision: Ships {i}&{j} at t={t:.2f}s")
+                        
+        # 2) Ship–land allisions
+        for i in range(self.sim.n):
+            poly = self.sim._current_hull_poly(i)
+            for land in self.sim.waterway.geometry:
+                if poly.intersects(land):
+                    self.sim.ship.cut_power(i)
+                    print(f"Allision: Ship{i} with land at t={t:.2f}s")
+        
         # record history for zigzag metrics
         self.sim.t_history.append(self.sim.t)
         self.sim.psi_history.append(self.sim.psi[0])
         self.sim.hd_cmd_history.append(hd_cmds[0])
-
 
         # 3) update each ship polygon’s position & rotation
         for i, poly in enumerate(self.ship_items):
@@ -686,10 +726,9 @@ class ship_viewer(QtWidgets.QWidget):
             self.view.addItem(rud_line)
             self.rudder_items.append(rud_line)
 
-
             # 2) Desired-heading line at the bow (length=0.2·L)
-            bow_x = x + (L/2) * np.cos(cmd_hd)
-            bow_y = y + (L/2) * np.sin(cmd_hd)
+            bow_x = x + (L/2) * np.cos(curr_hd)
+            bow_y = y + (L/2) * np.sin(curr_hd)
             dx_hd = 0.2 * L * np.cos(cmd_hd)
             dy_hd = 0.2 * L * np.sin(cmd_hd)
             hd_line = pg.PlotCurveItem(
@@ -702,7 +741,6 @@ class ship_viewer(QtWidgets.QWidget):
             # 3) Text label --------------------------------------------------
             r_dps = np.degrees(r_arr[i])        # deg s-¹ is what mariners think in
 
-            
             # choose font colour & size based on mode
             colour = "black" if getattr(self.sim, "test_mode", None) == "zigzag" else "white"
             html = (

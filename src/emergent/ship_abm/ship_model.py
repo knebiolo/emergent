@@ -111,6 +111,21 @@ class ship:
     
         # speed & propulsion settings
         init_sp = PROPULSION['initial_speed']
+        # initialize current_speed as array of length n for vectorized control
+        try:
+            # multi-ship case: fill an array of length n
+            self.current_speed = np.full(self.n, init_sp, dtype=float)
+        except Exception:
+            # fallback to scalar for single-ship case
+            self.current_speed = float(init_sp)
+
+        # deceleration limit: max acceleration (m/s²), fallback to max_speed if not configured
+        accel_limit = PROPULSION.get('max_accel', PROPULSION['max_speed'])
+        try:
+            self.max_accel = np.full(self.n, accel_limit, dtype=float)
+        except Exception:
+            self.max_accel = float(accel_limit)
+            
         self.desired_speed = np.full(n, PROPULSION['desired_speed'])
         self.cruise_speed  = self.desired_speed.copy()
         self.max_speed     = np.full(n, PROPULSION['max_speed'])
@@ -128,6 +143,14 @@ class ship:
         self.A_air     = self.length * self.beam * .7  # proj. area above WL
         self.Cd_air    = 1.0            # bluff-body
         self.Cd_water  = self.drag_coeff
+        
+        # ── per‑vessel avoidance state ───────────────────────────────────────
+        # crossing_lock holds the index of the vessel we are yielding to.
+        # -1 means no active lock.  When a give-way maneuver triggers,
+        # this lock stores the target index and the commanded heading/speed.
+        self.crossing_lock   = np.full(n, -1, dtype=int)
+        self.crossing_heading = np.zeros(n)
+        self.crossing_speed   = np.zeros(n)
 
     def cut_power(self, idx: int):
         """
@@ -257,11 +280,22 @@ class ship:
         uv    = dirs / safe
         return 500 * uv
 
-    def compute_desired(self, goals, x, y, u, v, r, psi):
+    def compute_desired(self, goals, x, y, u, v, r, psi, current_vec=None):
         """
-        Compute desired heading & speed toward waypoint, reusing
-        compute_attractive_force for the direction vector.
+        Compute desired *water-relative* heading & speed so that the
+        ship’s **course-over-ground** still aims at the goal even when
+        currents (and, second-order, wind) push the hull.
+
+        Parameters
+        ----------
+        goals : (2,n) goal positions in *earth* frame
+        x, y  : current positions (earth frame)
+        u, v  : surge/sway in *body* frame  (needed only for callers)
+        r, psi: yaw-rate / heading
+        current_vec : (2,n) environmental current in earth frame
+                      If None → fall back to “no drift” behaviour.
         """
+
         # — if no explicit goals given, default to the next route waypoint
         if goals is None and hasattr(self, 'wpts') and len(self.wpts) > 1:
             # wpts is a list of numpy [x,y]; take the second entry as our single goal
@@ -281,8 +315,31 @@ class ship:
 
         # get the attraction vector (2,n)
         attract = self.compute_attractive_force(positions, goals_arr)
-        # heading toward the goal is the arctan2 of that vector
-        hd = np.arctan2(attract[1], attract[0])
+
+        # ------------------------------------------------------------------
+        # DEAD-RECKONING : subtract drift to get required *water-relative*
+        #                  velocity vector that will yield the same COG.
+        # ------------------------------------------------------------------
+        if current_vec is not None:
+            # desired ground-track unit vector
+            cog_dir = attract / np.linalg.norm(attract, axis=0, keepdims=True)
+
+            # pick whatever speed controller already wants (vectorised)
+            sog_cmd = np.array(self.desired_speed, copy=True)
+
+            # required through-water velocity = V_gnd  -  current
+            v_req = sog_cmd * cog_dir - current_vec
+
+            # if we happen to be *with* the current and v_req→0, give a nudge
+            mask = np.linalg.norm(v_req, axis=0) < 1e-6
+            v_req[:, mask] = cog_dir[:, mask] * 1e-3
+
+            # new heading is direction of v_req
+            hd = np.arctan2(v_req[1], v_req[0])
+        else:
+            # original behaviour: ignore drift
+            hd = np.arctan2(attract[1], attract[0])
+
         # desired speed stays whatever you’ve set in self.desired_speed
         sp = np.array(self.desired_speed, copy=True)
         return hd, sp
@@ -293,8 +350,8 @@ class ship:
         P-I-D with gain scheduling, anti-windup, dead-band, and rate-limit.
         """
         # 1) heading error normalized to [-π, π] (flipped sign so positive error → starboard turn)
-        err = (hd - psi + np.pi) % (2*np.pi) - np.pi
-        #err = (psi - hd + np.pi) % (2*np.pi) - np.pi
+        #err = (hd - psi + np.pi) % (2*np.pi) - np.pi
+        err = (psi - hd + np.pi) % (2*np.pi) - np.pi
 
         # 1.1) small dead-band: ignore tiny errors < 0.5°
         db_rad = np.deg2rad(0.5)
@@ -401,10 +458,58 @@ class ship:
         for i in range(n):
             pd    = positions[:, i]
             psi_i = psi[i]
+            u_i   = nu[0, i]
+            v_i   = nu[1, i]
+            # earth-frame velocity of vessel i
+            vel_i = np.array([
+                u_i * np.cos(psi_i) - v_i * np.sin(psi_i),
+                u_i * np.sin(psi_i) + v_i * np.cos(psi_i)
+            ])
+            # --- Hysteresis: exit previous give-way when clear or bearing opens ---
+            if hasattr(self, '_last_role') and self._last_role[i] == 'give_way':
+                # compute distances & bearings to all vessels
+                deltas = positions - pd[:, None]
+                dists  = np.linalg.norm(deltas, axis=0)
+                bears  = ((np.arctan2(deltas[1], deltas[0]) - psi_i + np.pi) % (2*np.pi) - np.pi)
+                # if no one within clear_dist OR all bearings outside unlock_ang → resume normal
+                mask = dists < clear_dist
+                if not mask.any() or all(abs(b) > unlock_ang for b in bears[mask]):
+                    head[i]         = psi_i
+                    speed_des[i]    = self.desired_speed[i]
+                    role[i]         = 'neutral'
+                    give_way_found  = False  # clear any ongoing avoidance
+                    contact         = False
+                    continue
+           
             hd    = psi_i           # default heading
             rl    = 'neutral'       # default role
             give_way_found = False  # flag if any give_way rule fires
             contact = False         # flag if any vessel is within safe_dist
+            
+            # ── Maintain any active crossing lock ───────────────────────
+            tgt = self.crossing_lock[i]
+            if tgt >= 0 and tgt < n:
+                delta = positions[:, tgt] - pd
+                dist  = np.linalg.norm(delta)
+                bearing = ((np.arctan2(delta[1], delta[0]) - psi_i + np.pi) %
+                           (2*np.pi) - np.pi)
+                if dist < clear_dist and abs(bearing) < unlock_ang:
+                    # still locked → keep previous avoidance commands
+                    hd = self.crossing_heading[i]
+                    speed_des[i] = self.crossing_speed[i]
+                    rl = 'give_way'
+                    role[i] = rl
+                    head[i] = hd
+                    continue
+                else:
+                    # lock cleared
+                    self.crossing_lock[i] = -1
+
+            # --- Emergency braking / astern thrust ---
+            # compute stopping (braking) distance: d = v²/(2·a_max), with a safety margin
+            v     = self.current_speed[i]
+            a_max = self.max_accel[i]    # should be a positive deceleration limit
+            d_brk = v*v / (2*a_max) * 1.2
 
             # examine every other vessel
             for j in range(n):
@@ -416,32 +521,69 @@ class ship:
                     continue
                 contact = True
 
+                # relative velocity of j in Earth frame
+                u_j = nu[0, j]; v_j = nu[1, j]
+                vel_j = np.array([
+                    u_j * np.cos(psi[j]) - v_j * np.sin(psi[j]),
+                    u_j * np.sin(psi[j]) + v_j * np.cos(psi[j])
+                ])
+                rel_vel = vel_j - vel_i
+
+                # closing speed (<0 means approaching)
+                closing_speed = np.dot(delta, rel_vel) / dist
+
                 # compute relative bearing
                 bearing = ((np.arctan2(delta[1], delta[0])
                            - psi_i + np.pi) % (2*np.pi) - np.pi)
 
-                # Rule 15: crossing from starboard
-                if 0 < bearing < np.pi/2:
-                    rl = 'give_way'
-                    hd = (psi_i - 2*np.pi/3) % (2*np.pi)
-                    sf = max(0.3, min(1.0, dist/safe_dist))
-                    speed_des[i] = self.desired_speed[i] * sf
-                    give_way_found = True
-                    break
-
-                # Rule 14: head-on
+                # Rule 14: head-on (mutual give-way)
                 if abs(bearing) < np.radians(10):
-                    rl = 'give_way'
-                    hd = (psi_i - np.pi/3) % (2*np.pi)
-                    speed_des[i] = 5.0
+                    if dist < d_brk:
+                        rl = 'give_way'
+                        hd = (psi_i + np.radians(60)) % (2*np.pi)
+                        speed_des[i] = -self.max_reverse_speed[i]
+                    else:
+                        rl = 'give_way'
+                        hd = (psi_i + np.radians(60)) % (2*np.pi)
+                        speed_des[i] = 5.0
+                    self.crossing_lock[i]    = j
+                    self.crossing_heading[i] = hd
+                    self.crossing_speed[i]   = speed_des[i]
                     give_way_found = True
                     break
 
-                # Rule 13: overtaking
-                if -np.pi/8 < bearing < np.pi/8:
+                # Rule 15: crossing from starboard (other vessel on your right)
+                if 0 < bearing < np.pi/2:
+                    if dist < d_brk:
+                        rl = 'give_way'
+                        hd = (psi_i + np.pi/4) % (2*np.pi)
+                        speed_des[i] = -self.max_reverse_speed[i]
+                        self.crossing_lock[i] = j
+                        self.crossing_heading[i] = hd
+                        self.crossing_speed[i] = speed_des[i]
+                        give_way_found = True
+                        break
+                    else:
+                        rl = 'give_way'
+                        hd = (psi_i + np.pi/4) % (2*np.pi)
+                        sf = max(0.3, min(1.0, dist/safe_dist))
+                        speed_des[i] = self.desired_speed[i] * sf
+                        self.crossing_lock[i] = j
+                        self.crossing_heading[i] = hd
+                        self.crossing_speed[i] = speed_des[i]                        
+                        give_way_found = True
+                        break
+
+                # Rule 13: overtaking (other vessel approaching from astern)
+                if abs(bearing) > 3*np.pi/4:   # bearing within ±45° of dead-astern
+
                     rl = 'give_way'
+                    # now turn starboard by 10°
                     hd = (psi_i + np.pi/18) % (2*np.pi)
                     speed_des[i] = min(self.desired_speed[i] * 1.2, self.max_speed[i])
+                    self.crossing_lock[i] = j
+                    self.crossing_heading[i] = hd
+                    self.crossing_speed[i] = speed_des[i]                    
                     give_way_found = True
                     break
 
@@ -453,7 +595,7 @@ class ship:
             # neutral or stand-on → resume default cruise speed
             if rl in ['neutral', 'stand_on']:
                 speed_des[i] = self.desired_speed[i]
-
+                
             head[i] = hd
             role[i] = rl
 
@@ -513,6 +655,7 @@ class ship:
     def step(self, state, rpms, goals, wind, current, dt):
         # state: [x;y;u;v;p;r;phi;psi]
         x,y,u,v,p,r,phi,psi = state
+        #self.current_speed = u
         # COLREGS & control
         desired_heading, desired_speed = self.compute_desired(goals, x, y, u, v, r, psi)
         rudder = self.pid_control(psi, desired_heading, dt)

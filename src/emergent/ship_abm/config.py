@@ -76,21 +76,21 @@ SHIP_PHYSICS = {
 
     # Rigid-body properties
     'm': 2.5e8,                   # Mass of the vessel (kg)
-    'Ixx': 1384224260.293955,                 # Moment of inertia about the x‐axis (roll) (kg·m²)
-    'Izz': 9627947989.566050,                 # Moment of inertia about the z‐axis (yaw) (kg·m²)
+    'Ixx': 5802102368.428337,                 # Moment of inertia about the x‐axis (roll) (kg·m²)
+    'Izz': 8446609085.138884,                 # Moment of inertia about the z‐axis (yaw) (kg·m²)
     'xG': 0.0,                  # Longitudinal offset of center of gravity from geometric center (m)
-    'zG': -7.035222,                 # Vertical offset of center of gravity below waterline (m)
+    'zG': -3.666481,                 # Vertical offset of center of gravity below waterline (m)
 
     # Hydrodynamic derivatives
-    'Xu': -6504565.964343,               # Surge force derivative w.r.t. surge velocity (kg/s)
+    'Xu': -7536261.980847,               # Surge force derivative w.r.t. surge velocity (kg/s)
     'Xv': 0.0,                  # Surge force derivative w.r.t. sway velocity (kg/s)
     'Xp': 0.0,                  # Surge force derivative w.r.t. roll rate (kg·m)
     'Xr': 0.0,                  # Surge force derivative w.r.t. yaw rate (kg·m)
 
     'Yu': 0.0,                  # Sway force derivative w.r.t. surge velocity (kg/s)
-    'Yv': -632813.296804,             # Sway force derivative w.r.t. sway velocity (kg/s)
+    'Yv': -805224.848207,             # Sway force derivative w.r.t. sway velocity (kg/s)
     'Yp': 0.0,                  # Sway force derivative w.r.t. roll rate (kg·m)
-    'Yr': -60675001.243096,                  # Sway force derivative w.r.t. yaw rate (kg·m)
+    'Yr': -66333786.294689,                  # Sway force derivative w.r.t. yaw rate (kg·m)
 
     'Ku': 0.0,                  # Roll moment derivative w.r.t. surge velocity (kg·m²/s)
     'Kv': 0.0,                  # Roll moment derivative w.r.t. sway velocity (kg·m²/s)
@@ -98,13 +98,13 @@ SHIP_PHYSICS = {
     'Kr': 0.0,                  # Roll moment derivative w.r.t. yaw rate (kg·m²)
 
     'Nu': 0.0,                  # Yaw moment derivative w.r.t. surge velocity (kg·m²/s)
-    'Nv': -15629206373.796013,                # Yaw moment derivative w.r.t. sway velocity (kg·m²/s)
+    'Nv': -8238657164.318151,                # Yaw moment derivative w.r.t. sway velocity (kg·m²/s)
     'Np': 0.0,                  # Yaw moment derivative w.r.t. roll rate (kg·m²)
-    'Nr': -15041061.340577,                  # Yaw moment derivative w.r.t. yaw rate (kg·m²)
+    'Nr': -16943042.526334,                  # Yaw moment derivative w.r.t. yaw rate (kg·m²)
 
-    'Ydelta': 38125441.531057,   # 3.4e7 N of lateral force per radian of rudder
+    'Ydelta': 50161090.761107,   # 3.4e7 N of lateral force per radian of rudder
     'Kdelta': 0.0,     # N·m of roll moment per radian (ignored)
-    'Ndelta': 263166673.737946,   # 6.8e9 N·m of yaw torque per radian of rudder
+    'Ndelta': 148096565.795058,   # 6.8e9 N·m of yaw torque per radian of rudder
 
     # Damping
     'linear_damping': 1e5,      # Linear hull damping coefficient (N per m/s)
@@ -112,7 +112,7 @@ SHIP_PHYSICS = {
 
     # Rudder limits
     'max_rudder': np.radians(35),         # Maximum rudder deflection (rad)
-    'max_rudder_rate': 0.424107,  # Maximum rudder rate change (rad/s)
+    'max_rudder_rate': 0.183667,  # Maximum rudder rate change (rad/s)
     
     # Drag Stuff
     'drag_coeff': 0.0012
@@ -124,11 +124,11 @@ SHIP_PHYSICS = {
 # These gains determine how aggressively each vessel adjusts heading (rudder) and speed (thrust).
 CONTROLLER_GAINS = {
     # Proportional gain for heading controller
-    "Kp": 0.15,
+    "Kp": 0.10,
     # Integral gain for heading controller (set to 0 if no steady-state offset correction is needed)
     "Ki": 0.02,
     # Derivative gain for heading controller (damping term)
-    "Kd": 14.0,
+    "Kd": 20.0,
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -143,11 +143,11 @@ CONTROLLER_GAINS = {
 ADVANCED_CONTROLLER = {
     # Feed‐forward gain: multiplies heading error to compute a desired turn‐rate.
     # Typical values: 0.0 (no feed‐forward) up to ~1.0 (aggressive).
-    "Kf_gain": 0.05,  
+    "Kf_gain": 0.03,  
 
     # Maximum commanded turn rate (°/s).  After feed‐forward, we clamp
     # desired r_des to ±r_rate_max_deg before converting to radians.
-    "r_rate_max_deg": 4.0,  
+    "r_rate_max_deg": 3.0,  
 
     # Anti‐windup limit on the I‐term (degrees).  The integral of error is
     # clipped to ±I_max_deg before using it.  Convert to radians in code.
@@ -156,7 +156,7 @@ ADVANCED_CONTROLLER = {
     # Prediction horizon for dead‐band (seconds).  If |err_pred| < trim_band, we
     # set rudder=0 early to avoid chatter or overshoot.  Typical values: tens to
     # thousands of seconds depending on your dynamics.
-    "lead_time": 30.0,  #8000
+    "lead_time": 60.0,  #8000
 
     # Dead‐zone half‐angle (degrees).  Any commanded rudder smaller than this
     # in magnitude is forced to zero to prevent constant micro‐twitching.
@@ -165,7 +165,7 @@ ADVANCED_CONTROLLER = {
     # Early‐release band (degrees).  Once |predicted_error| < release_band_deg,
     # rudder is released (forced to zero), even if commanded > trim_band_deg.
     # This widens the “dead‐zone” as heading error shrinks.  Typical: 3–10°.
-    "release_band_deg": 2.0,  #5.0
+    "release_band_deg": 3.0,  #5.0
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
