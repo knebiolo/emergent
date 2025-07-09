@@ -128,7 +128,7 @@ CONTROLLER_GAINS = {
     # Integral gain for heading controller (set to 0 if no steady-state offset correction is needed)
     "Ki": 0.02,
     # Derivative gain for heading controller (damping term)
-    "Kd": 20.0,
+    "Kd": 30.0,
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ ADVANCED_CONTROLLER = {
     # Prediction horizon for dead‐band (seconds).  If |err_pred| < trim_band, we
     # set rudder=0 early to avoid chatter or overshoot.  Typical values: tens to
     # thousands of seconds depending on your dynamics.
-    "lead_time": 60.0,  #8000
+    "lead_time": 120.0,  #8000
 
     # Dead‐zone half‐angle (degrees).  Any commanded rudder smaller than this
     # in magnitude is forced to zero to prevent constant micro‐twitching.

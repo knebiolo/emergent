@@ -350,8 +350,8 @@ class ship:
         P-I-D with gain scheduling, anti-windup, dead-band, and rate-limit.
         """
         # 1) heading error normalized to [-π, π] (flipped sign so positive error → starboard turn)
-        #err = (hd - psi + np.pi) % (2*np.pi) - np.pi
-        err = (psi - hd + np.pi) % (2*np.pi) - np.pi
+        err = (hd - psi + np.pi) % (2*np.pi) - np.pi
+        #err = (psi - hd + np.pi) % (2*np.pi) - np.pi
 
         # 1.1) small dead-band: ignore tiny errors < 0.5°
         db_rad = np.deg2rad(0.5)
@@ -466,20 +466,14 @@ class ship:
                 u_i * np.sin(psi_i) + v_i * np.cos(psi_i)
             ])
             # --- Hysteresis: exit previous give-way when clear or bearing opens ---
-            if hasattr(self, '_last_role') and self._last_role[i] == 'give_way':
-                # compute distances & bearings to all vessels
-                deltas = positions - pd[:, None]
-                dists  = np.linalg.norm(deltas, axis=0)
-                bears  = ((np.arctan2(deltas[1], deltas[0]) - psi_i + np.pi) % (2*np.pi) - np.pi)
-                # if no one within clear_dist OR all bearings outside unlock_ang → resume normal
-                mask = dists < clear_dist
-                if not mask.any() or all(abs(b) > unlock_ang for b in bears[mask]):
-                    head[i]         = psi_i
-                    speed_des[i]    = self.desired_speed[i]
-                    role[i]         = 'neutral'
-                    give_way_found  = False  # clear any ongoing avoidance
-                    contact         = False
-                    continue
+            # --- NEW: stay in give-way as long as the crossing_lock is active ---
+            if hasattr(self, '_last_role') \
+               and self._last_role[i] == 'give_way' \
+               and self.crossing_lock[i] >= 0:
+                head[i]      = self.crossing_heading[i]
+                speed_des[i] = self.crossing_speed[i]
+                role[i]      = 'give_way'
+                continue
            
             hd    = psi_i           # default heading
             rl    = 'neutral'       # default role
@@ -540,11 +534,11 @@ class ship:
                 if abs(bearing) < np.radians(10):
                     if dist < d_brk:
                         rl = 'give_way'
-                        hd = (psi_i + np.radians(60)) % (2*np.pi)
+                        hd = (psi_i - np.radians(60)) % (2*np.pi)      # >> starboard turn
                         speed_des[i] = -self.max_reverse_speed[i]
                     else:
                         rl = 'give_way'
-                        hd = (psi_i + np.radians(60)) % (2*np.pi)
+                        hd = (psi_i - np.radians(60)) % (2*np.pi)
                         speed_des[i] = 5.0
                     self.crossing_lock[i]    = j
                     self.crossing_heading[i] = hd
@@ -556,7 +550,7 @@ class ship:
                 if 0 < bearing < np.pi/2:
                     if dist < d_brk:
                         rl = 'give_way'
-                        hd = (psi_i + np.pi/4) % (2*np.pi)
+                        hd = (psi_i - np.pi/4) % (2*np.pi)
                         speed_des[i] = -self.max_reverse_speed[i]
                         self.crossing_lock[i] = j
                         self.crossing_heading[i] = hd
@@ -565,7 +559,7 @@ class ship:
                         break
                     else:
                         rl = 'give_way'
-                        hd = (psi_i + np.pi/4) % (2*np.pi)
+                        hd = (psi_i - np.pi/4) % (2*np.pi)
                         sf = max(0.3, min(1.0, dist/safe_dist))
                         speed_des[i] = self.desired_speed[i] * sf
                         self.crossing_lock[i] = j

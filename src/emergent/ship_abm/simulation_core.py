@@ -1264,13 +1264,13 @@ class simulation:
         # # ────────────────────────────────────────────────────────────────────
 
         # fuse & PID (hd returned in radians)
-        hd, sp = self._fuse_and_pid(goal_hd, goal_sp, col_hd, col_sp)
+        hd, sp = self._fuse_and_pid(goal_hd, goal_sp, col_hd, col_sp, roles)
         # compute rudder from radian heading command
         rud = self._compute_rudder(hd, roles)
         return hd, sp, rud
 
-    def _fuse_and_pid(self, goal_hd, goal_sp, col_hd, col_sp):
-        roles = np.array(self.ship.colregs(self.pos, np.vstack([self.state[0],self.state[1],self.state[3]]), self.psi, self.ship.commanded_rpm)[3])
+    def _fuse_and_pid(self, goal_hd, goal_sp, col_hd, col_sp, roles):
+        #roles = np.array(self.ship.colregs(self.pos, np.vstack([self.state[0],self.state[1],self.state[3]]), self.psi, self.ship.commanded_rpm)[3])
         is_give = (roles == 'give_way')
         hd = np.where(is_give, col_hd, goal_hd)
         sp = np.where(is_give, col_sp, goal_sp)
@@ -1327,7 +1327,7 @@ class simulation:
         err_abs = np.abs(err)
         ov_mask = (np.array(roles) == 'give_way') & (err_abs >= np.radians(30))
         rud_cmd = np.where(ov_mask,
-                           -np.sign(err) * self.ship.max_rudder,
+                           np.sign(err) * self.ship.max_rudder,
                            rud_cmd)
     
         # 7) Saturate to max rudder and rate-limit the change

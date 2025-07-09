@@ -16,6 +16,9 @@ from emergent.ship_abm.simulation_core import simulation, SIMULATION_BOUNDS
 from emergent.ship_abm.simulation_core import playful_wind, north_south_current
 from emergent.ship_abm.simulation_core import compute_zigzag_metrics
 from datetime import date
+import sqlite3
+import datetime
+import json
 
 class ship_polygon(QGraphicsPolygonItem):
     """
@@ -196,7 +199,18 @@ class ship_viewer(QtWidgets.QWidget):
         
         # START button
         self.btn_start_sim = QtWidgets.QPushButton("Start Simulation")
+        # connect existing simulation button
         self.btn_start_sim.clicked.connect(self._start_simulation)
+        # add iterations selector and production‐run button
+        self.lbl_iterations = QtWidgets.QLabel("Iterations:")
+        self.spin_iterations = QtWidgets.QSpinBox()
+        self.spin_iterations.setRange(1, 1000)
+        self.spin_iterations.setValue(1)
+        self.btn_prod_run = QtWidgets.QPushButton("Run Production")
+        ctrl_layout.addWidget(self.lbl_iterations)
+        ctrl_layout.addWidget(self.spin_iterations)
+        ctrl_layout.addWidget(self.btn_prod_run)
+        self.btn_prod_run.clicked.connect(self._run_production)        
         ctrl_layout.addWidget(self.btn_start_sim)
         # Kill switch button to randomly cut power of an agent
         self.btn_kill_power = QtWidgets.QPushButton("Kill Power")
@@ -710,7 +724,7 @@ class ship_viewer(QtWidgets.QWidget):
             curr_hd = self.sim.psi[i]
             cmd_hd  = hd_cmds[i]
             rud_i   = rud_cmds[i]
-
+            rud_cmd_deg = np.degrees(rud_i)        # new: δcmd in degrees
             # 1) Rudder line at the stern (length=0.1·L, tilt=ψ+π+δ+signδ·π/2)
             stern_offset = (L/2) + 0.05 * L
             stern_x = x - stern_offset * np.cos(curr_hd)
@@ -747,7 +761,7 @@ class ship_viewer(QtWidgets.QWidget):
                 "<span style='font-family:Courier New; "
                 f"font-size:14px; color:{colour};'>"
                 f"u {u_arr[i]:5.1f}  v {v_arr[i]:5.1f}  r {r_dps:7.3f}<br>"
-                f"thr {thr_pct[i]:3.0f}% δ {rud_deg[i]:5.1f}°<br>"
+                f"thr {thr_pct[i]:3.0f}%  δcmd {rud_cmd_deg:5.1f}°  δ {rud_deg[i]:5.1f}°<br>"
                 f"{roles[i]}"
                 "</span>"
             )
@@ -777,5 +791,59 @@ class ship_viewer(QtWidgets.QWidget):
         self.lbl_current.setText(f"Current: {cs:.2f} m/s, {cd:.0f}°")
         self.current_arrow.setRotation(-cd)
 
-
+    def _run_production(self):
+        n_iter = self.spin_iterations.value()
+        # if only one, delegate to manual mode (user presses failure button)
+        if n_iter == 1:
+            self._start_simulation()
+            return
+        # setup SQLite DB for results
+        conn = sqlite3.connect('production_results.db')
+        c = conn.cursor()
+        c.execute(
+            '''CREATE TABLE IF NOT EXISTS results
+               (iter INTEGER, timestamp TEXT, failure_agent INTEGER,
+                failure_time REAL, metrics TEXT)'''
+        )
+        conn.commit()
+        # batch runs
+        for it in range(n_iter):
+            # instantiate fresh simulation
+            self._start_simulation()  # sets up self.sim
+            # run until proximity‐triggered failure
+            failed = False
+            t = 0.0
+            dt = self.sim.dt
+            while t < self.sim.T:
+                self.sim.step()
+                pos = self.sim.positions  # shape (2, n)
+                if not failed:
+                    # pairwise distances vectorized
+                    delta = pos[:, :, None] - pos[:, None, :]
+                    d2 = (delta**2).sum(axis=0)
+                    np.fill_diagonal(d2, np.inf)
+                    if d2.min() < 1e6:  # (1000 m)^2
+                        idx = np.random.randint(self.sim.n)
+                        self.sim.ship.cut_power(idx)
+                        fail_time = t
+                        failure_agent = idx
+                        failed = True
+                t += dt
+            # gather metrics
+            metrics = {
+                'final_pos': self.sim.positions.tolist(),
+                'collisions': getattr(self.sim, 'collision_events', [])
+            }
+            # insert into DB
+            c.execute(
+                'INSERT INTO results VALUES (?,?,?,?,?)',
+                (it, datetime.now().isoformat(),
+                 failure_agent if failed else None,
+                 fail_time if failed else None,
+                 json.dumps(metrics))
+            )
+            conn.commit()
+        conn.close()
+        QtWidgets.QMessageBox.information(
+            self, 'Production Run', f'Completed {n_iter} iterations')
 
