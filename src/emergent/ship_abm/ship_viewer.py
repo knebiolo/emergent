@@ -19,6 +19,8 @@ from datetime import datetime, date, timezone
 import sqlite3
 import json
 import pyqtgraph.functions as fn
+from pyproj import Transformer
+
 
 
 class ship_polygon(QGraphicsPolygonItem):
@@ -108,40 +110,32 @@ class ship_viewer(QtWidgets.QWidget):
         ctrl_layout = QtWidgets.QVBoxLayout()
         layout.addLayout(ctrl_layout, stretch=1)
 
-        # graphics panel for compass rose and vanes
+        # ─────────────────────────────────────────────────────────────────────
+        # INSET MAP PANEL (replacing wind/current vanes)
+        # ─────────────────────────────────────────────────────────────────────
         self.panel_widget = pg.GraphicsLayoutWidget()
         ctrl_layout.addWidget(self.panel_widget)
-        self.panel = self.panel_widget.addViewBox()
-        self.panel.setAspectLocked(True)
-        self.panel.setMouseEnabled(False, False)
-        # grey background for vane panel
-        self.panel.setBackgroundColor(QBrush(QColor(200,200,200)))
-        # set fixed range so vanes at (40,40) and (40,100) appear
-        from PyQt5.QtCore import QRectF
-        self.panel.setRange(QRectF(0, 0, 200, 200), padding=0)
-        ctrl_layout.addStretch()
-        
-
-        # ─────────────────────────────────────────────────────────────────────
-        #  ENVIRONMENTAL PANEL
-        # ─────────────────────────────────────────────────────────────────────
-        self.lbl_time    = QtWidgets.QLabel("Time: 0.00 s")
-        self.lbl_wind    = QtWidgets.QLabel("Wind: 0.00 m/s, 0°")
-        self.lbl_current = QtWidgets.QLabel("Current: 0.00 m/s, 0°")
-        for lbl in (self.lbl_time, self.lbl_wind, self.lbl_current):
-            ctrl_layout.addWidget(lbl)
-
-        # Wind-vane arrow in side panel
-        self.wind_arrow = pg.ArrowItem(angle=0, tipAngle=90, baseAngle=45, headLen=20)
-        self.wind_arrow.setZValue(50)
-        self.panel.addItem(self.wind_arrow)
-        self.wind_arrow.setPos(40, 40)
-        
-        # Current-vane arrow in side panel
-        self.current_arrow = pg.ArrowItem(angle=0, tipAngle=90, baseAngle=45, headLen=20)
-        self.current_arrow.setZValue(50)
-        self.panel.addItem(self.current_arrow)
-        self.current_arrow.setPos(40, 100)
+        # create a locked ViewBox for the inset
+        from pyqtgraph.Qt import QtCore
+        self.inset = self.panel_widget.addViewBox()
+        self.inset.setAspectLocked(True)
+        self.inset.setMouseEnabled(False, False)
+        # draw full ENC basemap (coastlines) into inset
+        if self.sim.enc_data:
+            for tris in self.sim.enc_data.get('coastlines', []):
+                # tris should be an Nx2 array of UTM coords
+                poly_item = ship_polygon(np.array(tris),
+                                         color=(150,150,150,200),
+                                         pen_color=(100,100,100))
+                self.inset.addItem(poly_item)
+        # add red rectangle to show current main‐view bounds
+        from PyQt5.QtWidgets import QGraphicsRectItem
+        from PyQt5.QtGui import QPen, QColor
+        self.view_rect = QGraphicsRectItem()
+        self.view_rect.setPen(QPen(QColor(255, 0, 0), 2))
+        self.inset.addItem(self.view_rect)
+        # when the main view’s range changes, update the red box
+        self.view.sigRangeChanged.connect(self.update_inset_rect)
 
         # ─────────────────────────────────────────────────────────────────────
         # 3) Draw the basemap only if ENC layers were actually loaded
@@ -149,32 +143,66 @@ class ship_viewer(QtWidgets.QWidget):
             self._draw_basemap()
             
         # ── QU I V E R  (surface currents) ──────────────────────────────
-        U, V = self.sim.currents_grid(datetime.utcnow())
-        X, Y = self.sim._utm_to_ll.transform(
-                   *self.sim._utm_to_ll.transform(
-                        self.sim._quiver_lon, self.sim._quiver_lat, direction="INVERSE"
-                   )
-               )      # lon/lat → UTM for plotting
+        ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
+        X, Y = ll2utm.transform(self.sim._quiver_lon, self.sim._quiver_lat)
+        U, V = self.sim.currents_grid(datetime.utcnow())        
+        
         # down-sample arrows so they don’t clutter high-res screens
-        skip = (slice(None, None, 2), slice(None, None, 2))
+        skip = (slice(None, None, 50), slice(None, None, 50))
         qx, qy, qu, qv = X[skip], Y[skip], U[skip], V[skip]
 
-        # plot as a series of ArrowItems (PyQtGraph has no native quiver)
+        # plot currents as a series of ArrowItems in blue, Z=1
         self.quiver_items = []
-        scale = 500      # metres per (m/s) so 1 m/s ⇒ 500 m arrow
+        scale = 250  # metres per (m/s) so 1 m/s ⇒ 500 m arrow
         for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), qu.ravel(), qv.ravel()):
             mag = np.hypot(u, v)
             if np.isnan(mag) or mag < 1e-3:
                 continue
             angle = np.degrees(np.arctan2(v, u))
-            arr = pg.ArrowItem(angle = -angle, headLen=8,
-                               tipAngle=90, baseAngle=45,
-                               brush=pg.mkBrush(0, 0, 255, 180))
+            arr = pg.ArrowItem(
+                angle=-angle,
+                headLen=8, tipAngle=90, baseAngle=45,
+                brush=pg.mkBrush(0, 0, 255, 200),
+            )
             arr.setPos(x0, y0)
             arr.setScale(mag * scale / arr.opts['headLen'])
-            arr.setZValue(5)
+            arr.setZValue(1)
             self.view.addItem(arr)
-            self.quiver_items.append(arr)      
+            self.quiver_items.append(arr)
+
+        # ── QU I V E R (surface wind) ─────────────────────────────────
+        # same grid, in purple, Z=2
+        W, Xw = None, None  # placeholders to keep diff clean
+        # ── QU I V E R (surface wind) ─────────────────────────────────
+        # sample over the full grid, then down-sample exactly like currents
+        WuVu = self.sim.wind_fn(
+            self.sim._quiver_lon.ravel(),
+            self.sim._quiver_lat.ravel(),
+            datetime.utcnow()
+        )  # (1600,2) over 40×40 grid
+        # reshape to full 40×40
+        full_shape = self.sim._quiver_lon.shape  # (ny_full=40, nx_full=40)
+        wu_full = WuVu[:, 0].reshape(full_shape)
+        wv_full = WuVu[:, 1].reshape(full_shape)
+        # down-sample via the same skip used for currents (→20×20)
+        WU = wu_full[skip]
+        WV = wv_full[skip]
+        self.wind_quiver_items = []
+        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), WU.ravel(), WV.ravel()):            
+            mag = np.hypot(u, v)
+            if np.isnan(mag) or mag < 1e-3:
+                continue
+            angle = np.degrees(np.arctan2(v, u))
+            arr = pg.ArrowItem(
+                angle=-angle,
+                headLen=8, tipAngle=90, baseAngle=45,
+                brush=pg.mkBrush(128,  0, 128, 180),
+            )
+            arr.setPos(x0, y0)
+            arr.setScale(mag * scale / arr.opts['headLen'])
+            arr.setZValue(2)
+            self.view.addItem(arr)
+            self.wind_quiver_items.append(arr)      
 
         # ───────────────────────────────────────────────────────────────────          
         # ROUTE widgets only when routing is relevant
