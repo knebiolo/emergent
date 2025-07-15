@@ -112,7 +112,7 @@ SHIP_PHYSICS = {
 
     # Rudder limits
     'max_rudder': np.radians(35),         # Maximum rudder deflection (rad)
-    'max_rudder_rate': 0.183667,  # Maximum rudder rate change (rad/s)
+    'max_rudder_rate': 0.35,  # Maximum rudder rate change (rad/s)
     
     # Drag Stuff
     'drag_coeff': 0.0012
@@ -143,7 +143,7 @@ CONTROLLER_GAINS = {
 ADVANCED_CONTROLLER = {
     # Feed‐forward gain: multiplies heading error to compute a desired turn‐rate.
     # Typical values: 0.0 (no feed‐forward) up to ~1.0 (aggressive).
-    "Kf_gain": 0.03,  
+    "Kf_gain": 0.01,  
 
     # Maximum commanded turn rate (°/s).  After feed‐forward, we clamp
     # desired r_des to ±r_rate_max_deg before converting to radians.
@@ -151,21 +151,21 @@ ADVANCED_CONTROLLER = {
 
     # Anti‐windup limit on the I‐term (degrees).  The integral of error is
     # clipped to ±I_max_deg before using it.  Convert to radians in code.
-    "I_max_deg": 5.0,  
+    "I_max_deg": 2.0,  
 
     # Prediction horizon for dead‐band (seconds).  If |err_pred| < trim_band, we
     # set rudder=0 early to avoid chatter or overshoot.  Typical values: tens to
     # thousands of seconds depending on your dynamics.
-    "lead_time": 120.0,  #8000
+    "lead_time": 25.0,  #8000
 
     # Dead‐zone half‐angle (degrees).  Any commanded rudder smaller than this
     # in magnitude is forced to zero to prevent constant micro‐twitching.
-    "trim_band_deg": 0.05,  
+    "trim_band_deg": 0.03,  
 
     # Early‐release band (degrees).  Once |predicted_error| < release_band_deg,
     # rudder is released (forced to zero), even if commanded > trim_band_deg.
     # This widens the “dead‐zone” as heading error shrinks.  Typical: 3–10°.
-    "release_band_deg": 3.0,  #5.0
+    "release_band_deg": 10.0,  #5.0
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -197,7 +197,7 @@ COLLISION_AVOIDANCE = {
     # (Currently unused in core avoidance, but reserved for future path‐prediction logic.)
     #
     # Typical value: 500.0  (m)
-    "clear_dist": 500.0,
+    "clear_dist": 2300.0,
     # ---------------------------------------------------------------------------
     # unlock_ang (radians)
     # ---------------------------------------------------------------------------
@@ -212,7 +212,17 @@ COLLISION_AVOIDANCE = {
     # with: np.radians(15).
     #
     # Typical value: np.radians(15)  →  ~0.2618 rad
-    "unlock_ang": np.radians(15.0)
+    "unlock_ang": np.radians(25.0),
+    
+    # NEW: seconds to stay “immune” after a lock clears
+    "post_avoid_time": 45.0,
+
+    # ── predictive CPA drop logic ─────────────────────────────
+    "t_cpa_max"   : 300.0,   # s  – don’t consider encounters >5 min away
+    "d_cpa_safe"  : 1000.0, # m  – if predicted dCPA exceeds this, unlock
+    "drop_angle"  : np.radians(15.0),  # if heading changed ≥15° from initial
+    "headon_turn_deg": 30,
+    "cross_turn_deg": 20,
 }
     
 # ───────────────────────────────────────────────────────────────────────────────
@@ -244,10 +254,10 @@ SIMULATION_BOUNDS = {
     "Galveston": {
         # Galveston, TX (City) bounds in EPSG:4326
         # Longitude: West → East, Latitude: South → North
-        "minx": -94.99,
-        "maxx": -94.70,
-        "miny":  29.20,
-        "maxy":  29.50,
+        "minx": -95.2,
+        "maxx": -94.60,
+        "miny":  29.1,
+        "maxy":  29.45,
     },
     "Baltimore": {
         # Baltimore, MD (City) bounds in EPSG:4326
@@ -296,6 +306,30 @@ SIMULATION_BOUNDS = {
         "maxy":  40.75,
     },
 }
+
+# ───────────────────────────────────────────────────────────────────────────────
+# 7)  NOAA Operational Forecast System (OFS) mapping
+# ───────────────────────────────────────────────────────────────────────────────
+# Used by emergent.ship_abm.ofs_loader to decide which hydrodynamic model to
+# download for each port in SIMULATION_BOUNDS.  Keys must *exactly* match the
+# port names you use elsewhere (e.g. spawn dialog, CLI flag, etc.).
+#
+# If you add a new port to SIMULATION_BOUNDS, drop the model-ID here and the
+# loader will pick it up automatically.  Model IDs are the same folder names
+# NOAA uses in the S3 bucket, 100 % lower-case.
+#
+#   https://registry.opendata.aws/noaa-ofs-pds/
+#
+OFS_MODEL_MAP = {
+    "Galveston":                    "ngofs2",   # Northern Gulf of Mexico
+    "Baltimore":                    "cbofs",    # Chesapeake Bay
+    "Los Angeles / Long Beach":     "wcofs",    # West-Coast nest (4 km ROMS)
+    "Oakland / San Francisco Bay":  "sfbofs",   # SF Bay FVCOM
+    "Seattle":                      "sscofs",   # Salish Sea / Puget
+    "New Orleans":                  "ngofs2",   # Northern Gulf (covers Delta)
+    "New York":                     "nyofs",    # NY/NJ Harbor
+}
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 6) OTHER CONSTANTS / FUTURE EXTENSIONS

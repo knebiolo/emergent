@@ -25,6 +25,9 @@ class ship:
         n = state0.shape[-1] if hasattr(state0, 'ndim') and state0.ndim > 1 else 1
         self.n = n
         
+        # ── cool-down timer after avoidance ──
+        self.post_avoid_timer = np.zeros(n)  # [s]
+        
         # assign initial state
         self.state = state0
         self.pos   = pos0
@@ -148,6 +151,7 @@ class ship:
         # crossing_lock holds the index of the vessel we are yielding to.
         # -1 means no active lock.  When a give-way maneuver triggers,
         # this lock stores the target index and the commanded heading/speed.
+        self.lock_init_psi  = np.full(n, np.nan)  # heading at lock-on
         self.crossing_lock   = np.full(n, -1, dtype=int)
         self.crossing_heading = np.zeros(n)
         self.crossing_speed   = np.zeros(n)
@@ -167,6 +171,8 @@ class ship:
             self.desired_speed[idx] = 0.0
             self.integral[idx]      = 0.0
             self.prev_rudder[idx]   = 0.0
+            # NEW ── make the vessel “dead in the water”
+            self.current_speed[idx] = 0.
         
         # log for debugging
         #log.warning(f"Power cut to vessel {idx}")        # ASCII → avoids CP1252 gripe
@@ -432,7 +438,7 @@ class ship:
 
         return self.smoothed_rudder
 
-    def colregs(self, positions, nu, psi, current_rpm):
+    def colregs(self, dt, positions, nu, psi, current_rpm):
         """
         Simplified COLREGS for n vessels:
           - “Unlock” first when the contact moves outside your avoidance cone
@@ -444,6 +450,9 @@ class ship:
           rpm   : np.ndarray (n,)  → commanded RPM toward scenario‐optimal speed
           role  : list of str      → 'give_way', 'stand_on', or 'neutral'
         """
+        DROP_ANG   = COLLISION_AVOIDANCE["drop_angle"]          # radians
+        CPA_SAFE   = COLLISION_AVOIDANCE["d_cpa_safe"]          # metres
+        T_CPA_MAX  = COLLISION_AVOIDANCE["t_cpa_max"]           # seconds
 
         safe_dist  = COLLISION_AVOIDANCE['safe_dist']                                        
         clear_dist = COLLISION_AVOIDANCE['clear_dist']
@@ -456,6 +465,19 @@ class ship:
         role      = ['neutral'] * n
 
         for i in range(n):
+            # ────────────────────────────────
+            # 0) cool-down: stay neutral
+            # ────────────────────────────────
+            if self.post_avoid_timer[i] > 0.0:
+                self.post_avoid_timer[i] = max(
+                    0.0,
+                    self.post_avoid_timer[i] - dt)
+
+                head[i]      = psi[i]
+                speed_des[i] = self.desired_speed[i]
+                role[i]      = "neutral"
+                continue
+            
             pd    = positions[:, i]
             psi_i = psi[i]
             u_i   = nu[0, i]
@@ -468,12 +490,15 @@ class ship:
             # --- Hysteresis: exit previous give-way when clear or bearing opens ---
             # --- NEW: stay in give-way as long as the crossing_lock is active ---
             if hasattr(self, '_last_role') \
-               and self._last_role[i] == 'give_way' \
-               and self.crossing_lock[i] >= 0:
+                and self._last_role[i] == 'give_way' \
+                and self.crossing_lock[i] >= 0:
                 head[i]      = self.crossing_heading[i]
                 speed_des[i] = self.crossing_speed[i]
-                role[i]      = 'give_way'
-                continue
+                role[i] = 'give_way'
+                # role[i]      = 'neutral'
+                # # also launch cool-down when we drop out here
+                # self.post_avoid_timer[i] = COLLISION_AVOIDANCE["post_avoid_time"]
+                
            
             hd    = psi_i           # default heading
             rl    = 'neutral'       # default role
@@ -483,12 +508,41 @@ class ship:
             # ── Maintain any active crossing lock ───────────────────────
             tgt = self.crossing_lock[i]
             if tgt >= 0 and tgt < n:
+                # geometry --------------------------------------------------
                 delta = positions[:, tgt] - pd
                 dist  = np.linalg.norm(delta)
-                bearing = ((np.arctan2(delta[1], delta[0]) - psi_i + np.pi) %
-                           (2*np.pi) - np.pi)
-                if dist < clear_dist and abs(bearing) < unlock_ang:
-                    # still locked → keep previous avoidance commands
+
+                # world-frame velocities of *each* ship
+                c_i, s_i = np.cos(psi[i]), np.sin(psi[i])
+                vel_i_w  = np.array([ nu[0, i]*c_i - nu[1, i]*s_i,
+                                      nu[0, i]*s_i + nu[1, i]*c_i ])
+
+                c_j, s_j = np.cos(psi[tgt]), np.sin(psi[tgt])
+                vel_j_w  = np.array([ nu[0, tgt]*c_j - nu[1, tgt]*s_j,
+                                      nu[0, tgt]*s_j + nu[1, tgt]*c_j ])
+
+                rel_w    = vel_j_w - vel_i_w                # correct Δv              
+                t_cpa  = -np.dot(delta, rel_w) / (np.dot(rel_w, rel_w) + 1e-9)
+                t_cpa  = np.clip(t_cpa, 0.0, T_CPA_MAX)
+                d_cpa  = np.linalg.norm(delta + rel_w * t_cpa)
+                
+                # heading change since lock-on
+                hdg_dev = np.abs(((psi_i - self.lock_init_psi[i] + np.pi) %
+                                   (2*np.pi)) - np.pi)
+
+                # ── NEW: world-frame range-rate  (+ → opening) ───────────
+                range_rate = np.dot(delta, rel_w) / (dist + 1e-9)
+
+                # stay locked **only** while all three are true:
+                #   • projected dCPA still inside safety zone *and*
+                #   • ships are still closing (range_rate < 0)  *and*
+                #   • helm hasn’t swung beyond DROP_ANG
+                still_danger = (d_cpa < CPA_SAFE) and (range_rate < 0.0) \
+                               and (hdg_dev < DROP_ANG)
+                print(f"[{i}] dist={dist:6.0f} dCPA={d_cpa:6.0f} rr={range_rate: .2f} "
+                          f"Δψ={np.degrees(hdg_dev):4.1f} danger={still_danger}")
+    
+                if still_danger:                    
                     hd = self.crossing_heading[i]
                     speed_des[i] = self.crossing_speed[i]
                     rl = 'give_way'
@@ -498,6 +552,20 @@ class ship:
                 else:
                     # lock cleared
                     self.crossing_lock[i] = -1
+                    self.lock_init_psi[i] = np.nan
+                    self.post_avoid_timer[i] = COLLISION_AVOIDANCE["post_avoid_time"]
+
+                    # flush controller memory so she doesn’t “drag her feet”
+                    self.integral[i]        = 0.0
+                    self.prev_error[i]      = 0.0
+                    self.prev_rudder[i]     = 0.0
+                    self.smoothed_rudder[i] = 0.0
+
+                    # hand control back to the route follower
+                    head[i]      = psi_i
+                    speed_des[i] = self.desired_speed[i]
+                    role[i]      = 'neutral'
+                    continue
 
             # --- Emergency braking / astern thrust ---
             # compute stopping (braking) distance: d = v²/(2·a_max), with a safety margin
@@ -522,35 +590,40 @@ class ship:
                     u_j * np.sin(psi[j]) + v_j * np.cos(psi[j])
                 ])
                 rel_vel = vel_j - vel_i
-
-                # closing speed (<0 means approaching)
-                closing_speed = np.dot(delta, rel_vel) / dist
+                t_cpa   = - (delta @ rel_vel).sum(-1) / (np.linalg.norm(rel_vel, axis=-1)**2 + 1e-9)
+                t_cpa   = np.clip(t_cpa, 0.0, T_CPA_MAX)               # future only
+                d_cpa   = np.linalg.norm(delta + rel_vel * t_cpa[..., None], axis=-1)
 
                 # compute relative bearing
                 bearing = ((np.arctan2(delta[1], delta[0])
                            - psi_i + np.pi) % (2*np.pi) - np.pi)
 
                 # Rule 14: head-on (mutual give-way)
+                TURN_14 = np.radians(COLLISION_AVOIDANCE['headon_turn_deg'])  # 30 deg
+
                 if abs(bearing) < np.radians(10):
                     if dist < d_brk:
                         rl = 'give_way'
-                        hd = (psi_i - np.radians(60)) % (2*np.pi)      # >> starboard turn
+                        hd = (psi_i - TURN_14) % (2*np.pi)      # >> starboard turn
                         speed_des[i] = -self.max_reverse_speed[i]
                     else:
                         rl = 'give_way'
-                        hd = (psi_i - np.radians(60)) % (2*np.pi)
+                        hd = (psi_i - TURN_14) % (2*np.pi)
                         speed_des[i] = 5.0
                     self.crossing_lock[i]    = j
+                    self.lock_init_psi[i]    = psi_i     # cache heading at lock-on
                     self.crossing_heading[i] = hd
                     self.crossing_speed[i]   = speed_des[i]
                     give_way_found = True
                     break
 
                 # Rule 15: crossing from starboard (other vessel on your right)
+                TURN_15 = np.radians(COLLISION_AVOIDANCE['cross_turn_deg'])  # 20 deg
+
                 if 0 < bearing < np.pi/2:
                     if dist < d_brk:
                         rl = 'give_way'
-                        hd = (psi_i - np.pi/4) % (2*np.pi)
+                        hd = (psi_i - TURN_15) % (2*np.pi)
                         speed_des[i] = -self.max_reverse_speed[i]
                         self.crossing_lock[i] = j
                         self.crossing_heading[i] = hd
@@ -559,7 +632,7 @@ class ship:
                         break
                     else:
                         rl = 'give_way'
-                        hd = (psi_i - np.pi/4) % (2*np.pi)
+                        hd = (psi_i - TURN_15) % (2*np.pi)
                         sf = max(0.3, min(1.0, dist/safe_dist))
                         speed_des[i] = self.desired_speed[i] * sf
                         self.crossing_lock[i] = j
@@ -573,12 +646,14 @@ class ship:
 
                     rl = 'give_way'
                     # now turn starboard by 10°
-                    hd = (psi_i + np.pi/18) % (2*np.pi)
+                    hd = (psi_i - np.pi/18) % (2*np.pi)
                     speed_des[i] = min(self.desired_speed[i] * 1.2, self.max_speed[i])
                     self.crossing_lock[i] = j
                     self.crossing_heading[i] = hd
                     self.crossing_speed[i] = speed_des[i]                    
                     give_way_found = True
+                    self.lock_init_psi[i] = psi_i
+
                     break
 
             # after checking all contacts:

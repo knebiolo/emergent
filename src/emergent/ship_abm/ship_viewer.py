@@ -15,10 +15,11 @@ from PyQt5.QtCore    import QPointF
 from emergent.ship_abm.simulation_core import simulation, SIMULATION_BOUNDS
 from emergent.ship_abm.simulation_core import playful_wind, north_south_current
 from emergent.ship_abm.simulation_core import compute_zigzag_metrics
-from datetime import date
+from datetime import datetime, date, timezone
 import sqlite3
-import datetime
 import json
+import pyqtgraph.functions as fn
+
 
 class ship_polygon(QGraphicsPolygonItem):
     """
@@ -146,6 +147,34 @@ class ship_viewer(QtWidgets.QWidget):
         # 3) Draw the basemap only if ENC layers were actually loaded
         if self.sim.enc_data:             # empty => skipped in test mode
             self._draw_basemap()
+            
+        # ── QU I V E R  (surface currents) ──────────────────────────────
+        U, V = self.sim.currents_grid(datetime.utcnow())
+        X, Y = self.sim._utm_to_ll.transform(
+                   *self.sim._utm_to_ll.transform(
+                        self.sim._quiver_lon, self.sim._quiver_lat, direction="INVERSE"
+                   )
+               )      # lon/lat → UTM for plotting
+        # down-sample arrows so they don’t clutter high-res screens
+        skip = (slice(None, None, 2), slice(None, None, 2))
+        qx, qy, qu, qv = X[skip], Y[skip], U[skip], V[skip]
+
+        # plot as a series of ArrowItems (PyQtGraph has no native quiver)
+        self.quiver_items = []
+        scale = 500      # metres per (m/s) so 1 m/s ⇒ 500 m arrow
+        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), qu.ravel(), qv.ravel()):
+            mag = np.hypot(u, v)
+            if np.isnan(mag) or mag < 1e-3:
+                continue
+            angle = np.degrees(np.arctan2(v, u))
+            arr = pg.ArrowItem(angle = -angle, headLen=8,
+                               tipAngle=90, baseAngle=45,
+                               brush=pg.mkBrush(0, 0, 255, 180))
+            arr.setPos(x0, y0)
+            arr.setScale(mag * scale / arr.opts['headLen'])
+            arr.setZValue(5)
+            self.view.addItem(arr)
+            self.quiver_items.append(arr)      
 
         # ───────────────────────────────────────────────────────────────────          
         # ROUTE widgets only when routing is relevant
@@ -773,6 +802,7 @@ class ship_viewer(QtWidgets.QWidget):
             lbl.setZValue(100)
             #self.label_items.append(txt)
 
+
         # ── UPDATE ENVIRONMENT PANEL ───────────────────────────────────────
         self.lbl_time.setText(f"Time: {self.sim.t:.2f} s")
         # wind stats & vane
@@ -784,10 +814,20 @@ class ship_viewer(QtWidgets.QWidget):
         # ensure vane points even if speed zero
         self.wind_arrow.setRotation(-wd)
         # current stats & vane
-        cv = north_south_current(self.sim.state, self.sim.t)
+        lon_lbl, lat_lbl = self.sim._utm_to_ll.transform(
+            self.sim.pos[0, 0], self.sim.pos[1, 0]
+        )
+        cv = self.sim.current_fn(
+            np.array([lon_lbl]),
+            np.array([lat_lbl]),
+            datetime.now(timezone.utc)
+        ).T   # (2,1)        
         cx, cy = cv[:,0]
         cs = np.hypot(cx, cy)
         cd = np.degrees(np.arctan2(cy, cx)) % 360
+        print(f"[DEBUG] t={self.sim.t:.1f}s  lon={lon_lbl:.4f} lat={lat_lbl:.4f}  "
+              f"u={cx:.3f} m/s  v={cy:.3f} m/s")
+
         self.lbl_current.setText(f"Current: {cs:.2f} m/s, {cd:.0f}°")
         self.current_arrow.setRotation(-cd)
 
@@ -814,7 +854,7 @@ class ship_viewer(QtWidgets.QWidget):
             failed = False
             t = 0.0
             dt = self.sim.dt
-            while t < self.sim.T:
+            while t < self.sim.steps:
                 self.sim.step()
                 pos = self.sim.positions  # shape (2, n)
                 if not failed:

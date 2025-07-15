@@ -87,7 +87,7 @@ import fiona
 import urllib3
 import warnings
 from pathlib import Path
-
+from typing import Iterable                    # <-- NEW: needed for type-hints
 import tempfile
 import sys
 from emergent.ship_abm.ship_model import ship
@@ -103,6 +103,10 @@ from datetime import date
 from emergent.ship_abm.ais import compute_ais_heatmap
 from pyqtgraph.Qt import QtCore
 import pyqtgraph as pg
+from datetime import datetime, timezone
+import datetime as dt
+from emergent.ship_abm.ofs_loader import get_current_fn
+from pyproj import Transformer          # <-- light-weight, pure-python
 
 # suppress SSL warnings, reduce noisy logging, and ignore non-critical warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -242,10 +246,18 @@ class simulation:
         self.bounds = (minx, miny, maxx, maxy)
 
         # Compute UTM CRS from domain center
+        # ───────────────────────────────────────────────────────────────
+        # 1) CRS setup & transformer (`utm → lon/lat`) – we need this
+        #    every timestep so make it once up-front.
         midx = (minx + maxx) / 2
         utm_zone = int((midx + 180) // 6) + 1
         utm_epsg = 32600 + utm_zone  # Northern hemisphere
         self.crs_utm = f"EPSG:{utm_epsg}"
+        
+        # forward = lon/lat→UTM (already used elsewhere)
+        self._utm_to_ll = Transformer.from_crs(
+            self.crs_utm, "EPSG:4326", always_xy=True
+        )
         
         # enable follow‐ship zoom (meters from ship center)
         self.dynamic_zoom = False
@@ -359,6 +371,28 @@ class simulation:
             self.tc_rudder_deg = 20.0  # default rudder angle for test
             self.tc_speed = PROPULSION.get("desired_speed", 6.0)
 
+        # 2) Instantiate the NOAA current sampler for *this* port
+        self.current_fn = get_current_fn(self.port_name)
+        
+        # ------------------------------------------------------------------
+        # Build a static lon/lat grid (≈40×40) over the domain for quiver
+        # ------------------------------------------------------------------
+        nx = ny = 40
+        gx = np.linspace(minx, maxx, nx)    # in lon/lat – we still have those
+        gy = np.linspace(miny, maxy, ny)
+        self._quiver_lon, self._quiver_lat = np.meshgrid(gx, gy)
+
+        def _currents_grid(when: datetime):
+            """Return U,V 2-D arrays (ny,nx) in m/s for viewer quiver."""
+            flat_u, flat_v = self.current_fn(
+                self._quiver_lon.ravel(),
+                self._quiver_lat.ravel(),
+                when
+            ).T
+            return (flat_u.reshape(ny, nx),
+                    flat_v.reshape(ny, nx))
+        self.currents_grid = _currents_grid
+    
         # Initialize placeholders for cached backgrounds
         self._bg_cache = None
 
@@ -1151,11 +1185,16 @@ class simulation:
             self._step_dynamics(hd, sp, rud)
 
             # Check for collisions or allisions
-            if self._check_collision(t):
-                print(f"[SIM] Collision at t={t:.1f}s, halting.")
-                break
-            if self._check_allision(t):
-                print(f"[SIM] Allision at t={t:.1f}s, halting.")
+            collided  = self._check_collision(t)
+            grounded  = self._check_allision(t)
+            if collided or grounded:
+                # ── hard-stop every vessel, vectorised ─────────────────────────
+                self.state[[0,1,3], :] = 0.0            # u, v, r → 0
+                self.ship.current_speed[:] = 0.0
+                self.ship.commanded_rpm[:] = 0.0
+                # keep desired_speed at zero so PID doesn’t spin back up
+                self.ship.desired_speed[:] = 0.0
+                print(f"[SIM] {'Collision' if collided else 'Allision'} at t={t:.1f}s — vessels frozen.")
                 break
             
             # -- record for post-run analysis
@@ -1214,7 +1253,7 @@ class simulation:
             self.state[0], self.state[1], self.state[3], self.psi
         )
         
-        col_hd, col_sp, _, roles = self.ship.colregs(
+        col_hd, col_sp, _, roles = self.ship.colregs(self.dt,
             self.pos, nu, self.psi, self.ship.commanded_rpm
         )
         
@@ -1271,10 +1310,11 @@ class simulation:
 
     def _fuse_and_pid(self, goal_hd, goal_sp, col_hd, col_sp, roles):
         #roles = np.array(self.ship.colregs(self.pos, np.vstack([self.state[0],self.state[1],self.state[3]]), self.psi, self.ship.commanded_rpm)[3])
-        is_give = (roles == 'give_way')
+        roles_arr = np.asarray(roles)           # ensure element-wise compare
+        is_give = (np.asarray(roles) == 'give_way')     # element-wise mask
         hd = np.where(is_give, col_hd, goal_hd)
         sp = np.where(is_give, col_sp, goal_sp)
-        raw_rud = self.ship.pid_control(self.psi, hd, self.dt)
+        #raw_rud = self.ship.pid_control(self.psi, hd, self.dt)
         # … blend override code here …
         return hd, np.minimum(sp, self.ship.max_speed)
 
@@ -1341,7 +1381,8 @@ class simulation:
         self.prev_psi = self.psi.copy()
         self.prev_rudder = rud
         self.ship.prev_rudder = rud
-    
+        self.ship.smoothed_rudder = rud
+   
         return rud
 
     def _step_dynamics(self, hd, sp, rud):
@@ -1378,8 +1419,19 @@ class simulation:
        #  self.wind_arrow.set_positions((tail_x, tail_y),
        #                                (tip_x, tip_y))
 
-        wind_vec    = playful_wind(self.state, self.t)
-        current_vec = north_south_current(self.state, self.t)
+        # ----------------------------------------------------------------
+        # A) Environmental forcing – REAL currents!
+        wind_vec = playful_wind(self.state, self.t)
+
+        # 1) Convert x/y (UTM m) → lon/lat once per frame (vectorised)
+        lon, lat = self._utm_to_ll.transform(self.pos[0], self.pos[1])
+
+        # 2) Sample NOAA field at (lon, lat, now)
+        current_vec = self.current_fn(
+            lon, lat,
+            datetime.now(timezone.utc)   # explicit UTC
+        ).T              # returns (N,2) – transpose → (2,N)
+
         wind, current = self.ship.environmental_forces(
              wind_vec, current_vec,
              self.state[0], self.state[1], self.psi
