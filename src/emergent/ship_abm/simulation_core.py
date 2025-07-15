@@ -105,7 +105,7 @@ from pyqtgraph.Qt import QtCore
 import pyqtgraph as pg
 from datetime import datetime, timezone
 import datetime as dt
-from emergent.ship_abm.ofs_loader import get_current_fn
+from emergent.ship_abm.ofs_loader import get_current_fn, get_wind_fn
 from pyproj import Transformer          # <-- light-weight, pure-python
 
 # suppress SSL warnings, reduce noisy logging, and ignore non-critical warnings
@@ -373,6 +373,8 @@ class simulation:
 
         # 2) Instantiate the NOAA current sampler for *this* port
         self.current_fn = get_current_fn(self.port_name)
+        self.wind_fn    = get_wind_fn(self.port_name)
+
         
         # ------------------------------------------------------------------
         # Build a static lon/lat grid (≈40×40) over the domain for quiver
@@ -1389,42 +1391,12 @@ class simulation:
         # throttle, drag, forces, integrate self.state & self.pos
         thrust = self.ship.thrust(self.ship.speed_to_rpm(sp))
         drag = self.ship.drag(self.state[0])
-        wind_raw = playful_wind(self.state, self.t)
-
-        # ─── Update wind-vane ------------------------------------------------
-        if isinstance(wind_raw, dict):
-            wx = float(wind_raw['speed'] * np.cos(wind_raw['dir']))
-            wy = float(wind_raw['speed'] * np.sin(wind_raw['dir']))
-        else:  # 2×n array → take the first vessel
-            wx = float(wind_raw[0, 0])
-            wy = float(wind_raw[1, 0])
-        if self.t == 0.0:
-            print(f"[DBG] t=0 arrow values: wx={wx:.2f}, wy={wy:.2f}")
-            
-        # Compute wind vector (wx, wy) in m/s (as floats) …
-        theta = np.arctan2(wy, wx)
-
-       #  # Make the arrow length some fraction of the axes size:
-       #  L = 0.08 * (1 + 0.5 * np.hypot(wx, wy))
-       #  dx, dy = L * np.cos(theta), L * np.sin(theta)
-
-       #  tail_x, tail_y = self._wing_tail
-       #  tip_x, tip_y = tail_x + dx, tail_y + dy
-
-       #  # Clamp to [0..1] so the arrow never wanders off-screen
-       #  tip_x = max(0.0, min(1.0, tip_x))
-       #  tip_y = max(0.0, min(1.0, tip_y))
-
-       # # Finally update the FancyArrowPatch (both coords in axes-fraction)
-       #  self.wind_arrow.set_positions((tail_x, tail_y),
-       #                                (tip_x, tip_y))
 
         # ----------------------------------------------------------------
-        # A) Environmental forcing – REAL currents!
-        wind_vec = playful_wind(self.state, self.t)
+        # A) Environmental forcing – REAL wind & currents!
 
-        # 1) Convert x/y (UTM m) → lon/lat once per frame (vectorised)
         lon, lat = self._utm_to_ll.transform(self.pos[0], self.pos[1])
+        wind_vec = self.wind_fn(lon, lat, datetime.now(timezone.utc)).T
 
         # 2) Sample NOAA field at (lon, lat, now)
         current_vec = self.current_fn(
@@ -1437,7 +1409,7 @@ class simulation:
              self.state[0], self.state[1], self.psi
         )
         
-        tide = tide_fn(self.t)
+        #tide = tide_fn(self.t)
         u_dot,v_dot,p_dot,r_dot = self.ship.dynamics(
             self.state, thrust, drag, wind, current, rud
         )
@@ -1449,7 +1421,7 @@ class simulation:
         self.psi     += self.state[3] * self.dt
 
         # In _step_dynamics, after computing wind, current, tide:
-        ws = np.hypot(wx, wy)
+        ws = np.hypot(wind_vec[1],wind_vec[0])
         cs = np.hypot(current_vec[1],current_vec[0])
         td = tide_fn(self.t)
         msg = f"Wind={ws} m/s  Curr={cs} m/s  Tide={td} m"
