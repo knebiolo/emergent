@@ -292,10 +292,16 @@ class ship_viewer(QtWidgets.QWidget):
                 head = pg.PlotDataItem([x1,hx],[y1,hy], pen=pg.mkPen(0,0,255, width=2))
                 head.setZValue(150); self.view.addItem(head); self.quiver_items.append(head)
         # ── MAP‐UNIT QUIVER (surface wind) ──────────────────────────────
-        Wu, Wv = self.sim.wind_fn(self.sim._quiver_lon.ravel(), self.sim._quiver_lat.ravel(), datetime.utcnow()).T
-        Wu, Wv = Wu.reshape(qx.shape), Wv.reshape(qx.shape)
+        # sample wind on down-sampled grid
+        flat_w = self.sim.wind_fn(
+            self.sim._quiver_lon[skip].ravel(),
+            self.sim._quiver_lat[skip].ravel(),
+            datetime.utcnow()
+        )
+        WU = flat_w[:, 0].reshape(qx.shape)
+        WV = flat_w[:, 1].reshape(qx.shape)
         self.wind_quiver_items = []
-        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), Wu.ravel(), Wv.ravel()):
+        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), WU.ravel(), WV.ravel()):
             mag = np.hypot(u, v)
             if mag < 1e-3 or np.isnan(mag): continue
             ux, uy = u/mag, v/mag
