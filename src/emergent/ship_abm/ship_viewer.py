@@ -181,91 +181,147 @@ class ship_viewer(QtWidgets.QWidget):
         if self.sim.enc_data:             # empty => skipped in test mode
             self._draw_basemap()
             
+        # # ── MAP‐UNIT QUIVER (surface currents) ───────────────────────────
+        # # Build full grid extent from the sampler's underlying dataset if available
+        # ds_cur = getattr(self.sim.current_fn, 'ds', None)
+        # if ds_cur is not None and hasattr(ds_cur, 'lon') and hasattr(ds_cur, 'lat'):
+        #     lon_arr = ds_cur.lon.values
+        #     lat_arr = ds_cur.lat.values
+        #     Lon, Lat = np.meshgrid(lon_arr, lat_arr)
+        # else:
+        #     Lon, Lat = self.sim._quiver_lon, self.sim._quiver_lat
+        # # convert lon/lat -> UTM
+        # ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
+        # X_full, Y_full = ll2utm.transform(Lon, Lat)
+        # # down‐sample by factor 4
+        # skip = (slice(None, None, 4), slice(None, None, 4))
+        # X, Y = X_full[skip], Y_full[skip]
+        # # sample currents over the 40×40 port grid (fast & varied)
+        # U, V = self.sim.currents_grid(datetime.utcnow())
+        # # down-sample the 40×40 → 10×10 mesh like before:
+        # U = U[skip]
+        # V = V[skip]
+        # # compute arrow lengths
+        # dx = X[0,1] - X[0,0]
+        # dy = Y[1,0] - Y[0,0]
+        # ds = np.hypot(dx, dy)
+        # shaft_length = 0.5 * ds
+        # head_length  = 0.2 * ds
+
+        # self.quiver_items = []
+        # for x0, y0, u, v in zip(X.ravel(), Y.ravel(), U.ravel(), V.ravel()):
+        #     mag = np.hypot(u, v)
+        #     if mag < 1e-3 or np.isnan(mag):
+        #         continue
+        #     ux, uy = u/mag, v/mag
+        #     x1 = x0 + ux * shaft_length
+        #     y1 = y0 + uy * shaft_length
+        #     shaft = pg.PlotDataItem([x0, x1], [y0, y1],
+        #                             pen=pg.mkPen(0,0,255, width=2))
+        #     shaft.setZValue(150)
+        #     self.view.addItem(shaft)
+        #     self.quiver_items.append(shaft)
+        #     base_ang = np.arctan2(uy, ux)
+        #     for sign in (+1, -1):
+        #         ang = base_ang + sign * (np.pi/6)
+        #         hx = x1 - head_length * np.cos(ang)
+        #         hy = y1 - head_length * np.sin(ang)
+        #         head = pg.PlotDataItem([x1, hx], [y1, hy],
+        #                                pen=pg.mkPen(0,0,255, width=2))
+        #         head.setZValue(150)
+        #         self.view.addItem(head)
+        #         self.quiver_items.append(head)
+
+        # # ── MAP‐UNIT QUIVER (surface wind) ──────────────────────────────
+        # # full grid reuse
+        # # sample wind fields low-level and reshape
+        # flat_w = self.sim.wind_fn(Lon[skip].ravel(), Lat[skip].ravel(), datetime.utcnow())
+        # # sample wind over the 40×40 port grid
+        # Wu, Wv = self.sim.currents_grid  # typo: use wind_grid when you have it, otherwise:
+        # W, _dummy = self.sim.wind_fn(self.sim._quiver_lon.ravel(),
+        #                              self.sim._quiver_lat.ravel(),
+        #                              datetime.utcnow()).T
+        # WU = W.reshape(self.sim._quiver_lon.shape)[skip]
+        # WV = _dummy.reshape(self.sim._quiver_lon.shape)[skip]
+        # self.wind_quiver_items = []
+        # for x0, y0, u, v in zip(X.ravel(), Y.ravel(), WU.ravel(), WV.ravel()):
+        #     mag = np.hypot(u, v)
+        #     if mag < 1e-3 or np.isnan(mag):
+        #         continue
+        #     ux, uy = u/mag, v/mag
+        #     x1 = x0 + ux * shaft_length
+        #     y1 = y0 + uy * shaft_length
+        #     shaft = pg.PlotDataItem([x0, x1], [y0, y1],
+        #                             pen=pg.mkPen(128,0,128, width=2))
+        #     shaft.setZValue(151)
+        #     self.view.addItem(shaft)
+        #     self.wind_quiver_items.append(shaft)
+        #     base_ang = np.arctan2(uy, ux)
+        #     for sign in (+1, -1):
+        #         ang = base_ang + sign * (np.pi/6)
+        #         hx = x1 - head_length * np.cos(ang)
+        #         hy = y1 - head_length * np.sin(ang)
+        #         head = pg.PlotDataItem([x1, hx], [y1, hy],
+        #                                pen=pg.mkPen(128,0,128, width=2))
+        #         head.setZValue(151)
+        #         self.view.addItem(head)
+        #         self.wind_quiver_items.append(head)
+                
         # ── MAP‐UNIT QUIVER (surface currents) ───────────────────────────
-        # Build full grid extent from the sampler's underlying dataset if available
-        ds_cur = getattr(self.sim.current_fn, 'ds', None)
-        if ds_cur is not None and hasattr(ds_cur, 'lon') and hasattr(ds_cur, 'lat'):
-            lon_arr = ds_cur.lon.values
-            lat_arr = ds_cur.lat.values
-            Lon, Lat = np.meshgrid(lon_arr, lat_arr)
-        else:
-            Lon, Lat = self.sim._quiver_lon, self.sim._quiver_lat
-        # convert lon/lat -> UTM
-        ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
-        X_full, Y_full = ll2utm.transform(Lon, Lat)
-        # down‐sample by factor 4
-        skip = (slice(None, None, 4), slice(None, None, 4))
-        X, Y = X_full[skip], Y_full[skip]
-        # sample currents over the 40×40 port grid (fast & varied)
         U, V = self.sim.currents_grid(datetime.utcnow())
-        # down-sample the 40×40 → 10×10 mesh like before:
-        U = U[skip]
-        V = V[skip]
-        # compute arrow lengths
-        dx = X[0,1] - X[0,0]
-        dy = Y[1,0] - Y[0,0]
+        ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
+        X, Y = ll2utm.transform(self.sim._quiver_lon, self.sim._quiver_lat)
+        skip = (slice(None, None, 4), slice(None, None, 4))
+        qx, qy, qu, qv = X[skip], Y[skip], U[skip], V[skip]
+        dx = X[0,1] - X[0,0]; dy = Y[1,0] - Y[0,0]
         ds = np.hypot(dx, dy)
-        shaft_length = 0.5 * ds
-        head_length  = 0.2 * ds
-
+        shaft_length, head_length = 0.5*ds, 0.2*ds
         self.quiver_items = []
-        for x0, y0, u, v in zip(X.ravel(), Y.ravel(), U.ravel(), V.ravel()):
+        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), qu.ravel(), qv.ravel()):
             mag = np.hypot(u, v)
-            if mag < 1e-3 or np.isnan(mag):
-                continue
+            if mag < 1e-3 or np.isnan(mag): continue
             ux, uy = u/mag, v/mag
-            x1 = x0 + ux * shaft_length
-            y1 = y0 + uy * shaft_length
-            shaft = pg.PlotDataItem([x0, x1], [y0, y1],
-                                    pen=pg.mkPen(0,0,255, width=2))
-            shaft.setZValue(150)
-            self.view.addItem(shaft)
-            self.quiver_items.append(shaft)
+            x1, y1 = x0+ux*shaft_length, y0+uy*shaft_length
+            shaft = pg.PlotDataItem([x0,x1],[y0,y1], pen=pg.mkPen(0,0,255, width=2))
+            shaft.setZValue(150); self.view.addItem(shaft); self.quiver_items.append(shaft)
             base_ang = np.arctan2(uy, ux)
-            for sign in (+1, -1):
-                ang = base_ang + sign * (np.pi/6)
-                hx = x1 - head_length * np.cos(ang)
-                hy = y1 - head_length * np.sin(ang)
-                head = pg.PlotDataItem([x1, hx], [y1, hy],
-                                       pen=pg.mkPen(0,0,255, width=2))
-                head.setZValue(150)
-                self.view.addItem(head)
-                self.quiver_items.append(head)
-
+            for sign in (+1,-1):
+                ang = base_ang + sign*(np.pi/6)
+                hx = x1 - head_length*np.cos(ang)
+                hy = y1 - head_length*np.sin(ang)
+                head = pg.PlotDataItem([x1,hx],[y1,hy], pen=pg.mkPen(0,0,255, width=2))
+                head.setZValue(150); self.view.addItem(head); self.quiver_items.append(head)
         # ── MAP‐UNIT QUIVER (surface wind) ──────────────────────────────
-        # full grid reuse
-        # sample wind fields low-level and reshape
-        flat_w = self.sim.wind_fn(Lon[skip].ravel(), Lat[skip].ravel(), datetime.utcnow())
-        # sample wind over the 40×40 port grid
-        Wu, Wv = self.sim.currents_grid  # typo: use wind_grid when you have it, otherwise:
-        W, _dummy = self.sim.wind_fn(self.sim._quiver_lon.ravel(),
-                                     self.sim._quiver_lat.ravel(),
-                                     datetime.utcnow()).T
-        WU = W.reshape(self.sim._quiver_lon.shape)[skip]
-        WV = _dummy.reshape(self.sim._quiver_lon.shape)[skip]
+        Wu, Wv = self.sim.wind_fn(self.sim._quiver_lon.ravel(), self.sim._quiver_lat.ravel(), datetime.utcnow()).T
+        Wu, Wv = Wu.reshape(qx.shape), Wv.reshape(qx.shape)
         self.wind_quiver_items = []
-        for x0, y0, u, v in zip(X.ravel(), Y.ravel(), WU.ravel(), WV.ravel()):
+        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), Wu.ravel(), Wv.ravel()):
             mag = np.hypot(u, v)
-            if mag < 1e-3 or np.isnan(mag):
-                continue
+            if mag < 1e-3 or np.isnan(mag): continue
             ux, uy = u/mag, v/mag
-            x1 = x0 + ux * shaft_length
-            y1 = y0 + uy * shaft_length
-            shaft = pg.PlotDataItem([x0, x1], [y0, y1],
-                                    pen=pg.mkPen(128,0,128, width=2))
-            shaft.setZValue(151)
-            self.view.addItem(shaft)
-            self.wind_quiver_items.append(shaft)
+            x1, y1 = x0+ux*shaft_length, y0+uy*shaft_length
+            shaft = pg.PlotDataItem([x0,x1],[y0,y1], pen=pg.mkPen(128,0,128, width=2))
+            shaft.setZValue(151); self.view.addItem(shaft); self.wind_quiver_items.append(shaft)
             base_ang = np.arctan2(uy, ux)
-            for sign in (+1, -1):
-                ang = base_ang + sign * (np.pi/6)
-                hx = x1 - head_length * np.cos(ang)
-                hy = y1 - head_length * np.sin(ang)
-                head = pg.PlotDataItem([x1, hx], [y1, hy],
-                                       pen=pg.mkPen(128,0,128, width=2))
-                head.setZValue(151)
-                self.view.addItem(head)
-                self.wind_quiver_items.append(head)
+            for sign in (+1,-1):
+                ang = base_ang + sign*(np.pi/6)
+                hx = x1 - head_length*np.cos(ang)
+                hy = y1 - head_length*np.sin(ang)
+                head = pg.PlotDataItem([x1,hx],[y1,hy], pen=pg.mkPen(128,0,128, width=2))
+                head.setZValue(151); self.view.addItem(head); self.wind_quiver_items.append(head)
+        
+        # ── DEFINE ROUTE BUTTON ────────────────────────────────────────
+        if test_mode != "zigzag":
+            self.btn_define_route = QtWidgets.QPushButton("Define Route")
+            self.btn_define_route.clicked.connect(self._start_route_mode)
+            ctrl_layout.addWidget(self.btn_define_route)
+            
+        # ── STATUS & START SIMULATION ─────────────────────────────────
+        self._status_label.setText(f"Draw route for agent 1 of {self.sim.n}")
+        self.btn_start_sim = QtWidgets.QPushButton("Start Simulation")
+        self.btn_start_sim.clicked.connect(self._start_simulation)
+        ctrl_layout.addWidget(self.btn_start_sim)                
+                
 
         # Done with initialization
         self.show()
