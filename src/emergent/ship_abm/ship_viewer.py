@@ -64,6 +64,8 @@ class ship_viewer(QtWidgets.QWidget):
                  zigzag_hold: float = 40.0):
         
         super().__init__()
+        self._status_label = QtWidgets.QLabel("")
+        self._status_label.setStyleSheet("color: black;")
         self.setWindowTitle(f"Ship ABM Viewer – {port_name}")
         self.resize(1200, 800)
         self.ais_removed = False
@@ -120,112 +122,150 @@ class ship_viewer(QtWidgets.QWidget):
         self.inset = self.panel_widget.addViewBox()
         self.inset.setAspectLocked(True)
         self.inset.setMouseEnabled(False, False)
-        # draw full ENC basemap (coastlines) into inset
+        # draw full ENC basemap (land & shoreline) into inset
         if self.sim.enc_data:
-            for tris in self.sim.enc_data.get('coastlines', []):
-                # tris should be an Nx2 array of UTM coords
-                poly_item = ship_polygon(np.array(tris),
-                                         color=(150,150,150,200),
-                                         pen_color=(100,100,100))
-                self.inset.addItem(poly_item)
+            # 1) land polygons (LNDARE), fill tan
+            if 'LNDARE' in self.sim.enc_data:
+                for geom in self.sim.enc_data['LNDARE'].geometry:
+                    # handle both Polygons and LineStrings
+                    if hasattr(geom, "exterior"):
+                        coords = np.array(geom.exterior.coords)
+                    else:
+                        coords = np.array(geom.coords)
+
+                    land_item = ship_polygon(coords,
+                                             color=(200,180,100,200),
+                                             pen_color=(150,120,80))
+                    self.inset.addItem(land_item)
+            # 2) shoreline (COALNE), draw thin gray
+            if 'COALNE' in self.sim.enc_data:
+                for geom in self.sim.enc_data['COALNE'].geometry:
+                    # handle both Polygons and LineStrings
+                    if hasattr(geom, "exterior"):
+                        coords = np.array(geom.exterior.coords)
+                    else:
+                        coords = np.array(geom.coords)
+                    
+                    shore_item = ship_polygon(coords,
+                                              color=(0,0,0,0),
+                                              pen_color=(100,100,100))
+                    self.inset.addItem(shore_item)
+                    
         # add red rectangle to show current main‐view bounds
         from PyQt5.QtWidgets import QGraphicsRectItem
         from PyQt5.QtGui import QPen, QColor
+        
         self.view_rect = QGraphicsRectItem()
         self.view_rect.setPen(QPen(QColor(255, 0, 0), 2))
         self.inset.addItem(self.view_rect)
         # when the main view’s range changes, update the red box
         self.view.sigRangeChanged.connect(self.update_inset_rect)
+        
+        # ▶ Zoom inset to just the quiver grid in UTM
+        # make a lon/lat → UTM transformer
+        ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
+        # our lon/lat mesh
+        lon_grid, lat_grid = self.sim._quiver_lon, self.sim._quiver_lat
+        # convert to UTM
+        utm_x, utm_y = ll2utm.transform(lon_grid, lat_grid)
+        # compute extents
+        xmin, xmax = float(utm_x.min()), float(utm_x.max())
+        ymin, ymax = float(utm_y.min()), float(utm_y.max())
+        # set the inset’s viewbox
+        self.inset.setXRange(xmin, xmax, padding=0)
+        self.inset.setYRange(ymin, ymax, padding=0)
+
 
         # ─────────────────────────────────────────────────────────────────────
         # 3) Draw the basemap only if ENC layers were actually loaded
         if self.sim.enc_data:             # empty => skipped in test mode
             self._draw_basemap()
             
-        # ── QU I V E R  (surface currents) ──────────────────────────────
+        # ── MAP‐UNIT QUIVER (surface currents) ───────────────────────────
+        # Build full grid extent from the sampler's underlying dataset if available
+        ds_cur = getattr(self.sim.current_fn, 'ds', None)
+        if ds_cur is not None and hasattr(ds_cur, 'lon') and hasattr(ds_cur, 'lat'):
+            lon_arr = ds_cur.lon.values
+            lat_arr = ds_cur.lat.values
+            Lon, Lat = np.meshgrid(lon_arr, lat_arr)
+        else:
+            Lon, Lat = self.sim._quiver_lon, self.sim._quiver_lat
+        # convert lon/lat -> UTM
         ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
-        X, Y = ll2utm.transform(self.sim._quiver_lon, self.sim._quiver_lat)
-        U, V = self.sim.currents_grid(datetime.utcnow())        
-        
-        # down-sample arrows so they don’t clutter high-res screens
-        skip = (slice(None, None, 50), slice(None, None, 50))
-        qx, qy, qu, qv = X[skip], Y[skip], U[skip], V[skip]
+        X_full, Y_full = ll2utm.transform(Lon, Lat)
+        # down‐sample by factor 4
+        skip = (slice(None, None, 4), slice(None, None, 4))
+        X, Y = X_full[skip], Y_full[skip]
+        # sample currents over the 40×40 port grid (fast & varied)
+        U, V = self.sim.currents_grid(datetime.utcnow())
+        # down-sample the 40×40 → 10×10 mesh like before:
+        U = U[skip]
+        V = V[skip]
+        # compute arrow lengths
+        dx = X[0,1] - X[0,0]
+        dy = Y[1,0] - Y[0,0]
+        ds = np.hypot(dx, dy)
+        shaft_length = 0.5 * ds
+        head_length  = 0.2 * ds
 
-        # plot currents as a series of ArrowItems in blue, Z=1
         self.quiver_items = []
-        scale = 250  # metres per (m/s) so 1 m/s ⇒ 500 m arrow
-        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), qu.ravel(), qv.ravel()):
+        for x0, y0, u, v in zip(X.ravel(), Y.ravel(), U.ravel(), V.ravel()):
             mag = np.hypot(u, v)
-            if np.isnan(mag) or mag < 1e-3:
+            if mag < 1e-3 or np.isnan(mag):
                 continue
-            angle = np.degrees(np.arctan2(v, u))
-            arr = pg.ArrowItem(
-                angle=-angle,
-                headLen=8, tipAngle=90, baseAngle=45,
-                brush=pg.mkBrush(0, 0, 255, 200),
-            )
-            arr.setPos(x0, y0)
-            arr.setScale(mag * scale / arr.opts['headLen'])
-            arr.setZValue(1)
-            self.view.addItem(arr)
-            self.quiver_items.append(arr)
+            ux, uy = u/mag, v/mag
+            x1 = x0 + ux * shaft_length
+            y1 = y0 + uy * shaft_length
+            shaft = pg.PlotDataItem([x0, x1], [y0, y1],
+                                    pen=pg.mkPen(0,0,255, width=2))
+            shaft.setZValue(150)
+            self.view.addItem(shaft)
+            self.quiver_items.append(shaft)
+            base_ang = np.arctan2(uy, ux)
+            for sign in (+1, -1):
+                ang = base_ang + sign * (np.pi/6)
+                hx = x1 - head_length * np.cos(ang)
+                hy = y1 - head_length * np.sin(ang)
+                head = pg.PlotDataItem([x1, hx], [y1, hy],
+                                       pen=pg.mkPen(0,0,255, width=2))
+                head.setZValue(150)
+                self.view.addItem(head)
+                self.quiver_items.append(head)
 
-        # ── QU I V E R (surface wind) ─────────────────────────────────
-        # same grid, in purple, Z=2
-        W, Xw = None, None  # placeholders to keep diff clean
-        # ── QU I V E R (surface wind) ─────────────────────────────────
-        # sample over the full grid, then down-sample exactly like currents
-        WuVu = self.sim.wind_fn(
-            self.sim._quiver_lon.ravel(),
-            self.sim._quiver_lat.ravel(),
-            datetime.utcnow()
-        )  # (1600,2) over 40×40 grid
-        # reshape to full 40×40
-        full_shape = self.sim._quiver_lon.shape  # (ny_full=40, nx_full=40)
-        wu_full = WuVu[:, 0].reshape(full_shape)
-        wv_full = WuVu[:, 1].reshape(full_shape)
-        # down-sample via the same skip used for currents (→20×20)
-        WU = wu_full[skip]
-        WV = wv_full[skip]
+        # ── MAP‐UNIT QUIVER (surface wind) ──────────────────────────────
+        # full grid reuse
+        # sample wind fields low-level and reshape
+        flat_w = self.sim.wind_fn(Lon[skip].ravel(), Lat[skip].ravel(), datetime.utcnow())
+        # sample wind over the 40×40 port grid
+        Wu, Wv = self.sim.currents_grid  # typo: use wind_grid when you have it, otherwise:
+        W, _dummy = self.sim.wind_fn(self.sim._quiver_lon.ravel(),
+                                     self.sim._quiver_lat.ravel(),
+                                     datetime.utcnow()).T
+        WU = W.reshape(self.sim._quiver_lon.shape)[skip]
+        WV = _dummy.reshape(self.sim._quiver_lon.shape)[skip]
         self.wind_quiver_items = []
-        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), WU.ravel(), WV.ravel()):            
+        for x0, y0, u, v in zip(X.ravel(), Y.ravel(), WU.ravel(), WV.ravel()):
             mag = np.hypot(u, v)
-            if np.isnan(mag) or mag < 1e-3:
+            if mag < 1e-3 or np.isnan(mag):
                 continue
-            angle = np.degrees(np.arctan2(v, u))
-            arr = pg.ArrowItem(
-                angle=-angle,
-                headLen=8, tipAngle=90, baseAngle=45,
-                brush=pg.mkBrush(128,  0, 128, 180),
-            )
-            arr.setPos(x0, y0)
-            arr.setScale(mag * scale / arr.opts['headLen'])
-            arr.setZValue(2)
-            self.view.addItem(arr)
-            self.wind_quiver_items.append(arr)      
-
-        # ───────────────────────────────────────────────────────────────────          
-        # ROUTE widgets only when routing is relevant
-        if test_mode != "zigzag":
-            self.btn_define_route = QtWidgets.QPushButton("Define Route")
-            self.btn_define_route.clicked.connect(self._start_route_mode)
-            if hasattr(self.sim, "use_ais") and hasattr(self.sim, "ais_extent"):
-                from pyqtgraph import ImageItem
-                img = ImageItem(self.sim.ais_heatmap.T)
-                img.setRect(QtCore.QRectF(*self.sim.ais_extent))
-                img.setOpacity(0.35)
-                self.view.addItem(img)
-                self.ais_item = img  # so we can later remove it in simulation mode
-            self.btn_define_route.setToolTip(
-                "Left-click: add waypoint\n"
-                "Right-click (once ≥2 points): finish route"
-            )
-            ctrl_layout.addWidget(self.btn_define_route)
-
-            self._status_label = QtWidgets.QLabel("")
-            self._status_label.setStyleSheet("color: black;")
-            ctrl_layout.addWidget(self._status_label)
-
+            ux, uy = u/mag, v/mag
+            x1 = x0 + ux * shaft_length
+            y1 = y0 + uy * shaft_length
+            shaft = pg.PlotDataItem([x0, x1], [y0, y1],
+                                    pen=pg.mkPen(128,0,128, width=2))
+            shaft.setZValue(151)
+            self.view.addItem(shaft)
+            self.wind_quiver_items.append(shaft)
+            base_ang = np.arctan2(uy, ux)
+            for sign in (+1, -1):
+                ang = base_ang + sign * (np.pi/6)
+                hx = x1 - head_length * np.cos(ang)
+                hy = y1 - head_length * np.sin(ang)
+                head = pg.PlotDataItem([x1, hx], [y1, hy],
+                                       pen=pg.mkPen(128,0,128, width=2))
+                head.setZValue(151)
+                self.view.addItem(head)
+                self.wind_quiver_items.append(head)
 
         # Done with initialization
         self.show()
@@ -444,7 +484,7 @@ class ship_viewer(QtWidgets.QWidget):
                     item.setBrush(QBrush(QColor(205, 185, 135)))  # tan
                     # goldenrod outline
                     item.setPen(QPen(QColor(218, 165, 32), 3.0))
-                    item.setZValue(0)
+                    item.setZValue(150)
                     self.view.addItem(item)
 
         # 3) Shoals (if requested)
@@ -467,7 +507,7 @@ class ship_viewer(QtWidgets.QWidget):
                         item.setBrush(QBrush(QColor(177, 255, 1, 100)))
                         # lighter blue outline matching matplotlib
                         item.setPen(QPen(QColor(100, 149, 237), 0.4))
-                        item.setZValue(1)
+                        item.setZValue(151)
                         self.view.addItem(item)
 
         # # 4) Coastline outlines (if you want extra emphasis)
@@ -671,6 +711,31 @@ class ship_viewer(QtWidgets.QWidget):
             return
         # 2)  update dynamic waypoint goals (pop reached waypoints)
         self.sim._update_goals()
+        
+        # ── update time, wind, and current labels ───────────────────────────
+        # Time
+        self.lbl_time.setText(f"Time: {self.sim.t:.2f} s")
+
+        # get primary ship’s lon/lat
+        lon0, lat0 = self.sim._utm_to_ll.transform(
+            self.sim.pos[0,0], self.sim.pos[1,0]
+        )
+
+        # Wind at ship #0
+        wu, wv = self.sim.wind_fn(
+            np.array([lon0]), np.array([lat0]), datetime.now(timezone.utc)
+        )[0]
+        w_speed = np.hypot(wu, wv)
+        w_dir   = int((np.degrees(np.arctan2(wv, wu)) + 360) % 360)
+        self.lbl_wind.setText(f"Wind: {w_speed:.2f} m/s, {w_dir}°")
+
+        # Current at ship #0
+        cu, cv = self.sim.current_fn(
+            np.array([lon0]), np.array([lat0]), datetime.now(timezone.utc)
+        )[0]
+        c_speed = np.hypot(cu, cv)
+        c_dir   = int((np.degrees(np.arctan2(cv, cu)) + 360) % 360)
+        self.lbl_current.setText(f"Current: {c_speed:.2f} m/s, {c_dir}°")
 
         # 3)  compute controls & integrate one step
         #    (match the core’s run() loop)
@@ -831,33 +896,33 @@ class ship_viewer(QtWidgets.QWidget):
             #self.label_items.append(txt)
 
 
-        # ── UPDATE ENVIRONMENT PANEL ───────────────────────────────────────
-        self.lbl_time.setText(f"Time: {self.sim.t:.2f} s")
-        # wind stats & vane
-        wv = playful_wind(self.sim.state, self.sim.t)
-        wx, wy = wv[:,0]
-        ws = np.hypot(wx, wy)
-        wd = np.degrees(np.arctan2(wy, wx)) % 360
-        self.lbl_wind.setText(f"Wind: {ws:.2f} m/s, {wd:.0f}°")
-        # ensure vane points even if speed zero
-        self.wind_arrow.setRotation(-wd)
-        # current stats & vane
-        lon_lbl, lat_lbl = self.sim._utm_to_ll.transform(
-            self.sim.pos[0, 0], self.sim.pos[1, 0]
-        )
-        cv = self.sim.current_fn(
-            np.array([lon_lbl]),
-            np.array([lat_lbl]),
-            datetime.now(timezone.utc)
-        ).T   # (2,1)        
-        cx, cy = cv[:,0]
-        cs = np.hypot(cx, cy)
-        cd = np.degrees(np.arctan2(cy, cx)) % 360
-        print(f"[DEBUG] t={self.sim.t:.1f}s  lon={lon_lbl:.4f} lat={lat_lbl:.4f}  "
-              f"u={cx:.3f} m/s  v={cy:.3f} m/s")
+        # # ── UPDATE ENVIRONMENT PANEL ───────────────────────────────────────
+        # self.lbl_time.setText(f"Time: {self.sim.t:.2f} s")
+        # # wind stats & vane
+        # wv = playful_wind(self.sim.state, self.sim.t)
+        # wx, wy = wv[:,0]
+        # ws = np.hypot(wx, wy)
+        # wd = np.degrees(np.arctan2(wy, wx)) % 360
+        # self.lbl_wind.setText(f"Wind: {ws:.2f} m/s, {wd:.0f}°")
+        # # ensure vane points even if speed zero
+        # self.wind_arrow.setRotation(-wd)
+        # # current stats & vane
+        # lon_lbl, lat_lbl = self.sim._utm_to_ll.transform(
+        #     self.sim.pos[0, 0], self.sim.pos[1, 0]
+        # )
+        # cv = self.sim.current_fn(
+        #     np.array([lon_lbl]),
+        #     np.array([lat_lbl]),
+        #     datetime.now(timezone.utc)
+        # ).T   # (2,1)        
+        # cx, cy = cv[:,0]
+        # cs = np.hypot(cx, cy)
+        # cd = np.degrees(np.arctan2(cy, cx)) % 360
+        # print(f"[DEBUG] t={self.sim.t:.1f}s  lon={lon_lbl:.4f} lat={lat_lbl:.4f}  "
+        #       f"u={cx:.3f} m/s  v={cy:.3f} m/s")
 
-        self.lbl_current.setText(f"Current: {cs:.2f} m/s, {cd:.0f}°")
-        self.current_arrow.setRotation(-cd)
+        # self.lbl_current.setText(f"Current: {cs:.2f} m/s, {cd:.0f}°")
+        # self.current_arrow.setRotation(-cd)
 
     def _run_production(self):
         n_iter = self.spin_iterations.value()
@@ -915,3 +980,9 @@ class ship_viewer(QtWidgets.QWidget):
         QtWidgets.QMessageBox.information(
             self, 'Production Run', f'Completed {n_iter} iterations')
 
+    def update_inset_rect(self, *args, **kwargs):
+        """
+        Placeholder for sigRangeChanged handler.
+        Called whenever the main view range changes; no-op for now.
+        """
+        pass
