@@ -254,10 +254,10 @@ SIMULATION_BOUNDS = {
     "Galveston": {
         # Galveston, TX (City) bounds in EPSG:4326
         # Longitude: West → East, Latitude: South → North
-        "minx": -95.2,
-        "maxx": -94.60,
-        "miny":  29.1,
-        "maxy":  29.45,
+        "minx": -95.5,
+        "maxx": -94.5,
+        "miny":  29.,
+        "maxy":  30.,
     },
     "Baltimore": {
         # Baltimore, MD (City) bounds in EPSG:4326
@@ -286,6 +286,13 @@ SIMULATION_BOUNDS = {
         "maxx": -122.224433,
         "miny":   47.491911,
         "maxy":   47.734061,
+    },
+    "Rosario Strait": {
+        # Rosario Strait, WA (between Anacortes and San Juan Islands) in EPSG:4326
+        "minx": -122.80,
+        "maxx": -122.60,
+        "miny":   48.50,
+        "maxy":   48.75,
     },
     "New Orleans": {
         # New Orleans downriver to the Mississippi River mouth (EPSG:4326)
@@ -326,6 +333,7 @@ OFS_MODEL_MAP = {
     "Los Angeles / Long Beach":     "wcofs",    # West-Coast nest (4 km ROMS)
     "Oakland / San Francisco Bay":  "sfbofs",   # SF Bay FVCOM
     "Seattle":                      "sscofs",   # Salish Sea / Puget
+    "Rosario Strait":               "sscofs",   # Salish Sea (same model)
     "New Orleans":                  "ngofs2",   # Northern Gulf (covers Delta)
     "New York":                     "nyofs",    # NY/NJ Harbor
 }

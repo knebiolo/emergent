@@ -393,8 +393,23 @@ class simulation:
             ).T
             return (flat_u.reshape(ny, nx),
                     flat_v.reshape(ny, nx))
+        
+        
         self.currents_grid = _currents_grid
     
+        def _wind_grid(when: datetime):
+            """Return wind U,V 2-D arrays (ny,nx) in m/s for viewer quiver."""
+            # wind_fn returns an (N,2) array of [u, v] at each query point
+            flat = self.wind_fn(
+                self._quiver_lon.ravel(),
+                self._quiver_lat.ravel(),
+                when
+            )
+            wu = flat[:, 0]
+            wv = flat[:, 1]
+            return wu.reshape(ny, nx), wv.reshape(ny, nx)
+        self.wind_grid = _wind_grid    
+   
         # Initialize placeholders for cached backgrounds
         self._bg_cache = None
 
@@ -1249,66 +1264,109 @@ class simulation:
             rud_cmds = self._compute_rudder(hd_cmds, roles)
             return hd_cmds, sp_cmds, rud_cmds
 
-        # compute desired & COLREGS headings/speeds
+        # ─── Sample wind & current at each ship’s lon/lat ───────────────
+        now = datetime.now(timezone.utc)
+        lon, lat = self._utm_to_ll.transform(self.pos[0], self.pos[1])
+        # wind_fn/current_fn expect (lon, lat)
+        wind_vec    = self.wind_fn(lon, lat, now).T   # shape (2, n)
+        current_vec = self.current_fn(lon, lat, now).T
+    
+        # Now pass the raw drift vector—compute_desired will do its own subtraction
+        combined_drift_vec = current_vec + wind_vec
+        drift_into = -(wind_vec + current_vec)
+        
+        # 1) COLREGS override
+        col_hd, col_sp, _, roles = self.ship.colregs(
+            self.dt, self.pos, nu, self.psi, self.ship.commanded_rpm
+        )
+
+        # ─── 3) Compute desired track WITH drift built-in ───────────────────────
         goal_hd, goal_sp = self.ship.compute_desired(
-            self.goals, self.pos[0], self.pos[1],
-            self.state[0], self.state[1], self.state[3], self.psi
+            self.goals,
+            self.pos[0], self.pos[1],
+            self.state[0], self.state[1], self.state[3], self.psi,
+            current_vec = drift_into
         )
         
-        col_hd, col_sp, _, roles = self.ship.colregs(self.dt,
-            self.pos, nu, self.psi, self.ship.commanded_rpm
-        )
-        
-        # # ── Wind/Current Compensation (Dead Reckoning) ────────────────────
-        # # Get drift vectors from your environment functions
-        # wind_raw    = playful_wind(self.state, t)
-        # current_raw = north_south_current(self.state, t)
-        # # Build a 2×n array of drift = wind + current in world‐frame
-        # drift = np.zeros((2, self.n), dtype=float)
-        # for i in range(self.n):
-        #     # wind component
-        #     if isinstance(wind_raw, dict):
-        #         wx = wind_raw['speed'] * np.cos(wind_raw['dir'])
-        #         wy = wind_raw['speed'] * np.sin(wind_raw['dir'])
-        #     else:
-        #         wx, wy = float(wind_raw[0,i]), float(wind_raw[1,i])
-        #     # current component
-        #     if isinstance(current_raw, dict):
-        #         cx = current_raw['speed'] * np.cos(current_raw['dir'])
-        #         cy = current_raw['speed'] * np.sin(current_raw['dir'])
-        #     else:
-        #         cx, cy = float(current_raw[0,i]), float(current_raw[1,i])
-        #     drift[:, i] = [wx + cx, wy + cy]
-
-        # # Adjust each goal heading to compensate for wind+current
-        # for i in range(self.n):
-        #     # 1) Normalize desired track into [0–360)
-        #     raw_deg   = np.degrees(goal_hd[i])
-        #     track_deg = (raw_deg + 360) % 360
-
-        #     # 2) Invert drift: compensator expects the vector *to steer into*
-        #     wind_for_comp = -drift[:, i]  # = np.array([-wx, -wy])
-        #     # if you have separate wind/current you can also do:
-        #     # wind_for_comp    = np.array([-wx, -wy])
-        #     # current_for_comp = np.array([-cx, -cy])
-
-        #     surge = self.state[0, i]
-        #     comp_deg = self.ship.compensate_heading(
-        #         track_bearing_deg=track_deg,
-        #         wind_vec=wind_for_comp,
-        #         current_vec=np.zeros(2),      # or `current_for_comp` if split
-        #         surge_speed=surge
-        #     )
-
-        #     # 3) Feed back in radians for your PID
-        #     goal_hd[i] = np.radians(comp_deg)
-        # # ────────────────────────────────────────────────────────────────────
-
-        # fuse & PID (hd returned in radians)
+        # 4) Fuse COLREGS + PID, then compute rudder
         hd, sp = self._fuse_and_pid(goal_hd, goal_sp, col_hd, col_sp, roles)
-        # compute rudder from radian heading command
-        rud = self._compute_rudder(hd, roles)
+        rud    = self._compute_rudder(hd, roles)
         return hd, sp, rud
+        
+        # # ─── Step 1: ask for the raw “no-drift” track
+        # raw_goal_hd, goal_sp = self.ship.compute_desired(
+        #     self.goals,
+        #     self.pos[0], self.pos[1],
+        #     self.state[0], self.state[1], self.state[3], self.psi,
+        #     # zero drift so that compute_desired just points at the green line
+        #     current_vec = np.zeros_like(current_vec)
+        # )
+        
+        # # ─── Step 2: apply *our* compensation
+        # goal_hd = raw_goal_hd.copy()
+        # for i in range(self.n):
+        #     # convert to compass bearing [0–360)
+        #     track_deg = (np.degrees(raw_goal_hd[i]) + 360) % 360
+        
+        #     # --- swap & (optionally) negate so we feed [east, north] into compensate_heading ---
+        #     # unpack raw [north, east]
+        #     w_north, w_east = wind_vec[:, i]
+        #     c_north, c_east = current_vec[:, i]
+    
+        #     # steer-into drift = NEGATE each axis-swapped component
+        #     wind_for_comp    = np.array([-w_east, -w_north], dtype=float)
+        #     current_for_comp = np.array([-c_east, -c_north], dtype=float)
+        
+        #     comp_deg = self.ship.compensate_heading(
+        #         track_bearing_deg = track_deg,
+        #         wind_vec          = wind_for_comp,
+        #         current_vec       = current_for_comp,
+        #         surge_speed       = float(self.state[0, i])
+        #     )
+        
+        #     # feed back in radians
+        #     goal_hd[i] = np.radians(comp_deg)
+        
+        #     # debug print so you can see exactly what’s happening:
+        #     #print(f"[DRIFT] A{i}: track {track_deg:.1f}°, drift=({drift[0]:.2f},{drift[1]:.2f}), comp→{comp_deg:.1f}°")
+
+        # # 1) COLREGS override
+        # col_hd, col_sp, _, roles = self.ship.colregs(
+        #     self.dt, self.pos, nu, self.psi, self.ship.commanded_rpm
+        # )
+
+        # # 2) “Point-at-route” heading with zero drift
+        # raw_goal_hd, goal_sp = self.ship.compute_desired(
+        #     self.goals,
+        #     self.pos[0], self.pos[1],
+        #     self.state[0], self.state[1], self.state[3], self.psi,
+        #     current_vec = np.zeros_like(current_vec)
+        # )
+
+        # # 3) Manual dead-reckoning: sum wind + current and compute a lateral offset
+        # goal_hd = raw_goal_hd.copy()
+        # drift   = wind_vec + current_vec    # world-frame environmental forcing
+        # for i in range(self.n):
+        #     h = raw_goal_hd[i]
+        #     # port-side unit vector in world frame
+        #     perp      = np.array([-np.sin(h), np.cos(h)])
+        #     lateral   = float(drift[:, i].dot(perp))
+        #     surge     = float(self.state[0, i]) + 1e-6
+        #     hd_offset = np.arctan2(lateral, surge)
+        #     goal_hd[i] = h + hd_offset
+
+        
+        # # now fuse with COLREGS and PID as before
+        # hd, sp = self._fuse_and_pid(goal_hd, goal_sp, col_hd, col_sp, roles)
+        # rud = self._compute_rudder(hd, roles)
+        # return hd, sp, rud
+    
+        # # 4) fuse nav+COLREGS, then PID → rudder
+        # hd, sp = self._fuse_and_pid(goal_hd, goal_sp, col_hd, col_sp, roles)
+        # rud = self._compute_rudder(hd, roles)
+        # return hd, sp, rud
+
+
 
     def _fuse_and_pid(self, goal_hd, goal_sp, col_hd, col_sp, roles):
         #roles = np.array(self.ship.colregs(self.pos, np.vstack([self.state[0],self.state[1],self.state[3]]), self.psi, self.ship.commanded_rpm)[3])
@@ -1355,15 +1413,15 @@ class simulation:
         Kd = self.tuning['Kd']
         rud_cmd = Kp * err + Ki * self.integral_error + Kd * derr
     
-        # 5) Prediction-based early release: anticipate inertia-driven overshoot
-        predicted_err = err + r * self.tuning['lead_time']
-        release_rad   = np.radians(self.tuning['release_band_deg'])
-        early_release = np.abs(predicted_err) < release_rad
-        rud_cmd = np.where(early_release, 0.0, rud_cmd)
-    
-        # 6) Micro-trim: zero small commands to avoid constant nudging
-        trim_rad = np.radians(self.tuning['trim_band_deg'])
-        rud_cmd[np.abs(rud_cmd) < trim_rad] = 0.0
+        # 5) (disabled) Prediction-based early release
+        # predicted_err = err + r * self.tuning['lead_time']
+        # release_rad   = np.radians(self.tuning['release_band_deg'])
+        # early_release = np.abs(predicted_err) < release_rad
+        # rud_cmd = np.where(early_release, 0.0, rud_cmd)
+
+        # 6) (disabled) Micro-trim for chatter avoidance
+        # trim_rad = np.radians(self.tuning['trim_band_deg'])
+        # rud_cmd[np.abs(rud_cmd) < trim_rad] = 0.0
     
         # 6) COLREGS override for give-way: hard opposite rudder beyond 30° error
         err_abs = np.abs(err)

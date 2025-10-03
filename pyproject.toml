@@ -26,7 +26,7 @@ dependencies = [
     "fiona>=1.8",
     "rasterio>=1.2",
     "affine>=2.4",
-    "pyproj",
+    "pyproj>=3.0",
 
     # storage / parallel
     "h5py>=3.1",
@@ -36,14 +36,19 @@ dependencies = [
     "PyQt5>=5.15",
     "pyqtgraph>=0.12",
 
+    # Ocean/atmospheric data access (AWS S3)
+    "xarray>=0.19",
+    "fsspec>=2021.8",
+    "s3fs>=2021.8",
+    "netcdf4>=1.5",
+    "h5netcdf>=0.11",
+    "cfgrib>=0.9.10",
+    "aiobotocore>=2.0",
+    "aiohttp>=3.7",
+
     # misc utilities
     "networkx>=2.6",
-    "requests>=2.25",
-    "xarray",
-    "fsspec",
-    "s3fs",
-    "netcdf4",
-    "h5netcdf"
+    "requests>=2.25"
 ]
 
 [project.optional-dependencies]

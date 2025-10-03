@@ -1992,52 +1992,95 @@ class simulation():
           and Brett and Glass (1973).
         """
     
-        # Calculate active and standard metabolic rate using equations from Brett and Glass (1973)
-        # O2_rate in units of mg O2/hr
+        # Convert kg → grams for metabolic rate equations
+        weight_g = self.weight * 1000.0
+    
+        # Standard Metabolic Rate (SMR) – Brett & Glass 1973
         sr_o2_rate = self.arr.where(
             self.water_temp <= 5.3,
-            self.arr.exp(0.0565 * np.power(self.arr.log(self.weight), 0.9141)),
+            self.arr.exp(0.0565 * self.arr.power(self.arr.log(weight_g), 0.9141)),
             self.arr.where(
                 self.water_temp <= 15,
-                self.arr.exp(0.1498 * self.arr.power(self.arr.log(self.weight), 0.8465)),
-                self.arr.exp(0.1987 * self.arr.power(self.arr.log(self.weight), 0.8844))
+                self.arr.exp(0.1498 * self.arr.power(self.arr.log(weight_g), 0.8465)),
+                self.arr.exp(0.1987 * self.arr.power(self.arr.log(weight_g), 0.8844))
             )
         )
     
+        # Active Metabolic Rate (AMR) – Brett & Glass 1973
         ar_o2_rate = self.arr.where(
             self.water_temp <= 5.3,
-            self.arr.exp(0.4667 * self.arr.power(self.arr.log(self.weight), 0.9989)),
+            self.arr.exp(0.4667 * self.arr.power(self.arr.log(weight_g), 0.9989)),
             self.arr.where(
                 self.water_temp <= 15,
-                self.arr.exp(0.9513 * self.arr.power(self.arr.log(self.weight), 0.9632)),
-                self.arr.exp(0.8237 * self.arr.power(self.arr.log(self.weight), 0.9947))
+                self.arr.exp(0.9513 * self.arr.power(self.arr.log(weight_g), 0.9632)),
+                self.arr.exp(0.8237 * self.arr.power(self.arr.log(weight_g), 0.9947))
             )
         )
     
-        # Calculate total metabolic rate
-        if self.num_agents > 1:
-            swim_cost = sr_o2_rate + self.wave_drag * (
-                self.arr.exp(np.log(sr_o2_rate) + self.swim_speed * (
-                    (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
-                ) - sr_o2_rate)
-            )
-        else:
-            swim_cost = sr_o2_rate + self.wave_drag.flatten() * (
-                self.arr.exp(np.log(sr_o2_rate) + np.linalg.norm(self.swim_speed.flatten(), axis = -1) * (
-                    (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
-                ) - sr_o2_rate)
-            )
-        # swim cost is expressed in mg O2 _kg _hr.  convert to mg O2 _ kg
-        hours = dt * (1./3600.)
-        per_capita_swim_cost = swim_cost * hours
-        mg_O2 = per_capita_swim_cost * self.weight
-        # Brett (1973) used a mean oxycalorific equivalent of 3.36 cal/ mg O2 (RQ = 0.8) 
-        kcal = mg_O2 * (3.36 / 1000)
-        
+        # Interpolated swim cost – Hughes 2004 (linear interpolation)
+        # Optional: use exponent b=2 for high effort swimming
+        b = 1.0
+        frac_speed = self.swim_speed / self.ucrit
+        frac_speed = self.arr.clip(frac_speed, 0.0, 1.0)
+        swim_cost = sr_o2_rate + (ar_o2_rate - sr_o2_rate) * self.arr.power(frac_speed, b)
+    
+        # Convert metabolic rate from mg O2/kg/hr → kcal
+        hours = dt / 3600.0
+        mg_O2 = swim_cost * hours * self.weight  # self.weight in kg
+        kcal  = mg_O2 * (3.36 / 1000.0)          # kcal burned this timestep
+    
         if np.any(kcal < 0):
-            print ('why kcal negative')
-        # Update kilocalories burned
+            print("🚨 Warning: Negative kcal detected!")
+    
+        # Update cumulative odometer
         self.kcal += kcal
+    
+        # # Calculate active and standard metabolic rate using equations from Brett and Glass (1973)
+        # # O2_rate in units of mg O2/hr
+        # sr_o2_rate = self.arr.where(
+        #     self.water_temp <= 5.3,
+        #     self.arr.exp(0.0565 * np.power(self.arr.log(self.weight), 0.9141)),
+        #     self.arr.where(
+        #         self.water_temp <= 15,
+        #         self.arr.exp(0.1498 * self.arr.power(self.arr.log(self.weight), 0.8465)),
+        #         self.arr.exp(0.1987 * self.arr.power(self.arr.log(self.weight), 0.8844))
+        #     )
+        # )
+    
+        # ar_o2_rate = self.arr.where(
+        #     self.water_temp <= 5.3,
+        #     self.arr.exp(0.4667 * self.arr.power(self.arr.log(self.weight), 0.9989)),
+        #     self.arr.where(
+        #         self.water_temp <= 15,
+        #         self.arr.exp(0.9513 * self.arr.power(self.arr.log(self.weight), 0.9632)),
+        #         self.arr.exp(0.8237 * self.arr.power(self.arr.log(self.weight), 0.9947))
+        #     )
+        # )
+    
+        # # Calculate total metabolic rate
+        # if self.num_agents > 1:
+        #     swim_cost = sr_o2_rate + self.wave_drag * (
+        #         self.arr.exp(np.log(sr_o2_rate) + self.swim_speed * (
+        #             (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
+        #         ) - sr_o2_rate)
+        #     )
+        # else:
+        #     swim_cost = sr_o2_rate + self.wave_drag.flatten() * (
+        #         self.arr.exp(np.log(sr_o2_rate) + np.linalg.norm(self.swim_speed.flatten(), axis = -1) * (
+        #             (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
+        #         ) - sr_o2_rate)
+        #     )
+        # # swim cost is expressed in mg O2 _kg _hr.  convert to mg O2 _ kg
+        # hours = dt * (1./3600.)
+        # per_capita_swim_cost = swim_cost * hours
+        # mg_O2 = per_capita_swim_cost * self.weight
+        # # Brett (1973) used a mean oxycalorific equivalent of 3.36 cal/ mg O2 (RQ = 0.8) 
+        # kcal = mg_O2 * (3.36 / 1000)
+        
+        # if np.any(kcal < 0):
+        #     print ('why kcal negative')
+        # # Update kilocalories burned
+        # self.kcal += kcal
         
     class movement():
         

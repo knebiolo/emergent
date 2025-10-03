@@ -17,11 +17,11 @@ from emergent.ship_abm.config      import xml_url      # ENC catalog URL
 app = QtWidgets.QApplication(sys.argv)
 
 view = ship_viewer(
-    port_name          = "Galveston",
+    port_name          = "Galveston",      # ONLY harbor with working currents + winds!
     xml_url            = xml_url,          # from config.py
     dt                 = 0.1,
     T                  = 9000,
-    n_agents           = 2,
+    n_agents           = 1,                # Start with 1 ship
     coast_simplify_tol = 2.0,
     light_bg           = True,
     verbose            = True,

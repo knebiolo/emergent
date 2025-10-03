@@ -1,39 +1,3 @@
-Metadata-Version: 2.4
-Name: emergent
-Version: 0.0.1
-Summary: Emergent – agent-based modelling framework for spatial emergent phenomena (ships, fish, …)
-Author: Kevin Nebiolo
-License: MIT
-Requires-Python: >=3.10
-Description-Content-Type: text/markdown
-License-File: LICENSE
-Requires-Dist: numpy>=1.20
-Requires-Dist: pandas>=1.3
-Requires-Dist: scipy>=1.7
-Requires-Dist: matplotlib>=3.4
-Requires-Dist: geopandas>=0.9
-Requires-Dist: shapely>=1.7
-Requires-Dist: fiona>=1.8
-Requires-Dist: rasterio>=1.2
-Requires-Dist: affine>=2.4
-Requires-Dist: pyproj
-Requires-Dist: h5py>=3.1
-Requires-Dist: dask[array]>=2021.6
-Requires-Dist: PyQt5>=5.15
-Requires-Dist: pyqtgraph>=0.12
-Requires-Dist: networkx>=2.6
-Requires-Dist: requests>=2.25
-Requires-Dist: xarray
-Requires-Dist: fsspec
-Requires-Dist: s3fs
-Requires-Dist: netcdf4
-Requires-Dist: h5netcdf
-Provides-Extra: dev
-Requires-Dist: black; extra == "dev"
-Requires-Dist: isort; extra == "dev"
-Requires-Dist: pytest; extra == "dev"
-Dynamic: license-file
-
 # emergent
 Python software using agent based models to solve complex spatial problems.  This software was written alongside my dissertation (Nebiolo 2017).   
 
