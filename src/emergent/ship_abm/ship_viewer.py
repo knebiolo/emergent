@@ -7,7 +7,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore
 from PyQt5.QtCore import Qt, QPointF
 from PyQt5.QtWidgets import QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsEllipseItem
-from PyQt5.QtGui     import QPolygonF, QBrush, QPen, QColor
+from PyQt5.QtGui     import QPolygonF, QBrush, QPen, QColor, QTextCursor
 from PyQt5.QtCore    import QPointF
 from pyqtgraph import RectROI, mkPen
 from emergent.ship_abm.simulation_core import simulation, SIMULATION_BOUNDS
@@ -18,6 +18,8 @@ import sqlite3
 import json
 import pyqtgraph.functions as fn
 from pyproj import Transformer
+import os
+import json
 
 
 class ship_polygon(QGraphicsPolygonItem):
@@ -86,6 +88,55 @@ class ship_viewer(QtWidgets.QWidget):
         ctrl_layout = QtWidgets.QVBoxLayout()
         layout.addLayout(ctrl_layout, stretch=1)
 
+        # create a text log panel for simulation messages and wire it to the sim
+        self.log_panel = QtWidgets.QTextEdit()
+        self.log_panel.setReadOnly(True)
+        self.log_panel.setFixedHeight(150)
+        ctrl_layout.addWidget(QtWidgets.QLabel("Simulation Log:"))
+        ctrl_layout.addWidget(self.log_panel)
+
+        # helper wrapper: simulation core expects objects with set_text, set_fontsize, set_fontfamily
+        class _LogTextArtist:
+            def __init__(self, idx, panel, sim):
+                self.idx = idx
+                self.panel = panel
+                self.sim = sim
+            def set_text(self, txt):
+                # ensure the sim.log_lines list is reflected into the panel
+                try:
+                    lines = list(self.sim.log_lines)
+                except Exception:
+                    lines = []
+                # pad/trim to max_log_lines
+                maxl = getattr(self.sim, 'max_log_lines', 10)
+                lines = lines[:maxl]
+                # add timestamps for readability
+                out_lines = []
+                for ln in lines:
+                    try:
+                        ts = datetime.now().strftime('%H:%M:%S')
+                        out_lines.append(f"[{ts}] {ln}")
+                    except Exception:
+                        out_lines.append(ln)
+                # set text and auto-scroll to bottom
+                self.panel.setPlainText("\n".join(out_lines))
+                try:
+                    self.panel.moveCursor(QTextCursor.End)
+                except Exception:
+                    pass
+            def set_fontsize(self, *_):
+                return
+            def set_fontfamily(self, *_):
+                return
+
+        # create placeholder artists and attach to simulation so core can update them
+        try:
+            maxl = getattr(self.sim, 'max_log_lines', 10)
+            self.sim.log_text_artists = [ _LogTextArtist(i, self.log_panel, self.sim) for i in range(maxl) ]
+        except Exception:
+            # fail gracefully; simulation will skip GUI updates
+            self.sim.log_text_artists = None
+
         # 3) Inset panel background
         self.panel_widget = pg.GraphicsLayoutWidget()
         self.panel_widget.setBackground(self.palette().color(self.backgroundRole()))
@@ -117,92 +168,51 @@ class ship_viewer(QtWidgets.QWidget):
                                              pen_color=(150,120,80))
                     self.inset.addItem(land_item)
             # 2) shoreline (COALNE), draw thin gray
-            if 'COALNE' in self.sim.enc_data:
-                for geom in self.sim.enc_data['COALNE'].geometry:
-                    # handle both Polygons and LineStrings
-                    if hasattr(geom, "exterior"):
-                        coords = np.array(geom.exterior.coords)
-                    else:
-                        coords = np.array(geom.coords)
-                    
-                    shore_item = ship_polygon(coords,
-                                              color=(0,0,0,0),
-                                              pen_color=(100,100,100))
-                    self.inset.addItem(shore_item)
+            # DISABLED: Too many coastline segments cause pyqtgraph to hang during bounds calculation
+            # TODO: Merge geometries or simplify before drawing
+            # if 'COALNE' in self.sim.enc_data:
+            #     for geom in self.sim.enc_data['COALNE'].geometry:
+            #         # handle both Polygons and LineStrings
+            #         if hasattr(geom, "exterior"):
+            #             coords = np.array(geom.exterior.coords)
+            #         else:
+            #             coords = np.array(geom.coords)
+            #         
+            #         shore_item = ship_polygon(coords,
+            #                                   color=(0,0,0,0),
+            #                                   pen_color=(100,100,100))
+            #         self.inset.addItem(shore_item)
                     
         
         # 4) Draw basemap
         if self.sim.enc_data:
             self._draw_basemap()
 
-        
-        # 5) Quiver: sample on 40×40 grid (explicit UTC) using the raw sampler
-        # 5) Quiver: sample on 40×40 grid (explicit UTC), using the built-in grid sampler
-        now = datetime.utcnow()
-        # U,V come back as full (ny,nx) arrays
-        U_full, V_full = self.sim.currents_grid(now)
-        ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
-        X, Y = ll2utm.transform(self.sim._quiver_lon, self.sim._quiver_lat)
-        skip = (slice(None, None, 4), slice(None, None, 4))
-        qx, qy = X[skip], Y[skip]
-        qu, qv = U_full[skip], V_full[skip]   
-        
-        dx = X[0,1] - X[0,0]; dy = Y[1,0] - Y[0,0]
-        ds = np.hypot(dx, dy)
-        shaft, head = 0.5*ds, 0.2*ds
+        # Initialize quiver items as empty - will be populated when env loads
         self.quiver_items = []
-        
-        # Correct zip to use down-sampled qu,qv for direction
-        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), qu.ravel(), qv.ravel()):
-            mag = np.hypot(u, v)
-            if mag < 1e-3 or np.isnan(mag):
-                continue
-            ux, uy = u/mag, v/mag
-            x1, y1 = x0 + ux*shaft, y0 + uy*shaft
-            shaft_line = pg.PlotDataItem([x0, x1], [y0, y1], pen=pg.mkPen(0,0,255, width=2))
-            shaft_line.setZValue(150)
-            self.view.addItem(shaft_line)
-            self.quiver_items.append(shaft_line)
-            base_ang = np.arctan2(uy, ux)
-            for s in (+1, -1):
-                ang = base_ang + s * (np.pi/6)
-                hx = x1 - head * np.cos(ang)
-                hy = y1 - head * np.sin(ang)
-                head_line = pg.PlotDataItem([x1, hx], [y1, hy], pen=pg.mkPen(0,0,255, width=2))
-                head_line.setZValue(150)
-                self.view.addItem(head_line)
-                self.quiver_items.append(head_line)
-
-        # 6) Wind quiver 
-        # 6) Wind quiver (same idea)
-        W_full, Vw_full = self.sim.wind_grid(now)  # you can add a similar helper if needed, or:
-        # If you don't have wind_grid, just call currents_grid logic with wind_fn:
-        #   wind_uv = self.sim.wind_fn(self.sim._quiver_lon.ravel(),
-        #                              self.sim._quiver_lat.ravel(), now).T
-        #   W_full = wind_uv[0].reshape(self.sim._quiver_lon.shape)
-        #   Vw_full = wind_uv[1].reshape(self.sim._quiver_lat.shape)
-        Wu, Wv = W_full[skip], Vw_full[skip]        
         self.wind_quiver_items = []
-        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), Wu.ravel(), Wv.ravel()):
-            mag = np.hypot(u, v)
-            if mag < 1e-3 or np.isnan(mag):
-                continue
-            ux, uy = u/mag, v/mag
-            x1, y1 = x0 + ux*shaft, y0 + uy*shaft
-            wind_shaft = pg.PlotDataItem([x0, x1], [y0, y1], pen=pg.mkPen(128,0,128, width=2))
-            wind_shaft.setZValue(151)
-            self.view.addItem(wind_shaft)
-            self.wind_quiver_items.append(wind_shaft)
-            base_ang = np.arctan2(uy, ux)
-            for s in (+1, -1):
-                ang = base_ang + s * (np.pi/6)
-                hx = x1 - head * np.cos(ang)
-                hy = y1 - head * np.sin(ang)
-                wind_head = pg.PlotDataItem([x1, hx], [y1, hy], pen=pg.mkPen(128,0,128, width=2))
-                wind_head.setZValue(151)
-                self.view.addItem(wind_head)
-                self.wind_quiver_items.append(wind_head)
         
+        # Environmental forcing will be loaded when user clicks "Start Simulation"
+        # Environmental controls are set up in _init_gui_controls
+        self._init_gui_controls(test_mode, ctrl_layout)
+
+        # Environmental forcing will be loaded when user clicks "Start Simulation"
+        # to avoid Qt threading issues during init
+
+    def _load_environmental_and_quivers(self):
+        """
+        Load environmental forcing data and draw quiver plots.
+        Called via QTimer after Qt event loop is running to avoid threading issues.
+        """
+        print("[ShipViewer] Loading environmental forcing...")
+        self.sim.load_environmental_forcing()
+        
+        print("[ShipViewer] Drawing current and wind quivers...")
+        # delegate actual drawing to the helper so refresh can skip re-loading
+        self._draw_quivers()
+    
+    def _init_gui_controls(self, test_mode, ctrl_layout):
+        """Initialize GUI controls - called from __init__ after quiver setup is deferred."""
         # ── status labels ────────────────────────────────────────────
         self.lbl_time    = QtWidgets.QLabel("Time: 0.00 s")
         self.lbl_wind    = QtWidgets.QLabel("Wind: 0.00 m/s, 0°")
@@ -240,6 +250,62 @@ class ship_viewer(QtWidgets.QWidget):
         self.btn_kill_power.clicked.connect(self._on_kill_power)
         ctrl_layout.addWidget(self.btn_kill_power)
 
+        # ── Quiver controls (density/scale/pen width) ─────────────────
+        qlabel = QtWidgets.QLabel("Quiver density (step, 1=full):")
+        self.spin_quiver_step = QtWidgets.QSpinBox()
+        self.spin_quiver_step.setRange(1, 8)
+        # default to full density
+        self.spin_quiver_step.setValue(getattr(self, 'quiver_step', 1))
+        self.spin_quiver_step.valueChanged.connect(lambda v: setattr(self, 'quiver_step', v))
+        ctrl_layout.addWidget(qlabel)
+        ctrl_layout.addWidget(self.spin_quiver_step)
+
+        qlabel2 = QtWidgets.QLabel("Quiver scale (fraction of grid spacing):")
+        self.dspin_quiver_scale = QtWidgets.QDoubleSpinBox()
+        # keep base scale smaller so arrows are not oversized by default
+        self.dspin_quiver_scale.setRange(0.05, 2.0)
+        self.dspin_quiver_scale.setSingleStep(0.05)
+        self.dspin_quiver_scale.setValue(getattr(self, 'quiver_scale', 0.35))
+        self.dspin_quiver_scale.valueChanged.connect(lambda v: setattr(self, 'quiver_scale', v))
+        ctrl_layout.addWidget(qlabel2)
+        ctrl_layout.addWidget(self.dspin_quiver_scale)
+
+        qlabel3 = QtWidgets.QLabel("Quiver pen width:")
+        self.spin_quiver_pen = QtWidgets.QSpinBox()
+        self.spin_quiver_pen.setRange(1, 8)
+        self.spin_quiver_pen.setValue(getattr(self, 'quiver_pen_width', 2))
+        self.spin_quiver_pen.valueChanged.connect(lambda v: setattr(self, 'quiver_pen_width', v))
+        ctrl_layout.addWidget(qlabel3)
+        ctrl_layout.addWidget(self.spin_quiver_pen)
+
+        # Auto-clamp toggle: when enabled, the viewer will increase quiver step
+        # at wide zooms to avoid too many arrows. Uncheck to force density=spin value.
+        self.chk_auto_clamp = QtWidgets.QCheckBox("Auto-clamp quiver density")
+        self.chk_auto_clamp.setChecked(True)
+        ctrl_layout.addWidget(self.chk_auto_clamp)
+
+        # Refresh quivers now button
+        self.btn_refresh_quivers = QtWidgets.QPushButton("Refresh Quivers Now")
+        self.btn_refresh_quivers.clicked.connect(self._refresh_quivers)
+        ctrl_layout.addWidget(self.btn_refresh_quivers)
+
+        # Legend for quivers
+        legend_html = "<div><span style='color:rgb(0,100,255);font-weight:bold;'>▮</span> Currents &nbsp;&nbsp; " \
+                  "<span style='color:rgb(160,32,240);font-weight:bold;'>▮</span> Winds</div>"
+        lbl_legend = QtWidgets.QLabel()
+        lbl_legend.setText(legend_html)
+        lbl_legend.setStyleSheet('font-size:12px;')
+        ctrl_layout.addWidget(lbl_legend)
+
+        # Load user config (quiver settings)
+        self._config_path = os.path.join(os.path.expanduser('~'), '.emergent_config.json')
+        self._load_user_config()
+
+        # wire save on change so settings persist
+        self.spin_quiver_step.valueChanged.connect(lambda v: (setattr(self, 'quiver_step', v), self._save_user_config()))
+        self.dspin_quiver_scale.valueChanged.connect(lambda v: (setattr(self, 'quiver_scale', v), self._save_user_config()))
+        self.spin_quiver_pen.valueChanged.connect(lambda v: (setattr(self, 'quiver_pen_width', v), self._save_user_config()))
+
         # iterations & production
         self.lbl_iterations = QtWidgets.QLabel("Iterations:")
         self.spin_iterations = QtWidgets.QSpinBox()
@@ -250,7 +316,6 @@ class ship_viewer(QtWidgets.QWidget):
         ctrl_layout.addWidget(self.spin_iterations)
         ctrl_layout.addWidget(self.btn_prod_run)
         self.btn_prod_run.clicked.connect(self._run_production)
-
 
         # show
         self.show()
@@ -268,12 +333,138 @@ class ship_viewer(QtWidgets.QWidget):
         self.heading_items = []
         self.label_items = []
 
+    def _load_user_config(self):
+        try:
+            if os.path.exists(self._config_path):
+                with open(self._config_path, 'r') as fh:
+                    cfg = json.load(fh)
+                    self.quiver_step = int(cfg.get('quiver_step', getattr(self, 'quiver_step', 2)))
+                    self.quiver_scale = float(cfg.get('quiver_scale', getattr(self, 'quiver_scale', 0.6)))
+                    self.quiver_pen_width = int(cfg.get('quiver_pen_width', getattr(self, 'quiver_pen_width', 3)))
+                    # set widget values if present
+                    try: self.spin_quiver_step.setValue(self.quiver_step)
+                    except Exception: pass
+                    try: self.dspin_quiver_scale.setValue(self.quiver_scale)
+                    except Exception: pass
+                    try: self.spin_quiver_pen.setValue(self.quiver_pen_width)
+                    except Exception: pass
+        except Exception:
+            pass
+
+    def _save_user_config(self):
+        try:
+            cfg = {
+                'quiver_step': getattr(self, 'quiver_step', 2),
+                'quiver_scale': getattr(self, 'quiver_scale', 0.6),
+                'quiver_pen_width': getattr(self, 'quiver_pen_width', 3)
+            }
+            with open(self._config_path, 'w') as fh:
+                json.dump(cfg, fh)
+        except Exception:
+            pass
+
+    def _refresh_quivers(self):
+        # Force immediate quiver redraw by calling the quiver drawing helper
+        try:
+            # remove existing quiver items and trigger the draw
+            for itm in list(self.quiver_items) + list(self.wind_quiver_items):
+                try: self.view.removeItem(itm)
+                except Exception: pass
+            self.quiver_items = []
+            self.wind_quiver_items = []
+            # draw now (but don't reload environmental datasets if already loaded)
+            if not self.sim._env_loaded:
+                self._load_environmental_and_quivers()
+            else:
+                self._draw_quivers()
+        except Exception as e:
+            print(f"[ShipViewer] ✗ Failed to refresh quivers: {e}")
+
+    def _draw_quivers(self):
+        # Draw quivers using currently-loaded environmental functions.
+        now = datetime.utcnow()
+        U_full, V_full = self.sim.currents_grid(now)
+        W_full, Vw_full = self.sim.wind_grid(now)
+        ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
+        X, Y = ll2utm.transform(self.sim._quiver_lon, self.sim._quiver_lat)
+
+        qstep = getattr(self, "quiver_step", 2)
+        # optionally auto-clamp based on view
+        if getattr(self, 'chk_auto_clamp', None) and self.chk_auto_clamp.isChecked():
+            try:
+                (vx0, vx1), (vy0, vy1) = self.view.viewRange()
+                view_span = max(abs(vx1 - vx0), abs(vy1 - vy0))
+                auto_step = int(min(max(view_span / (self.sim.zoom * 0.2), 1), 8))
+                qstep = max(qstep, auto_step)
+            except Exception:
+                pass
+
+        skip = (slice(None, None, qstep), slice(None, None, qstep))
+        qx, qy = X[skip], Y[skip]
+        qu, qv = U_full[skip], V_full[skip]
+        Wu, Wv = W_full[skip], Vw_full[skip]
+
+        dx = X[0,1] - X[0,0]; dy = Y[1,0] - Y[0,0]
+        ds = np.hypot(dx, dy)
+        scale = getattr(self, "quiver_scale", 0.6)
+        head_frac = getattr(self, "quiver_head_frac", 0.25)
+        shaft, head = scale * ds, head_frac * ds
+
+        # draw currents
+        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), qu.ravel(), qv.ravel()):
+            mag = np.hypot(u, v)
+            if mag < 1e-3 or np.isnan(mag):
+                continue
+            ux, uy = u/mag, v/mag
+            x1, y1 = x0 + ux*shaft, y0 + uy*shaft
+            shaft_line = pg.PlotDataItem([x0, x1], [y0, y1], pen=pg.mkPen(0, 100, 255, width=getattr(self, 'quiver_pen_width', 3)))
+            shaft_line.setZValue(150)
+            self.view.addItem(shaft_line)
+            self.quiver_items.append(shaft_line)
+            base_ang = np.arctan2(uy, ux)
+            for s in (+1, -1):
+                ang = base_ang + s * (np.pi/6)
+                hx = x1 - head * np.cos(ang)
+                hy = y1 - head * np.sin(ang)
+                head_line = pg.PlotDataItem([x1, hx], [y1, hy], pen=pg.mkPen(0, 100, 255, width=getattr(self, 'quiver_pen_width', 3)))
+                head_line.setZValue(150)
+                self.view.addItem(head_line)
+                self.quiver_items.append(head_line)
+
+        # draw winds
+        for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), Wu.ravel(), Wv.ravel()):
+            mag = np.hypot(u, v)
+            if mag < 1e-3 or np.isnan(mag):
+                continue
+            ux, uy = u/mag, v/mag
+            x1, y1 = x0 + ux*shaft, y0 + uy*shaft
+            wind_shaft = pg.PlotDataItem([x0, x1], [y0, y1], pen=pg.mkPen(160,32,240, width=getattr(self, 'quiver_pen_width', 3)))
+            wind_shaft.setZValue(151)
+            self.view.addItem(wind_shaft)
+            self.wind_quiver_items.append(wind_shaft)
+            base_ang = np.arctan2(uy, ux)
+            for s in (+1, -1):
+                ang = base_ang + s * (np.pi/6)
+                hx = x1 - head * np.cos(ang)
+                hy = y1 - head * np.sin(ang)
+                wind_head = pg.PlotDataItem([x1, hx], [y1, hy], pen=pg.mkPen(160,32,240, width=getattr(self, 'quiver_pen_width', 3)))
+                wind_head.setZValue(151)
+                self.view.addItem(wind_head)
+                self.wind_quiver_items.append(wind_head)
+
+        print("[ShipViewer] ✓ Quivers drawn")
+
     def _start_simulation(self):
         """
         Called when the user clicks 'Start Simulation'.
         Spawns agents in the core, draws ship polygons, and kicks off the timer.
         """
         print("▶ _start_simulation called")
+        
+        # Load environmental forcing if not already loaded
+        if not self.sim._env_loaded:
+            print("[ShipViewer] Loading environmental forcing before simulation start...")
+            self._load_environmental_and_quivers()
         
         # Hide AIS layer and remove plotted route
         if self.ais_item is not None:
@@ -745,7 +936,18 @@ class ship_viewer(QtWidgets.QWidget):
             poly.setPos(x, y)
             poly.setRotation(np.degrees(psi_i))
             
-        print(f"▶ tick t={self.sim.t:.2f}, pos={self.sim.pos[:,0] if self.sim.pos is not None else 'N/A'}")
+        # sample environmental at the primary ship for quick terminal diagnostics
+        try:
+            lon0, lat0 = self.sim._utm_to_ll.transform(self.sim.pos[0,0], self.sim.pos[1,0])
+            wu, wv = self.sim.wind_fn(np.array([lon0]), np.array([lat0]), datetime.now(timezone.utc))[0]
+            cu, cv = self.sim.current_fn(np.array([lon0]), np.array([lat0]), datetime.now(timezone.utc))[0]
+            w_speed = np.hypot(wu, wv); w_dir = int((np.degrees(np.arctan2(wv, wu)) + 360) % 360)
+            c_speed = np.hypot(cu, cv); c_dir = int((np.degrees(np.arctan2(cv, cu)) + 360) % 360)
+            print(f"▶ tick t={self.sim.t:.2f}, pos={self.sim.pos[:,0] if self.sim.pos is not None else 'N/A'}; "
+                  f"wind={w_speed:.2f}m/s@{w_dir}°; current={c_speed:.2f}m/s@{c_dir}°")
+        except Exception:
+            # fallback to plain tick if sampling fails
+            print(f"▶ tick t={self.sim.t:.2f}, pos={self.sim.pos[:,0] if self.sim.pos is not None else 'N/A'}")
 
         # ── Clear previous annotations ─────────────────────────────────────
         for lst in (self.rudder_items, self.heading_items):
@@ -846,23 +1048,44 @@ class ship_viewer(QtWidgets.QWidget):
         # Resample updated environmental grids
         U_full, V_full = self.sim.currents_grid(datetime.utcnow())
         W_full, Vw_full = self.sim.wind_grid(datetime.utcnow())
-        
-        # Sample & draw quivers
-        skip = (slice(None, None, 4), slice(None, None, 4))
+
+        # quiver subsampling and scaling (tunable attributes on the viewer)
+        qstep = getattr(self, "quiver_step", 2)
+        # clamp density based on current view zoom
+        try:
+            (vx0, vx1), (vy0, vy1) = self.view.viewRange()
+            view_span = max(abs(vx1 - vx0), abs(vy1 - vy0))
+            auto_step = int(min(max(view_span / (self.sim.zoom * 0.2), 1), 8))
+            qstep = max(qstep, auto_step)
+        except Exception:
+            pass
+
+        skip = (slice(None, None, qstep), slice(None, None, qstep))
         ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
         X, Y = ll2utm.transform(self.sim._quiver_lon, self.sim._quiver_lat)
         qx, qy = X[skip], Y[skip]
         qu, qv = U_full[skip], V_full[skip]
         Wu, Wv = W_full[skip], Vw_full[skip]
-        shaft, head = 100, 40  # fixed scale, or derive from spacing if needed
+        dx = X[0,1] - X[0,0]; dy = Y[1,0] - Y[0,0]
+        ds = np.hypot(dx, dy)
+        scale = getattr(self, "quiver_scale", 0.6)
+        head_frac = getattr(self, "quiver_head_frac", 0.25)
         
+        # Dynamic arrow scaling based on viewport zoom
+        view_range = self.view.viewRange()
+        view_span = max(view_range[0][1] - view_range[0][0], view_range[1][1] - view_range[1][0])
+        zoom_factor = max(0.3, min(3.0, view_span / self.sim.zoom))
+        scale *= zoom_factor
+        
+        shaft, head = scale * ds, head_frac * ds
+
         for x0, y0, u, v in zip(qx.ravel(), qy.ravel(), qu.ravel(), qv.ravel()):
             mag = np.hypot(u, v)
             if mag < 1e-3 or np.isnan(mag):
                 continue
             ux, uy = u/mag, v/mag
             x1, y1 = x0 + ux * shaft, y0 + uy * shaft
-            shaft_line = pg.PlotDataItem([x0, x1], [y0, y1], pen=pg.mkPen(0,0,255, width=2))
+            shaft_line = pg.PlotDataItem([x0, x1], [y0, y1], pen=pg.mkPen(0, 100, 255, width=getattr(self, 'quiver_pen_width', 3)))
             self.view.addItem(shaft_line)
             self.quiver_items.append(shaft_line)
             base_ang = np.arctan2(uy, ux)
@@ -870,7 +1093,7 @@ class ship_viewer(QtWidgets.QWidget):
                 ang = base_ang + s * (np.pi/6)
                 hx = x1 - head * np.cos(ang)
                 hy = y1 - head * np.sin(ang)
-                head_line = pg.PlotDataItem([x1, hx], [y1, hy], pen=pg.mkPen(0,0,255, width=2))
+                head_line = pg.PlotDataItem([x1, hx], [y1, hy], pen=pg.mkPen(0, 100, 255, width=getattr(self, 'quiver_pen_width', 3)))
                 self.view.addItem(head_line)
                 self.quiver_items.append(head_line)
         
@@ -880,7 +1103,7 @@ class ship_viewer(QtWidgets.QWidget):
                 continue
             ux, uy = u/mag, v/mag
             x1, y1 = x0 + ux * shaft, y0 + uy * shaft
-            wind_shaft = pg.PlotDataItem([x0, x1], [y0, y1], pen=pg.mkPen(128,0,128, width=2))
+            wind_shaft = pg.PlotDataItem([x0, x1], [y0, y1], pen=pg.mkPen(160,32,240, width=getattr(self, 'quiver_pen_width', 3)))
             self.view.addItem(wind_shaft)
             self.wind_quiver_items.append(wind_shaft)
             base_ang = np.arctan2(uy, ux)
@@ -888,7 +1111,7 @@ class ship_viewer(QtWidgets.QWidget):
                 ang = base_ang + s * (np.pi/6)
                 hx = x1 - head * np.cos(ang)
                 hy = y1 - head * np.sin(ang)
-                wind_head = pg.PlotDataItem([x1, hx], [y1, hy], pen=pg.mkPen(128,0,128, width=2))
+                wind_head = pg.PlotDataItem([x1, hx], [y1, hy], pen=pg.mkPen(160,32,240, width=getattr(self, 'quiver_pen_width', 3)))
                 self.view.addItem(wind_head)
                 self.wind_quiver_items.append(wind_head)
 

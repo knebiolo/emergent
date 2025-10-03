@@ -1,10 +1,12 @@
 LICENSE
 README.md
 pyproject.toml
+setup.py
 src/emergent/__init__.py
 src/emergent.egg-info/PKG-INFO
 src/emergent.egg-info/SOURCES.txt
 src/emergent.egg-info/dependency_links.txt
+src/emergent.egg-info/not-zip-safe
 src/emergent.egg-info/requires.txt
 src/emergent.egg-info/top_level.txt
 src/emergent/salmon_abm/__init__.py
@@ -14,11 +16,13 @@ src/emergent/salmon_abm/sockeye_dynamic_environment.py
 src/emergent/salmon_abm/sockeye_multiprocessing.py
 src/emergent/ship_abm/__init__.py
 src/emergent/ship_abm/ais.py
+src/emergent/ship_abm/atmospheric.py
 src/emergent/ship_abm/config.py
 src/emergent/ship_abm/enctiler.py
 src/emergent/ship_abm/ofs_loader.py
 src/emergent/ship_abm/ship_model.py
 src/emergent/ship_abm/ship_viewer.py
+src/emergent/ship_abm/ship_viewer_old.py
 src/emergent/ship_abm/simulation_core.py
 src/emergent/ship_abm/deprecated/ofs_loader_2.py
 src/emergent/ship_abm/deprecated/ofs_loader_final.py

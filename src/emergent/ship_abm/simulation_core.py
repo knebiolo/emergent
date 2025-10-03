@@ -372,14 +372,26 @@ class simulation:
             self.tc_speed = PROPULSION.get("desired_speed", 6.0)
 
         # 2) Instantiate the NOAA current sampler for *this* port
-        self.current_fn = get_current_fn(self.port_name)
-        self.wind_fn    = get_wind_fn(self.port_name)
+        # Deferred loading to avoid Qt threading issue - use load_environmental_forcing() after GUI init
+        # Start with dummy functions that return zeros
+        def _dummy_current(lon, lat, when):
+            n = len(np.atleast_1d(lon))
+            return np.zeros((n, 2))
+        def _dummy_wind(lon, lat, when):
+            n = len(np.atleast_1d(lon))
+            return np.zeros((n, 2))
+        
+        self.current_fn = _dummy_current
+        self.wind_fn = _dummy_wind
+        self._env_loaded = False
 
         
         # ------------------------------------------------------------------
-        # Build a static lon/lat grid (≈40×40) over the domain for quiver
+        # Build a static lon/lat grid (≈150×150) over the domain for quiver
         # ------------------------------------------------------------------
-        nx = ny = 40
+        # Increase resolution to provide many more quiver sampling points
+        # Note: higher values increase sampling and drawing cost; 150×150 = 22.5k samples
+        nx = ny = 150
         gx = np.linspace(minx, maxx, nx)    # in lon/lat – we still have those
         gy = np.linspace(miny, maxy, ny)
         self._quiver_lon, self._quiver_lat = np.meshgrid(gx, gy)
@@ -434,10 +446,49 @@ class simulation:
         msg = f"Vessel {idx} lost power at t={self.t:.1f}s"
         self.log_lines.insert(0, msg)
         self.log_lines = self.log_lines[: self.max_log_lines]
-        for j, txt in enumerate(self.log_text_artists):
-            txt.set_text(self.log_lines[j] if j < len(self.log_lines) else "")
-            txt.set_fontsize(12)
-            txt.set_fontfamily('serif')
+        # If the viewer has registered text artists for the log, update them.
+        artists = getattr(self, 'log_text_artists', None)
+        if artists:
+            for j, txt in enumerate(artists):
+                try:
+                    txt.set_text(self.log_lines[j] if j < len(self.log_lines) else "")
+                    txt.set_fontsize(12)
+                    txt.set_fontfamily('serif')
+                except Exception:
+                    # be defensive: ignore any drawing errors from GUI objects
+                    pass
+
+    def load_environmental_forcing(self):
+        """
+        Load environmental forcing data (currents and winds) from NOAA sources.
+        This should be called AFTER Qt GUI is fully initialized to avoid threading conflicts.
+        Safe to call multiple times - only loads once.
+        """
+        if self._env_loaded:
+            print("[Simulation] Environmental forcing already loaded, skipping")
+            return
+        
+        print(f"[Simulation] Loading environmental forcing for {self.port_name}...")
+        try:
+            from .ofs_loader import get_current_fn
+            self.current_fn = get_current_fn(self.port_name)
+            print("[Simulation] ✓ Ocean currents loaded")
+        except Exception as e:
+            print(f"[Simulation] ✗ Failed to load currents: {e}")
+            print(f"[Simulation]   Falling back to zero currents")
+            # Keep the dummy function
+        
+        try:
+            from .atmospheric import get_wind_fn
+            self.wind_fn = get_wind_fn(self.port_name)
+            print("[Simulation] ✓ Winds loaded")
+        except Exception as e:
+            print(f"[Simulation] ✗ Failed to load winds: {e}")
+            print(f"[Simulation]   Falling back to zero winds")
+            # Keep the dummy function
+        
+        self._env_loaded = True
+        print("[Simulation] ✓ Environmental forcing ready!")
 
     def get_ais_heatmap(self,
                         date_range: tuple[date,date],
@@ -632,7 +683,10 @@ class simulation:
         """
         # a) fetch catalog & select cells at all resolutions to ensure full coverage
         self.load_enc_catalog(enc_catalog_url, verbose=verbose)
-        resolutions = ['best', 'medium']#, 'low']
+        # Use only 'medium' for faster loading, or 'best' for highest detail
+        # Using both creates too many charts and slows down GUI initialization
+        resolutions = ['medium']  # was: ['best', 'medium']
+        print(f"[ENC] Using resolutions: {resolutions}")  # DEBUG
         cells = []
         seen_ids = set()
         for res in resolutions:
@@ -646,17 +700,31 @@ class simulation:
                     cells.append(hit)
     
         self.enc_data = {}
+        
+        # Use persistent cache directory instead of temp
+        cache_root = Path.home() / '.emergent_cache' / 'enc'
+        cache_root.mkdir(parents=True, exist_ok=True)
+        if verbose:
+            print(f"[ENC] Cache directory: {cache_root}")
     
         for cell in cells:
-            if verbose:
-                print(f"Fetching ENC cell: {cell['url']}")
-            # create a unique temp dir so files from each cell don't clobber each other
-            extract_dir = tempfile.mkdtemp(prefix=f"enc_{cell.get('cell_id','')}_" )
-            cell_dir = self.fetch_and_extract_enc(
-                cell['url'],
-                extract_to=extract_dir,
-                verbose=verbose
-            )
+            cell_id = cell.get('cell_id', 'unknown')
+            cell_cache_dir = cache_root / cell_id
+            
+            # Check if already cached
+            if cell_cache_dir.exists() and list(cell_cache_dir.glob("*.000")):
+                if verbose:
+                    print(f"[ENC] Using cached: {cell_id}")
+                cell_dir = cell_cache_dir
+            else:
+                if verbose:
+                    print(f"Fetching ENC cell: {cell['url']}")
+                cell_cache_dir.mkdir(parents=True, exist_ok=True)
+                cell_dir = self.fetch_and_extract_enc(
+                    cell['url'],
+                    extract_to=str(cell_cache_dir),
+                    verbose=verbose
+                )
             # only iterate the true S-57 base (.000) files; skip .001 updates
             enc_files = list(Path(cell_dir).glob("*.000"))
             
