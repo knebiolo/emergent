@@ -117,6 +117,18 @@ SHIP_PHYSICS = {
     # Drag Stuff
     'drag_coeff': 0.0012
 }
+# Optional aerodynamic tuning (per-ship or global defaults)
+# A_air_ref: reference projected area (m^2) exposed to crosswind. If not set,
+#   the ship_model computes a default from length*beam*0.7.
+# Cd_air: aerodynamic drag coefficient (dimensionless)
+# wind_proj_baseline/scale: projection factor = baseline + scale * |sin(beta)|
+#   where beta is wind incidence angle relative to ship heading.
+SHIP_AERO_DEFAULTS = {
+    'A_air_ref': None,        # None -> use length*beam*0.7
+    'Cd_air': 1.0,
+    'wind_proj_baseline': 0.2,
+    'wind_proj_scale': 0.8,
+}
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 2) PID CONTROLLER GAINS (for heading and/or speed control)
@@ -128,7 +140,8 @@ CONTROLLER_GAINS = {
     # Integral gain for heading controller (set to 0 if no steady-state offset correction is needed)
     "Ki": 0.02,
     # Derivative gain for heading controller (damping term)
-    "Kd": 30.0,
+    # lowered from 30.0 to reduce aggressive damping spikes seen at timestep boundaries
+    "Kd": 12.0,
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -156,16 +169,40 @@ ADVANCED_CONTROLLER = {
     # Prediction horizon for dead‐band (seconds).  If |err_pred| < trim_band, we
     # set rudder=0 early to avoid chatter or overshoot.  Typical values: tens to
     # thousands of seconds depending on your dynamics.
-    "lead_time": 25.0,  #8000
+    # Reduced lead_time to avoid over-aggressive predictive deadzone that forced
+    # rudder to zero on short transients. 5s is a conservative choice to start.
+    "lead_time": 5.0,
 
     # Dead‐zone half‐angle (degrees).  Any commanded rudder smaller than this
     # in magnitude is forced to zero to prevent constant micro‐twitching.
-    "trim_band_deg": 0.03,  
+    # Slightly increase trim_band to prevent micro-twitching while still
+    # allowing small corrections. Raised from 0.03° to 0.3°.
+    "trim_band_deg": 0.3,  
 
     # Early‐release band (degrees).  Once |predicted_error| < release_band_deg,
     # rudder is released (forced to zero), even if commanded > trim_band_deg.
     # This widens the “dead‐zone” as heading error shrinks.  Typical: 3–10°.
-    "release_band_deg": 10.0,  #5.0
+    # Keep release band moderate to allow release when errors are small.
+    "release_band_deg": 8.0,
+    # Dead-reckoning tuning: how aggressively to correct for current drift
+    # sensitivity: fraction of U (through-water speed) at which full correction is applied
+    "dead_reck_sensitivity": 0.25,
+    # maximum heading correction (degrees) applied by dead-reckoning
+    "dead_reck_max_corr_deg": 30.0,
+    # When True, the simulation-level controller is the canonical source of
+    # rudder commands. Per-ship `pid_control()` will return the last
+    # simulation-commanded rudder unless explicitly asked to run locally.
+    "use_simulation_controller": True,
+}
+
+# Enable verbose PID internals printing when True (useful for headless debugging)
+PID_DEBUG = False
+
+# Simulation-level PID tracing: when True, the simulation will emit a CSV of
+# per-step PID internals for offline QC/tuning. Path may be None to auto-generate.
+PID_TRACE = {
+    'enabled': False,
+    'path': None
 }
 
 # ───────────────────────────────────────────────────────────────────────────────

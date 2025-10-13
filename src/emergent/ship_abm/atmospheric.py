@@ -124,45 +124,175 @@ def build_wind_sampler(ds: xr.Dataset):
 
     u_vals = ds.u10.values
     v_vals = ds.v10.values
+    # Diagnostic: print u10/v10 shapes and dataset coordinate shapes
+    try:
+        print(f"[wind_sampler][diag] u10.shape={u_vals.shape} v10.shape={v_vals.shape}")
+        coord_info = {name: getattr(coord, 'values', None).shape if getattr(coord, 'values', None) is not None else None for name, coord in ds.coords.items()}
+        print(f"[wind_sampler][diag] ds.coords shapes: {coord_info}")
+        print(f"[wind_sampler][diag] ds.u10.dims={ds.u10.dims}")
+    except Exception:
+        pass
     # print("u10:", u_vals)
     # print("v10:", v_vals)
 
-    # Standardize to 3D: (time, y, x) or (time, station)
-    if u_vals.ndim == 2 and "time" in ds.u10.dims:  # (time, station)
-        t_axis = ds.time.values.astype("datetime64[s]").astype(np.int64)
-    elif u_vals.ndim == 2:  # (lat, lon)
-        u_vals = u_vals[None, ...]
-        v_vals = v_vals[None, ...]
-        t_axis = np.array([np.datetime64(ds.time.values[0], "s").astype(np.int64)])
-    elif u_vals.ndim == 3:  # (time, lat, lon)
-        t_axis = ds.time.values.astype("datetime64[s]").astype(np.int64)
-    else:
-        raise ValueError(f"Unsupported wind array shape: {u_vals.shape}")
+    # Determine which dimension represents time. Datasets vary: some use
+    # 'time', others use 'ocean_time' etc. We pick the most likely candidate
+    # (a coord with 'time' in its name and length>1). Then normalize u_vals
+    # to shape (time, spatial...) for later flattening.
+    dims = ds.u10.dims
+    # candidate time dims: prefer any dim whose coord name contains 'time' and has length>1
+    time_dim = None
+    for d in dims:
+        if d in ds.coords and 'time' in d.lower() and getattr(ds.coords[d], 'size', 0) > 1:
+            time_dim = d
+            break
+    # fallback to 'time' coord if present
+    if time_dim is None and 'time' in ds.coords and getattr(ds.coords['time'], 'size', 0) > 1:
+        time_dim = 'time'
+    # final fallback: first dim
+    if time_dim is None:
+        time_dim = dims[0]
+
+    # build t_axis from the chosen time_dim if it contains datetimes
+    t_axis = None
+    try:
+        t_axis = ds.coords[time_dim].values.astype('datetime64[s]').astype(np.int64)
+    except Exception:
+        try:
+            t_axis = ds.coords[time_dim].values
+        except Exception:
+            t_axis = None
+
+    # Ensure u_vals has a leading time axis at position 0 matching time_dim
+    # Move the time_dim to axis 0 then reshape spatial dims later.
+    if dims[0] != time_dim:
+        # move axis
+        axis_idx = dims.index(time_dim)
+        u_vals = np.moveaxis(u_vals, axis_idx, 0)
+        v_vals = np.moveaxis(v_vals, axis_idx, 0)
+        dims = (time_dim,) + tuple(d for d in dims if d != time_dim)
 
     # ─────────────────────────────────────────────────────────────
     # KDTree Interpolation for Unstructured 1D station data
-    # ─────────────────────────────────────────────────────────────
-    if "station" in ds.dims or "node" in ds.dims or u_vals.shape[-1] == ds.lon.size:
+    # Only use KDTree when the dataset is truly unstructured (lon/lat are 1-D
+    # station/node coordinates) or explicitly labeled as 'station'/'node'.
+    # If lon/lat are 2-D arrays (structured curvilinear grid), fall through
+    # to the structured-grid interpolator below.
+    if ("station" in ds.dims) or ("node" in ds.dims) or ("lon" in ds and ds.lon.ndim == 1):
         print("[wind_sampler] using KDTree nearest-neighbor sampling (stations)")
 
         # Get dimension name aligned with u10 shape
         spatial_dim = ds.u10.dims[-1]
 
-        try:
-            # Grab properly aligned coordinates from the u10 variable itself
-            lon = ds.u10.coords["lon"]
-            lat = ds.u10.coords["lat"]
-            # print("LON:", lon)
-            # print("LAT:", lat)
-        except KeyError:
-            raise ValueError(f"'u10' variable lacks aligned 'lon'/'lat' coordinates.")
+        # Attempt to find coordinates that align with the spatial shape of u_vals
+        lon = None
+        lat = None
+        spatial_shape = u_vals.shape[1:]
+        # Look for coords attached to u10 that have the same spatial shape
+        for name, coord in getattr(ds.u10, 'coords', {}).items():
+            try:
+                if hasattr(coord.values, 'shape') and coord.values.shape == spatial_shape:
+                    if 'lon' in name.lower() or 'x' in name.lower():
+                        lon = coord
+                    if 'lat' in name.lower() or 'y' in name.lower():
+                        lat = coord
+            except Exception:
+                continue
 
-        # Defensive check
-        if lon.size != u_vals.shape[-1]:
-            raise ValueError(f"Mismatch: lon size = {lon.size}, u10 shape = {u_vals.shape}")
+        # If we didn't find explicit lon/lat coords attached to u10, try the dataset-level lon/lat
+        if lon is None or lat is None:
+            if 'lon' in ds and 'lat' in ds:
+                # accept dataset-level lon/lat even if their shapes don't exactly
+                # match the u10 spatial dims — we'll try to align/transposed below.
+                lon = ds.lon
+                lat = ds.lat
+            else:
+                # last resort: try any coords in dataset matching spatial shape
+                for name, coord in ds.coords.items():
+                    try:
+                        if hasattr(coord.values, 'shape') and coord.values.shape == spatial_shape:
+                            if lon is None:
+                                lon = coord
+                            elif lat is None:
+                                lat = coord
+                    except Exception:
+                        continue
 
-        xy = np.column_stack((lon.values, lat.values))
+        if lon is None or lat is None:
+            raise ValueError(f"'u10' variable lacks aligned lon/lat coordinates. Tried spatial_shape={spatial_shape}")
+
+        # Flatten spatial dims (all dims after the leading time_dim) into a
+        # single spatial axis. After the moveaxis above, u_vals shape is
+        # (time, spatial_dim1, spatial_dim2, ...). We flatten the trailing
+        # axes into a single (time, npoints) array.
+        if u_vals.ndim >= 2:
+            u_flat = u_vals.reshape((u_vals.shape[0], -1))
+            v_flat = v_vals.reshape((v_vals.shape[0], -1))
+        else:
+            u_flat = u_vals.reshape((u_vals.shape[0], -1))
+            v_flat = v_vals.reshape((v_vals.shape[0], -1))
+
+        # Align lon/lat to flattened u/v. lon/lat may be 1-D (separable axes)
+        # or 2-D (curvilinear). Create flattened coordinate pairs accordingly.
+        # Align lon/lat to flattened u/v. lon/lat may be 1-D (separable axes),
+        # 2-D (curvilinear grid), or transposed relative to u/v. Handle common
+        # cases by transposing when necessary.
+        lv = getattr(lon, 'values', None)
+        la = getattr(lat, 'values', None)
+        if lv is None or la is None:
+            raise ValueError("lon/lat coordinates have no .values")
+
+        if lv.ndim == 1 and la.ndim == 1:
+            # If lon/lat lengths match the flattened u/v spatial length, they
+            # represent station coordinate pairs. If their product matches the
+            # flattened length, they are separable axes (meshgrid). Otherwise
+            # prefer treating them as station pairs when lon.size == lat.size.
+            nspat = u_flat.shape[1]
+            if lv.size == nspat:
+                lon_flat = lv
+                lat_flat = la
+            elif lv.size * la.size == nspat:
+                lon2d, lat2d = np.meshgrid(lv, la)
+                lon_flat = lon2d.ravel()
+                lat_flat = lat2d.ravel()
+            elif lv.size == la.size:
+                lon_flat = lv
+                lat_flat = la
+            else:
+                # fallback: ravel both and hope for the best
+                lon_flat = lv.ravel()
+                lat_flat = la.ravel()
+        elif lv.ndim == 2 and lv.shape == spatial_shape:
+            lon_flat = lv.ravel()
+            lat_flat = la.ravel()
+        elif lv.ndim == 2 and lv.T.shape == spatial_shape:
+            lon_flat = lv.T.ravel()
+            lat_flat = la.T.ravel()
+        else:
+            # Last resort: just ravel whatever we have and hope it aligns
+            lon_flat = lv.ravel()
+            lat_flat = la.ravel()
+
+        # Defensive check: number of flattened spatial points should match the flattened u/v arrays
+        if lon_flat.size != u_flat.shape[1]:
+            raise ValueError(f"Mismatch: lon size = {lon_flat.size}, u10 flattened shape = {u_flat.shape}")
+
+        xy = np.column_stack((lon_flat, lat_flat))
         tree = cKDTree(xy)
+        # Diagnostic: print basic stats about the native u/v arrays so we can
+        # detect empty or all-zero data early. This helps debug station-based
+        # OFS files that end up producing zero winds in the viewer.
+        try:
+            u0 = u_flat[0]
+            v0 = v_flat[0]
+            print(f"[wind_sampler][debug] native u: shape={u_vals.shape} min={np.nanmin(u0):.6f} max={np.nanmax(u0):.6f} nonzero={int(np.count_nonzero(u0))}")
+            print(f"[wind_sampler][debug] native v: shape={v_vals.shape} min={np.nanmin(v0):.6f} max={np.nanmax(v0):.6f} nonzero={int(np.count_nonzero(v0))}")
+            print(f"[wind_sampler][debug] sample lon/lat pts (first 5): {xy[:5].tolist()}")
+        except Exception:
+            # non-fatal; continue
+            pass
+
+        warned = {"once": False}
 
         def sample(lon, lat, when):
             t_idx = 0
@@ -170,11 +300,24 @@ def build_wind_sampler(ds: xr.Dataset):
                 t_val = np.int64(np.datetime64(when, "s"))
                 t_idx = np.abs(t_axis - t_val).argmin()
 
-            u_slice = u_vals[t_idx]
-            v_slice = v_vals[t_idx]
+            u_slice = u_flat[t_idx]
+            v_slice = v_flat[t_idx]
 
             _, idx = tree.query(np.column_stack((lon, lat)), k=1)
-            return np.column_stack((u_slice[idx], v_slice[idx]))
+            out = np.column_stack((u_slice[idx], v_slice[idx]))
+
+            # One-time warning if this sampler is returning all zeros — helps
+            # distinguish between genuinely calm conditions and a loader bug.
+            if not warned["once"]:
+                if np.allclose(out, 0.0):
+                    warned["once"] = True
+                    try:
+                        sample_idx = idx[:10]
+                        print(f"[wind_sampler][warn] sampler returned all zeros for t_idx={t_idx}.\n first_query_idxs={sample_idx.tolist()}\n first_u={u_slice[sample_idx].tolist()}\n first_v={v_slice[sample_idx].tolist()}")
+                    except Exception:
+                        print(f"[wind_sampler][warn] sampler returned all zeros for t_idx={t_idx} (could not print samples)")
+
+            return out
 
         return sample
 

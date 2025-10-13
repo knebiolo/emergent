@@ -365,8 +365,9 @@ phase_S2: float = 0.0) -> Callable:
     return current
 
 def get_current_fn(
-port: str,
-start: dt.datetime | None = None,
+    port: str,
+    start: dt.datetime | None = None,
+    land_gdf=None,
 ) -> Callable[[np.ndarray, np.ndarray, dt.datetime], np.ndarray]:
     """Return f(lon, lat, when)->(N,2) m/s.
     Tries regional OFS → RTOFS, then falls back to a tidal proxy.
@@ -428,6 +429,12 @@ start: dt.datetime | None = None,
                 u = u[0]
                 v = v[0]
             return np.column_stack((u, v))
+        # annotate sampler for downstream resampling/diagnostics
+        try:
+            sample._native = 'structured'
+            sample._lon_0360 = lon_0360
+        except Exception:
+            pass
         return sample
     
     # ROMS curvilinear C-grid: Use NearestNDInterpolator (FAST, no Delaunay)
@@ -458,7 +465,7 @@ start: dt.datetime | None = None,
         # U and V are on staggered C-grids - build separate trees for each
         lon_u = ds["lon_u"].values.ravel() if "lon_u" in ds else ds["lon_rho"].values.ravel()
         lat_u = ds["lat_u"].values.ravel() if "lat_u" in ds else ds["lat_rho"].values.ravel()
-        lon_v = ds["lon_v"].values.ravel() if "lon_v" in ds else ds["lat_rho"].values.ravel()
+        lon_v = ds["lon_v"].values.ravel() if "lon_v" in ds else ds["lon_rho"].values.ravel()
         lat_v = ds["lat_v"].values.ravel() if "lat_v" in ds else ds["lat_rho"].values.ravel()
         
         # Get velocity arrays
@@ -482,9 +489,46 @@ start: dt.datetime | None = None,
         print(f"[ofs_loader] U: range=[{u_valid.min():.3f}, {u_valid.max():.3f}] m/s")
         print(f"[ofs_loader] V: range=[{v_valid.min():.3f}, {v_valid.max():.3f}] m/s")
         
+        # Optionally filter out points that lie on land (ENC LNDARE) so
+        # nearest-neighbour picks do not snap to inland grid points.
+        try:
+            if land_gdf is not None:
+                from shapely.geometry import Point
+                from shapely.ops import unary_union
+                from shapely.prepared import prep
+
+                land_union = unary_union(list(getattr(land_gdf, 'geometry', [])))
+                land_prep = prep(land_union)
+
+                u_pts_all = np.column_stack((lon_u_valid, lat_u_valid))
+                v_pts_all = np.column_stack((lon_v_valid, lat_v_valid))
+
+                u_on_land = np.array([land_prep.contains(Point(xy)) for xy in u_pts_all])
+                v_on_land = np.array([land_prep.contains(Point(xy)) for xy in v_pts_all])
+
+                u_keep = ~u_on_land
+                v_keep = ~v_on_land
+
+                # Apply masks, but fall back to original arrays if filtering removes all points
+                if np.count_nonzero(u_keep) > 0:
+                    u_pts = u_pts_all[u_keep]
+                    u_valid = u_valid[u_keep]
+                else:
+                    print("[ofs_loader] WARN: land filtering removed all U-grid points — keeping originals")
+                    u_pts = u_pts_all
+
+                if np.count_nonzero(v_keep) > 0:
+                    v_pts = v_pts_all[v_keep]
+                    v_valid = v_valid[v_keep]
+                else:
+                    print("[ofs_loader] WARN: land filtering removed all V-grid points — keeping originals")
+                    v_pts = v_pts_all
+        except Exception:
+            # If anything goes wrong with filtering, fall back to unfiltered points
+            u_pts = np.column_stack((lon_u_valid, lat_u_valid))
+            v_pts = np.column_stack((lon_v_valid, lat_v_valid))
+
         # Build separate KDTrees for U and V grids (FAST!)
-        u_pts = np.column_stack((lon_u_valid, lat_u_valid))
-        v_pts = np.column_stack((lon_v_valid, lat_v_valid))
         u_tree = cKDTree(u_pts)
         v_tree = cKDTree(v_pts)
         
@@ -504,7 +548,16 @@ start: dt.datetime | None = None,
             v_vals = v_valid[v_indices]
             
             return np.column_stack((u_vals, v_vals))
-        
+        # annotate sampler with native grids and valid data for resampling
+        try:
+            sample._native = 'roms'
+            sample._u_pts = u_pts
+            sample._v_pts = v_pts
+            sample._u_valid = u_valid
+            sample._v_valid = v_valid
+        except Exception:
+            pass
+
         return sample
     
     # Unstructured FVCOM grid: use fast nearest-neighbor (NO slow Delaunay!)
@@ -528,7 +581,30 @@ start: dt.datetime | None = None,
         lon_coords = np.where(lon_coords < 0.0, lon_coords + 360.0, lon_coords)
         
     pts = np.column_stack((lon_coords, lat_coords))
-    tree = cKDTree(pts)
+
+    # Optionally filter out points that lie on land (if ENC LNDARE provided)
+    try:
+        if land_gdf is not None:
+            from shapely.geometry import Point
+            from shapely.ops import unary_union
+            from shapely.prepared import prep
+
+            land_union = unary_union(list(getattr(land_gdf, 'geometry', [])))
+            land_prep = prep(land_union)
+
+            on_land = np.array([land_prep.contains(Point(xy)) for xy in pts])
+            keep = ~on_land
+            if np.count_nonzero(keep) > 0:
+                valid_pts = pts[keep]
+            else:
+                print("[ofs_loader] WARN: land filtering removed all FVCOM points — keeping originals")
+                valid_pts = pts
+        else:
+            valid_pts = pts
+    except Exception:
+        valid_pts = pts
+
+    tree = cKDTree(valid_pts)
     
     # Extract surface layer from 3D/4D data
     u_data = ds["u"]
@@ -564,6 +640,27 @@ start: dt.datetime | None = None,
     
     # Build fast KDTree (no Delaunay triangulation!)
     valid_pts = np.column_stack((lon_valid, lat_valid))
+
+    # If land_gdf was provided earlier for the FVCOM/unstructured branch, try to filter
+    try:
+        if land_gdf is not None:
+            from shapely.geometry import Point
+            from shapely.ops import unary_union
+            from shapely.prepared import prep
+
+            land_union = unary_union(list(getattr(land_gdf, 'geometry', [])))
+            land_prep = prep(land_union)
+            on_land = np.array([land_prep.contains(Point(xy)) for xy in valid_pts])
+            keep = ~on_land
+            if np.count_nonzero(keep) > 0:
+                valid_pts = valid_pts[keep]
+                u_valid = u_valid[keep]
+                v_valid = v_valid[keep]
+            else:
+                print("[ofs_loader] WARN: land filtering removed all valid FVCOM points — keeping originals")
+    except Exception:
+        pass
+
     valid_tree = cKDTree(valid_pts)
     
     print(f"[ofs_loader] ✓ Built FAST nearest-neighbor interpolator")
@@ -583,7 +680,15 @@ start: dt.datetime | None = None,
         u_vals = u_valid[indices]
         v_vals = v_valid[indices]
         return np.column_stack((u_vals, v_vals))
-    
+    # annotate sampler for downstream resampling/diagnostics
+    try:
+        sample._native = 'unstructured'
+        sample._valid_pts = valid_pts
+        sample._u_valid = u_valid
+        sample._v_valid = v_valid
+    except Exception:
+        pass
+
     return sample
 
     return sample

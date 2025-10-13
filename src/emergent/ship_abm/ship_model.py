@@ -4,6 +4,7 @@ from emergent.ship_abm.config import SHIP_PHYSICS, \
         ADVANCED_CONTROLLER, \
             COLLISION_AVOIDANCE, \
                 PROPULSION
+from emergent.ship_abm.config import PID_DEBUG
 
 class ship:
     """
@@ -85,8 +86,20 @@ class ship:
         self.Ydelta = SHIP_PHYSICS['Ydelta']
         self.Kdelta = SHIP_PHYSICS['Kdelta']  
         self.Ndelta = SHIP_PHYSICS['Ndelta']
-        self.max_rudder = np.radians(SHIP_PHYSICS["max_rudder"])
-        self.max_rudder_rate = np.radians(SHIP_PHYSICS["max_rudder_rate"])
+        # SHIP_PHYSICS may contain values already converted to radians in some configs,
+        # so be defensive: if the stored value is plausibly in degrees (> 2π) convert,
+        # otherwise assume it's already in radians and use as-is.
+        raw_max_rudder = float(SHIP_PHYSICS.get("max_rudder", 0.0))
+        if abs(raw_max_rudder) > 2 * np.pi:
+            self.max_rudder = np.deg2rad(raw_max_rudder)
+        else:
+            self.max_rudder = raw_max_rudder
+
+        raw_max_rudder_rate = float(SHIP_PHYSICS.get("max_rudder_rate", 0.0))
+        if abs(raw_max_rudder_rate) > 2 * np.pi:
+            self.max_rudder_rate = np.deg2rad(raw_max_rudder_rate)
+        else:
+            self.max_rudder_rate = raw_max_rudder_rate
         self.smoothed_rudder = np.zeros(n)
         self.prev_rudder = np.zeros(n)
         self.rudder_tau = 1.0
@@ -111,6 +124,9 @@ class ship:
         self.trim_band_deg    = np.radians(ADVANCED_CONTROLLER["trim_band_deg"])
         self.release_band_deg = np.radians(ADVANCED_CONTROLLER["release_band_deg"])
         self._deadzone_off_state = np.zeros(self.n, dtype=bool)
+        # dead-reckoning tuning (from config)
+        self.dead_reck_sensitivity = ADVANCED_CONTROLLER.get('dead_reck_sensitivity', 0.25)
+        self.dead_reck_max_corr_deg = ADVANCED_CONTROLLER.get('dead_reck_max_corr_deg', 30.0)
     
         # speed & propulsion settings
         init_sp = PROPULSION['initial_speed']
@@ -132,6 +148,11 @@ class ship:
         self.desired_speed = np.full(n, PROPULSION['desired_speed'])
         self.cruise_speed  = self.desired_speed.copy()
         self.max_speed     = np.full(n, PROPULSION['max_speed'])
+        # maximum reverse speed (positive magnitude) – default to 30% of max_speed
+        try:
+            self.max_reverse_speed = 0.3 * np.array(self.max_speed)
+        except Exception:
+            self.max_reverse_speed = 0.3 * PROPULSION['max_speed']
         self.rho = PROPULSION['rho']
         self.K_T = PROPULSION['K_T']
         self.max_rpm = PROPULSION['max_rpm']
@@ -249,23 +270,55 @@ class ship:
         u_e = u*np.cos(psi) - v*np.sin(psi)
         v_e = u*np.sin(psi) + v*np.cos(psi)
 
-        def _force(rel_vec, rho, Cd, A):
+        def _force(rel_vec, rho, Cd, A_override, psi_local, baseA):
+            # rel_vec: (2,) vector in Earth frame
             mag   = np.hypot(rel_vec[0], rel_vec[1])
-            mag   = np.where(mag < 1e-6, 1e-6, mag)          # avoid /0
+            mag   = mag if mag >= 1e-6 else 1e-6          # avoid /0 (scalar)
             dir_x = rel_vec[0] / mag
             dir_y = rel_vec[1] / mag
-            F     = 0.5 * rho * Cd * A * mag**2              # scalar
-            Fx_e, Fy_e = F*dir_x, F*dir_y                    # Earth frame
+            # compute relative wind angle in Earth frame, then incidence vs ship heading
+            rel_angle = np.arctan2(rel_vec[1], rel_vec[0])  # global angle
+            beta = (rel_angle - psi_local + np.pi) % (2*np.pi) - np.pi
+            # projection factor: baseline + scale*|sin(beta)| → beam-on maximized
+            try:
+                from emergent.ship_abm.config import SHIP_AERO_DEFAULTS
+                baseline = SHIP_AERO_DEFAULTS.get('wind_proj_baseline', 0.2)
+                scale = SHIP_AERO_DEFAULTS.get('wind_proj_scale', 0.8)
+            except Exception:
+                baseline, scale = 0.2, 0.8
+            proj = baseline + scale * abs(np.sin(beta))
+            A_proj = (A_override if (A_override is not None) else baseA) * proj
+            F     = 0.5 * rho * Cd * A_proj * mag**2              # scalar
+            Fx_e, Fy_e = F*dir_x, F*dir_y                        # Earth frame
             # rotate to body frame (surge = +Xfwd, sway = +Yport)
-            X_b =  Fx_e*np.cos(psi) + Fy_e*np.sin(psi)
-            Y_b = -Fx_e*np.sin(psi) + Fy_e*np.cos(psi)
+            X_b =  Fx_e*np.cos(psi_local) + Fy_e*np.sin(psi_local)
+            Y_b = -Fx_e*np.sin(psi_local) + Fy_e*np.cos(psi_local)
             return np.vstack([X_b, Y_b])
 
         rel_wind    = wind_vec    - np.vstack([u_e, v_e])
         rel_current = current_vec - np.vstack([u_e, v_e])
 
-        wind_force    = _force(rel_wind,    self.rho_air, self.Cd_air,   self.A_air)
-        current_force = _force(rel_current, self.rho,     self.Cd_water, self.A)
+        # allow per-ship aero overrides from config; default to instance attributes
+        try:
+            from emergent.ship_abm.config import SHIP_AERO_DEFAULTS
+            A_ref = SHIP_AERO_DEFAULTS.get('A_air_ref', None) or None
+            Cd_air = SHIP_AERO_DEFAULTS.get('Cd_air', self.Cd_air)
+        except Exception:
+            A_ref = None
+            Cd_air = self.Cd_air
+
+        # compute per-ship wind force: vectorized over ships
+        nships = rel_wind.shape[1]
+        wind_force_cols = []
+        current_force_cols = []
+        for i in range(nships):
+            wf = _force(rel_wind[:, i], self.rho_air, Cd_air, A_ref, psi[i], self.A_air)
+            cf = _force(rel_current[:, i], self.rho, self.Cd_water, None, psi[i], self.A)
+            wind_force_cols.append(wf)
+            current_force_cols.append(cf)
+
+        wind_force = np.hstack(wind_force_cols)
+        current_force = np.hstack(current_force_cols)
         return wind_force, current_force      # shape (2, n) each
     
     def coriolis_matrix(self, u, v):
@@ -323,25 +376,49 @@ class ship:
         attract = self.compute_attractive_force(positions, goals_arr)
 
         # ------------------------------------------------------------------
-        # DEAD-RECKONING : subtract drift to get required *water-relative*
-        #                  velocity vector that will yield the same COG.
+        # DEAD-RECKONING : compute a conservative correction for drift
         # ------------------------------------------------------------------
         if current_vec is not None:
-            # desired ground-track unit vector
-            cog_dir = attract / np.linalg.norm(attract, axis=0, keepdims=True)
+            # desired ground-track unit vector (safe divide)
+            mag_attr = np.linalg.norm(attract, axis=0, keepdims=True)
+            cog_dir = np.divide(attract, mag_attr, out=np.zeros_like(attract), where=mag_attr>0)
 
-            # pick whatever speed controller already wants (vectorised)
+            # base heading (without drift correction)
+            hd_base = np.arctan2(cog_dir[1], cog_dir[0])
+
+            # pick the speed controller's demanded through-ground speed
             sog_cmd = np.array(self.desired_speed, copy=True)
 
-            # required through-water velocity = V_gnd  -  current
-            v_req = sog_cmd * cog_dir - current_vec
+            # compute perpendicular component of current+wind relative to track
+            perp = np.vstack([-cog_dir[1, :], cog_dir[0, :]])
+            V_perp = (current_vec * perp).sum(axis=0)
 
-            # if we happen to be *with* the current and v_req→0, give a nudge
-            mask = np.linalg.norm(v_req, axis=0) < 1e-6
-            v_req[:, mask] = cog_dir[:, mask] * 1e-3
+            # Predict lateral offset over lead_time (more stable than instant asin correction)
+            lead_t = getattr(self, 'lead_time', 5.0)
+            lateral_offset = V_perp * lead_t
 
-            # new heading is direction of v_req
-            hd = np.arctan2(v_req[1], v_req[0])
+            # forward distance over which we expect to close toward waypoint
+            U = np.maximum(sog_cmd, 1e-3)
+            forward_dist = U * lead_t
+
+            # correction angle (radians) from lateral offset using atan2(lateral, forward)
+            corr = np.arctan2(lateral_offset, forward_dist + 1e-9)
+
+            # clamp maximum correction to avoid wild headings when currents are uncertain
+            max_corr_deg = getattr(self, 'dead_reck_max_corr_deg', 30.0)
+            max_corr_rad = np.deg2rad(max_corr_deg)
+            corr = np.clip(corr, -max_corr_rad, max_corr_rad)
+
+            # compute a corrected heading per-agent
+            hd_corrected = hd_base - corr
+
+            # Blend between no-correction and corrected heading based on current strength
+            current_mag = np.linalg.norm(current_vec, axis=0)
+            sensitivity = getattr(self, 'dead_reck_sensitivity', 0.25)
+            beta = np.clip(current_mag / (sensitivity * U), 0.0, 1.0)
+
+            # final heading: smooth blend (handles vector shapes)
+            hd = (1.0 - beta) * hd_base + beta * hd_corrected
         else:
             # original behaviour: ignore drift
             hd = np.arctan2(attract[1], attract[0])
@@ -355,6 +432,17 @@ class ship:
         """
         P-I-D with gain scheduling, anti-windup, dead-band, and rate-limit.
         """
+        # If the simulation-level controller is canonical, don't run the
+        # per-ship PID (it would duplicate integrator state). Instead return
+        # the previously commanded rudder (set by simulation) as a fallback.
+        try:
+            from emergent.ship_abm.config import ADVANCED_CONTROLLER
+            if ADVANCED_CONTROLLER.get('use_simulation_controller', False):
+                # return the most recently stored rudder (vectorized)
+                return self.prev_rudder
+        except Exception:
+            pass
+
         # 1) heading error normalized to [-π, π] (flipped sign so positive error → starboard turn)
         err = (hd - psi + np.pi) % (2*np.pi) - np.pi
         #err = (psi - hd + np.pi) % (2*np.pi) - np.pi
@@ -391,10 +479,25 @@ class ship:
         # 4) compute raw command *on the predicted error*,
         #    so P (and optionally D) act early
         raw = Kp_eff * err_pred + self.Ki * self.integral + self.Kd * derr
-        
-        # convert bands to radians
-        release_rad = np.radians(self.release_band_deg)
-        trim_rad    = np.radians(self.trim_band_deg)
+
+        # Optional debug: print internals for diagnosing control transients
+        if PID_DEBUG:
+            try:
+                # print a compact per-agent summary (handles n=1 or vectorized)
+                for idx in range(self.n):
+                    print(f"[PID] idx={idx} err={np.degrees(err[idx]):+.3f}deg "
+                          f"err_pred={np.degrees(err_pred[idx]):+.3f}deg "
+                          f"P={np.degrees(Kp_eff[idx]*err_pred[idx]) if hasattr(Kp_eff, '__iter__') else np.degrees(Kp_eff*err_pred[idx]):+.3f}deg "
+                          f"I={np.degrees(self.integral[idx]*self.Ki):+.3f}deg "
+                          f"D={np.degrees(self.Kd*derr[idx]):+.3f}deg "
+                          f"raw_deg={np.degrees(raw[idx]):+.3f}deg")
+            except Exception:
+                # be permissive: if shapes don't match, print scalar-friendly line
+                print(f"[PID] err={np.degrees(err):+.3f} err_pred={np.degrees(err_pred):+.3f} raw_deg={np.degrees(raw):+.3f}")
+
+        # release_band_deg and trim_band_deg were converted to radians in __init__
+        release_rad = self.release_band_deg
+        trim_rad    = self.trim_band_deg
         # previous off-state array
         state_off = self._deadzone_off_state
         # determine new off-state via hysteresis:

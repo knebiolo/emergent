@@ -82,6 +82,7 @@ import requests, zipfile, io
 import geopandas as gpd
 from shapely.geometry import box, LineString, MultiPolygon
 from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.ops import unary_union
 import pandas as pd
 import fiona
 import urllib3
@@ -211,11 +212,12 @@ class simulation:
         self.t = 0
         self.steps = int(T / dt)
         self.use_ais = use_ais
-        self.n = n_agents
+        # Normalize n_agents to integer (allow None -> 0)
+        self.n = int(n_agents) if (n_agents is not None) else 0
         self.in_deadband = np.zeros(self.n, dtype=bool)    # Are we currently in the dead-band?
         self.entry_sign  = np.zeros(self.n, dtype=float)   # Which side (±1) we locked in on entry
         self.hyst_done   = np.zeros(self.n, dtype=bool)    # Have we already exited once?
-        self.prev_rudder = np.zeros(n_agents, dtype=float)
+        self.prev_rudder = np.zeros(self.n, dtype=float)
         self.prev_sign   = np.zeros(self.n, dtype=float)  # last step’s sign(err_vec)
         self.prev_abs_err  = np.full(self.n, np.inf)
         self.tile_dict = {}   # always defined (ENC or not)
@@ -244,6 +246,17 @@ class simulation:
 
         # Determine or default domain bounds
         self.bounds = (minx, miny, maxx, maxy)
+
+        # Waypoint tolerance: default to half-ship length for more sensible waypoint popping
+        if not hasattr(self, 'wp_tol'):
+            self.wp_tol = max(50.0, self.L * 0.5)
+
+        # Collision events log
+        self.collision_events = []
+        # Allision (ship->shore) events
+        self.allision_events = []
+        # collision area tolerance (m^2) — small polygon overlaps below this are ignored
+        self.collision_tol_area = 1.0
 
         # Compute UTM CRS from domain center
         # ───────────────────────────────────────────────────────────────
@@ -383,6 +396,53 @@ class simulation:
         
         self.current_fn = _dummy_current
         self.wind_fn = _dummy_wind
+
+        # Ensure any environment sampler we expose returns an (N,2) array where N = len(lons)
+        def _normalize_env_sampler(raw_sampler):
+            import inspect
+            def sampler(lons, lats, when):
+                import numpy as _np
+                N = int(_np.atleast_1d(lons).size)
+                # Try calling the sampler with (lon, lat, when)
+                try:
+                    res = raw_sampler(lons, lats, when)
+                except TypeError:
+                    # Fallback: sampler may expect (state, t) signature (legacy test funcs)
+                    try:
+                        res = raw_sampler(getattr(self, 'state', None), getattr(self, 't', None))
+                    except Exception:
+                        return _np.zeros((N, 2), dtype=float)
+                except Exception:
+                    return _np.zeros((N, 2), dtype=float)
+
+                arr = _np.asarray(res)
+                # (N,2) -> good
+                if arr.ndim == 2 and arr.shape[0] == N and arr.shape[1] >= 2:
+                    return arr[:, :2]
+                # (2,N) -> transpose
+                if arr.ndim == 2 and arr.shape[0] == 2 and arr.shape[1] == N:
+                    return arr.T
+                # flat length 2*N -> reshape
+                if arr.ndim == 1 and arr.size == 2 * N:
+                    try:
+                        return arr.reshape((N, 2))
+                    except Exception:
+                        pass
+                # single pair -> tile for N
+                flat = arr.ravel()
+                if flat.size >= 2:
+                    try:
+                        u0, v0 = float(flat[0]), float(flat[1])
+                        out = _np.tile(_np.array([[u0, v0]]), (N, 1))
+                        return out
+                    except Exception:
+                        pass
+                return _np.zeros((N, 2), dtype=float)
+            return sampler
+
+        # Normalize the dummy samplers immediately so callers can rely on (N,2)
+        self.current_fn = _normalize_env_sampler(self.current_fn)
+        self.wind_fn = _normalize_env_sampler(self.wind_fn)
         self._env_loaded = False
 
         
@@ -398,13 +458,25 @@ class simulation:
 
         def _currents_grid(when: datetime):
             """Return U,V 2-D arrays (ny,nx) in m/s for viewer quiver."""
-            flat_u, flat_v = self.current_fn(
+            res = self.current_fn(
                 self._quiver_lon.ravel(),
                 self._quiver_lat.ravel(),
                 when
-            ).T
-            return (flat_u.reshape(ny, nx),
-                    flat_v.reshape(ny, nx))
+            )
+            arr = np.asarray(res)
+            expected = ny * nx
+            try:
+                # arr expected shape (N,2)
+                if arr.ndim == 2 and arr.shape[0] == expected and arr.shape[1] >= 2:
+                    flat_u = arr[:, 0]
+                    flat_v = arr[:, 1]
+                    return (flat_u.reshape(ny, nx), flat_v.reshape(ny, nx))
+                else:
+                    print(f"[Simulation][debug] current_fn returned shape={arr.shape}, expected ({expected},2); falling back to zeros")
+            except Exception as e:
+                print(f"[Simulation][debug] current_fn reshape error: {e}; arr.shape={getattr(arr,'shape',None)}")
+            # fallback: return zeros to avoid index errors
+            return (np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float))
         
         
         self.currents_grid = _currents_grid
@@ -412,14 +484,23 @@ class simulation:
         def _wind_grid(when: datetime):
             """Return wind U,V 2-D arrays (ny,nx) in m/s for viewer quiver."""
             # wind_fn returns an (N,2) array of [u, v] at each query point
-            flat = self.wind_fn(
+            res = self.wind_fn(
                 self._quiver_lon.ravel(),
                 self._quiver_lat.ravel(),
                 when
             )
-            wu = flat[:, 0]
-            wv = flat[:, 1]
-            return wu.reshape(ny, nx), wv.reshape(ny, nx)
+            arr = np.asarray(res)
+            expected = ny * nx
+            try:
+                if arr.ndim == 2 and arr.shape[0] == expected and arr.shape[1] >= 2:
+                    wu = arr[:, 0]
+                    wv = arr[:, 1]
+                    return wu.reshape(ny, nx), wv.reshape(ny, nx)
+                else:
+                    print(f"[Simulation][debug] wind_fn returned shape={arr.shape}, expected ({expected},2); falling back to zeros")
+            except Exception as e:
+                print(f"[Simulation][debug] wind_fn reshape error: {e}; arr.shape={getattr(arr,'shape',None)}")
+            return (np.zeros((ny, nx), dtype=float), np.zeros((ny, nx), dtype=float))
         self.wind_grid = _wind_grid    
    
         # Initialize placeholders for cached backgrounds
@@ -458,7 +539,7 @@ class simulation:
                     # be defensive: ignore any drawing errors from GUI objects
                     pass
 
-    def load_environmental_forcing(self):
+    def load_environmental_forcing(self, start: 'datetime | None' = None):
         """
         Load environmental forcing data (currents and winds) from NOAA sources.
         This should be called AFTER Qt GUI is fully initialized to avoid threading conflicts.
@@ -467,28 +548,284 @@ class simulation:
         if self._env_loaded:
             print("[Simulation] Environmental forcing already loaded, skipping")
             return
-        
-        print(f"[Simulation] Loading environmental forcing for {self.port_name}...")
-        try:
-            from .ofs_loader import get_current_fn
-            self.current_fn = get_current_fn(self.port_name)
-            print("[Simulation] ✓ Ocean currents loaded")
-        except Exception as e:
-            print(f"[Simulation] ✗ Failed to load currents: {e}")
-            print(f"[Simulation]   Falling back to zero currents")
-            # Keep the dummy function
-        
-        try:
-            from .atmospheric import get_wind_fn
-            self.wind_fn = get_wind_fn(self.port_name)
-            print("[Simulation] ✓ Winds loaded")
-        except Exception as e:
-            print(f"[Simulation] ✗ Failed to load winds: {e}")
-            print(f"[Simulation]   Falling back to zero winds")
-            # Keep the dummy function
-        
-        self._env_loaded = True
-        print("[Simulation] ✓ Environmental forcing ready!")
+
+        if start is None:
+            start = datetime.utcnow()
+        print(f"[Simulation] Loading environmental forcing for {self.port_name} (start={start.date()})...")
+
+        # Helper: wrap a sampler so it always returns values aligned with query points.
+        def wrap_sampler_for_queries(raw_sampler):
+            """Return a sampler(lons, lats, when) that guarantees output length == len(lons).
+
+            Strategy:
+            1) Try calling raw_sampler directly with query points.
+            2) If the returned array length matches len(query) -> return it.
+            3) Else, if raw_sampler carries metadata (native pts or valid arrays), use KDTree
+               nearest-neighbor resampling from native points to query points.
+            4) As a last resort, fall back to nearest-neighbor sampling by calling raw_sampler
+               on the native points extracted from the sampler (if exposed) or return zeros.
+            """
+            import numpy as _np
+            from scipy.spatial import cKDTree as _cKDTree
+
+            # If raw_sampler already has metadata for fast resampling, extract them
+            native_type = getattr(raw_sampler, '_native', None)
+
+            # Prebuild KDTree if possible
+            kdtree = None
+            native_pts = None
+            native_u = None
+            native_v = None
+            if native_type == 'roms':
+                # roms exposes separate u/v pts and valid arrays
+                try:
+                    u_pts = getattr(raw_sampler, '_u_pts', None)
+                    v_pts = getattr(raw_sampler, '_v_pts', None)
+                    u_valid = getattr(raw_sampler, '_u_valid', None)
+                    v_valid = getattr(raw_sampler, '_v_valid', None)
+                    # merge into one representative native grid by averaging (cheap approx)
+                    if u_pts is not None and v_pts is not None:
+                        # stack and build tree on combined unique points
+                        pts = _np.vstack((u_pts, v_pts))
+                        native_pts = pts
+                        kdtree = _cKDTree(pts)
+                        # store u/v arrays aligned to pts by nearest mapping (approx)
+                        native_u = _np.concatenate((u_valid, _np.full(len(v_valid), _np.nan)))
+                        native_v = _np.concatenate((_np.full(len(u_valid), _np.nan), v_valid))
+                except Exception:
+                    pass
+            elif native_type in ('unstructured',):
+                try:
+                    pts = getattr(raw_sampler, '_valid_pts', None)
+                    native_u = getattr(raw_sampler, '_u_valid', None)
+                    native_v = getattr(raw_sampler, '_v_valid', None)
+                    if pts is not None:
+                        native_pts = pts
+                        kdtree = _cKDTree(pts)
+                except Exception:
+                    pass
+
+            def sampler(lons, lats, when):
+                lons = _np.asarray(lons, dtype=float)
+                lats = _np.asarray(lats, dtype=float)
+                Nq = lons.size
+                try:
+                    res = raw_sampler(lons, lats, when)
+                    arr = _np.asarray(res)
+                    if arr.ndim == 2 and arr.shape[0] == Nq and arr.shape[1] >= 2:
+                        return arr
+                    # many samplers return (N,2), but some return flattened shorter arrays
+                except Exception:
+                    arr = None
+
+                # If we have a KDTree and native values, use it
+                if kdtree is not None and native_pts is not None and native_u is not None and native_v is not None:
+                    try:
+                        query = _np.column_stack((lons.ravel(), lats.ravel()))
+                        _, idx = kdtree.query(query)
+                        uvals = native_u[idx]
+                        vvals = native_v[idx]
+                        print(f"[Simulation][debug] KDTree resample used (native_pts={len(native_pts)}, queries={Nq})")
+                        return _np.column_stack((uvals, vvals))
+                    except Exception:
+                        pass
+
+                # Last resort: try calling raw_sampler with native points (if exposed) to build a KDTree
+                try:
+                    # attempt to pull native lon/lat arrays from sampler attributes
+                    nlon = getattr(raw_sampler, '_lon', None)
+                    nlat = getattr(raw_sampler, '_lat', None)
+                    if nlon is not None and nlat is not None:
+                        native = _np.column_stack((_np.asarray(nlon).ravel(), _np.asarray(nlat).ravel()))
+                        vals = _np.asarray(raw_sampler(nlon.ravel(), nlat.ravel(), when))
+                        if vals.ndim == 2 and vals.shape[0] == native.shape[0]:
+                            tree = _cKDTree(native)
+                            _, idx = tree.query(_np.column_stack((lons.ravel(), lats.ravel())))
+                            uvals = vals[idx, 0]
+                            vvals = vals[idx, 1]
+                            return _np.column_stack((uvals, vvals))
+                except Exception:
+                    pass
+
+                # Fallback: return zeros
+                return _np.zeros((Nq, 2), dtype=float)
+
+            return sampler
+
+        # local normalizer (same logic as used in __init__) to ensure any exposed
+        # sampler returns an (N,2) array where N = len(lons)
+        def _normalize_env_sampler(raw_sampler):
+            def sampler(lons, lats, when):
+                import numpy as _np
+                N = int(_np.atleast_1d(lons).size)
+                try:
+                    res = raw_sampler(lons, lats, when)
+                except TypeError:
+                    try:
+                        res = raw_sampler(getattr(self, 'state', None), getattr(self, 't', None))
+                    except Exception:
+                        return _np.zeros((N, 2), dtype=float)
+                except Exception:
+                    return _np.zeros((N, 2), dtype=float)
+
+                arr = _np.asarray(res)
+                if arr.ndim == 2 and arr.shape[0] == N and arr.shape[1] >= 2:
+                    return arr[:, :2]
+                if arr.ndim == 2 and arr.shape[0] == 2 and arr.shape[1] == N:
+                    return arr.T
+                if arr.ndim == 1 and arr.size == 2 * N:
+                    try:
+                        return arr.reshape((N, 2))
+                    except Exception:
+                        pass
+                flat = arr.ravel()
+                if flat.size >= 2:
+                    try:
+                        u0, v0 = float(flat[0]), float(flat[1])
+                        out = _np.tile(_np.array([[u0, v0]]), (N, 1))
+                        return out
+                    except Exception:
+                        pass
+                return _np.zeros((N, 2), dtype=float)
+            return sampler
+
+
+        # Try multiple times to acquire current data before falling back
+        current_loaded = False
+        # exponential backoff schedule in seconds
+        backoff = [1, 2, 4, 8]
+        for attempt in range(len(backoff)):
+            try:
+                from .ofs_loader import get_current_fn
+                # Provide ENC land polygons (LNDARE) if available so the OFS loader
+                # can avoid building KDTree entries that fall on land and thus
+                # prevent inland nearest-neighbour picks.
+                land_gdf = None
+                try:
+                    land_gdf = getattr(self, 'enc_data', {}).get('LNDARE')
+                except Exception:
+                    land_gdf = None
+
+                raw_current = get_current_fn(self.port_name, start=start, land_gdf=land_gdf)
+                # wrap with robust query wrapper then normalize output shape
+                self.current_fn = _normalize_env_sampler(wrap_sampler_for_queries(raw_current))
+                msg = f"[Simulation] ✓ Ocean currents loaded (attempt {attempt+1})"
+                print(msg)
+                # Diagnostic: sample the current_fn at our quiver points (if available) and print shapes
+                try:
+                    if hasattr(self, '_quiver_lon'):
+                        res = self.current_fn(self._quiver_lon.ravel(), self._quiver_lat.ravel(), start)
+                        arr = np.asarray(res)
+                        print(f"[Simulation][debug] sampled current_fn -> arr.shape={getattr(arr,'shape',None)}")
+                except Exception as _e:
+                    print(f"[Simulation][debug] sampling current_fn failed: {_e}")
+                try:
+                    self.log_lines.insert(0, msg)
+                    self.log_lines = self.log_lines[: self.max_log_lines]
+                except Exception:
+                    pass
+                current_loaded = True
+                break
+            except Exception as e:
+                msg = f"[Simulation] ✗ Failed to load currents (attempt {attempt+1}): {e}"
+                print(msg)
+                try:
+                    self.log_lines.insert(0, msg)
+                    self.log_lines = self.log_lines[: self.max_log_lines]
+                except Exception:
+                    pass
+                # backoff before next attempt
+                try:
+                    import time
+                    time.sleep(backoff[attempt])
+                except Exception:
+                    pass
+        if not current_loaded:
+            msg = f"[Simulation]   Falling back to zero currents after {len(backoff)} attempts"
+            print(msg)
+            try:
+                self.log_lines.insert(0, msg)
+                self.log_lines = self.log_lines[: self.max_log_lines]
+            except Exception:
+                pass
+
+        # Try multiple times to acquire wind data before falling back
+        wind_loaded = False
+        for attempt in range(len(backoff)):
+            try:
+                from .ofs_loader import get_wind_fn
+                raw_wind = get_wind_fn(self.port_name, start=start)
+                # wrap with robust query wrapper then normalize output shape
+                self.wind_fn = _normalize_env_sampler(wrap_sampler_for_queries(raw_wind))
+                msg = f"[Simulation] ✓ Winds loaded (from OFS loader) (attempt {attempt+1})"
+                print(msg)
+                # Diagnostic: sample the wind_fn at our quiver points (if available) and print shapes
+                try:
+                    if hasattr(self, '_quiver_lon'):
+                        resw = self.wind_fn(self._quiver_lon.ravel(), self._quiver_lat.ravel(), start)
+                        arrw = np.asarray(resw)
+                        print(f"[Simulation][debug] sampled wind_fn -> arr.shape={getattr(arrw,'shape',None)}")
+                except Exception as _e:
+                    print(f"[Simulation][debug] sampling wind_fn failed: {_e}")
+                try:
+                    self.log_lines.insert(0, msg)
+                    self.log_lines = self.log_lines[: self.max_log_lines]
+                except Exception:
+                    pass
+                wind_loaded = True
+                break
+            except Exception as e:
+                msg = f"[Simulation] ✗ Failed to load winds (attempt {attempt+1}): {e}"
+                print(msg)
+                try:
+                    self.log_lines.insert(0, msg)
+                    self.log_lines = self.log_lines[: self.max_log_lines]
+                except Exception:
+                    pass
+                # attempt atmospheric fallback for this attempt
+                try:
+                    from .atmospheric import wind_sampler
+                    cfg = SIMULATION_BOUNDS[self.port_name]
+                    bbox = (cfg["minx"], cfg["maxx"], cfg["miny"], cfg["maxy"])
+                    self.wind_fn = wind_sampler(bbox, start)
+                    msg2 = f"[Simulation] ✓ Winds loaded (from atmospheric.wind_sampler) (attempt {attempt+1})"
+                    print(msg2)
+                    try:
+                        self.log_lines.insert(0, msg2)
+                        self.log_lines = self.log_lines[: self.max_log_lines]
+                    except Exception:
+                        pass
+                    wind_loaded = True
+                    break
+                except Exception as e2:
+                    msg2 = f"[Simulation] ✗ Atmospheric fallback failed (attempt {attempt+1}): {e2}"
+                    print(msg2)
+                    try:
+                        self.log_lines.insert(0, msg2)
+                        self.log_lines = self.log_lines[: self.max_log_lines]
+                    except Exception:
+                        pass
+                try:
+                    import time
+                    time.sleep(backoff[attempt])
+                except Exception:
+                    pass
+        if not wind_loaded:
+            msg = f"[Simulation]   Falling back to zero winds after {len(backoff)} attempts"
+            print(msg)
+            try:
+                self.log_lines.insert(0, msg)
+                self.log_lines = self.log_lines[: self.max_log_lines]
+            except Exception:
+                pass
+
+        # Consider environment loaded if at least one of currents or winds is available
+        if current_loaded or wind_loaded:
+            self._env_loaded = True
+            print("[Simulation] ✓ Environmental forcing ready!")
+        else:
+            self._env_loaded = False
+            print("[Simulation] ✗ Environmental forcing unavailable; using zero fields")
 
     def get_ais_heatmap(self,
                         date_range: tuple[date,date],
@@ -656,10 +993,48 @@ class simulation:
         z = zipfile.ZipFile(io.BytesIO(r.content))
         z.extractall(extract_to)
 
-        # locate folder with .000 files
+        # handle nested zips: if any zip was inside, extract those too
+        for root, dirs, files in os.walk(extract_to):
+            for fname in files:
+                if fname.lower().endswith('.zip'):
+                    try:
+                        nested = zipfile.ZipFile(os.path.join(root, fname))
+                        nested.extractall(root)
+                        if verbose:
+                            print(f"Extracted nested zip: {fname} in {root}")
+                    except Exception:
+                        if verbose:
+                            print(f"Failed to extract nested zip: {fname} (skipping)")
+
+        # debug: print small tree when verbose
+        if verbose:
+            for root, dirs, files in os.walk(extract_to):
+                rel = os.path.relpath(root, extract_to)
+                print(f"  {rel}/: {len(files)} files, {len(dirs)} dirs")
+                sample = files[:10]
+                for f in sample:
+                    print(f"    - {f}")
+
+        # locate folder with .000 files and sanity-check them
         for root_dir, _, files in os.walk(extract_to):
             s57 = [f for f in files if f.lower().endswith('.000')]
             if s57:
+                # sanity-check first file
+                test_path = os.path.join(root_dir, s57[0])
+                try:
+                    size = os.path.getsize(test_path)
+                    if size < 200:
+                        if verbose:
+                            print(f"Warning: extracted {s57[0]} is very small ({size} bytes)")
+                    # simple header sniff: S-57 often contains 'ISO' or 'S-57' bytes; check first 256 bytes
+                    with open(test_path, 'rb') as fh:
+                        head = fh.read(256)
+                    if b'ISO' not in head and b'S-57' not in head and b'000' not in head[:20]:
+                        if verbose:
+                            print(f"Note: {s57[0]} header doesn't look like a typical S-57 file; proceeding but fiona may fail to open it")
+                except Exception as e:
+                    if verbose:
+                        print(f"Failed to inspect {test_path}: {e}")
                 return root_dir
         raise RuntimeError(f"No S-57 .000 files found in {extract_to}")
 
@@ -728,35 +1103,66 @@ class simulation:
             # only iterate the true S-57 base (.000) files; skip .001 updates
             enc_files = list(Path(cell_dir).glob("*.000"))
             
+            # track whether key layers were present in this cell
+            cell_had_lnd = False
+            cell_had_coal = False
             for enc_file in enc_files:
                 if verbose:
                     print(f"  Opening ENC file: {enc_file.name}")
-                for layer in fiona.listlayers(str(enc_file)):
+                try:
+                    layers = fiona.listlayers(str(enc_file))
+                except Exception as e:
+                    if verbose:
+                        print(f"    SKIP: cannot list layers for {enc_file.name}: {e}")
+                    continue
+                for layer in layers:
                     if verbose:
                         print(f"    reading layer: {layer}")
+                    if layer == 'LNDARE':
+                        cell_had_lnd = True
+                    if layer == 'COALNE':
+                        cell_had_coal = True
                     try:
                         with fiona.open(str(enc_file), layer=layer) as src:
                             gdf = gpd.GeoDataFrame.from_features(src)
+                            # skip empty frames and ensure CRS then filter and reproject
+                            if gdf.empty:
+                                continue
+                            if gdf.crs is None:
+                                gdf.set_crs(epsg=4326, inplace=True)
+
+                            gdf = (
+                                gdf[gdf.geom_type.isin([
+                                    "Point","MultiPoint",
+                                    "LineString","MultiLineString",
+                                    "Polygon","MultiPolygon"
+                                ])]
+                                .to_crs(self.crs_utm)
+                            )
+
+                            self.enc_data.setdefault(layer, []).append(gdf)
                     except Exception as e:
                         if verbose:
-                            log.warning(f"Skipped {layer}: {e}")
+                            print(f"    Skipped {layer}: {e}")
                         continue
 
-                    if gdf.empty:
-                        continue
-                    if gdf.crs is None:
-                        gdf.set_crs(epsg=4326, inplace=True)
-
-                    gdf = (
-                        gdf[gdf.geom_type.isin([
-                            "Point","MultiPoint",
-                            "LineString","MultiLineString",
-                            "Polygon","MultiPolygon"
-                        ])]
-                        .to_crs(self.crs_utm)
-                    )
-
-                    self.enc_data.setdefault(layer, []).append(gdf)
+            # report per-cell summary so we can diagnose missing coverage (donut holes)
+            if verbose:
+                print(f"[ENC] cell {cell_id}: LNDARE={cell_had_lnd}, COALNE={cell_had_coal}")
+            # emit progress for GUI: percent of cells processed
+            try:
+                total = len(cells) if len(cells) > 0 else 1
+                processed = getattr(self, '_enc_processed', 0) + 1
+                self._enc_processed = processed
+                self._enc_progress = int(100.0 * processed / total)
+                # also push a short log line for visibility
+                try:
+                    self.log_lines.insert(0, f"[ENC] processed {cell_id} ({self._enc_progress}%)")
+                    self.log_lines = self.log_lines[: self.max_log_lines]
+                except Exception:
+                    pass
+            except Exception:
+                pass
     
         keep_layers = {
             'LNDARE',     # land areas
@@ -786,6 +1192,48 @@ class simulation:
             "COALNE",
             gpd.GeoDataFrame(geometry=[], crs=self.crs_utm)
         )
+
+        # If COALNE absent or empty, attempt to synthesize coastline from LNDARE polygons
+        # If COALNE absent or empty, attempt to synthesize coastline from LNDARE polygons
+        if ("COALNE" not in self.enc_data) or (self.waterway is None) or self.waterway.empty:
+            try:
+                lnd = self.enc_data.get('LNDARE')
+                if lnd is not None and not lnd.empty:
+                    # merge land polygons and take their exterior boundaries as coastline lines
+                    merged = unary_union(list(lnd.geometry))
+                    boundaries = merged.boundary
+                    # boundaries can be LineString or MultiLineString
+                    geoms = [boundaries] if hasattr(boundaries, 'geom_type') else list(boundaries)
+                    coal_gdf = gpd.GeoDataFrame(geometry=geoms, crs=self.crs_utm)
+                    self.enc_data['COALNE'] = coal_gdf
+                    self.waterway = coal_gdf
+                    print("[ENC] COALNE synthesized from LNDARE (merged land boundaries)")
+            except Exception as e:
+                print(f"[ENC] Failed to synthesize COALNE from LNDARE: {e}")
+
+    def synthesize_coastline(self):
+        """Ensure that a coastline layer (COALNE) exists in self.enc_data.
+        If COALNE is missing or empty but LNDARE (land polygons) exist, synthesize
+        the coastline from land polygon boundaries. Returns True if synthesized.
+        """
+        try:
+            coal = self.enc_data.get('COALNE')
+            if coal is not None and not getattr(coal, 'empty', False):
+                return False
+            lnd = self.enc_data.get('LNDARE')
+            if lnd is None or getattr(lnd, 'empty', True):
+                return False
+            merged = unary_union(list(lnd.geometry))
+            boundaries = merged.boundary
+            geoms = [boundaries] if hasattr(boundaries, 'geom_type') else list(boundaries)
+            coal_gdf = gpd.GeoDataFrame(geometry=geoms, crs=self.crs_utm)
+            self.enc_data['COALNE'] = coal_gdf
+            self.waterway = coal_gdf
+            print("[ENC] COALNE synthesized from LNDARE (synthesize_coastline call)")
+            return True
+        except Exception as e:
+            print(f"[ENC] synthesize_coastline failed: {e}")
+            return False
 
         # ── NEW: re-project every GeoDataFrame to the sim’s UTM CRS ─────────
         for k, gdf in self.enc_data.items():
@@ -867,6 +1315,20 @@ class simulation:
                     "Cannot spawn: self.waypoints not set. "
                     "Call route() (in viewer) before spawn()."
                 )
+
+        # Debug instrumentation: if waypoints already exist at spawn time,
+        # print a short stack trace to help locate the caller setting them.
+        try:
+            import traceback
+            if hasattr(self, 'waypoints') and len(getattr(self, 'waypoints', [])) > 0:
+                print(f"[Simulation.spawn] Spawn called with pre-existing waypoints (n_agents={self.n}, waypoints_len={len(self.waypoints)})")
+                stack = traceback.format_stack(limit=8)
+                print("[Simulation.spawn] recent stack (most recent call last):")
+                for line in stack[:-1]:
+                    # skip the current frame's own line
+                    print(line.strip())
+        except Exception:
+            pass
 
 
 
@@ -1173,38 +1635,81 @@ class simulation:
 
     def _check_collision(self, t):
         """
-        Return True if any two ship patches overlap (collision).
+        Return a list of collision events for any overlapping ship hulls.
+        Each event is a dict containing indices, contact area, relative speed,
+        and computed impact energies per vessel.
         """
-        # Test every pair of ships using freshly‐built hulls
+        events = []
+        # Test every pair of ships using freshly‑built hulls
         for i in range(self.n):
             poly_i = self._current_hull_poly(i)
-            for j in range(i+1, self.n):
+            for j in range(i + 1, self.n):
                 poly_j = self._current_hull_poly(j)
                 if poly_i.intersects(poly_j):
                     inter = poly_i.intersection(poly_j)
                     if inter.area > self.collision_tol_area:
-                        log.error(f"Collision detected between Ship{i} and Ship{j} at t={t:.2f}s")
-                        return True
-        return False
+                        # compute relative speed (world frame)
+                        psi_i, psi_j = self.psi[i], self.psi[j]
+                        u_i, v_i = self.state[0, i], self.state[1, i]
+                        u_j, v_j = self.state[0, j], self.state[1, j]
+                        vel_i = np.array([u_i * np.cos(psi_i) - v_i * np.sin(psi_i),
+                                          u_i * np.sin(psi_i) + v_i * np.cos(psi_i)])
+                        vel_j = np.array([u_j * np.cos(psi_j) - v_j * np.sin(psi_j),
+                                          u_j * np.sin(psi_j) + v_j * np.cos(psi_j)])
+                        rel_v = vel_j - vel_i
+                        rel_speed = float(np.linalg.norm(rel_v))
+
+                        # Use masses from ship model; if vectorized, extract per-index
+                        try:
+                            m_i = float(self.ship.m)
+                            m_j = float(self.ship.m)
+                        except Exception:
+                            m_i = getattr(self.ship, 'm', 1.0)
+                            m_j = getattr(self.ship, 'm', 1.0)
+
+                        # Compute per-ship kinetic energies at impact in Joules
+                        # KE = 0.5 * m * v^2 (use magnitude of body-relative velocities)
+                        # Use half the relative speed apportioned by mass ratio for rough estimate
+                        ke_rel = 0.5 * (m_i * (rel_speed ** 2) * (m_j / (m_i + m_j)))
+                        ke_i = 0.5 * m_i * (rel_speed ** 2) * (m_j / (m_i + m_j))
+                        ke_j = 0.5 * m_j * (rel_speed ** 2) * (m_i / (m_i + m_j))
+
+                        ev = {
+                            't': float(t),
+                            'i': int(i),
+                            'j': int(j),
+                            'contact_area': float(inter.area),
+                            'rel_speed_m_s': rel_speed,
+                            'ke_i_J': ke_i,
+                            'ke_j_J': ke_j,
+                        }
+                        log.error(f"Collision detected between Ship{i} and Ship{j} at t={t:.2f}s, rel_speed={rel_speed:.2f} m/s")
+                        events.append(ev)
+        return events
 
     def _check_allision(self, t):
         """
-        Return True if any ship hull polygon intersects land.
+        Return a list of allision events (ship index and intersecting land geometry)
+        if any ship hull polygon intersects land.
         """
-        # Build Shapely Polygons for each ship patch
+        events = []
+        # If no waterway geometry is available, return empty
+        land_geoms = list(getattr(self, 'waterway', gpd.GeoDataFrame()).geometry)
+        if not land_geoms:
+            return events
+
         ship_polys = [ShapelyPolygon(patch.get_xy()) for patch in self.patches]
-        
-        # Pull the true coastline/land polygons out of your waterway object.
-        # Assuming self.waterway is a GeoDataFrame with a 'geometry' column:
-        land_geoms = list(self.waterway.geometry)
-    
         for i, ship_poly in enumerate(ship_polys):
             for land in land_geoms:
                 if ship_poly.intersects(land):
+                    inter = ship_poly.intersection(land)
+                    ev = {'t': float(t), 'i': int(i), 'contact_area': float(inter.area)}
                     log.error(f"Allision detected: Ship{i} with shore at t={t:.2f}s")
-                    return True
-    
-        return False
+                    events.append(ev)
+        # record to persistent list
+        for e in events:
+            self.allision_events.append(e)
+        return events
 
     def _update_overlay(self, t):
         """
@@ -1270,16 +1775,42 @@ class simulation:
             self._step_dynamics(hd, sp, rud)
 
             # Check for collisions or allisions
-            collided  = self._check_collision(t)
-            grounded  = self._check_allision(t)
-            if collided or grounded:
-                # ── hard-stop every vessel, vectorised ─────────────────────────
-                self.state[[0,1,3], :] = 0.0            # u, v, r → 0
-                self.ship.current_speed[:] = 0.0
-                self.ship.commanded_rpm[:] = 0.0
-                # keep desired_speed at zero so PID doesn’t spin back up
-                self.ship.desired_speed[:] = 0.0
-                print(f"[SIM] {'Collision' if collided else 'Allision'} at t={t:.1f}s — vessels frozen.")
+            collision_events = self._check_collision(t)
+            grounded = self._check_allision(t)
+            if collision_events or grounded:
+                # If there are individual collision events, stop the involved vessels and record events
+                if collision_events:
+                    for ev in collision_events:
+                        i = ev['i']
+                        j = ev['j']
+                        # stop the two vessels immediately
+                        try:
+                            self.ship.cut_power(i)
+                        except Exception:
+                            pass
+                        try:
+                            self.ship.cut_power(j)
+                        except Exception:
+                            pass
+                        # add to persistent collisions list
+                        self.collision_events.append(ev)
+                        # also log to console
+                        print(f"[SIM] Collision: Ships {i}&{j} at t={t:.1f}s rel_speed={ev['rel_speed_m_s']:.2f} m/s KE_i={ev['ke_i_J']:.1f} J KE_j={ev['ke_j_J']:.1f} J")
+
+                # If grounded (allision) or any collision happened we freeze simulation state
+                # Apply a conservative hard-stop across all vessels
+                try:
+                    self.state[[0,1,3], :] = 0.0            # u, v, r → 0
+                except Exception:
+                    pass
+                try:
+                    self.ship.current_speed[:] = 0.0
+                    self.ship.commanded_rpm[:] = 0.0
+                    self.ship.desired_speed[:] = 0.0
+                except Exception:
+                    pass
+
+                print(f"[SIM] {'Collision' if collision_events else 'Allision'} at t={t:.1f}s — vessels frozen.")
                 break
             
             # -- record for post-run analysis
@@ -1315,8 +1846,20 @@ class simulation:
             if len(wpts) > 1 and np.linalg.norm(self.pos[:, i] - wpts[0]) < tol:
                 wpts.pop(0)
 
-            # Always aim at the first (current) waypoint
-            self.goals[:, i] = wpts[0]
+            # Aim not just at the immediate waypoint but at a short lookahead target
+            # to smooth the course over multiple legs. Use up to the next 3 waypoints.
+            lookahead = 3
+            n_w = min(len(wpts), lookahead)
+            if n_w >= 2:
+                # weighted average favoring nearer waypoints
+                weights = np.linspace(1.0, 0.5, n_w)
+                weights = weights / weights.sum()
+                pts = np.stack([wpts[k] for k in range(n_w)], axis=0)
+                target = np.dot(weights, pts)
+                self.goals[:, i] = target
+            else:
+                # Always aim at the first (current) waypoint
+                self.goals[:, i] = wpts[0]
 
     def _compute_controls_and_update(self, nu, t):
         # ──────────────────────────────────────────────────────────────
@@ -1457,6 +2000,11 @@ class simulation:
           - COLREGS override for give-way situations
         """
         dt = self.dt
+        # optional tracing
+        try:
+            from emergent.ship_abm.config import PID_TRACE
+        except Exception:
+            PID_TRACE = {'enabled': False, 'path': None}
     
         # 1) Heading error in [-π, π]
         err = ((psi_ref - self.psi + np.pi) % (2 * np.pi)) - np.pi
@@ -1480,6 +2028,33 @@ class simulation:
         Ki = self.tuning['Ki']
         Kd = self.tuning['Kd']
         rud_cmd = Kp * err + Ki * self.integral_error + Kd * derr
+
+        # optional trace: write per-agent PID internals
+        if PID_TRACE.get('enabled', False):
+            import csv, os
+            path = PID_TRACE.get('path')
+            if path is None:
+                path = os.path.abspath('pid_trace_simulation.csv')
+            # open file on append, write header if missing
+            header = ['t','agent','err_deg','derr_deg','P_deg','I_deg','D_deg','raw_deg','rud_deg']
+            write_header = not os.path.exists(path)
+            try:
+                with open(path, 'a', newline='') as fh:
+                    writer = csv.writer(fh)
+                    if write_header:
+                        writer.writerow(header)
+                    for idx in range(self.n):
+                        p_term = Kp * err[idx]
+                        i_term = Ki * self.integral_error[idx]
+                        d_term = Kd * derr[idx]
+                        raw_deg = np.degrees(rud_cmd[idx])
+                        writer.writerow([
+                            float(self.t), int(idx), float(np.degrees(err[idx])), float(np.degrees(derr[idx])),
+                            float(np.degrees(p_term)), float(np.degrees(i_term)), float(np.degrees(d_term)),
+                            float(raw_deg), float(np.degrees(rud[idx])) if 'rud' in locals() else float(raw_deg)
+                        ])
+            except Exception:
+                pass
     
         # 5) (disabled) Prediction-based early release
         # predicted_err = err + r * self.tuning['lead_time']
