@@ -103,6 +103,17 @@ class ship:
         self.smoothed_rudder = np.zeros(n)
         self.prev_rudder = np.zeros(n)
         self.rudder_tau = 1.0
+        # rudder geometric/physical defaults (can be overridden in SHIP_PHYSICS)
+        # area (m^2) of the rudder blade; default small fraction of hull frontal
+        self.rudder_area = float(SHIP_PHYSICS.get('rudder_area', 0.02 * self.length * self.draft))
+        # lift slope (per rad) for small angles; thin-foil ~ 2*pi ~6.28, use slightly lower
+        self.rudder_lift_slope = float(SHIP_PHYSICS.get('rudder_lift_slope', 5.7))
+        # stall angle (rad) after which lift degrades
+        self.rudder_stall_angle = float(np.deg2rad(SHIP_PHYSICS.get('rudder_stall_deg', 20.0)))
+        # lever arm from center of lateral force to yaw center (approx distance aft of CG)
+        self.rudder_lever_arm = float(SHIP_PHYSICS.get('rudder_lever_arm', 0.45 * self.length))
+        # rudder viscous loss / efficiency factor [0..1]
+        self.rudder_efficiency = float(SHIP_PHYSICS.get('rudder_efficiency', 0.95))
         
         # damping and drag coefficients 
         self.linear_damping = SHIP_PHYSICS['linear_damping']
@@ -123,6 +134,13 @@ class ship:
         self.lead_time    = ADVANCED_CONTROLLER["lead_time"]
         self.trim_band_deg    = np.radians(ADVANCED_CONTROLLER["trim_band_deg"])
         self.release_band_deg = np.radians(ADVANCED_CONTROLLER["release_band_deg"])
+        # derivative low-pass time constant (seconds)
+        self.deriv_tau = ADVANCED_CONTROLLER.get('deriv_tau', 1.0)
+        # filtered derivative state (initialized per-ship)
+        try:
+            self.deriv_filtered = np.zeros(self.n)
+        except Exception:
+            self.deriv_filtered = 0.0
         self._deadzone_off_state = np.zeros(self.n, dtype=bool)
         # dead-reckoning tuning (from config)
         self.dead_reck_sensitivity = ADVANCED_CONTROLLER.get('dead_reck_sensitivity', 0.25)
@@ -311,14 +329,33 @@ class ship:
         nships = rel_wind.shape[1]
         wind_force_cols = []
         current_force_cols = []
+        # ensure psi is array-like with length == nships for indexing
+        psi_arr = np.atleast_1d(psi)
+        if psi_arr.size != nships:
+            # broadcast or repeat scalar heading to match nships
+            try:
+                psi_val = float(psi_arr.flat[0])
+            except Exception:
+                psi_val = 0.0
+            psi_arr = np.full(nships, psi_val)
+
         for i in range(nships):
-            wf = _force(rel_wind[:, i], self.rho_air, Cd_air, A_ref, psi[i], self.A_air)
-            cf = _force(rel_current[:, i], self.rho, self.Cd_water, None, psi[i], self.A)
+            psi_local = float(psi_arr[i])
+            wf = _force(rel_wind[:, i], self.rho_air, Cd_air, A_ref, psi_local, self.A_air)
+            cf = _force(rel_current[:, i], self.rho, self.Cd_water, None, psi_local, self.A)
             wind_force_cols.append(wf)
             current_force_cols.append(cf)
 
         wind_force = np.hstack(wind_force_cols)
         current_force = np.hstack(current_force_cols)
+        # apply a global wind-force scaling factor (configurable)
+        try:
+            from emergent.ship_abm.config import SHIP_AERO_DEFAULTS
+            wscale = float(SHIP_AERO_DEFAULTS.get('wind_force_scale', 1.0))
+        except Exception:
+            wscale = 1.0
+        if abs(wscale - 1.0) > 1e-12:
+            wind_force = wind_force * wscale
         return wind_force, current_force      # shape (2, n) each
     
     def coriolis_matrix(self, u, v):
@@ -329,7 +366,51 @@ class ship:
         return np.vstack([np.zeros(self.n), 500*np.abs(v)*v, 1e6*np.abs(r)*r])
 
     def compute_rudder_torque(self, rudder_angle, lengths, u):
-        return rudder_angle * lengths * np.maximum(u,0)
+        """Physics-based rudder torque model (vectorized).
+
+        Parameters
+        ----------
+        rudder_angle : array_like (n,) in radians (positive = starboard)
+        lengths      : unused here (kept for legacy compatibility)
+        u            : array_like (n,) forward speed through water (m/s)
+
+        Returns
+        -------
+        torque : array_like (n,) yaw moment applied by rudder (N·m)
+
+        Model:
+          - dynamic pressure q = 0.5 * rho * u^2
+          - lift (side) F_y = q * A_rudder * C_L(alpha)
+          - C_L approx = a0 * alpha for |alpha| < alpha_stall, then scaled down
+          - moment = F_y * lever_arm * efficiency
+        """
+        # ensure arrays
+        rud = np.atleast_1d(rudder_angle)
+        u = np.atleast_1d(u)
+
+        # side force depends on square of forward speed; for negative u, use small positive floor
+        U_eff = np.maximum(np.abs(u), 1e-3)
+        q = 0.5 * self.rho * U_eff**2
+
+        # lift coefficient with simple stall model
+        a0 = self.rudder_lift_slope
+        alpha = np.clip(rud, -np.pi/2, np.pi/2)
+
+        # linear region
+        Cl_lin = a0 * alpha
+
+        # stall scaling: reduce lift gradually beyond stall angle (30° transition)
+        stall_window = np.deg2rad(30.0)
+        s = np.minimum(1.0, np.maximum(0.0, 1.0 - (np.abs(alpha) - self.rudder_stall_angle) / (stall_window)))
+        s = np.where(np.abs(alpha) <= self.rudder_stall_angle, 1.0, s)
+        Cl = Cl_lin * s
+
+        # side force (N)
+        F_y = q * self.rudder_area * Cl * self.rudder_efficiency
+
+        # yaw moment = F_y * lever_arm (N·m)
+        moment = F_y * self.rudder_lever_arm
+        return moment
 
     def compute_attractive_force(self, positions, goals):
         dirs  = goals - positions
@@ -419,6 +500,34 @@ class ship:
 
             # final heading: smooth blend (handles vector shapes)
             hd = (1.0 - beta) * hd_base + beta * hd_corrected
+            # Optional debug printing to trace dead-reck signs/values
+            try:
+                from emergent.ship_abm.config import PID_DEBUG
+                # print only when PID_DEBUG or if this instance has verbose attribute
+                verbose_print = PID_DEBUG or getattr(self, 'verbose', False)
+                if verbose_print:
+                    for i in range(hd.shape[0] if hasattr(hd, '__iter__') else 1):
+                        # handle scalar/vector shapes
+                        idx = i if hasattr(hd, '__iter__') else 0
+                        cur = current_vec[:, idx]
+                        cd = cog_dir[:, idx]
+                        vperp = V_perp[idx]
+                        corr_deg = np.degrees(corr[idx]) if hasattr(corr, '__iter__') else np.degrees(corr)
+                        # normalize hd_base/hd for logging to degrees in [-180,180)
+                        hd_base_deg = ((np.degrees(hd_base[idx]) + 180.0) % 360.0) - 180.0
+                        hd_final_deg = ((np.degrees(hd[idx]) + 180.0) % 360.0) - 180.0
+                        try:
+                            from emergent.ship_abm.simulation_core import log as sim_log
+                            if getattr(self, 'verbose', False):
+                                sim_log.debug(f"[DR] idx={idx} attract=({attract[0,idx]:.2f},{attract[1,idx]:.2f}) hd_base={hd_base_deg:.2f}° "
+                                              f"cur=(E{cur[0]:.3f},N{cur[1]:.3f}) V_perp={vperp:.3f} corr={corr_deg:.2f}° hd_final={hd_final_deg:.2f}°")
+                        except Exception:
+                            # fallback to print only if verbose
+                            if getattr(self, 'verbose', False):
+                                print(f"[DR] idx={idx} attract=({attract[0,idx]:.2f},{attract[1,idx]:.2f}) hd_base={hd_base_deg:.2f}° "
+                                      f"cur=(E{cur[0]:.3f},N{cur[1]:.3f}) V_perp={vperp:.3f} corr={corr_deg:.2f}° hd_final={hd_final_deg:.2f}°")
+            except Exception:
+                pass
         else:
             # original behaviour: ignore drift
             hd = np.arctan2(attract[1], attract[0])
@@ -443,8 +552,14 @@ class ship:
         except Exception:
             pass
 
-        # 1) heading error normalized to [-π, π] (flipped sign so positive error → starboard turn)
-        err = (hd - psi + np.pi) % (2*np.pi) - np.pi
+        # 1) heading error normalized to [-π, π] (positive error -> starboard turn)
+        # Use shared helper to ensure consistency with simulation-level controller
+        try:
+            from emergent.ship_abm.angle_utils import heading_diff_rad
+            err = heading_diff_rad(hd, psi)
+        except Exception:
+            # fallback: manual wrap if import fails
+            err = (hd - psi + np.pi) % (2*np.pi) - np.pi
         #err = (psi - hd + np.pi) % (2*np.pi) - np.pi
 
         # 1.1) small dead-band: ignore tiny errors < 0.5°
@@ -461,6 +576,15 @@ class ship:
         # 2) derivative term
         derr = (err - self.prev_error) / dt
         derr[mask_db] = 0.0  # prevent spikes when exiting dead-band
+        # apply first-order low-pass to derivative to reduce noise sensitivity
+        try:
+            tau = float(getattr(self, 'deriv_tau', 1.0))
+            alpha_d = dt / (tau + dt)
+            # ensure shapes match for vectorized update
+            self.deriv_filtered = (1.0 - alpha_d) * np.atleast_1d(self.deriv_filtered) + alpha_d * np.atleast_1d(derr)
+            derr_f = np.atleast_1d(self.deriv_filtered)
+        except Exception:
+            derr_f = derr
 
         # 3) predictive error: look ahead lead_time seconds
         #    using derivative as a rough slope
@@ -475,25 +599,79 @@ class ship:
 
         err_pred = (hd - (psi + yaw_rate * self.lead_time) + np.pi) % (2 * np.pi) - np.pi
 
+        # Conservative feed-forward guard: if predicted error is very large,
+        # reduce the effective P contribution so we don't command an overly
+        # aggressive raw command that immediately saturates the actuator.
+        try:
+            ff_err_limit_deg = float(ADVANCED_CONTROLLER.get('ff_err_limit_deg', 10.0))
+        except Exception:
+            ff_err_limit_deg = 10.0
+        ff_limit_rad = np.deg2rad(ff_err_limit_deg)
+        try:
+            large_mask = np.abs(err_pred) > ff_limit_rad
+            if np.any(large_mask):
+                # scale local Kp (for these agents) down when prediction is huge
+                if hasattr(Kp_eff, '__iter__'):
+                    Kp_eff = np.where(large_mask, Kp_eff * 0.5, Kp_eff)
+                else:
+                    if large_mask:
+                        Kp_eff = Kp_eff * 0.5
+        except Exception:
+            pass
 
-        # 4) compute raw command *on the predicted error*,
-        #    so P (and optionally D) act early
-        raw = Kp_eff * err_pred + self.Ki * self.integral + self.Kd * derr
 
-        # Optional debug: print internals for diagnosing control transients
-        if PID_DEBUG:
-            try:
-                # print a compact per-agent summary (handles n=1 or vectorized)
-                for idx in range(self.n):
-                    print(f"[PID] idx={idx} err={np.degrees(err[idx]):+.3f}deg "
-                          f"err_pred={np.degrees(err_pred[idx]):+.3f}deg "
-                          f"P={np.degrees(Kp_eff[idx]*err_pred[idx]) if hasattr(Kp_eff, '__iter__') else np.degrees(Kp_eff*err_pred[idx]):+.3f}deg "
-                          f"I={np.degrees(self.integral[idx]*self.Ki):+.3f}deg "
-                          f"D={np.degrees(self.Kd*derr[idx]):+.3f}deg "
-                          f"raw_deg={np.degrees(raw[idx]):+.3f}deg")
-            except Exception:
-                # be permissive: if shapes don't match, print scalar-friendly line
-                print(f"[PID] err={np.degrees(err):+.3f} err_pred={np.degrees(err_pred):+.3f} raw_deg={np.degrees(raw):+.3f}")
+            # 4) compute raw command *on the predicted error*,
+            #    so P (and optionally D) act early
+            # use filtered derivative for D-term
+            raw = Kp_eff * err_pred + self.Ki * self.integral + self.Kd * derr_f
+
+        # Apply a configurable soft pre-saturation cap to the raw PID output.
+        # This prevents extremely large internal commands (e.g., hundreds of degrees)
+        # from causing aggressive integrator/back-calculation dynamics. The cap is
+        # specified in degrees in ADVANCED_CONTROLLER['raw_cap_deg']. If not set,
+        # no extra cap is applied.
+        try:
+            from emergent.ship_abm.config import ADVANCED_CONTROLLER
+            raw_cap_deg = ADVANCED_CONTROLLER.get('raw_cap_deg', None)
+            if raw_cap_deg is not None:
+                cap_rad = np.deg2rad(float(raw_cap_deg))
+                # raw may be scalar or array-like
+                raw = np.clip(raw, -cap_rad, cap_rad)
+        except Exception:
+            # if config is not available for any reason, silently continue
+            pass
+
+        # Optional debug: print internals for diagnosing control transients.
+        # Use the module logger at DEBUG level and only emit when PID_DEBUG
+        # or self.verbose is True.
+        try:
+            from emergent.ship_abm.simulation_core import log as sim_log
+            if PID_DEBUG or getattr(self, 'verbose', False):
+                try:
+                    for idx in range(self.n):
+                        sim_log.debug("[PID] idx=%s err=%+.3fdeg err_pred=%+.3fdeg P=%+.3fdeg I=%+.3fdeg D=%+.3fdeg raw_deg=%+.3fdeg",
+                                      idx,
+                                      np.degrees(err[idx]),
+                                      np.degrees(err_pred[idx]),
+                                      np.degrees(Kp_eff[idx]*err_pred[idx]) if hasattr(Kp_eff, '__iter__') else np.degrees(Kp_eff*err_pred[idx]),
+                                      np.degrees(self.integral[idx]*self.Ki),
+                                      np.degrees(self.Kd*derr[idx]),
+                                      np.degrees(raw[idx]))
+                except Exception:
+                    sim_log.debug("[PID] err=%s err_pred=%s raw_deg=%s", np.degrees(err), np.degrees(err_pred), np.degrees(raw))
+        except Exception:
+            # Last-resort fallback: use print only if verbose
+            if PID_DEBUG or getattr(self, 'verbose', False):
+                try:
+                    for idx in range(self.n):
+                        print(f"[PID] idx={idx} err={np.degrees(err[idx]):+.3f}deg "
+                              f"err_pred={np.degrees(err_pred[idx]):+.3f}deg "
+                              f"P={np.degrees(Kp_eff[idx]*err_pred[idx]) if hasattr(Kp_eff, '__iter__') else np.degrees(Kp_eff*err_pred[idx]):+.3f}deg "
+                              f"I={np.degrees(self.integral[idx]*self.Ki):+.3f}deg "
+                              f"D={np.degrees(self.Kd*derr[idx]):+.3f}deg "
+                              f"raw_deg={np.degrees(raw[idx]):+.3f}deg")
+                except Exception:
+                    print(f"[PID] err={np.degrees(err):+.3f} err_pred={np.degrees(err_pred):+.3f} raw_deg={np.degrees(raw):+.3f}")
 
         # release_band_deg and trim_band_deg were converted to radians in __init__
         release_rad = self.release_band_deg
@@ -516,22 +694,74 @@ class ship:
         # 4) clamp to rudder limits
         des = np.clip(raw, -self.max_rudder, self.max_rudder)
 
-        # 5) anti-windup: integrate only when not saturated
-        windup_mask = np.abs(des) < self.max_rudder
+        # 5) anti-windup: integrate only when not saturated OR when
+        # the error would drive the integrator back toward unsaturation.
+        # This prevents integral from winding up when rudder is saturated.
+        # Allow a small epsilon so we still integrate when very close to limit
+        eps = 1e-8
+        des_abs = np.abs(des)
+        # integrate if desired command is not saturated, or if the sign of the
+        # error would reduce the command magnitude (i.e., help recover)
+        sign_err = np.sign(err)
+        sign_des = np.sign(des)
+        recover_mask = sign_err != sign_des
+        windup_mask = (des_abs < (self.max_rudder - eps)) | recover_mask
         self.integral[windup_mask] += err[windup_mask] * dt
 
-        # 6) rate-limit: max change ±(max_rudder_rate·dt)
+        # clamp integral term so Ki * integral stays within configured I_max
+        try:
+            I_max = float(self.I_max)
+        except Exception:
+            I_max = None
+        if I_max is not None and self.Ki != 0.0:
+            # clamp such that Ki * integral is within [-I_max, I_max]
+            max_integral = I_max / (abs(self.Ki) + 1e-12)
+            self.integral = np.clip(self.integral, -max_integral, max_integral)
+
+        # Note: integrator back-calculation will be applied after we compute the
+        # final applied rudder (post rate-limit & smoothing) so that the
+        # integrator is unwound based on the true actuator output.
+
+        # 6) compute I-term and construct the unclamped desired command
+        # (we recompute des using the clamped integral contribution)
+        I_term = self.Ki * self.integral
+        # recompute raw with clamped I-term and same P/D contributions
+        raw_with_I = Kp_eff * err_pred + I_term + self.Kd * derr_f
+        # clamp to rudder limits
+        des = np.clip(raw_with_I, -self.max_rudder, self.max_rudder)
+
+        # 7) rate-limit: limit change per timestep
         max_delta = self.max_rudder_rate * dt
-        rud = np.clip(
+        rud_rate_limited = np.clip(
             des,
             self.prev_rudder - max_delta,
             self.prev_rudder + max_delta
         )
 
-        # 7) low-pass filter the commanded rudder
-        # alpha = dt / (self.rudder_tau + dt)
-        # self.smoothed_rudder += alpha * (rud - self.smoothed_rudder)
-        self.smoothed_rudder = rud
+        # 8) first-order servo (low-pass) to emulate actuator dynamics
+        alpha = dt / (self.rudder_tau + dt)
+        # ensure smoothed_rudder is same shape
+        self.smoothed_rudder = (1.0 - alpha) * self.smoothed_rudder + alpha * rud_rate_limited
+        rud = self.smoothed_rudder
+
+        # Integrator back-calculation based on the actual applied rudder
+        try:
+            backcalc_beta = float(ADVANCED_CONTROLLER.get('backcalc_beta', 0.08))
+        except Exception:
+            backcalc_beta = 0.08
+        try:
+            raw_arr = np.atleast_1d(raw_with_I)
+            applied_arr = np.atleast_1d(rud)
+            diff = raw_arr - applied_arr
+            apply_mask = np.abs(diff) > 1e-8
+            if np.isscalar(self.integral):
+                if apply_mask:
+                    self.integral -= backcalc_beta * diff * dt
+            else:
+                # vectorized subtract only where meaningful
+                self.integral = self.integral - (backcalc_beta * diff * dt * apply_mask)
+        except Exception:
+            pass
         
         # 8) update state
         self.prev_error  = err
@@ -642,8 +872,15 @@ class ship:
                 #   • helm hasn’t swung beyond DROP_ANG
                 still_danger = (d_cpa < CPA_SAFE) and (range_rate < 0.0) \
                                and (hdg_dev < DROP_ANG)
-                print(f"[{i}] dist={dist:6.0f} dCPA={d_cpa:6.0f} rr={range_rate: .2f} "
-                          f"Δψ={np.degrees(hdg_dev):4.1f} danger={still_danger}")
+                try:
+                    from emergent.ship_abm.simulation_core import log as sim_log
+                    if getattr(self, 'verbose', False):
+                        sim_log.debug("[%s] dist=%6.0f dCPA=%6.0f rr=% .2f Δψ=%4.1f danger=%s",
+                                      i, dist, d_cpa, range_rate, np.degrees(hdg_dev), still_danger)
+                except Exception:
+                    if getattr(self, 'verbose', False):
+                        print(f"[{i}] dist={dist:6.0f} dCPA={d_cpa:6.0f} rr={range_rate: .2f} "
+                              f"Δψ={np.degrees(hdg_dev):4.1f} danger={still_danger}")
     
                 if still_danger:                    
                     hd = self.crossing_heading[i]
@@ -836,8 +1073,8 @@ class ship:
         thrust = self.calculate_thrust(rpms)
         drag = self.compute_drag(u)
         env = self.environmental_forces(wind, current)
-        # Rudder torque
-        rudder_tau = self.compute_rudder_torque(rudder, state)
+        # Rudder torque (legacy call passed state) — pass forward speed u explicitly
+        rudder_tau = self.compute_rudder_torque(rudder, None, u)
         # Hydrodynamic
         Xh = self.Xu*u + self.Xv*v + self.Xp*p + self.Xr*r
         Yh = self.Yu*u + self.Yv*v + self.Yp*p + self.Yr*r
@@ -873,15 +1110,60 @@ class ship:
         rudder_angle:(n,)
         Returns: u_dot, v_dot, p_dot, r_dot (each (n,))
         """
+        # Ensure inputs are 1D arrays of length n
+        # determine n from state shape
+        if hasattr(state, 'ndim') and state.ndim > 1:
+            n = state.shape[1]
+        else:
+            n = 1
+
+        def _ensure_arr(x, shape_len=n):
+            a = np.atleast_1d(x)
+            if a.size == shape_len:
+                return a
+            if a.size == 1:
+                return np.full(shape_len, float(a.flat[0]))
+            # try transpose if shape mismatched (e.g., (1,n) vs (n,))
+            if a.shape[0] == 1 and a.size == shape_len:
+                return a.reshape(shape_len)
+            return np.reshape(a, (shape_len,)) if a.size == shape_len else np.resize(a, shape_len)
+
+        prop_thrust = _ensure_arr(prop_thrust, n)
+        drag_force = _ensure_arr(drag_force, n)
+        rudder_angle = _ensure_arr(rudder_angle, n)
+
+        # DEBUG: print shapes of the inputs to catch accidental transposes
+        try:
+            verbose_print = getattr(self, 'verbose', False)
+            if verbose_print:
+                from emergent.ship_abm.simulation_core import log as sim_log
+                sim_log.debug(f"[DYN-DBG-IN] n={n} prop_thrust.shape={getattr(prop_thrust,'shape',None)} drag.shape={getattr(drag_force,'shape',None)} rud.shape={getattr(rudder_angle,'shape',None)} wind_force.shape={getattr(wind_force,'shape',None)} current_force.shape={getattr(current_force,'shape',None)} state.shape={getattr(state,'shape',None)}")
+        except Exception:
+            pass
+
+        # wind_force and current_force expected shape (2, n)
+        wind_force = np.atleast_2d(wind_force)
+        current_force = np.atleast_2d(current_force)
+        if wind_force.shape[1] != n and wind_force.shape[0] == n:
+            # maybe transposed -> transpose
+            wind_force = wind_force.T
+        if current_force.shape[1] != n and current_force.shape[0] == n:
+            current_force = current_force.T
+        # if still wrong, broadcast columns
+        if wind_force.shape[1] == 1 and n > 1:
+            wind_force = np.tile(wind_force, (1, n))
+        if current_force.shape[1] == 1 and n > 1:
+            current_force = np.tile(current_force, (1, n))
+
         # Surge and sway forces
         X = prop_thrust + drag_force + wind_force[0] + current_force[0]
         Y =                 wind_force[1] + current_force[1]
         # Moments from rudder
-        K = self.Kdelta * rudder_angle
-        N = self.Ndelta * rudder_angle
+        K = np.full(n, self.Kdelta) * rudder_angle
+        N = np.full(n, self.Ndelta) * rudder_angle
         # Damping (linear + quadratic) applied only to u, v, r
         u, v, p, r = state
-        state_uvr = state[[0,1,3], :]  # u, v, r only
+        state_uvr = state[[0,1,3], :].copy()  # u, v, r only
         # lin = self.linear_damping * state_uvr
         # quad = self.quad_damping * state_uvr * np.abs(state_uvr)
         lin = np.zeros_like(state_uvr)
@@ -905,11 +1187,23 @@ class ship:
         # Then acc = H_inv @ Tau …
 
         # Net generalized forces
+        # DEBUG: ensure shapes match before stacking
+        a0 = X - lin[0] - quad[0]
+        a1 = Y - lin[1] - quad[1]
+        a2 = K
+        a3 = N
+        try:
+            verbose_print = getattr(self, 'verbose', False)
+            if verbose_print:
+                from emergent.ship_abm.simulation_core import log as sim_log
+                sim_log.debug(f"[DYN-DBG] shapes: a0={getattr(a0,'shape',None)} a1={getattr(a1,'shape',None)} a2={getattr(a2,'shape',None)} a3={getattr(a3,'shape',None)}")
+        except Exception:
+            pass
         Tau = np.vstack([
-            X - lin[0] - quad[0],  # surge
-            Y - lin[1] - quad[1],  # sway
-            K,                     # roll
-            N                      # yaw
+            a0,
+            a1,
+            a2,
+            a3
         ])  # shape (4,n)
         # Accelerations
         acc = self.H_inv @ Tau  # (4,n)

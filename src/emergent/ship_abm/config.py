@@ -102,17 +102,28 @@ SHIP_PHYSICS = {
     'Np': 0.0,                  # Yaw moment derivative w.r.t. roll rate (kg·m²)
     'Nr': -16943042.526334,                  # Yaw moment derivative w.r.t. yaw rate (kg·m²)
 
-    'Ydelta': 50161090.761107,   # 3.4e7 N of lateral force per radian of rudder
+    # Rudder control effectiveness: reduce slightly to avoid excessive yaw from small rudder
+    # (temporarily reduced by ~40% from original to get gentler steering; reversible)
+    'Ydelta': 30096654.456664,   # lateral force per radian of rudder (reduced)
     'Kdelta': 0.0,     # N·m of roll moment per radian (ignored)
-    'Ndelta': 148096565.795058,   # 6.8e9 N·m of yaw torque per radian of rudder
+    # Increased by 1.5x from 88,857,939.477034 to improve rudder authority for candidate tuning
+    # For Option B testing we temporarily reduce Ndelta to 70% of the tuned value
+    # to make the plant less aggressive and observe controller behaviour.
+    'Ndelta': 133286909.215551 * 0.7,   # yaw torque per radian of rudder (reduced for test)
 
     # Damping
-    'linear_damping': 1e5,      # Linear hull damping coefficient (N per m/s)
-    'quad_damping': 1e4,        # Quadratic hull damping coefficient (N per (m/s)²)
+    # Increase linear yaw-related damping modestly to reduce yaw acceleration peaks
+    'linear_damping': 1.4e5,      # Linear hull damping coefficient (N per m/s)
+    'quad_damping': 1.2e4,        # Quadratic hull damping coefficient (N per (m/s)²)
 
-    # Rudder limits
-    'max_rudder': np.radians(35),         # Maximum rudder deflection (rad)
-    'max_rudder_rate': 0.35,  # Maximum rudder rate change (rad/s)
+    # Rudder limits (temporarily reduced to avoid spinouts)
+    # NOTE: lowered from 35° to 20° and rate from 0.35 rad/s (~20°/s) to
+    # 0.17 rad/s (~10°/s). These conservative defaults are easy to revert.
+    # Reduce rudder limits to model more conservative steering and avoid
+    # frequent hard-over during gusty forcing. 12° max and ~0.087 rad/s
+    # (~5°/s) rate limit are conservative defaults for development.
+    'max_rudder': np.radians(12),         # Maximum rudder deflection (rad)
+    'max_rudder_rate': 0.087,  # Maximum rudder rate change (rad/s) (~5°/s)
     
     # Drag Stuff
     'drag_coeff': 0.0012
@@ -128,6 +139,11 @@ SHIP_AERO_DEFAULTS = {
     'Cd_air': 1.0,
     'wind_proj_baseline': 0.2,
     'wind_proj_scale': 0.8,
+    # global multiplier applied to computed wind force (use <1.0 to reduce wind effect)
+    # conservative default: slightly reduce wind forcing to avoid excessive crabbing
+    # Set to 1.0 to model realistic wind forcing by default; lower values used
+    # earlier were a conservative handicap and may make vessels under-react.
+    'wind_force_scale': 1.0,
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -136,12 +152,12 @@ SHIP_AERO_DEFAULTS = {
 # These gains determine how aggressively each vessel adjusts heading (rudder) and speed (thrust).
 CONTROLLER_GAINS = {
     # Proportional gain for heading controller
-    "Kp": 0.10,
+    "Kp": 0.5,
     # Integral gain for heading controller (set to 0 if no steady-state offset correction is needed)
-    "Ki": 0.02,
+    "Ki": 0.05,
     # Derivative gain for heading controller (damping term)
-    # lowered from 30.0 to reduce aggressive damping spikes seen at timestep boundaries
-    "Kd": 12.0,
+    # reduced to avoid excessive D-term reacting to transient measured r
+    "Kd": 0.12,
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -156,7 +172,7 @@ CONTROLLER_GAINS = {
 ADVANCED_CONTROLLER = {
     # Feed‐forward gain: multiplies heading error to compute a desired turn‐rate.
     # Typical values: 0.0 (no feed‐forward) up to ~1.0 (aggressive).
-    "Kf_gain": 0.01,  
+    "Kf_gain": 0.002,  
 
     # Maximum commanded turn rate (°/s).  After feed‐forward, we clamp
     # desired r_des to ±r_rate_max_deg before converting to radians.
@@ -164,7 +180,7 @@ ADVANCED_CONTROLLER = {
 
     # Anti‐windup limit on the I‐term (degrees).  The integral of error is
     # clipped to ±I_max_deg before using it.  Convert to radians in code.
-    "I_max_deg": 2.0,  
+    "I_max_deg": 10.0,  
 
     # Prediction horizon for dead‐band (seconds).  If |err_pred| < trim_band, we
     # set rudder=0 early to avoid chatter or overshoot.  Typical values: tens to
@@ -175,15 +191,17 @@ ADVANCED_CONTROLLER = {
 
     # Dead‐zone half‐angle (degrees).  Any commanded rudder smaller than this
     # in magnitude is forced to zero to prevent constant micro‐twitching.
-    # Slightly increase trim_band to prevent micro-twitching while still
-    # allowing small corrections. Raised from 0.03° to 0.3°.
-    "trim_band_deg": 0.3,  
+    # Increase trim_band to reduce twitching under strong, gusty wind forcing.
+    "trim_band_deg": 0.5,  
 
     # Early‐release band (degrees).  Once |predicted_error| < release_band_deg,
     # rudder is released (forced to zero), even if commanded > trim_band_deg.
     # This widens the “dead‐zone” as heading error shrinks.  Typical: 3–10°.
     # Keep release band moderate to allow release when errors are small.
-    "release_band_deg": 8.0,
+    "release_band_deg": 3.0,
+    # Derivative low-pass time constant (seconds). Small values follow measured r closely;
+    # larger values smooth noisy measurements before they reach the D-term. 0.5s is conservative.
+    "deriv_tau": 1.0,
     # Dead-reckoning tuning: how aggressively to correct for current drift
     # sensitivity: fraction of U (through-water speed) at which full correction is applied
     "dead_reck_sensitivity": 0.25,
@@ -193,16 +211,27 @@ ADVANCED_CONTROLLER = {
     # rudder commands. Per-ship `pid_control()` will return the last
     # simulation-commanded rudder unless explicitly asked to run locally.
     "use_simulation_controller": True,
+    # Back-calculation coefficient used for anti-windup: when saturation occurs,
+    # this fraction of the (raw - applied) command is subtracted from the
+    # integrator each second (i.e. integral -= backcalc_beta * diff * dt).
+    # Increase to more aggressively unwind I during saturation. Default was 0.08.
+    "backcalc_beta": 0.16,
+    # Soft pre-saturation cap (degrees): clamp PID raw command magnitude before
+    # applying actuator limits. This prevents extremely large internal commands
+    # from causing aggressive integrator back-calculation and numeric instability.
+    # Set to None or a very large value to disable.
+    "raw_cap_deg": 90.0,
 }
 
 # Enable verbose PID internals printing when True (useful for headless debugging)
+# Default to False for batch/automated runs; tests can override to True when needed.
 PID_DEBUG = False
 
 # Simulation-level PID tracing: when True, the simulation will emit a CSV of
 # per-step PID internals for offline QC/tuning. Path may be None to auto-generate.
 PID_TRACE = {
     'enabled': False,
-    'path': None
+    'path': 'scripts/pid_trace_gui_rosario.csv'
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -260,6 +289,8 @@ COLLISION_AVOIDANCE = {
     "drop_angle"  : np.radians(15.0),  # if heading changed ≥15° from initial
     "headon_turn_deg": 30,
     "cross_turn_deg": 20,
+    # If False, do not force hard-over rudder when give-way logic requests it.
+    "allow_hard_give_way_override": True,
 }
     
 # ───────────────────────────────────────────────────────────────────────────────

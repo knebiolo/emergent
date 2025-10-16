@@ -2103,7 +2103,32 @@ class ship_viewer(QtWidgets.QWidget):
                 self.view.addItem(curve)
                 route_items.append(curve)
             self.route_item = route_items
-            self.sim.waypoints = [[np.array(p) for p in agent_pts] for agent_pts in wps]
+            # Detect coordinate units: if waypoints look like lon/lat (deg), convert to UTM
+            try:
+                first_pt = wps[0][0]
+                x0, y0 = float(first_pt[0]), float(first_pt[1])
+                need_transform = (abs(x0) <= 180.0 and abs(y0) <= 90.0)
+            except Exception:
+                need_transform = False
+
+            if need_transform:
+                try:
+                    from pyproj import Transformer
+                    ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
+                    converted = []
+                    for agent_pts in wps:
+                        conv = []
+                        for x, y in agent_pts:
+                            ux, uy = ll2utm.transform(float(x), float(y))
+                            conv.append(np.array([ux, uy]))
+                        converted.append(conv)
+                    self.sim.waypoints = converted
+                    print(f"[ShipViewer] Converted persisted waypoints from lon/lat → {self.sim.crs_utm} before applying")
+                except Exception as e:
+                    print(f"[ShipViewer] Failed to convert persisted waypoints to UTM: {e}; applying raw values")
+                    self.sim.waypoints = [[np.array(p) for p in agent_pts] for agent_pts in wps]
+            else:
+                self.sim.waypoints = [[np.array(p) for p in agent_pts] for agent_pts in wps]
             try:
                 if hasattr(self, 'btn_start_sim'):
                     self.btn_start_sim.setEnabled(True)
@@ -2340,14 +2365,14 @@ class ship_viewer(QtWidgets.QWidget):
         ])
         # compute heading, speed, rudder commands (arrays of length n)
         # ─────────────────────────────────────────────────────────────────
-        # apply a softened “steer-into-drift”:
-        #   - the minus flips sign so we fight the flow,
-        #   - drift_gain <1 attenuates the correction to prevent over-yaw.
+        # apply a softened attenuation of environment sampling for UI controller
+        # (do NOT negate: samplers already return the drift vector in earth-frame
+        #  that points in the direction the medium is pushing the ship)
         orig_wind_fn    = self.sim.wind_fn
         orig_current_fn = self.sim.current_fn
         drift_gain = 0.6   # tune between 0 (no comp) and 1 (full comp)
-        self.sim.wind_fn    = lambda lon, lat, now: drift_gain * -orig_wind_fn(lon, lat, now)
-        self.sim.current_fn = lambda lon, lat, now: drift_gain * -orig_current_fn(lon, lat, now)
+        self.sim.wind_fn    = lambda lon, lat, now: drift_gain * orig_wind_fn(lon, lat, now)
+        self.sim.current_fn = lambda lon, lat, now: drift_gain * orig_current_fn(lon, lat, now)
 
         hd_cmds, sp_cmds, rud_cmds = self.sim._compute_controls_and_update(
             self.sim.state[[0,1,3]], t)

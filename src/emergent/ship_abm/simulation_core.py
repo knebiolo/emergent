@@ -98,7 +98,7 @@ from emergent.ship_abm.config import SHIP_PHYSICS, \
         ADVANCED_CONTROLLER, \
             PROPULSION, \
                 SIMULATION_BOUNDS, \
-                    xml_url
+                    xml_url, COLLISION_AVOIDANCE
 from emergent.ship_abm.ais import compute_ais_heatmap
 from datetime import date
 from emergent.ship_abm.ais import compute_ais_heatmap
@@ -228,6 +228,8 @@ class simulation:
         self.t_history = []          # append t each step
         self.psi_history = []        # append self.psi[0] each step (or full array)
         self.hd_cmd_history = []     # append hd_cmds[0] each step
+        # verbosity flag: when False, suppress high-frequency debug prints
+        self.verbose = bool(verbose)
 
         # Base polygon from ship scale
         self.L = getattr(ship, 'length', 400.0)
@@ -351,6 +353,23 @@ class simulation:
         self.prev_psi = self.psi.copy()
         # integral of heading error for I-term
         self.integral_error = np.zeros_like(self.psi)
+        # runtime rudder inversion detection (per-agent)
+        # If the plant (dynamics) responds opposite to applied rudder for
+        # several consecutive steps, we flip commanded rudder to correct
+        # coordinate-convention mismatches. Counters are conservative.
+        self._rudder_inverted = np.zeros(self.n, dtype=bool)
+        self._rudder_rev_counter = np.zeros(self.n, dtype=int)
+        # lockout timestamp (simulation time) until which further flips are disabled
+        self._rudder_rev_lock_until = np.zeros(self.n, dtype=float)
+        # store previous raw command (for optional low-pass filtering to avoid chatter)
+        self.prev_raw_cmd = np.zeros(self.n, dtype=float)
+        # confirm after this many consecutive opposite-sign observations
+        # Temporarily disable runtime rudder-inversion auto-correct by
+        # setting confirmation to a very large value. This makes the
+        # detector inert for short diagnostic runs. Revert after debug.
+        self._rudder_rev_confirm = 10**9
+        # minimum yaw-rate magnitude (rad/s) to consider for detection (~1°/s)
+        self._rudder_rev_threshold = np.radians(1.0)
         
         self.tuning = {
             'Kp': CONTROLLER_GAINS['Kp'],
@@ -741,13 +760,30 @@ class simulation:
                 except Exception:
                     pass
         if not current_loaded:
-            msg = f"[Simulation]   Falling back to zero currents after {len(backoff)} attempts"
-            print(msg)
+            # If OFS discovery/opening failed repeatedly, fall back to a
+            # simple tidal-proxy sampler so the simulation still experiences
+            # spatially-uniform, time-varying currents (helpful for UI tests).
             try:
-                self.log_lines.insert(0, msg)
-                self.log_lines = self.log_lines[: self.max_log_lines]
+                from emergent.ship_abm.ofs_loader import make_tidal_proxy_current
+                proxy = make_tidal_proxy_current(axis_deg=320.0, A_M2=0.30, A_S2=0.10)
+                # wrap+normalize so caller always gets an (N,2) array
+                self.current_fn = _normalize_env_sampler(wrap_sampler_for_queries(proxy))
+                msg = f"[Simulation] ✓ Falling back to tidal-proxy currents after {len(backoff)} attempts"
+                print(msg)
+                try:
+                    self.log_lines.insert(0, msg)
+                    self.log_lines = self.log_lines[: self.max_log_lines]
+                except Exception:
+                    pass
+                current_loaded = True
             except Exception:
-                pass
+                msg = f"[Simulation]   Falling back to zero currents after {len(backoff)} attempts"
+                print(msg)
+                try:
+                    self.log_lines.insert(0, msg)
+                    self.log_lines = self.log_lines[: self.max_log_lines]
+                except Exception:
+                    pass
 
         # Try multiple times to acquire wind data before falling back
         wind_loaded = False
@@ -1317,17 +1353,20 @@ class simulation:
                 )
 
         # Debug instrumentation: if waypoints already exist at spawn time,
-        # print a short stack trace to help locate the caller setting them.
+        # log a short stack trace at DEBUG level to help locate the caller
+        # setting them. Only emit this when self.verbose is True (batch
+        # runs should remain quiet).
         try:
             import traceback
-            if hasattr(self, 'waypoints') and len(getattr(self, 'waypoints', [])) > 0:
-                print(f"[Simulation.spawn] Spawn called with pre-existing waypoints (n_agents={self.n}, waypoints_len={len(self.waypoints)})")
+            if getattr(self, 'verbose', False) and hasattr(self, 'waypoints') and len(getattr(self, 'waypoints', [])) > 0:
+                log.debug("[Simulation.spawn] Spawn called with pre-existing waypoints (n_agents=%s, waypoints_len=%s)", self.n, len(self.waypoints))
                 stack = traceback.format_stack(limit=8)
-                print("[Simulation.spawn] recent stack (most recent call last):")
+                log.debug("[Simulation.spawn] recent stack (most recent call last):")
                 for line in stack[:-1]:
                     # skip the current frame's own line
-                    print(line.strip())
+                    log.debug(line.strip())
         except Exception:
+            # Best-effort: never raise during spawn for logging
             pass
 
 
@@ -1364,6 +1403,11 @@ class simulation:
         self.psi    = psi0.copy()
         self.goals  = goals_arr.copy()
         self.ship = ship(state0,pos0,psi0,goals_arr)
+        # propagate verbosity preference to ship model so its debug prints respect the sim flag
+        try:
+            setattr(self.ship, 'verbose', bool(self.verbose))
+        except Exception:
+            pass
         self.ship.wpts = self.waypoints
         self.ship.short_route = self.waypoints
         self.history = { i: [self.pos[:,i].copy()] for i in range(self.n) }
@@ -1757,9 +1801,12 @@ class simulation:
             if self.test_mode not in ("zigzag", "turning_circle"):
                 self._update_goals()
 
-            print(f"[SIM] Time step: {step}, t={t:.1f}s")
+            if getattr(self, 'verbose', False):
+                log.debug("[SIM] Time step: %s, t=%.1f s", step, t)
             if self.stop:
-                print(f"[SIM] Halted at t={t:.1f}s.")
+                if getattr(self, 'verbose', False):
+                    log.info("[SIM] Halted at t=%.1f s.", t)
+                break
                 break
 
             # 2) pack body‐fixed velocities into nu = [u; v; r]
@@ -1795,7 +1842,10 @@ class simulation:
                         # add to persistent collisions list
                         self.collision_events.append(ev)
                         # also log to console
-                        print(f"[SIM] Collision: Ships {i}&{j} at t={t:.1f}s rel_speed={ev['rel_speed_m_s']:.2f} m/s KE_i={ev['ke_i_J']:.1f} J KE_j={ev['ke_j_J']:.1f} J")
+                        # record collision but only log if verbose requested
+                        if getattr(self, 'verbose', False):
+                            log.warning("[SIM] Collision: Ships %s&%s at t=%.1f s rel_speed=%.2f m/s KE_i=%.1f J KE_j=%.1f J",
+                                        i, j, t, ev.get('rel_speed_m_s', 0.0), ev.get('ke_i_J', 0.0), ev.get('ke_j_J', 0.0))
 
                 # If grounded (allision) or any collision happened we freeze simulation state
                 # Apply a conservative hard-stop across all vessels
@@ -1810,21 +1860,39 @@ class simulation:
                 except Exception:
                     pass
 
-                print(f"[SIM] {'Collision' if collision_events else 'Allision'} at t={t:.1f}s — vessels frozen.")
+                if getattr(self, 'verbose', False):
+                    log.info("[SIM] %s at t=%.1f s — vessels frozen.", 'Collision' if collision_events else 'Allision', t)
                 break
             
             # -- record for post-run analysis
             self.t_history.append(t)
             # psi[0] = heading of agent 0 in radians
-            self.psi_history.append(self.psi[0])
+            # store normalized heading in [-pi, pi]
+            psi0 = ((self.psi[0] + np.pi) % (2*np.pi)) - np.pi
+            self.psi_history.append(psi0)
             # hd_cmds[0] = commanded heading for agent 0
             self.hd_cmd_history.append(self.hd_cmds[0])
+            # rudder recorded from last _compute_rudder output (rad)
+            try:
+                # ensure rudder_history exists
+                if not hasattr(self, 'rudder_history'):
+                    self.rudder_history = []
+                # store agent-0 rudder
+                self.rudder_history.append(float(rud[0]))
+            except Exception:
+                # fallback: append nan if something went wrong
+                try:
+                    self.rudder_history.append(float('nan'))
+                except Exception:
+                    pass
 
-        print(f"[SIM] Completed at t={self.t:.1f}s")
+        if getattr(self, 'verbose', False):
+            log.info("[SIM] Completed at t=%.1f s", self.t)
 
     def _startup_diagnostics(self, total_steps):
-        print(f"[SIM] Starting: {self.n} agents, dt={self.dt}, steps={total_steps}")
-        print(f"[SIM] Initial pos: {self.pos.T.round(2)}")
+        if getattr(self, 'verbose', False):
+            log.info("[SIM] Starting: %s agents, dt=%s, steps=%s", self.n, self.dt, total_steps)
+            log.info("[SIM] Initial pos: %s", self.pos.T.round(2))
         
     def _update_goals(self):
         """
@@ -1882,9 +1950,14 @@ class simulation:
         wind_vec    = self.wind_fn(lon, lat, now).T   # shape (2, n)
         current_vec = self.current_fn(lon, lat, now).T
     
-        # Now pass the raw drift vector—compute_desired will do its own subtraction
-        combined_drift_vec = current_vec + wind_vec
-        drift_into = -(wind_vec + current_vec)
+        # Now pass the raw environmental drift vector (wind + current).
+        # compute_desired expects the environmental *current* used to compute
+        # a correction for steering INTO the drift. The caller should provide
+        # the vector which represents how the ship should compensate (i.e.
+        # steer into the drift), so pass the *negated* environmental push
+        # (wind+current) here. Previously we passed the raw push which had
+        # the wrong sign and produced headings ~180° off in some scenarios.
+        combined_drift_vec = -(current_vec + wind_vec)
         
         # 1) COLREGS override
         col_hd, col_sp, _, roles = self.ship.colregs(
@@ -1896,7 +1969,7 @@ class simulation:
             self.goals,
             self.pos[0], self.pos[1],
             self.state[0], self.state[1], self.state[3], self.psi,
-            current_vec = drift_into
+            current_vec = combined_drift_vec
         )
         
         # 4) Fuse COLREGS + PID, then compute rudder
@@ -2007,54 +2080,157 @@ class simulation:
             PID_TRACE = {'enabled': False, 'path': None}
     
         # 1) Heading error in [-π, π]
-        err = ((psi_ref - self.psi + np.pi) % (2 * np.pi)) - np.pi
+        # canonical form: err = hd - psi  (use helper to ensure consistent wrapping)
+        try:
+            from emergent.ship_abm.angle_utils import heading_diff_rad
+            err = heading_diff_rad(psi_ref, self.psi)
+        except Exception:
+            # fallback (previous behavior used psi_ref - self.psi but we want hd - psi)
+            err = ((psi_ref - self.psi + np.pi) % (2 * np.pi)) - np.pi
+        # normalize to 1-D arrays of length self.n to avoid shape mismatches
+        err = np.asarray(err).ravel()
+        if err.size != self.n:
+            # if scalar or unexpected shape, broadcast/resize to match self.n
+            err = np.resize(err, (self.n,))
     
         # 2) Feed-forward: desired turn rate
         Kf = self.tuning['Kf']                # feed-forward gain
         r_rate_max = np.radians(self.tuning['r_rate_max_deg'])
         r_des = np.clip(Kf * err, -r_rate_max, r_rate_max)
+        # Conservative feed-forward guard: if heading error is very large,
+        # downscale feed-forward so the controller doesn't command an
+        # aggressive turn-rate based solely on a large error (prevents
+        # large r_des that the ship cannot follow and leads to saturation).
+        try:
+            ff_err_limit_deg = float(self.tuning.get('ff_err_limit_deg', 10.0))
+        except Exception:
+            ff_err_limit_deg = 10.0
+        ff_limit_rad = np.deg2rad(ff_err_limit_deg)
+        # scale down r_des where |err| exceeds the threshold
+        try:
+            large_err_mask = np.abs(err) > ff_limit_rad
+            if np.any(large_err_mask):
+                # apply conservative scale (retain a small portion of feed-forward)
+                r_des = np.where(large_err_mask, r_des * 0.25, r_des)
+        except Exception:
+            pass
     
         # 3) Measured turn-rate
-        r = (self.psi - self.prev_psi) / dt
-    
-        # 4) PID on turn-rate error
-        derr = r_des - r
-        # update integral of heading error, with anti-windup limits
-        self.integral_error += err * dt
-        I_max = np.radians(self.tuning['I_max_deg'])
-        self.integral_error = np.clip(self.integral_error, -I_max, I_max)
-    
+        # Compute angle difference with wrap-around protection so crossing the
+        # -pi/pi boundary doesn't produce a huge false yaw-rate spike.
+        # Also guard the very first call if prev_psi is not initialized.
+        if not hasattr(self, 'prev_psi') or self.prev_psi is None:
+            # no previous heading recorded -> assume zero turn-rate on first step
+            r_meas = np.zeros_like(self.psi)
+            # initialize prev_psi so subsequent steps are valid
+            self.prev_psi = self.psi.copy()
+        else:
+            # minimal signed angle difference in [-pi, pi]
+            delta_psi = ((self.psi - self.prev_psi + np.pi) % (2 * np.pi)) - np.pi
+            r_meas = delta_psi / dt
+        r_meas = np.asarray(r_meas).ravel()
+        if r_meas.size != self.n:
+            r_meas = np.resize(r_meas, (self.n,))
+
+        # 3a) Derivative low-pass filtering (first-order) to reduce noisy D-action
+        # r_filtered[k] = r_filtered[k-1] + alpha * (r_meas - r_filtered[k-1])
+        deriv_tau = self.tuning.get('deriv_tau', 0.0)
+        if not hasattr(self, '_r_filtered'):
+            self._r_filtered = r_meas.copy()
+        if deriv_tau and deriv_tau > 0.0:
+            alpha = dt / (deriv_tau + dt)
+            self._r_filtered = self._r_filtered + alpha * (r_meas - self._r_filtered)
+        else:
+            self._r_filtered = r_meas.copy()
+
+        # 4) PID on turn-rate error (use filtered measured r)
+        derr = r_des - self._r_filtered
+        derr = np.asarray(derr).ravel()
+        if derr.size != self.n:
+            derr = np.resize(derr, (self.n,))
+
+        # Tentative integrator update (anti-windup via conditional / back-calculation)
+        # Compute a candidate integral and test for saturation after combining terms.
         Kp = self.tuning['Kp']
         Ki = self.tuning['Ki']
         Kd = self.tuning['Kd']
-        rud_cmd = Kp * err + Ki * self.integral_error + Kd * derr
 
-        # optional trace: write per-agent PID internals
-        if PID_TRACE.get('enabled', False):
-            import csv, os
-            path = PID_TRACE.get('path')
-            if path is None:
-                path = os.path.abspath('pid_trace_simulation.csv')
-            # open file on append, write header if missing
-            header = ['t','agent','err_deg','derr_deg','P_deg','I_deg','D_deg','raw_deg','rud_deg']
-            write_header = not os.path.exists(path)
-            try:
-                with open(path, 'a', newline='') as fh:
-                    writer = csv.writer(fh)
-                    if write_header:
-                        writer.writerow(header)
-                    for idx in range(self.n):
-                        p_term = Kp * err[idx]
-                        i_term = Ki * self.integral_error[idx]
-                        d_term = Kd * derr[idx]
-                        raw_deg = np.degrees(rud_cmd[idx])
-                        writer.writerow([
-                            float(self.t), int(idx), float(np.degrees(err[idx])), float(np.degrees(derr[idx])),
-                            float(np.degrees(p_term)), float(np.degrees(i_term)), float(np.degrees(d_term)),
-                            float(raw_deg), float(np.degrees(rud[idx])) if 'rud' in locals() else float(raw_deg)
-                        ])
-            except Exception:
-                pass
+        # Gain-schedule: reduce proportional gain when heading error is large
+        try:
+            kp_reduce_deg = float(self.tuning.get('kp_reduce_deg', 15.0))
+        except Exception:
+            kp_reduce_deg = 15.0
+        kp_reduce_rad = np.deg2rad(kp_reduce_deg)
+        try:
+            large_err_mask = np.abs(err) > kp_reduce_rad
+            if np.any(large_err_mask):
+                # conservative reduction: halve Kp where error is large
+                if np.isscalar(Kp):
+                    Kp_eff = np.where(large_err_mask, Kp * 0.5, Kp) if hasattr(large_err_mask, '__iter__') else (Kp * 0.5 if large_err_mask else Kp)
+                else:
+                    Kp_eff = np.where(large_err_mask, np.asarray(Kp) * 0.5, np.asarray(Kp))
+            else:
+                Kp_eff = Kp
+        except Exception:
+            Kp_eff = Kp
+
+        # provisional integral (do not commit yet)
+        I_proposed = self.integral_error + err * dt
+        I_proposed = np.asarray(I_proposed).ravel()
+        if I_proposed.size != self.n:
+            I_proposed = np.resize(I_proposed, (self.n,))
+        I_max = np.radians(self.tuning['I_max_deg'])
+        I_proposed = np.clip(I_proposed, -I_max, I_max)
+
+        # provisional rudder command if we used the proposed integral
+        # use scheduled proportional gain (Kp_eff) to avoid overly large P-action
+        rud_prov = (Kp_eff * err) + Ki * I_proposed + Kd * derr
+        rud_prov = np.asarray(rud_prov).ravel()
+        if rud_prov.size != self.n:
+            rud_prov = np.resize(rud_prov, (self.n,))
+
+        # Micro-trim: if provisional command is very small, zero it to avoid chatter
+        trim_rad = np.radians(self.tuning.get('trim_band_deg', np.degrees(self.tuning.get('trim_band_deg', 1.0))))
+        if np.isscalar(rud_prov):
+            if abs(rud_prov) < trim_rad:
+                rud_prov = 0.0
+        else:
+            small_mask = np.abs(rud_prov) < trim_rad
+            rud_prov[small_mask] = 0.0
+
+        # Now decide whether to accept the integrator update: if rud_prov would saturate
+        # aggressively (sign change at saturation), avoid adding to integral (simple anti-windup)
+        sat_mask = np.abs(rud_prov) >= self.ship.max_rudder
+        sat_mask = np.asarray(sat_mask).ravel()
+        if sat_mask.size != self.n:
+            sat_mask = np.resize(sat_mask, (self.n,))
+        # commit integral only where not saturating
+        commit_mask = ~sat_mask
+        if np.isscalar(self.integral_error):
+            if commit_mask:
+                self.integral_error = I_proposed
+        else:
+            self.integral_error[commit_mask] = I_proposed[commit_mask]
+
+        # final rudder command (use scheduled Kp_eff)
+        rud_cmd = (Kp_eff * err) + Ki * self.integral_error + Kd * derr
+
+        # preserve pre-override / pre-saturation command for logging
+        # Apply a light low-pass filter to the provisional rudder command to
+        # reduce rapid sign-flips (chatter) that can be amplified by high Kp
+        try:
+            raw_cmd_arr = np.asarray(rud_cmd).ravel()
+            prev_raw = getattr(self, 'prev_raw_cmd', np.zeros_like(raw_cmd_arr))
+            alpha = 0.35  # smoothing factor: 0<alpha<=1 (smaller -> more smoothing)
+            filtered = alpha * raw_cmd_arr + (1.0 - alpha) * prev_raw
+            if filtered.size != self.n:
+                filtered = np.resize(filtered, (self.n,))
+            raw_cmd = filtered.copy()
+            # store for next step
+            self.prev_raw_cmd = filtered.copy()
+        except Exception:
+            # fallback to original value if filtering fails for any reason
+            raw_cmd = rud_cmd.copy() if hasattr(rud_cmd, 'copy') else np.array(rud_cmd)
     
         # 5) (disabled) Prediction-based early release
         # predicted_err = err + r * self.tuning['lead_time']
@@ -2066,12 +2242,18 @@ class simulation:
         # trim_rad = np.radians(self.tuning['trim_band_deg'])
         # rud_cmd[np.abs(rud_cmd) < trim_rad] = 0.0
     
-        # 6) COLREGS override for give-way: hard opposite rudder beyond 30° error
+        # 6) COLREGS override for give-way: optionally hard opposite rudder beyond 30° error
         err_abs = np.abs(err)
         ov_mask = (np.array(roles) == 'give_way') & (err_abs >= np.radians(30))
-        rud_cmd = np.where(ov_mask,
-                           np.sign(err) * self.ship.max_rudder,
-                           rud_cmd)
+        allow_override = COLLISION_AVOIDANCE.get('allow_hard_give_way_override', True)
+        if allow_override:
+            rud_cmd = np.where(ov_mask,
+                               np.sign(err) * self.ship.max_rudder,
+                               rud_cmd)
+        else:
+            # log when we would have overridden (useful for diagnostics)
+            if np.any(ov_mask):
+                log.info(f"[COLREGS] override suppressed for agents: {list(np.where(ov_mask)[0])}")
     
         # 7) Saturate to max rudder and rate-limit the change
         rud_sat = np.clip(rud_cmd, -self.ship.max_rudder, self.ship.max_rudder)
@@ -2079,6 +2261,144 @@ class simulation:
         rud = np.clip(rud_sat,
                       self.prev_rudder - max_delta,
                       self.prev_rudder + max_delta)
+
+        # Integrator back-calculation (small corrective term) when saturation occurred.
+        # This gently pulls the integral term toward a value consistent with the
+        # saturated actuator to reduce windup over time.
+        try:
+            backcalc_beta = float(self.tuning.get('backcalc_beta', 0.08))
+            # raw_cmd is the filtered pre-saturation command; rud_sat is saturated.
+            raw_arr = np.asarray(raw_cmd).ravel()
+            sat_arr = np.asarray(rud_sat).ravel()
+            if raw_arr.size != self.n:
+                raw_arr = np.resize(raw_arr, (self.n,))
+            if sat_arr.size != self.n:
+                sat_arr = np.resize(sat_arr, (self.n,))
+            diff = raw_arr - sat_arr
+            # Update integral with a small back-calculation step (units: rad*s)
+            # Only apply where saturation magnitude is significant
+            sat_apply = np.abs(diff) > 1e-6
+            if np.isscalar(self.integral_error):
+                if sat_apply:
+                    self.integral_error -= backcalc_beta * diff * dt
+            else:
+                self.integral_error = self.integral_error - (backcalc_beta * diff * dt * sat_apply)
+        except Exception:
+            # be conservative: don't crash the sim on any error here
+            pass
+
+        # ---------- Rudder inversion auto-detect & corrective flip ----------
+        # Compare previously applied rudder (self.prev_rudder) with measured yaw-rate
+        # r_meas: if prev_rudder has significant magnitude but r_meas has opposite
+        # sign for several consecutive steps, assume the plant interprets rudder
+        # with an inverted sign and flip the commanded rudder for that agent.
+        try:
+            prev_r = np.asarray(self.prev_rudder).ravel()
+            prev_r = np.resize(prev_r, (self.n,))
+            # detection mask: prev rudder sizeable and measured yaw sizeable and opposite signs
+            # Do not attempt flip while locked out for an agent
+            unlocked = self._rudder_rev_lock_until <= self.t
+            detect_mask = (np.abs(prev_r) > np.radians(1.0)) & (np.abs(r_meas) > self._rudder_rev_threshold) & ((np.sign(prev_r) * np.sign(r_meas)) < 0) & unlocked
+            # update per-agent counters conservatively (decrement where not detected)
+            self._rudder_rev_counter = np.where(detect_mask, self._rudder_rev_counter + 1, np.maximum(self._rudder_rev_counter - 1, 0))
+            newly = (self._rudder_rev_counter >= self._rudder_rev_confirm) & (~self._rudder_inverted)
+            if np.any(newly):
+                # apply flip and perform safe reset actions to avoid immediate oscillation
+                for i in np.where(newly)[0]:
+                    self._rudder_inverted[i] = True
+                    # set a lockout to prevent further flips for a short window
+                    lock_seconds = 5.0
+                    self._rudder_rev_lock_until[i] = self.t + lock_seconds
+                    # reset integrator and prev_rudder to avoid sudden discontinuities
+                    try:
+                        self.integral_error[i] = 0.0
+                    except Exception:
+                        pass
+                    try:
+                        self.prev_rudder[i] = 0.0
+                    except Exception:
+                        pass
+                    # reset counter so we only trigger once until re-detected after lock
+                    self._rudder_rev_counter[i] = 0
+                    log.warning(f"[RUDDER-AUTO-CORRECT] Agent {i}: detected inverted plant, flipping commanded rudder; lock for {lock_seconds}s")
+            # Apply flip to commanded rudder & raw_cmd for any inverted agents so dynamics see corrected sign
+            if np.any(self._rudder_inverted):
+                if np.isscalar(rud):
+                    if bool(self._rudder_inverted):
+                        rud = -rud
+                        raw_cmd = -raw_cmd
+                else:
+                    rud = np.where(self._rudder_inverted, -rud, rud)
+                    raw_cmd = np.where(self._rudder_inverted, -raw_cmd, raw_cmd)
+        except Exception:
+            # conservative: if detection fails for any reason, don't crash the sim
+            pass
+
+        # optional trace: write per-agent PID internals AFTER saturation/rate-limit
+        if PID_TRACE.get('enabled', False):
+            import csv, os
+            path = PID_TRACE.get('path')
+            if path is None:
+                path = os.path.abspath('pid_trace_simulation.csv')
+            # open file on append, write header if missing
+            # add psi (heading), hd_cmd (desired heading), measured turn-rate, and position
+            header = ['t','agent','err_deg','r_des_deg','derr_deg','P_deg','I_deg','D_deg','raw_deg','rud_deg',
+                      'psi_deg','hd_cmd_deg','r_meas_deg','x_m','y_m']
+            write_header = not os.path.exists(path)
+            try:
+                with open(path, 'a', newline='') as fh:
+                    writer = csv.writer(fh)
+                    if write_header:
+                        writer.writerow(header)
+                    for idx in range(self.n):
+                        # reflect scheduled Kp in trace P-term
+                        # Kp_eff may be array-like or scalar
+                        try:
+                            if np.isscalar(Kp_eff):
+                                p_term = float(Kp_eff) * err[idx]
+                            else:
+                                p_term = float(np.asarray(Kp_eff).ravel()[idx]) * err[idx]
+                        except Exception:
+                            p_term = Kp * err[idx]
+                        i_term = Ki * self.integral_error[idx]
+                        d_term = Kd * derr[idx]
+                        # For clarity in the trace, present P/I/D after any runtime flip so the sign
+                        # shown lines up with the commanded rudder the plant saw (raw_cmd). This
+                        # avoids confusing apparent sign-mismatches in post-mortem analysis.
+                        if self._rudder_inverted[idx]:
+                            p_out = -p_term
+                            i_out = -i_term
+                            d_out = -d_term
+                        else:
+                            p_out = p_term
+                            i_out = i_term
+                            d_out = d_term
+                        raw_deg = float(np.degrees(raw_cmd[idx]))
+                        r_des_deg = float(np.degrees(r_des[idx])) if hasattr(r_des, '__len__') or np.isscalar(r_des) else float(np.degrees(r_des))
+                        # For clarity in traces, normalize (wrap) logged headings to [-180, +180)
+                        try:
+                            psi_deg_wrapped = ((np.degrees(self.psi[idx]) + 180.0) % 360.0) - 180.0
+                        except Exception:
+                            psi_deg_wrapped = float(np.degrees(self.psi[idx]))
+                        try:
+                            # psi_ref may be scalar or array-like
+                            raw_ref = psi_ref[idx] if hasattr(psi_ref, '__len__') else psi_ref
+                            hd_deg_wrapped = ((np.degrees(raw_ref) + 180.0) % 360.0) - 180.0
+                        except Exception:
+                            hd_deg_wrapped = float(np.degrees(psi_ref) if hasattr(psi_ref, '__len__') else np.degrees(psi_ref))
+
+                        writer.writerow([
+                            float(self.t), int(idx), float(np.degrees(err[idx])), r_des_deg, float(np.degrees(derr[idx])),
+                            float(np.degrees(p_out)), float(np.degrees(i_out)), float(np.degrees(d_out)),
+                            raw_deg, float(np.degrees(rud[idx])),
+                            float(psi_deg_wrapped),
+                            float(hd_deg_wrapped),
+                            float(np.degrees(r_meas[idx])),
+                            float(self.pos[0, idx]) if (hasattr(self, 'pos') and self.pos is not None) else float('nan'),
+                            float(self.pos[1, idx]) if (hasattr(self, 'pos') and self.pos is not None) else float('nan')
+                        ])
+            except Exception:
+                pass
     
         # 8) Save state for next cycle
         self.prev_psi = self.psi.copy()
@@ -2097,6 +2417,12 @@ class simulation:
         # A) Environmental forcing – REAL wind & currents!
 
         lon, lat = self._utm_to_ll.transform(self.pos[0], self.pos[1])
+        # DEBUG: inspect lon/lat shapes just before sampling
+        try:
+            if getattr(self, 'verbose', False):
+                log.debug(f"[SIM-DBG] pos.shape={getattr(self.pos,'shape',None)} lon.shape={getattr(lon,'shape',None)} lat.shape={getattr(lat,'shape',None)}")
+        except Exception:
+            pass
         wind_vec = self.wind_fn(lon, lat, datetime.now(timezone.utc)).T
 
         # 2) Sample NOAA field at (lon, lat, now)
@@ -2104,6 +2430,38 @@ class simulation:
             lon, lat,
             datetime.now(timezone.utc)   # explicit UTC
         ).T              # returns (N,2) – transpose → (2,N)
+        try:
+            if getattr(self, 'verbose', False):
+                log.debug(f"[SIM-DBG] wind_vec.shape(before)={getattr(wind_vec,'shape',None)} current_vec.shape(before)={getattr(current_vec,'shape',None)}")
+        except Exception:
+            pass
+
+        # Defensive normalization: ensure wind_vec/current_vec are shape (2, n)
+        def _norm_env(ev, name):
+            ev = np.atleast_2d(ev)
+            # If transposed relative to expectation, try swapping axes
+            if ev.shape[0] != 2 and ev.shape[1] == 2:
+                ev = ev.T
+            # If sampler returned a single column but we have n agents, tile it
+            if ev.shape[1] == 1 and self.n > 1:
+                ev = np.tile(ev, (1, self.n))
+            # If sampler returned more columns than agents, truncate
+            if ev.shape[1] > self.n:
+                ev = ev[:, :self.n]
+            # If sampler produced fewer columns than agents, pad by repeating last column
+            if ev.shape[1] < self.n:
+                last = ev[:, -1:]
+                need = self.n - ev.shape[1]
+                ev = np.hstack([ev, np.tile(last, (1, need))])
+            return ev
+
+        wind_vec = _norm_env(wind_vec, 'wind')
+        current_vec = _norm_env(current_vec, 'current')
+        try:
+            if getattr(self, 'verbose', False):
+                log.debug(f"[SIM-DBG] wind_vec.shape(after)={getattr(wind_vec,'shape',None)} current_vec.shape(after)={getattr(current_vec,'shape',None)}")
+        except Exception:
+            pass
 
         wind, current = self.ship.environmental_forces(
              wind_vec, current_vec,
@@ -2296,10 +2654,15 @@ def heading_error(actual_deg: np.ndarray, commanded_deg: np.ndarray) -> np.ndarr
     Compute signed error in degrees, wrapped to [–180, +180).
     actual_deg, commanded_deg: 1D arrays of the same length.
     """
-    # raw difference
-    diff = actual_deg - commanded_deg
-    # wrap into [–180, +180)
-    return (diff + 180) % 360 - 180
+    # Use shared helper for consistent degrees wrapping
+    try:
+        from emergent.ship_abm.angle_utils import heading_diff_deg
+        # canonical error = commanded - actual, wrapped to [-180, 180)
+        return heading_diff_deg(commanded_deg, actual_deg)
+    except Exception:
+        # fallback: compute wrapped difference manually
+        diff = commanded_deg - actual_deg
+        return (diff + 180) % 360 - 180
 
 def peak_overshoot(error_deg: np.ndarray) -> float:
     """Largest absolute heading error (deg)."""
