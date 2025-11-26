@@ -66,6 +66,10 @@ from datetime import date, timedelta
 from typing import Callable, Iterable, Tuple, List
 
 import fsspec
+import os
+import tempfile
+import shutil
+import io
 import numpy as np
 import xarray as xr
 from scipy.spatial import cKDTree
@@ -128,7 +132,7 @@ def first_existing_url(urls: List[str]) -> str | None:
         try:
             bucket, key = url[5:].split("/", 1)
             if fs.exists(f"{bucket}/{key}"):
-                print(f"[ofs_loader] ✓ Found: {url}")
+                print(f"[ofs_loader] [OK] Found: {url}")
                 return url
         except Exception as e:
             # Skip malformed URLs
@@ -186,17 +190,50 @@ bbox: Tuple[float, float, float, float], # lon_min, lon_max, lat_min, lat_max
         url = first_existing_url(candidate_urls(model, day))
         if url:
             try:
-                print(f"[ofs_loader] → opening {url}")
-                ds = xr.open_dataset(
-                    fs.open(url),
-                    engine="h5netcdf",
-                    chunks={"time": 1},
-                    drop_variables=["siglay", "siglev"],  # FVCOM: drop vars that collide with dims
-                )
-                print(f"[ofs_loader] ✓ Successfully opened dataset from {day}")
+                print(f"[ofs_loader] Opening: {url}")
+                # First attempt: let xarray open the fsspec file-like directly
+                try:
+                    ds = xr.open_dataset(
+                        fs.open(url),
+                        engine="h5netcdf",
+                        chunks={"time": 1},
+                        drop_variables=["siglay", "siglev"],  # FVCOM: drop vars that collide with dims
+                    )
+                except Exception as e_inner:
+                    # Fallback: stream the remote file to a temporary local file and open that
+                    try:
+                        emsg = str(e_inner)
+                    except Exception:
+                        emsg = repr(e_inner)
+                    # ascii-safe print
+                    print(f"[ofs_loader] [WARN] direct open failed: {emsg.encode('ascii','backslashreplace').decode('ascii')}; attempting tempfile fallback")
+                    try:
+                        suffix = os.path.splitext(url)[1] if os.path.splitext(url)[1] else ".nc"
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmpf:
+                            tmp_path = tmpf.name
+                            with fs.open(url, "rb") as fin:
+                                shutil.copyfileobj(fin, tmpf)
+                        ds = xr.open_dataset(
+                            tmp_path,
+                            engine="h5netcdf",
+                            chunks={"time": 1},
+                            drop_variables=["siglay", "siglev"],
+                        )
+                    finally:
+                        try:
+                            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                                os.remove(tmp_path)
+                        except Exception:
+                            pass
+
+                print(f"[ofs_loader] [OK] Successfully opened dataset from {day}")
                 break  # SUCCESS - stop searching!
             except Exception as e:
-                print(f"[ofs_loader] ✗ Failed to open {url}: {e}")
+                try:
+                    emsg = str(e)
+                except Exception:
+                    emsg = repr(e)
+                print(f"[ofs_loader] [ERR] Failed to open {url}: {emsg.encode('ascii','backslashreplace').decode('ascii')}")
                 continue  # Try next day
     
     if ds is None:
@@ -236,7 +273,7 @@ bbox: Tuple[float, float, float, float], # lon_min, lon_max, lat_min, lat_max
     if {"lon", "lat"} <= set(ds):
         ds = ds.set_coords(["lon", "lat"]) # make query-able
         
-    print(f"[ofs_loader] ✔ opened {url}")
+    print(f"[ofs_loader] [OK] opened {url}")
         
     # Spatial crop – structured 2D only; for unstructured we keep all and sample by KD-tree
     lon_min, lon_max, lat_min, lat_max = _convert_bbox_for_dataset(ds, bbox)
@@ -388,15 +425,15 @@ def get_current_fn(
     ds = None
     try:
         ds = open_ofs_subset(model, start.date(), bbox)
-        print(f"[ofs_loader] ✓ Using {model.upper()} data")
+        print(f"[ofs_loader] [OK] Using {model.upper()} data")
     except Exception as e:
-        print(f"[ofs_loader] WARN: {model.upper()} open failed ({e}); trying RTOFS…")
+        print(f"[ofs_loader] WARN: {model.upper()} open failed ({str(e)}); trying RTOFS...")
         try:
             ds = open_ofs_subset("rtofs", start.date(), bbox)
-            print(f"[ofs_loader] ✓ Using RTOFS data")
+            print(f"[ofs_loader] [OK] Using RTOFS data")
         except Exception as e2:
-            print(f"[ofs_loader] WARN: RTOFS open failed ({e2}); using tidal proxy.")
-            # Reasonable Puget/Salish defaults; adjust per‑port via OFS_MODEL_MAP if desired
+            print(f"[ofs_loader] WARN: RTOFS open failed ({str(e2)}); using tidal proxy.")
+            # Reasonable Puget/Salish defaults; adjust per-port via OFS_MODEL_MAP if desired
             return make_tidal_proxy_current(axis_deg=320.0, A_M2=0.30, A_S2=0.10)
     
     # Build sampler from ds (structured vs unstructured)

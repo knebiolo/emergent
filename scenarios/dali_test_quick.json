@@ -1,0 +1,64 @@
+{
+  "scenario_name": "Dali Quick Test",
+  "simulation": {
+    "port_name": "Baltimore",
+    "dt": 0.5,
+    "T": 60.0,
+    "n_agents": 1,
+    "load_enc": false,
+    "verbose": true,
+    "random_seed": 1
+  },
+  "environmental": {
+    "start_datetime": "2024-03-26T05:07:00Z",
+    "use_cbofs": false
+  },
+  "vessel": {
+    "name": "MV Dali Test",
+    "imo": "9697428",
+    "dimensions": {
+      "loa_m": 299.92,
+      "beam_m": 48.2,
+      "draft_m": 10.0
+    },
+    "initial_conditions": {
+      "speed_knots": 8.0,
+      "heading_deg": 141.0
+    }
+  },
+  "route": {
+    "waypoints_lonlat": [
+      [-76.5874, 39.2286],
+      [-76.5297, 39.2156]
+    ]
+  },
+  "events": {
+    "power_loss_schedule": [
+      {
+        "time_s": 30.0,
+        "description": "Test power failure",
+        "action": "cut_power",
+        "agent_index": 0
+      }
+    ]
+  },
+  "incident_data": {
+    "collision_coordinates": {
+      "lat": 39.2156,
+      "lon": -76.5297
+    },
+    "casualties": 6
+  },
+  "parametric_variations": {
+    "batch_run_matrix": {
+      "runs": [],
+      "estimated_runtime_minutes": 1
+    }
+  },
+  "output": {
+    "save_trajectory": true,
+    "save_csv": true,
+    "save_plots": false,
+    "output_dir": "outputs/dali_scenario"
+  }
+}

@@ -19,7 +19,6 @@ def main(argv=None):
     parser.add_argument('--port', default='Galveston', help='Port name (matches config entries)')
     parser.add_argument('--agents', type=int, default=1, help='Number of agents to spawn')
     parser.add_argument('--no-enc', dest='no_enc', action='store_true', help='Skip downloading/loading ENC data (fast startup)')
-    parser.add_argument('--preload-enc', dest='preload_enc', action='store_true', help='Preload ENC before creating the UI (blocks until ENCs are loaded)')
     parser.add_argument('--auto-start', dest='auto_start', action='store_true', help='Automatically start the simulation after the UI appears')
     parser.add_argument('--verbose', dest='verbose', action='store_true', help='Enable verbose logging')
     args = parser.parse_args(argv or sys.argv[1:])
@@ -28,10 +27,11 @@ def main(argv=None):
     app = QtWidgets.QApplication(sys.argv)
 
     sim_instance = None
-    if args.preload_enc and not args.no_enc:
-        # preload ENC synchronously before starting the Qt app so the UI appears after ENCs loaded
+    # Preload ENC synchronously before starting the Qt app so the UI appears after ENCs loaded
+    # Default behavior: preload ENCs unless the user explicitly requests --no-enc
+    if not args.no_enc:
         from emergent.ship_abm.simulation_core import simulation
-        print("[Launcher] Preloading ENC synchronously before UI...")
+        print("[Launcher] Preloading ENC synchronously before UI (default)...")
         sim_instance = simulation(
             port_name=args.port,
             dt=0.1,

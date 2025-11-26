@@ -99,6 +99,12 @@ Launch the ship simulation GUI:
 python scripts/run_ship.py
 ```
 
+Note: The launcher now preloads ENC data by default for faster, consistent visualization. To skip loading ENCs (faster startup but without chart overlays), pass the `--no-enc` flag:
+
+```python
+python scripts/run_ship.py --no-enc
+```
+
 **Workflow**:
 1. GUI window opens with harbor map
 2. Click **"Define Route"** button

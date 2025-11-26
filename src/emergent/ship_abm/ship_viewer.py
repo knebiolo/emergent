@@ -175,6 +175,8 @@ class ship_viewer(QtWidgets.QWidget):
             self.timer = None
         # common item lists and placeholders
         self.ship_items = []
+        # persistent UI flag marker items (one per ship) — small red ellipse
+        self.flag_items = []
         self.route_item = None
         self.rudder_items = []
         self.heading_items = []
@@ -605,10 +607,10 @@ class ship_viewer(QtWidgets.QWidget):
             ctrl_layout.addWidget(self.btn_define_route)
             self._status_label.setText(f"Draw route for agent 1 of {self.sim.n}")
             instr = QtWidgets.QLabel(
-                "▶ Define Route:\n"
+                 "> Define Route:\n"
                 "   • Left-click on map to add points\n"
                 "   • Right-click to finish (needs ≥2 points)\n"
-                "\n▶ Start Simulation when ready"
+                 "\n> Start Simulation when ready"
             )
             instr.setWordWrap(True)
             instr.setStyleSheet("color: black;")
@@ -632,6 +634,18 @@ class ship_viewer(QtWidgets.QWidget):
         self.btn_kill_power = QtWidgets.QPushButton("Kill Power")
         self.btn_kill_power.clicked.connect(self._on_kill_power)
         ctrl_layout.addWidget(self.btn_kill_power)
+
+        # Pause / Play controls
+        play_row = QtWidgets.QHBoxLayout()
+        self.btn_pause = QtWidgets.QPushButton("Pause")
+        self.btn_pause.clicked.connect(self._on_pause)
+        self.btn_play = QtWidgets.QPushButton("Play")
+        self.btn_play.clicked.connect(self._on_play)
+        # initially, play is disabled until simulation runs
+        self.btn_play.setEnabled(False)
+        play_row.addWidget(self.btn_pause)
+        play_row.addWidget(self.btn_play)
+        ctrl_layout.addLayout(play_row)
 
         # ── Quiver controls (density/scale/pen width) ─────────────────
         qlabel = QtWidgets.QLabel("Quiver density (step, 1=full):")
@@ -665,14 +679,11 @@ class ship_viewer(QtWidgets.QWidget):
         self.chk_mask_land = QtWidgets.QCheckBox("Mask quivers on land")
         self.chk_mask_land.setChecked(True)
         ctrl_layout.addWidget(self.chk_mask_land)
-
-        # Smooth quiver field for display (simple box filter)
         self.chk_smooth_quivers = QtWidgets.QCheckBox("Smooth quivers (display only)")
         self.chk_smooth_quivers.setChecked(False)
         ctrl_layout.addWidget(self.chk_smooth_quivers)
 
-        # Auto-clamp toggle: when enabled, the viewer will increase quiver step
-        # at wide zooms to avoid too many arrows. Uncheck to force density=spin value.
+    # Auto-clamp toggle: when enabled, the viewer will increase quiver step
         self.chk_auto_clamp = QtWidgets.QCheckBox("Auto-clamp quiver density")
         self.chk_auto_clamp.setChecked(True)
         ctrl_layout.addWidget(self.chk_auto_clamp)
@@ -690,6 +701,7 @@ class ship_viewer(QtWidgets.QWidget):
         self.btn_zoom_out.clicked.connect(lambda: self._zoom(1.4))
         self.btn_center_ship = QtWidgets.QPushButton("Center on Ship")
         self.btn_center_ship.clicked.connect(self._center_on_ship)
+        # add Zoom In first (was previously created but not added, causing it to float)
         zrow.addWidget(self.btn_zoom_in)
         zrow.addWidget(self.btn_zoom_out)
         zrow.addWidget(self.btn_center_ship)
@@ -713,7 +725,6 @@ class ship_viewer(QtWidgets.QWidget):
         self.lbl_iterations = QtWidgets.QLabel("Iterations:")
         self.spin_iterations = QtWidgets.QSpinBox()
         self.spin_iterations.setRange(1, 1000)
-        self.spin_iterations.setValue(1)
         self.btn_prod_run = QtWidgets.QPushButton("Run Production")
         ctrl_layout.addWidget(self.lbl_iterations)
         ctrl_layout.addWidget(self.spin_iterations)
@@ -1250,6 +1261,11 @@ class ship_viewer(QtWidgets.QWidget):
         self.rudder_items = []
         self.heading_items = []
         self.label_items = []
+        # extra visuals: bow->waypoint lines and danger cones
+        self.bow_goal_items = []
+        self.danger_cone_items = []
+        # trajectory line items (updated each tick)
+        self.traj_items = []
 
     def _load_user_config(self):
         try:
@@ -1588,14 +1604,14 @@ class ship_viewer(QtWidgets.QWidget):
                 self.view.addItem(wind_shaft)
                 self.wind_quiver_items.append(wind_shaft)
 
-        print("[ShipViewer] ✓ Quivers drawn (batched)")
+    print("[ShipViewer] [OK] Quivers drawn (batched)")
 
     def _start_simulation(self):
         """
         Called when the user clicks 'Start Simulation'.
         Spawns agents in the core, draws ship polygons, and kicks off the timer.
         """
-        print("▶ _start_simulation called")
+        print("[PLAY] _start_simulation called")
         
         # Ensure animation timer exists (guard against initialization races)
         try:
@@ -1645,7 +1661,9 @@ class ship_viewer(QtWidgets.QWidget):
             
         # 1) spawn in the core
         # If no waypoints are defined, do not attempt to spawn (especially for auto-start cases).
-        if not hasattr(self.sim, 'waypoints') or len(getattr(self.sim, 'waypoints', [])) != self.sim.n:
+        # Allow cases where fewer than n waypoint lists are provided; simulation.spawn
+        # will duplicate the last route to fill missing agents.
+        if not hasattr(self.sim, 'waypoints') or len(getattr(self.sim, 'waypoints', [])) == 0:
             # Inform the user and enable Start so they can define or load a route.
             try:
                 QtWidgets.QMessageBox.information(self, "No route defined", "No route is defined for the simulation. Click 'Define Route' to create one or 'Load Persisted' to apply a saved route.")
@@ -1671,6 +1689,11 @@ class ship_viewer(QtWidgets.QWidget):
 
         # 3) draw ship polygons
         self.ship_items = []
+        # clear any existing trajectory items (fresh spawn)
+        for itm in getattr(self, 'traj_items', []):
+            try: self.view.removeItem(itm)
+            except Exception: pass
+        self.traj_items = []
         for i in range(self.sim.n):
             body = self.sim._ship_base
             poly = ship_polygon(body, color=(200,50,50,180))
@@ -1679,6 +1702,57 @@ class ship_viewer(QtWidgets.QWidget):
             poly.setZValue(30)
             self.view.addItem(poly)
             self.ship_items.append(poly)
+            # create a placeholder for a persistent flag marker (hidden until set)
+            try:
+                flag = QGraphicsEllipseItem(-4, -4, 8, 8)
+                flag.setBrush(QBrush(QColor(220, 20, 20, 220)))
+                flag.setPen(QPen(QColor(0,0,0,200), 1))
+                flag.setZValue(120)
+                flag.setVisible(False)
+                self.view.addItem(flag)
+                self.flag_items.append(flag)
+            except Exception:
+                self.flag_items.append(None)
+            # create an empty trajectory line for this ship
+            try:
+                tline = pg.PlotCurveItem(x=[], y=[], pen=pg.mkPen('lime', width=1))
+                tline.setZValue(20)
+                self.view.addItem(tline)
+                self.traj_items.append(tline)
+            except Exception:
+                self.traj_items.append(None)
+        # create/clear danger cone items (QGraphicsPolygonItem, orange fill)
+        for itm in getattr(self, 'danger_cone_items', []):
+            try: self.view.removeItem(itm)
+            except Exception: pass
+        self.danger_cone_items = []
+        for k in range(self.sim.n):
+            # Compute danger cone geometry for ship k
+            pos = self.sim.pos[:, k]
+            psi = self.sim.psi[k]
+            length = self.sim.ship.length if hasattr(self.sim.ship, 'length') else 400.0
+            width = self.sim.ship.beam if hasattr(self.sim.ship, 'beam') else 60.0
+            cone_angle = np.radians(25.0)
+            cone_length = length * 2.5
+            # Bow point
+            bow = pos + length * np.array([np.cos(psi), np.sin(psi)])
+            # Left/right cone points
+            left = bow + cone_length * np.array([np.cos(psi + cone_angle), np.sin(psi + cone_angle)])
+            right = bow + cone_length * np.array([np.cos(psi - cone_angle), np.sin(psi - cone_angle)])
+            # Stern
+            stern = pos - 0.5 * length * np.array([np.cos(psi), np.sin(psi)])
+            cone_poly = QPolygonF([
+                QPointF(pos[0], pos[1]),
+                QPointF(left[0], left[1]),
+                QPointF(right[0], right[1]),
+                QPointF(stern[0], stern[1])
+            ])
+            cone_item = QGraphicsPolygonItem(cone_poly)
+            cone_item.setBrush(QBrush(QColor(255,165,0,80)))
+            cone_item.setPen(QPen(QColor(255,140,0, 120), 2))
+            cone_item.setZValue(10)
+            self.view.addItem(cone_item)
+            self.danger_cone_items.append(cone_item)
             
         x0, y0 = pos0[0,0], pos0[1,0]
         width = height = self.sim.zoom  # e.g. 5000m
@@ -1702,6 +1776,14 @@ class ship_viewer(QtWidgets.QWidget):
                 self.btn_start_sim.setEnabled(False)
         except Exception:
             pass
+        # After simulation starts, Pause should be enabled and Play disabled
+        try:
+            if hasattr(self, 'btn_pause'):
+                self.btn_pause.setEnabled(True)
+            if hasattr(self, 'btn_play'):
+                self.btn_play.setEnabled(False)
+        except Exception:
+            pass
         self.btn_define_route.setEnabled(False)
         # enable kill switch during simulation
         self.btn_kill_power.setEnabled(True)
@@ -1717,6 +1799,31 @@ class ship_viewer(QtWidgets.QWidget):
         """
         # Delegate to core simulation method
         self.sim._cut_random_power()
+
+    def _on_pause(self):
+        """Pause the simulation timer (freeze simulation state)."""
+        try:
+            if getattr(self, 'timer', None) is not None and self.timer.isActive():
+                self.timer.stop()
+                # toggle buttons
+                try: self.btn_pause.setEnabled(False)
+                except Exception: pass
+                try: self.btn_play.setEnabled(True)
+                except Exception: pass
+        except Exception as e:
+            print(f"[ShipViewer] Pause failed: {e}")
+
+    def _on_play(self):
+        """Resume the simulation timer if paused."""
+        try:
+            if getattr(self, 'timer', None) is not None and not self.timer.isActive():
+                self.timer.start(int(self.sim.dt * 1000))
+                try: self.btn_pause.setEnabled(True)
+                except Exception: pass
+                try: self.btn_play.setEnabled(False)
+                except Exception: pass
+        except Exception as e:
+            print(f"[ShipViewer] Play failed: {e}")
 
     def _clear_events(self):
         """Clear recorded collision and allision events from the simulation and GUI."""
@@ -2116,18 +2223,65 @@ class ship_viewer(QtWidgets.QWidget):
                     from pyproj import Transformer
                     ll2utm = Transformer.from_crs("EPSG:4326", self.sim.crs_utm, always_xy=True)
                     converted = []
+                    failed = False
                     for agent_pts in wps:
                         conv = []
                         for x, y in agent_pts:
-                            ux, uy = ll2utm.transform(float(x), float(y))
+                            # try normal (lon, lat)
+                            try:
+                                ux, uy = ll2utm.transform(float(x), float(y))
+                            except Exception:
+                                # try swapped (lat, lon)
+                                try:
+                                    ux, uy = ll2utm.transform(float(y), float(x))
+                                    if self.sim.verbose:
+                                        print("[ShipViewer] Converted point using swapped (lat,lon) ordering")
+                                except Exception:
+                                    ux, uy = np.nan, np.nan
                             conv.append(np.array([ux, uy]))
                         converted.append(conv)
+                    # sanity-check converted coordinates
+                    bad = False
+                    for agent in converted:
+                        for pt in agent:
+                            try:
+                                xx, yy = float(pt[0]), float(pt[1])
+                                if not (np.isfinite(xx) and np.isfinite(yy)):
+                                    bad = True
+                                    break
+                            except Exception:
+                                bad = True
+                                break
+                        if bad:
+                            break
+                    if bad:
+                        QtWidgets.QMessageBox.warning(self, "Invalid route", "Persisted route conversion failed; contains invalid coordinate values; cannot apply.")
+                        print(f"[ShipViewer] Persisted route conversion produced non-finite coords; refusing to apply")
+                        return
                     self.sim.waypoints = converted
                     print(f"[ShipViewer] Converted persisted waypoints from lon/lat → {self.sim.crs_utm} before applying")
                 except Exception as e:
                     print(f"[ShipViewer] Failed to convert persisted waypoints to UTM: {e}; applying raw values")
                     self.sim.waypoints = [[np.array(p) for p in agent_pts] for agent_pts in wps]
             else:
+                # Validate raw numeric values before assigning
+                bad = False
+                for agent_pts in wps:
+                    for p in agent_pts:
+                        try:
+                            x, y = float(p[0]), float(p[1])
+                            if not (np.isfinite(x) and np.isfinite(y)):
+                                bad = True
+                                break
+                        except Exception:
+                            bad = True
+                            break
+                    if bad:
+                        break
+                if bad:
+                    QtWidgets.QMessageBox.warning(self, "Invalid route", "Persisted route contains invalid coordinate values; cannot apply.")
+                    print(f"[ShipViewer] Persisted route contains non-finite coordinates; refusing to apply")
+                    return
                 self.sim.waypoints = [[np.array(p) for p in agent_pts] for agent_pts in wps]
             try:
                 if hasattr(self, 'btn_start_sim'):
@@ -2429,8 +2583,21 @@ class ship_viewer(QtWidgets.QWidget):
             poly = self.sim._current_hull_poly(i)
             for land in self.sim.waterway.geometry:
                 if poly.intersects(land):
-                    self.sim.ship.cut_power(i)
-                    print(f"Allision: Ship{i} with land at t={t:.2f}s")
+                    inter = poly.intersection(land)
+                    # cut power and log structured allision event (include heading & yaw-rate)
+                    try:
+                        self.sim.ship.cut_power(i)
+                    except Exception:
+                        pass
+                    try:
+                        from emergent.ship_abm.simulation_core import log as sim_log
+                        hd_deg = np.degrees(self.sim.psi[i])
+                        r_meas = getattr(self.sim, 'r_meas', None)
+                        r_val = float(r_meas[i]) if (r_meas is not None) else float('nan')
+                        sim_log.warning('[ALLISION] ship=%s t=%5.2f area=%s bounds=%s hd_deg=%5.1f yaw_rate_deg_s=%5.2f',
+                                        i, t, getattr(inter, 'area', 0.0), getattr(inter, 'bounds', None), hd_deg, np.degrees(r_val))
+                    except Exception:
+                        print(f"Allision: Ship{i} with land at t={t:.2f}s hd={np.degrees(self.sim.psi[i]):.1f} r={np.degrees(getattr(self.sim, 'r_meas', [0])[i]):.2f}deg/s")
         
         # record history for zigzag metrics
         self.sim.t_history.append(self.sim.t)
@@ -2537,6 +2704,105 @@ class ship_viewer(QtWidgets.QWidget):
                 self.view.addItem(hd_line)
                 self.heading_items.append(hd_line)
 
+            # 2b) Bow -> next-waypoint line (if a goal exists)
+            try:
+                goal = None
+                if hasattr(self.sim, 'goals') and self.sim.goals is not None:
+                    garr = np.atleast_2d(self.sim.goals)
+                    # assume goals shape (2, n) or (n, 2)
+                    if garr.shape[0] == 2 and garr.shape[1] >= i+1:
+                        goal = garr[:, i]
+                    elif garr.shape[1] == 2 and garr.shape[0] >= i+1:
+                        goal = garr[i, :]
+                if goal is not None:
+                    gx, gy = float(goal[0]), float(goal[1])
+                    # reuse or create bow->goal line
+                    if i < len(self.bow_goal_items):
+                        bg_line = self.bow_goal_items[i]
+                        try:
+                            bg_line.setData(x=[bow_x, gx], y=[bow_y, gy])
+                        except Exception:
+                            try: self.view.removeItem(bg_line)
+                            except Exception: pass
+                            bg_line = pg.PlotCurveItem(x=[bow_x, gx], y=[bow_y, gy], pen=pg.mkPen('cyan', width=1, style=QtCore.Qt.DashLine))
+                            bg_line.setZValue(90)
+                            self.view.addItem(bg_line)
+                            self.bow_goal_items[i] = bg_line
+                else:
+                    # hide or clear existing item
+                    if i < len(self.bow_goal_items):
+                        try:
+                            self.bow_goal_items[i].setData(x=[], y=[])
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # 2c) Danger cone polygon (triangle) originating at bow
+            # Use the *commanded* heading (cmd_hd) for the cone direction so the
+            # visual shows the avoidance/desired heading rather than the current
+            # instantaneous heading. Color the cone by role to make overlapping
+            # situations obvious (give_way=orange, stand_on=green, neutral=gray).
+            try:
+                half_ang = np.radians(30.0)
+                cone_len = max(500.0, 4.0 * L)
+                p0x, p0y = bow_x, bow_y
+                # prefer commanded heading if available (hd command may be smoother)
+                cone_dir = float(cmd_hd) if cmd_hd is not None else float(curr_hd)
+                p1x = p0x + cone_len * math.cos(cone_dir + half_ang)
+                p1y = p0y + cone_len * math.sin(cone_dir + half_ang)
+                p2x = p0x + cone_len * math.cos(cone_dir - half_ang)
+                p2y = p0y + cone_len * math.sin(cone_dir - half_ang)
+
+                # update or create the QGraphicsPolygonItem for the cone so it
+                # follows the ship each frame
+                if i < len(self.danger_cone_items):
+                    cone_item = self.danger_cone_items[i]
+                    poly = QPolygonF([QPointF(p0x, p0y), QPointF(p1x, p1y), QPointF(p2x, p2y), QPointF(p0x, p0y)])
+                    try:
+                        cone_item.setPolygon(poly)
+                    except Exception:
+                        # in case the item was removed or invalid, recreate it
+                        try: self.view.removeItem(cone_item)
+                        except Exception: pass
+                        cone_item = QGraphicsPolygonItem(poly)
+                        cone_item.setZValue(10)
+                        self.view.addItem(cone_item)
+                        self.danger_cone_items[i] = cone_item
+
+                    # color by role
+                    role = roles[i] if (i < len(roles)) else 'neutral'
+                    if role == 'give_way':
+                        brush_col = QColor(255, 140, 0, 120)   # orange
+                        pen_col = QColor(220, 110, 0, 200)
+                    elif role == 'stand_on':
+                        brush_col = QColor(0, 200, 80, 120)    # green
+                        pen_col = QColor(0, 160, 64, 200)
+                    else:
+                        brush_col = QColor(180, 180, 180, 60)  # gray
+                        pen_col = QColor(120, 120, 120, 120)
+                    try:
+                        cone_item.setBrush(QBrush(brush_col))
+                        cone_item.setPen(QPen(pen_col, 2))
+                    except Exception:
+                        pass
+            except Exception:
+                # don't let the whole frame fail for one ship's cone
+                pass
+
+            # 3) Persistent flagged_give_way marker (UI-visible until acknowledged)
+            try:
+                if i < len(self.flag_items) and getattr(self.sim.ship, 'flagged_give_way', None) is not None:
+                    flag_item = self.flag_items[i]
+                    if flag_item is not None:
+                        # place just aft of the bow (so it doesn't overlap hull)
+                        fx = x + (L/2 + 0.25 * L) * math.cos(curr_hd)
+                        fy = y + (L/2 + 0.25 * L) * math.sin(curr_hd)
+                        flag_item.setPos(fx, fy)
+                        flag_item.setVisible(bool(self.sim.ship.flagged_give_way[i]))
+            except Exception:
+                pass
+
             # 3) Text label --------------------------------------------------
             r_dps = np.degrees(r_arr[i])        # deg s-¹ is what mariners think in
 
@@ -2557,6 +2823,16 @@ class ship_viewer(QtWidgets.QWidget):
                        y + 0.02 * L * np.sin(curr_hd))
             lbl.setZValue(100)
             #self.label_items.append(txt)
+            # update trajectory line from sim.history if present
+            try:
+                if i < len(self.traj_items) and self.traj_items[i] is not None:
+                    traj = np.array(self.sim.history[i]) if hasattr(self.sim, 'history') else np.empty((0,2))
+                    if traj.size:
+                        self.traj_items[i].setData(x=traj[:,0], y=traj[:,1])
+                    else:
+                        self.traj_items[i].setData(x=[], y=[])
+            except Exception:
+                pass
             
         # assume you’ve done something like:
         (xmin, xmax), (ymin, ymax) = self.view.viewRange()

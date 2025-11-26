@@ -107,9 +107,9 @@ SHIP_PHYSICS = {
     'Ydelta': 30096654.456664,   # lateral force per radian of rudder (reduced)
     'Kdelta': 0.0,     # N·m of roll moment per radian (ignored)
     # Increased by 1.5x from 88,857,939.477034 to improve rudder authority for candidate tuning
-    # For Option B testing we temporarily reduce Ndelta to 70% of the tuned value
-    # to make the plant less aggressive and observe controller behaviour.
-    'Ndelta': 133286909.215551 * 0.7,   # yaw torque per radian of rudder (reduced for test)
+    # For Option B testing we temporarily reduced Ndelta to 70% of the tuned value.
+    # Restore the tuned value below (uncommented) for normal runs.
+    'Ndelta': 133286909.215551,   # yaw torque per radian of rudder (tuned)
 
     # Damping
     # Increase linear yaw-related damping modestly to reduce yaw acceleration peaks
@@ -122,8 +122,10 @@ SHIP_PHYSICS = {
     # Reduce rudder limits to model more conservative steering and avoid
     # frequent hard-over during gusty forcing. 12° max and ~0.087 rad/s
     # (~5°/s) rate limit are conservative defaults for development.
-    'max_rudder': np.radians(12),         # Maximum rudder deflection (rad)
-    'max_rudder_rate': 0.087,  # Maximum rudder rate change (rad/s) (~5°/s)
+    # Increased rudder authority for responsive testing:
+    'max_rudder': np.radians(20),         # Maximum rudder deflection (rad)
+    # Increase max rudder rate to ~10°/s (0.174 rad/s) for faster actuation in tests
+    'max_rudder_rate': 0.174,  # Maximum rudder rate change (rad/s) (~10°/s)
     
     # Drag Stuff
     'drag_coeff': 0.0012
@@ -152,12 +154,12 @@ SHIP_AERO_DEFAULTS = {
 # These gains determine how aggressively each vessel adjusts heading (rudder) and speed (thrust).
 CONTROLLER_GAINS = {
     # Proportional gain for heading controller
-    "Kp": 0.5,
+    "Kp": 0.35,
     # Integral gain for heading controller (set to 0 if no steady-state offset correction is needed)
-    "Ki": 0.05,
+    "Ki": 0.0,
     # Derivative gain for heading controller (damping term)
     # reduced to avoid excessive D-term reacting to transient measured r
-    "Kd": 0.12,
+    "Kd": 0.4,
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -172,7 +174,7 @@ CONTROLLER_GAINS = {
 ADVANCED_CONTROLLER = {
     # Feed‐forward gain: multiplies heading error to compute a desired turn‐rate.
     # Typical values: 0.0 (no feed‐forward) up to ~1.0 (aggressive).
-    "Kf_gain": 0.002,  
+    "Kf_gain": 0.005,  
 
     # Maximum commanded turn rate (°/s).  After feed‐forward, we clamp
     # desired r_des to ±r_rate_max_deg before converting to radians.
@@ -183,30 +185,34 @@ ADVANCED_CONTROLLER = {
     "I_max_deg": 10.0,  
 
     # Prediction horizon for dead‐band (seconds).  If |err_pred| < trim_band, we
-    # set rudder=0 early to avoid chatter or overshoot.  Typical values: tens to
-    # thousands of seconds depending on your dynamics.
-    # Reduced lead_time to avoid over-aggressive predictive deadzone that forced
-    # rudder to zero on short transients. 5s is a conservative choice to start.
+    # set rudder=0 early to avoid chatter or overshoot. Shorter horizons reduce
+    # large initial dead-reck corrections when lead_time is large relative to
+    # the vessel's response time.
+    # Reduced from 20s → 5s to limit predicted lateral-offset magnitudes at
+    # startup (low-risk tuning change to reduce transient heading jumps).
     "lead_time": 5.0,
 
     # Dead‐zone half‐angle (degrees).  Any commanded rudder smaller than this
     # in magnitude is forced to zero to prevent constant micro‐twitching.
     # Increase trim_band to reduce twitching under strong, gusty wind forcing.
-    "trim_band_deg": 0.5,  
+    "trim_band_deg": 0.3,  
 
     # Early‐release band (degrees).  Once |predicted_error| < release_band_deg,
     # rudder is released (forced to zero), even if commanded > trim_band_deg.
     # This widens the “dead‐zone” as heading error shrinks.  Typical: 3–10°.
     # Keep release band moderate to allow release when errors are small.
-    "release_band_deg": 3.0,
+    "release_band_deg": 5.0,
     # Derivative low-pass time constant (seconds). Small values follow measured r closely;
     # larger values smooth noisy measurements before they reach the D-term. 0.5s is conservative.
     "deriv_tau": 1.0,
     # Dead-reckoning tuning: how aggressively to correct for current drift
     # sensitivity: fraction of U (through-water speed) at which full correction is applied
-    "dead_reck_sensitivity": 0.25,
+    # Increased from 0.25 → 0.50 to give dead-reck a bit more authority (tunable).
+    "dead_reck_sensitivity": 0.50,
     # maximum heading correction (degrees) applied by dead-reckoning
-    "dead_reck_max_corr_deg": 30.0,
+    # Tuned: nudged slightly down from 20° → 18° and now a fractional
+    # nudge to 17.5° to dial the dead-reck correction a hair lower.
+    "dead_reck_max_corr_deg": 17.5,
     # When True, the simulation-level controller is the canonical source of
     # rudder commands. Per-ship `pid_control()` will return the last
     # simulation-commanded rudder unless explicitly asked to run locally.
@@ -225,13 +231,15 @@ ADVANCED_CONTROLLER = {
 
 # Enable verbose PID internals printing when True (useful for headless debugging)
 # Default to False for batch/automated runs; tests can override to True when needed.
-PID_DEBUG = False
+PID_DEBUG = True
 
 # Simulation-level PID tracing: when True, the simulation will emit a CSV of
 # per-step PID internals for offline QC/tuning. Path may be None to auto-generate.
 PID_TRACE = {
-    'enabled': False,
-    'path': 'scripts/pid_trace_gui_rosario.csv'
+    # When enabled=True the simulation writes a per-step CSV with PID internals
+    # Useful for guaranteed forensic captures; path is placed in logs/ by default
+    'enabled': True,
+    'path': 'logs/pid_trace_forced.csv'
 }
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -281,7 +289,23 @@ COLLISION_AVOIDANCE = {
     "unlock_ang": np.radians(25.0),
     
     # NEW: seconds to stay “immune” after a lock clears
-    "post_avoid_time": 45.0,
+    # Reduced from 45s -> 15s to avoid overly-long post-avoid conservatism
+    "post_avoid_time": 15.0,
+    # seconds to linger in 'give_way' after a crossing_lock clears (prevents
+    # rapid flip-to-neutral when encounters transiently show as safe).
+    # Increased during tuning to reduce role flip-flop in busy encounters.
+    "crossing_linger": 12.0,
+    # Relative-speed reference (m/s) used to scale post_avoid_time. When
+    # relative closing speeds are below this reference, the post_avoid_time is
+    # scaled down towards post_avoid_min_scale to shorten the forced period.
+    "post_avoid_rel_speed_ref": 2.0,
+    # Minimum scale applied to post_avoid_time when relative speeds are very low
+    "post_avoid_min_scale": 0.2,
+    # When True, inhibit per-ship PID outputs while the vessel is actively
+    # engaged in avoidance (crossing_lock/flagged_give_way/linger/post_avoid).
+    # This forces PID raw outputs to zero and clears/freezes the integrator
+    # so that the avoidance heading is not fought by the waypoint-following PID.
+    "disable_pid_while_avoiding": True,
 
     # ── predictive CPA drop logic ─────────────────────────────
     "t_cpa_max"   : 300.0,   # s  – don’t consider encounters >5 min away

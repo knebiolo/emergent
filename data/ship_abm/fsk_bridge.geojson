@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "fsk_bridge",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::32618" } },
+"features": [
+{ "type": "Feature", "properties": { "name": "Francis Scott Key Bridge", "type": "bridge", "collision_site": true }, "geometry": { "type": "Polygon", "coordinates": [ [ [ 367833.90585442451993, 4341645.941603829152882 ], [ 367795.048556351626758, 4341677.407623381353915 ], [ 368046.776712771563325, 4341988.266007964499295 ], [ 368085.634010844456498, 4341956.799988412298262 ], [ 367833.90585442451993, 4341645.941603829152882 ] ] ] } }
+]
+}

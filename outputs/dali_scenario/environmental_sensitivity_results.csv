@@ -1,0 +1,2 @@
+run_id,env_datetime,cbofs_loaded,collision,collision_time_s,final_distance_to_bridge_m,simulation_completed
+1,2025-11-16T13:00:00,True,False,,4931.14603215959,True

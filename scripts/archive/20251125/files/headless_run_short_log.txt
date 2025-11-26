@@ -1,0 +1,600 @@
+[DR] t=0.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=0.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=0.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=0.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=0.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=0.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=0.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=0.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=0.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=0.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=0.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=0.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=0.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=0.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=0.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=0.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=0.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=0.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=0.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=0.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=1.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=1.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=1.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=1.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=1.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=1.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=1.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=1.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=1.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=1.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=1.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=1.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=1.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=1.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=1.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=1.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=1.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=1.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=1.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=1.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=2.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=2.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=2.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=2.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=2.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=2.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=2.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=2.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=2.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=2.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=2.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=2.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=2.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=2.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=2.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=2.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=2.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=2.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=2.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=2.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=3.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=3.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=3.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=3.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=3.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=3.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=3.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=3.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=3.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=3.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=3.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=3.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=3.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=3.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=3.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=3.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=3.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=3.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=3.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=3.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=4.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=4.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=4.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=4.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=4.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=4.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=4.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=4.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=4.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=4.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=4.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=4.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=4.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=4.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=4.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=4.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=4.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=4.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=4.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=4.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=5.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=5.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=5.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=5.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=5.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=5.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=5.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=5.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=5.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=5.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=5.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=5.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=5.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=5.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=5.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=5.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=5.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=5.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=5.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=5.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=6.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=6.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=6.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=6.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=6.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=6.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=6.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=6.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=6.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=6.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=6.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=6.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=6.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=6.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=6.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=6.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=6.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=6.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=6.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=6.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=7.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=7.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=7.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=7.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=7.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=7.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=7.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=7.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=7.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=7.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=7.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=7.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=7.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=7.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=7.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=7.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=7.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=7.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=7.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=7.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=8.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=8.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=8.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=8.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=8.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=8.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=8.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=8.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=8.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=8.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=8.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=8.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=8.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=8.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=8.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=8.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=8.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=8.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=8.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=8.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=9.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=9.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=9.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=9.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=9.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=9.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=9.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=9.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=9.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=9.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=9.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=9.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=9.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=9.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=9.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=9.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=9.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=9.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=9.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=9.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=10.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=10.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=10.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=10.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=10.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=10.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=10.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=10.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=10.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=10.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=10.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=10.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=10.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=10.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=10.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=10.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=10.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=10.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=10.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=10.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=11.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=11.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=11.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=11.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=11.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=11.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=11.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=11.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=11.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=11.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=11.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=11.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=11.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=11.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=11.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=11.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=11.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=11.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=11.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=11.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=12.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=12.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=12.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=12.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=12.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=12.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=12.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=12.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=12.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=12.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=12.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=12.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=12.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=12.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=12.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=12.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=12.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=12.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=12.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=12.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=13.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=13.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=13.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=13.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=13.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=13.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=13.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=13.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=13.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=13.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=13.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=13.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=13.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=13.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=13.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=13.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=13.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=13.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=13.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=13.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=14.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=14.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=14.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=14.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=14.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=14.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=14.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=14.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=14.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=14.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=14.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=14.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=14.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=14.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=14.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=14.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=14.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=14.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=14.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=14.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=15.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=15.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=15.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=15.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=15.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=15.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=15.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=15.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=15.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=15.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=15.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=15.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=15.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=15.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=15.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=15.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=15.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=15.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=15.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=15.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=16.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=16.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=16.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=16.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=16.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=16.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=16.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=16.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=16.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=16.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=16.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=16.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=16.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=16.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=16.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=16.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=16.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=16.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=16.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=16.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=17.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=17.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=17.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=17.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=17.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=17.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=17.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=17.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=17.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=17.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=17.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=17.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=17.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=17.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=17.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=17.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=17.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=17.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=17.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=17.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=18.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=18.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=18.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=18.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=18.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=18.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=18.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=18.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=18.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=18.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=18.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=18.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=18.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=18.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=18.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=18.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=18.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=18.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=18.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=18.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=19.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=19.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=19.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=19.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=19.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=19.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=19.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=19.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=19.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=19.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=19.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=19.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=19.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=19.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=19.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=19.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=19.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=19.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=19.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=19.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=20.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=20.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=20.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=20.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=20.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=20.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=20.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=20.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=20.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=20.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=20.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=20.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=20.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=20.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=20.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=20.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=20.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=20.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=20.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=20.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=21.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=21.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=21.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=21.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=21.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=21.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=21.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=21.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=21.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=21.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=21.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=21.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=21.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=21.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=21.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=21.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=21.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=21.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=21.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=21.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=22.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=22.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=22.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=22.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=22.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=22.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=22.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=22.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=22.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=22.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=22.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=22.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=22.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=22.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=22.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=22.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=22.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=22.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=22.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=22.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=23.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=23.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=23.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=23.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=23.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=23.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=23.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=23.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=23.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=23.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=23.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=23.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=23.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=23.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=23.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=23.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=23.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=23.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=23.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=23.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=24.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=24.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=24.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=24.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=24.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=24.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=24.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=24.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=24.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=24.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=24.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=24.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=24.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=24.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=24.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=24.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=24.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=24.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=24.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=24.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=25.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=25.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=25.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=25.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=25.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=25.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=25.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=25.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=25.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=25.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=25.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=25.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=25.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=25.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=25.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=25.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=25.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=25.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=25.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=25.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=26.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=26.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=26.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=26.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=26.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=26.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=26.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=26.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=26.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=26.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=26.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=26.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=26.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=26.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=26.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=26.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=26.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=26.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=26.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=26.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=27.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=27.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=27.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=27.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=27.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=27.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=27.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=27.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=27.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=27.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=27.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=27.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=27.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=27.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=27.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=27.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=27.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=27.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=27.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=27.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=28.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=28.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=28.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=28.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=28.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=28.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=28.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=28.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=28.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=28.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=28.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=28.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=28.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=28.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=28.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=28.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=28.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=28.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=28.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=28.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=29.00 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=29.00 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=29.10 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=29.10 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=29.20 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=29.20 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=29.30 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=29.30 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=29.40 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=29.40 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=29.50 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=29.50 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=29.60 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=29.60 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=29.70 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=29.70 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=29.80 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=29.80 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)
+[DR] t=29.90 hd_goal=0.00° sp_goal=5.00
+[CTRL] t=29.90 -> hd_cmd=0.0°, hd_cur=0.0°, err=0.0°, rud=0.0000rad (0.00°)

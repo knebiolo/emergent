@@ -6,6 +6,18 @@ from emergent.ship_abm.config import SHIP_PHYSICS, \
                 PROPULSION
 from emergent.ship_abm.config import PID_DEBUG
 
+# Helper: normalize a heading to the nearest angular equivalent relative to a
+# reference heading (psi). Uses the shared angle utilities when available and
+# falls back to a safe modular arithmetic implementation.
+try:
+    from emergent.ship_abm.angle_utils import heading_diff_rad
+    def _nearest_heading(hd, psi_ref):
+        # heading_diff_rad(hd, psi_ref) returns (hd - psi_ref) wrapped to [-pi,pi]
+        return psi_ref + heading_diff_rad(hd, psi_ref)
+except Exception:
+    def _nearest_heading(hd, psi_ref):
+        return psi_ref + ((hd - psi_ref + np.pi) % (2 * np.pi) - np.pi)
+
 class ship:
     """
     Encapsulates vessel geometry, hydrodynamics, and basic control loops.
@@ -145,6 +157,9 @@ class ship:
         # dead-reckoning tuning (from config)
         self.dead_reck_sensitivity = ADVANCED_CONTROLLER.get('dead_reck_sensitivity', 0.25)
         self.dead_reck_max_corr_deg = ADVANCED_CONTROLLER.get('dead_reck_max_corr_deg', 30.0)
+    # Note: dead-reck damping is derived from existing parameters instead
+    # of introducing a separate config key. We will map
+    # `dead_reck_sensitivity` → damping when computing corrections.
     
         # speed & propulsion settings
         init_sp = PROPULSION['initial_speed']
@@ -194,12 +209,72 @@ class ship:
         self.crossing_lock   = np.full(n, -1, dtype=int)
         self.crossing_heading = np.zeros(n)
         self.crossing_speed   = np.zeros(n)
+        # linger timer: after a crossing lock clears, keep role='give_way'
+        # for a brief period to avoid chatter (seconds)
+        try:
+            from emergent.ship_abm.config import COLLISION_AVOIDANCE
+            self.crossing_linger_default = float(COLLISION_AVOIDANCE.get('crossing_linger', 6.0))
+        except Exception:
+            self.crossing_linger_default = 6.0
+        self.crossing_linger_timer = np.zeros(n, dtype=float)
+        # UI-visible persistent flag: mark vessels that recently had to give way.
+        # This flag is intended to be shown in the UI and not automatically
+        # cleared by COLREGS logic; it must be cleared explicitly by the UI
+        # or higher-level code when the operator acknowledges it.
+        try:
+            self.flagged_give_way = np.zeros(n, dtype=bool)
+        except Exception:
+            self.flagged_give_way = np.array([False] * n)
+        # Instrumentation state: previous goal heading for HD jump detection,
+        # rudder saturation timers and reporting flags
+        try:
+            self._instr_prev_hd = None
+            self._sat_timer = np.zeros(self.n)
+            self._sat_reported = np.zeros(self.n, dtype=bool)
+        except Exception:
+            self._instr_prev_hd = None
+            self._sat_timer = 0.0
+            self._sat_reported = False
+        # transient integrator-flush indicator per-agent (set when integrator is cleared,
+        # cleared at the end of the colregs pass so it only signals for one tick)
+        try:
+            self._last_integrator_flushed = np.zeros(self.n, dtype=bool)
+        except Exception:
+            self._last_integrator_flushed = np.array([False] * self.n)
+        # safety counter: if a give-way vessel issues near-zero rudder for many
+        # consecutive ticks, escalate by nudging prev_rudder to a small avoidance
+        # value to ensure motion (defensive fallback)
+        try:
+            self._giveway_no_rudder_counts = np.zeros(self.n, dtype=int)
+        except Exception:
+            self._giveway_no_rudder_counts = np.zeros(self.n, dtype=int)
 
     def cut_power(self, idx: int):
         """
         Instantly sets RPM and desired speed to zero for vessel *idx*.
         """
         # Support both scalar and vector storage just in case.
+        # Before zeroing, write a best-effort log entry so we can detect
+        # where commanded_rpm gets zeroed during headless runs.
+        try:
+            import os, datetime
+            # prefer workspace-relative logs/ but fall back to package-relative
+            workspace_logs = os.path.abspath(os.path.join(os.getcwd(), 'logs'))
+            os.makedirs(workspace_logs, exist_ok=True)
+            evfile = os.path.join(workspace_logs, 'cut_power_events.log')
+            ts = datetime.datetime.utcnow().isoformat() + 'Z'
+            prev = None
+            try:
+                # read prev value safely
+                prev = float(self.commanded_rpm[idx]) if np.ndim(self.commanded_rpm) != 0 else float(self.commanded_rpm)
+            except Exception:
+                prev = None
+            with open(evfile, 'a') as fh:
+                fh.write(f"{ts} cut_power called idx={idx} prev_cmd={prev}\n")
+        except Exception:
+            # best-effort logging; do not allow logging failure to raise
+            pass
+
         if np.ndim(self.commanded_rpm) == 0:        # single-vessel scalar
             self.commanded_rpm = 0.0
             self.desired_speed = 0.0
@@ -210,11 +285,8 @@ class ship:
             self.desired_speed[idx] = 0.0
             self.integral[idx]      = 0.0
             self.prev_rudder[idx]   = 0.0
-            # NEW ── make the vessel “dead in the water”
-            self.current_speed[idx] = 0.
-        
-        # log for debugging
-        #log.warning(f"Power cut to vessel {idx}")        # ASCII → avoids CP1252 gripe
+            # make the vessel “dead in the water”
+            self.current_speed[idx] = 0.0
 
     def speed_to_rpm(self, u):
         """
@@ -455,10 +527,55 @@ class ship:
 
         # get the attraction vector (2,n)
         attract = self.compute_attractive_force(positions, goals_arr)
+        # Debug: log the raw environmental vector and heading on the first
+        # few calls so we can confirm sign/axis semantics when running the GUI.
+        try:
+            _dbg_cnt = getattr(self, '_dr_input_dbg', 0)
+            if _dbg_cnt < 6:
+                # current_vec may be None or a (2,n) array; pick index-0 for readability
+                if current_vec is None:
+                    cur0 = (0.0, 0.0)
+                else:
+                    try:
+                        cur0 = (float(current_vec[0, 0]), float(current_vec[1, 0]))
+                    except Exception:
+                        # fallback if shapes differ
+                        cur_arr = np.atleast_2d(current_vec)
+                        cur0 = (float(cur_arr[0, 0]), float(cur_arr[1, 0]))
+                # psi may be scalar or array-like
+                try:
+                    psi0 = float(np.atleast_1d(psi)[0])
+                except Exception:
+                    psi0 = 0.0
+                print(f"DR-IN call={_dbg_cnt} raw_current=(E{cur0[0]:.3f},N{cur0[1]:.3f}) psi_deg={np.degrees(psi0):.6f}")
+                self._dr_input_dbg = _dbg_cnt + 1
+        except Exception:
+            pass
+        # Debug: show attract/positions/goals for first few calls
+        try:
+            cnt = getattr(self, '_attract_dbg_calls', 0)
+            if cnt < 6:
+                a = attract[:, 0] if attract.shape[1] >= 1 else attract
+                pos0 = positions[:, 0]
+                g0 = goals_arr[:, 0]
+                print(f"AT-DBG call={cnt} attract={a.tolist()} pos={pos0.tolist()} goal={g0.tolist()}")
+                self._attract_dbg_calls = cnt + 1
+        except Exception:
+            pass
 
         # ------------------------------------------------------------------
         # DEAD-RECKONING : compute a conservative correction for drift
         # ------------------------------------------------------------------
+        # Optional experimental bypass: allow tests to disable dead-reck
+        # corrections by setting `ship.disable_dead_reck = True` on the
+        # instance. This is useful for isolating whether dead-reck logic is
+        # responsible for transient large heading corrections.
+        if getattr(self, 'disable_dead_reck', False):
+            # Return raw attractor heading (no correction) and desired speed
+            hd = np.arctan2(attract[1], attract[0])
+            sp = np.array(self.desired_speed, copy=True)
+            return hd, sp
+
         if current_vec is not None:
             # desired ground-track unit vector (safe divide)
             mag_attr = np.linalg.norm(attract, axis=0, keepdims=True)
@@ -485,6 +602,25 @@ class ship:
             # correction angle (radians) from lateral offset using atan2(lateral, forward)
             corr = np.arctan2(lateral_offset, forward_dist + 1e-9)
 
+            # Apply conservative damping to avoid over-correction. Instead of
+            # introducing a new config parameter, derive a damping factor from
+            # the existing dead_reck_sensitivity: higher sensitivity means we
+            # should trust the correction more (less damping). Map
+            # sensitivity ∈ [0.0, 1.0] → damping ∈ [0.7, 1.0].
+            sens = getattr(self, 'dead_reck_sensitivity', 0.25)
+            try:
+                sens = float(sens)
+            except Exception:
+                sens = 0.25
+            # clamp sens
+            sens = np.clip(sens, 0.0, 1.0)
+            # linear mapping (tunable): sens=0 → damping=0.85 (moderate damping)
+            # sens=1 → damping=1.0 (no damping). This gives more correction
+            # authority for typical sensitivity values while still preventing
+            # full over-correction when sens is very small.
+            damping = 0.85 + 0.15 * sens
+            corr = corr * damping
+
             # clamp maximum correction to avoid wild headings when currents are uncertain
             max_corr_deg = getattr(self, 'dead_reck_max_corr_deg', 30.0)
             max_corr_rad = np.deg2rad(max_corr_deg)
@@ -498,8 +634,160 @@ class ship:
             sensitivity = getattr(self, 'dead_reck_sensitivity', 0.25)
             beta = np.clip(current_mag / (sensitivity * U), 0.0, 1.0)
 
+            # Normalize angular quantities to the nearest-equivalent relative to
+            # the current heading (psi) before performing a linear blend. This
+            # prevents linear interpolation across the ±π branch cut which can
+            # produce far-equivalent headings (e.g., +30° → -180° → +150° jump).
+            try:
+                # _nearest_heading handles vectorized inputs when angle_utils
+                # is available; fallback is defined at module top.
+                hd_base_norm = _nearest_heading(hd_base, psi)
+                hd_corr_norm = _nearest_heading(hd_corrected, psi)
+                hd_base = hd_base_norm
+                hd_corrected = hd_corr_norm
+            except Exception:
+                # if any issue, continue with the raw values (conservative)
+                pass
+
+            # Debugging: print intermediate dead-reckoning values for the first
+            # few calls to help identify why goal_hd flips early in the run.
+            try:
+                cnt = getattr(self, '_dr_dbg_calls', 0)
+                if cnt < 6:
+                    # Convert to degrees for readability
+                    def _d(a):
+                        a = np.atleast_1d(a)
+                        return np.degrees(a).tolist()
+                    # extract per-agent diagnostics for clearer logs
+                    try:
+                        idx = 0
+                        # current vector for this agent
+                        cur = current_vec[:, idx]
+                        vperp = V_perp[idx]
+                        lat_off = lateral_offset[idx]
+                        U_val = U[idx]
+                        fwd = forward_dist[idx]
+                        cur_mag = current_mag[idx]
+                    except Exception:
+                        # fall back to scalars
+                        cur = current_vec if current_vec is not None else np.array([0.0, 0.0])
+                        vperp = V_perp if 'V_perp' in locals() else 0.0
+                        lat_off = lateral_offset if 'lateral_offset' in locals() else 0.0
+                        U_val = U if 'U' in locals() else 0.0
+                        fwd = forward_dist if 'forward_dist' in locals() else 0.0
+                        cur_mag = current_mag if 'current_mag' in locals() else 0.0
+                    # Use simulation logger when available, else print
+                    msg = (
+                        f"DR-DBG call={cnt} hd_base_deg={_d(hd_base)[0]:.6f} "
+                        f"hd_corr_deg={_d(hd_corrected)[0]:.6f} corr_deg={np.degrees(corr)[0]:.6f} "
+                        f"beta={beta[0]:.6f} psi_deg={np.degrees(psi)[0]:.6f} "
+                        f"cur=(E{cur[0]:.3f},N{cur[1]:.3f}) V_perp={vperp:.3f} "
+                        f"lat_off={lat_off:.3f} U={U_val:.3f} fwd={fwd:.3f} cur_mag={cur_mag:.3f}"
+                    )
+                    # Emit both to the simulation logger (if present) and to
+                    # stdout so short headless runs capture the diagnostics.
+                    try:
+                        from emergent.ship_abm.simulation_core import log as sim_log
+                        try:
+                            sim_log.debug(msg)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    # Always print to stdout for visibility in quick runs
+                    try:
+                        print(msg)
+                    except Exception:
+                        pass
+                    self._dr_dbg_calls = cnt + 1
+            except Exception:
+                pass
+
             # final heading: smooth blend (handles vector shapes)
             hd = (1.0 - beta) * hd_base + beta * hd_corrected
+            # Instrumentation: detect huge heading jumps (>90°) relative to
+            # the last produced goal heading and emit a structured record.
+            try:
+                if getattr(self, '_instr_prev_hd', None) is None:
+                    self._instr_prev_hd = hd.copy()
+                try:
+                    from emergent.ship_abm.angle_utils import heading_diff_rad
+                    hd_diff = np.abs(heading_diff_rad(hd, self._instr_prev_hd))
+                except Exception:
+                    hd_diff = np.abs(((hd - self._instr_prev_hd + np.pi) % (2*np.pi)) - np.pi)
+                if np.any(hd_diff > np.deg2rad(90.0)):
+                    # collect richer context (index-0 agent best-effort)
+                    try:
+                        idx0 = 0
+                        pos0 = positions[:, idx0].tolist() if 'positions' in locals() else [None, None]
+                        goal0 = goals_arr[:, idx0].tolist() if 'goals_arr' in locals() else [None, None]
+                        attract0 = attract[:, idx0].tolist() if 'attract' in locals() else [None, None]
+                        cur0 = current_vec[:, idx0].tolist() if (current_vec is not None and 'current_vec' in locals()) else [0.0, 0.0]
+                        vperp0 = float(V_perp[idx0]) if 'V_perp' in locals() else None
+                        lat_off0 = float(lateral_offset[idx0]) if 'lateral_offset' in locals() else None
+                        U0 = float(U[idx0]) if 'U' in locals() else None
+                        fwd0 = float(forward_dist[idx0]) if 'forward_dist' in locals() else None
+                        beta0 = float(beta[idx0]) if 'beta' in locals() else None
+                    except Exception:
+                        pos0 = goal0 = attract0 = cur0 = [None, None]
+                        vperp0 = lat_off0 = U0 = fwd0 = beta0 = None
+                    try:
+                        from emergent.ship_abm.simulation_core import log as sim_log
+                        sim_log.info('[INSTRUMENT] EVENT=HD_JUMP idxs=%s new_deg=%s prev_deg=%s Δdeg=%s pos=%s goal=%s attract=%s cur=%s V_perp=%.3f lat_off=%.3f U=%.3f fwd=%.3f beta=%.3f',
+                                     np.where(hd_diff > np.deg2rad(90.0))[0].tolist(),
+                                     np.round(np.degrees(hd).tolist(),3),
+                                     np.round(np.degrees(self._instr_prev_hd).tolist(),3),
+                                     np.round(np.degrees(hd_diff).tolist(),3),
+                                     pos0, goal0, attract0, cur0, vperp0, lat_off0, U0, fwd0, beta0)
+                    except Exception:
+                        print(f"[INSTRUMENT] EVENT=HD_JUMP idxs={np.where(hd_diff>np.deg2rad(90.0))[0].tolist()} new={np.degrees(hd).tolist()} prev={np.degrees(self._instr_prev_hd).tolist()} Δ={np.degrees(hd_diff).tolist()} pos={pos0} goal={goal0} attract={attract0} cur={cur0} V_perp={vperp0} lat_off={lat_off0} U={U0} fwd={fwd0} beta={beta0}")
+                self._instr_prev_hd = hd.copy()
+            except Exception:
+                pass
+            # --- Defensive guard: avoid accepting a new hd that is far (>120°)
+            # from the previous returned heading in this ship instance unless
+            # the distance to the goal has materially changed. This prevents
+            # spurious ±180° flips at startup caused by tiny geometry or
+            # ordering differences. We log the first few occurrences for
+            # debugging.
+            try:
+                # ensure we have a per-instance previous heading storage
+                if not hasattr(self, '_prev_goal_hd'):
+                    self._prev_goal_hd = hd.copy()
+                    self._prev_goal_dist = np.linalg.norm(goals_arr - positions, axis=0)
+
+                # compute angular difference to previous goal heading
+                try:
+                    from emergent.ship_abm.angle_utils import heading_diff_rad
+                    ang_diff = np.abs(heading_diff_rad(hd, self._prev_goal_hd))
+                except Exception:
+                    ang_diff = np.abs(((hd - self._prev_goal_hd + np.pi) % (2*np.pi)) - np.pi)
+
+                # compute current distance to first goal and compare to previous
+                cur_dist = np.linalg.norm(goals_arr - positions, axis=0)
+                # if angular jump > 120° but distance hasn't changed much (< 5%),
+                # keep previous heading and log an informational debug line.
+                big_jump_mask = ang_diff > np.deg2rad(120.0)
+                small_dist_change = np.abs(cur_dist - self._prev_goal_dist) < (0.05 * np.maximum(self._prev_goal_dist, 1e-3))
+                if np.any(big_jump_mask & small_dist_change):
+                    # Only mute the jump for those agents meeting the condition
+                    hd = np.where(big_jump_mask & small_dist_change, self._prev_goal_hd, hd)
+                    if getattr(self, 'verbose', False) or PID_DEBUG:
+                        try:
+                            from emergent.ship_abm.simulation_core import log as sim_log
+                            sim_log.debug("[DR-GUARD] muted far-equivalent hd change (deg): new=%s prev=%s dist_change=%s",
+                                          np.round(np.degrees(np.atleast_1d(hd)),3).tolist(),
+                                          np.round(np.degrees(np.atleast_1d(self._prev_goal_hd)),3).tolist(),
+                                          np.round(cur_dist - self._prev_goal_dist,3).tolist())
+                        except Exception:
+                            print(f"[DR-GUARD] muted far-equivalent hd change new={np.degrees(hd)[0]:.3f} prev={np.degrees(self._prev_goal_hd)[0]:.3f} distΔ={cur_dist[0]-self._prev_goal_dist[0]:.3f}")
+
+                # update stored values for next call
+                self._prev_goal_hd = hd.copy()
+                self._prev_goal_dist = cur_dist
+            except Exception:
+                # if anything goes wrong with guard bookkeeping, fall back silently
+                pass
             # Optional debug printing to trace dead-reck signs/values
             try:
                 from emergent.ship_abm.config import PID_DEBUG
@@ -551,6 +839,51 @@ class ship:
                 return self.prev_rudder
         except Exception:
             pass
+
+        # Optional: when avoiding, we may want to inhibit the normal PID so
+        # the avoidance heading is not fought by waypoint-following integrator.
+        try:
+            from emergent.ship_abm.config import COLLISION_AVOIDANCE
+            disable_while_avoiding = COLLISION_AVOIDANCE.get('disable_pid_while_avoiding', False)
+        except Exception:
+            disable_while_avoiding = False
+
+        if disable_while_avoiding:
+            # build a mask of agents that are actively avoiding
+            try:
+                # crossing_lock >= 0 indicates active lock; do NOT use the UI-visible
+                # `flagged_give_way` persistence flag to disable PID. The controller
+                # must react to active signals (locks/timers/role) only. Using the
+                # UI flag could leave the controller neutral even when avoidance
+                # timers have expired or been cleared; exclude it from the mask.
+                avoiding_mask = (self.crossing_lock >= 0) | (self.crossing_linger_timer > 0.0) | (self.post_avoid_timer > 0.0)
+                # if any agents avoiding, zero their integrator and prev_rudder and return a mixed vector
+                if np.any(avoiding_mask):
+                    # ensure shapes
+                    n = self.n
+                    out = np.array(self.prev_rudder, copy=True)
+                    # zero outputs for avoiding agents
+                    try:
+                        out = np.atleast_1d(out)
+                        out[avoiding_mask] = 0.0
+                    except Exception:
+                        # scalar fallback
+                        if bool(avoiding_mask):
+                            out = 0.0
+                    # clear integrator for avoiding agents to prevent sudden returns
+                    try:
+                        self.integral = np.where(avoiding_mask, 0.0, self.integral)
+                    except Exception:
+                        try:
+                            self.integral = np.zeros_like(self.integral)
+                        except Exception:
+                            self.integral = 0.0
+                    # update prev_rudder and return immediately
+                    self.prev_rudder = out
+                    return out
+            except Exception:
+                # if anything goes wrong with avoidance gating, fall back to normal PID
+                pass
 
         # 1) heading error normalized to [-π, π] (positive error -> starboard turn)
         # Use shared helper to ensure consistency with simulation-level controller
@@ -673,6 +1006,22 @@ class ship:
                 except Exception:
                     print(f"[PID] err={np.degrees(err):+.3f} err_pred={np.degrees(err_pred):+.3f} raw_deg={np.degrees(raw):+.3f}")
 
+            # Instrumentation: report very large heading errors (>30°)
+            try:
+                err_mask = np.abs(err) > np.deg2rad(30.0)
+                if np.any(err_mask):
+                    try:
+                        from emergent.ship_abm.simulation_core import log as sim_log
+                        sim_log.info('[INSTRUMENT] EVENT=ERR_LARGE idxs=%s err_deg=%s hd_deg=%s psi_deg=%s',
+                                     np.where(err_mask)[0].tolist(),
+                                     np.round(np.degrees(err).tolist(),3),
+                                     np.round(np.degrees(hd).tolist(),3),
+                                     np.round(np.degrees(psi).tolist(),3))
+                    except Exception:
+                        print(f"[INSTRUMENT] EVENT=ERR_LARGE idxs={np.where(err_mask)[0].tolist()} err_deg={np.round(np.degrees(err).tolist(),3)} hd_deg={np.round(np.degrees(hd).tolist(),3)} psi_deg={np.round(np.degrees(psi).tolist(),3)}")
+            except Exception:
+                pass
+
         # release_band_deg and trim_band_deg were converted to radians in __init__
         release_rad = self.release_band_deg
         trim_rad    = self.trim_band_deg
@@ -744,6 +1093,32 @@ class ship:
         self.smoothed_rudder = (1.0 - alpha) * self.smoothed_rudder + alpha * rud_rate_limited
         rud = self.smoothed_rudder
 
+        # Instrumentation: detect sustained rudder saturation (>1s)
+        try:
+            # maintain a small dt estimator (updated externally by caller ideally)
+            dt_est = getattr(self, '_last_dt_est', 0.1)
+            sat_mask = np.abs(des) >= (self.max_rudder - 1e-8)
+            if np.isscalar(self._sat_timer):
+                self._sat_timer = np.zeros(self.n)
+            self._sat_timer = self._sat_timer + dt_est * sat_mask.astype(float)
+            over_mask = self._sat_timer > 1.0
+            if np.any(over_mask & (~self._sat_reported)):
+                idxs = np.where(over_mask & (~self._sat_reported))[0].tolist()
+                try:
+                    from emergent.ship_abm.simulation_core import log as sim_log
+                    sim_log.info('[INSTRUMENT] EVENT=RUD_SAT idxs=%s duration_s=%s des_deg=%s',
+                                 idxs,
+                                 np.round(self._sat_timer.tolist(),2),
+                                 np.round(np.degrees(des).tolist(),3))
+                except Exception:
+                    print(f"[INSTRUMENT] EVENT=RUD_SAT idxs={idxs} duration_s={self._sat_timer} des_deg={np.round(np.degrees(des).tolist(),3)}")
+                try:
+                    self._sat_reported[over_mask & (~self._sat_reported)] = True
+                except Exception:
+                    self._sat_reported = True
+        except Exception:
+            pass
+
         # Integrator back-calculation based on the actual applied rudder
         try:
             backcalc_beta = float(ADVANCED_CONTROLLER.get('backcalc_beta', 0.08))
@@ -768,6 +1143,47 @@ class ship:
         # update prev_error only outside the dead-band
         # self.prev_error[~mask_db] = err[~mask_db]
         self.prev_rudder = rud
+
+        # Safety: if vessel is in active avoidance (lock/linger/post) but
+        # applied rudder remains near zero for many consecutive ticks, nudge
+        # prev_rudder to a small commanded avoidance to ensure motion.
+        try:
+            # determine active avoidance per-ship
+            avoiding_mask = (self.crossing_lock >= 0) | (self.crossing_linger_timer > 0.0) | (self.post_avoid_timer > 0.0)
+            # small threshold (radians) below which rudder is considered 'zero'
+            zero_thresh = np.deg2rad(0.5)
+            # nudge magnitude (radians)
+            nudge_rad = np.deg2rad(5.0)
+            # for vectorized arrays
+            for i in range(self.n):
+                try:
+                    if avoiding_mask[i]:
+                        rud_val = float(np.atleast_1d(rud)[i])
+                        if abs(rud_val) < zero_thresh:
+                            self._giveway_no_rudder_counts[i] += 1
+                        else:
+                            self._giveway_no_rudder_counts[i] = 0
+                        # if persisted for >8 ticks, apply small nudge
+                        if self._giveway_no_rudder_counts[i] > 8:
+                            # choose sign from raw_with_I (desired before smoothing)
+                            try:
+                                sign = np.sign(float(np.atleast_1d(raw_with_I)[i]))
+                            except Exception:
+                                sign = 1.0
+                            try:
+                                self.prev_rudder[i] = sign * nudge_rad
+                                # also reset smoothed rudder to the nudge to force motion
+                                self.smoothed_rudder[i] = sign * nudge_rad
+                            except Exception:
+                                self.prev_rudder = sign * nudge_rad
+                    else:
+                        # not avoiding -> reset counter
+                        self._giveway_no_rudder_counts[i] = 0
+                except Exception:
+                    # best-effort: if per-agent indexing fails, ignore
+                    pass
+        except Exception:
+            pass
 
         return self.smoothed_rudder
 
@@ -796,8 +1212,58 @@ class ship:
         # start from current cruise speeds, to be overridden per scenario
         speed_des = self.desired_speed.copy()
         role      = ['neutral'] * n
+        # decrement any active crossing-linger timers so they naturally expire
+        try:
+            # protect shape mismatches
+            self.crossing_linger_timer = np.maximum(0.0, self.crossing_linger_timer - dt)
+        except Exception:
+            try:
+                self.crossing_linger_timer = np.zeros(n, dtype=float)
+            except Exception:
+                self.crossing_linger_timer = np.zeros(n)
 
         for i in range(n):
+            # --- instrumentation: write a per-agent COLREGS row for post-mortem
+            try:
+                import os, csv
+                logs_dir = os.path.abspath(os.path.join(os.getcwd(), 'logs'))
+                os.makedirs(logs_dir, exist_ok=True)
+                path = os.path.join(logs_dir, 'colregs_runtime_debug.csv')
+                write_hdr = not os.path.exists(path)
+                sim_time = float(getattr(self, '_sim_time', np.nan))
+                with open(path, 'a', newline='') as fh:
+                    writer = csv.writer(fh)
+                    if write_hdr:
+                        writer.writerow(['sim_time', 'agent', 'role', 'flagged_give_way', 'crossing_lock', 'crossing_heading_deg', 'crossing_speed_mps', 'crossing_linger_s', 'post_avoid_s', 'integrator_flushed'])
+                    try:
+                        ch_deg = float(np.degrees(self.crossing_heading[i])) if not np.isnan(self.crossing_heading[i]) else float('nan')
+                    except Exception:
+                        ch_deg = float('nan')
+                    try:
+                        cs_mps = float(self.crossing_speed[i])
+                    except Exception:
+                        cs_mps = float('nan')
+                    try:
+                        flag = int(bool(self.flagged_give_way[i]))
+                    except Exception:
+                        flag = 0
+                    try:
+                        lockv = int(self.crossing_lock[i])
+                    except Exception:
+                        lockv = -1
+                    try:
+                        linger = float(self.crossing_linger_timer[i])
+                    except Exception:
+                        linger = float('nan')
+                    try:
+                        post = float(self.post_avoid_timer[i])
+                    except Exception:
+                        post = float('nan')
+                    # hook: any time we flush integrator on this agent we set a transient attribute
+                    flushed = int(bool(getattr(self, '_last_integrator_flushed', False) and getattr(self, '_last_integrator_flushed_idx', -1) == i))
+                    writer.writerow([sim_time, int(i), str('neutral'), flag, lockv, ch_deg, cs_mps, linger, post, flushed])
+            except Exception:
+                pass
             # ────────────────────────────────
             # 0) cool-down: stay neutral
             # ────────────────────────────────
@@ -820,18 +1286,166 @@ class ship:
                 u_i * np.cos(psi_i) - v_i * np.sin(psi_i),
                 u_i * np.sin(psi_i) + v_i * np.cos(psi_i)
             ])
-            # --- Hysteresis: exit previous give-way when clear or bearing opens ---
-            # --- NEW: stay in give-way as long as the crossing_lock is active ---
-            if hasattr(self, '_last_role') \
-                and self._last_role[i] == 'give_way' \
-                and self.crossing_lock[i] >= 0:
-                head[i]      = self.crossing_heading[i]
-                speed_des[i] = self.crossing_speed[i]
-                role[i] = 'give_way'
-                # role[i]      = 'neutral'
-                # # also launch cool-down when we drop out here
-                # self.post_avoid_timer[i] = COLLISION_AVOIDANCE["post_avoid_time"]
-                
+            # Auto-clear the persistent UI flag when the vessel is no longer
+            # at risk: no active lock, no linger/post_avoid timers, and no
+            # nearby contact that is closing into a CPA inside the safety bound.
+            try:
+                if (getattr(self, 'flagged_give_way', None) is not None
+                        and self.crossing_linger_timer[i] <= 0.0
+                        and self.crossing_lock[i] < 0
+                        and self.post_avoid_timer[i] <= 0.0):
+                    # Determine whether any contact still represents a CPA threat
+                    _safe = True
+                    for j in range(self.n):
+                        if i == j:
+                            continue
+                        delta = positions[:, j] - pd
+                        dist = np.linalg.norm(delta)
+                        # other vessel world-frame velocity
+                        c_j, s_j = np.cos(psi[j]), np.sin(psi[j])
+                        vel_j_w = np.array([ nu[0, j]*c_j - nu[1, j]*s_j,
+                                              nu[0, j]*s_j + nu[1, j]*c_j ])
+                        rel_w = vel_j_w - vel_i
+                        t_cpa = -np.dot(delta, rel_w) / (np.dot(rel_w, rel_w) + 1e-9)
+                        t_cpa = np.clip(t_cpa, 0.0, T_CPA_MAX)
+                        d_cpa = np.linalg.norm(delta + rel_w * t_cpa)
+                        range_rate = np.dot(delta, rel_w) / (dist + 1e-9)
+                        if (d_cpa < CPA_SAFE) and (range_rate < 0.0):
+                            _safe = False
+                            break
+
+                    # Use a short persistent timer to avoid eager auto-clear flicker.
+                    # Configurable via COLLISION_AVOIDANCE['flag_clear_delay_s'] (seconds).
+                    try:
+                        delay = float(COLLISION_AVOIDANCE.get('flag_clear_delay_s', 1.0))
+                    except Exception:
+                        delay = 1.0
+
+                    # initialize per-agent safe timer if missing
+                    try:
+                        if not hasattr(self, '_flagged_safe_timer'):
+                            self._flagged_safe_timer = np.zeros(self.n, dtype=float)
+                    except Exception:
+                        self._flagged_safe_timer = np.zeros(n, dtype=float)
+
+                    if _safe:
+                        # accumulate safe time; only clear the UI flag once the
+                        # safe interval has been exceeded to prevent brief UI flicker
+                        self._flagged_safe_timer[i] = min(delay, self._flagged_safe_timer[i] + dt)
+                        if self._flagged_safe_timer[i] >= delay:
+                            try:
+                                self.flagged_give_way[i] = False
+                                print(f"[COLREGS] Auto-clear give_way for vessel {i}: no CPA threat for {delay:.1f}s; cleared.")
+                            except Exception:
+                                pass
+                    else:
+                        # reset timer when still at risk
+                        try:
+                            self._flagged_safe_timer[i] = 0.0
+                        except Exception:
+                            pass
+                    
+                # debug: report when flagged_give_way is still set and why
+                try:
+                    if getattr(self, 'flagged_give_way', None) is not None and self.flagged_give_way[i]:
+                        # compute nearest contact metrics for debugging
+                        nearest_j = -1
+                        nearest_d = float('inf')
+                        nearest_dCPA = float('nan')
+                        nearest_rr = float('nan')
+                        try:
+                            for j in range(self.n):
+                                if i == j:
+                                    continue
+                                delta = positions[:, j] - pd
+                                dist = np.linalg.norm(delta)
+                                if dist < nearest_d:
+                                    nearest_d = dist
+                                    nearest_j = j
+                                    # world-frame velocity of other
+                                    c_j, s_j = np.cos(psi[j]), np.sin(psi[j])
+                                    vel_j_w = np.array([ nu[0, j]*c_j - nu[1, j]*s_j,
+                                                          nu[0, j]*s_j + nu[1, j]*c_j ])
+                                    rel_w = vel_j_w - vel_i
+                                    t_cpa = -np.dot(delta, rel_w) / (np.dot(rel_w, rel_w) + 1e-9)
+                                    t_cpa = np.clip(t_cpa, 0.0, T_CPA_MAX)
+                                    d_cpa = np.linalg.norm(delta + rel_w * t_cpa)
+                                    nearest_dCPA = d_cpa
+                                    nearest_rr = np.dot(delta, rel_w) / (dist + 1e-9)
+                        except Exception:
+                            pass
+                        print(f"[COLREGS] flagged_give_way persists agent={i} post_avoid={self.post_avoid_timer[i]:.1f}s linger={self.crossing_linger_timer[i]:.1f}s lock={self.crossing_lock[i]} nearest_j={nearest_j} d={nearest_d:.1f} dCPA={nearest_dCPA:5.1f} rr={nearest_rr: .3f}")
+                except Exception:
+                    pass
+                    
+            except Exception:
+                pass
+            # If we're in a post-lock linger period, allow early release when
+            # all contacts are opening or safely distant. Otherwise preserve
+            # the give-way role and stored avoidance heading/speed.
+            if self.crossing_linger_timer[i] > 0.0:
+                try:
+                    from emergent.ship_abm.simulation_core import log as sim_log
+                except Exception:
+                    sim_log = None
+
+                still_needs_linger = False
+                # examine other vessels to see if any still present a danger
+                for j in range(n):
+                    if i == j:
+                        continue
+                    delta = positions[:, j] - pd
+                    dist = np.linalg.norm(delta)
+                    # world-frame velocity of other ship j
+                    c_j, s_j = np.cos(psi[j]), np.sin(psi[j])
+                    vel_j_w = np.array([ nu[0, j]*c_j - nu[1, j]*s_j,
+                                          nu[0, j]*s_j + nu[1, j]*c_j ])
+                    rel_w = vel_j_w - vel_i
+                    # predicted time to CPA (clamped)
+                    t_cpa = -np.dot(delta, rel_w) / (np.dot(rel_w, rel_w) + 1e-9)
+                    t_cpa = np.clip(t_cpa, 0.0, T_CPA_MAX)
+                    d_cpa = np.linalg.norm(delta + rel_w * t_cpa)
+                    # world-frame range-rate (+ = opening)
+                    range_rate = np.dot(delta, rel_w) / (dist + 1e-9)
+                    # if any contact is still closing and dCPA inside the safety
+                    # bound, we should remain in give-way for the linger period
+                    if (d_cpa < CPA_SAFE) and (range_rate < 0.0):
+                        still_needs_linger = True
+                        break
+
+                if not still_needs_linger:
+                    # nothing important nearby — clear linger early so normal
+                    # COLREGS logic can resume and the agent may manoeuvre.
+                    self.crossing_linger_timer[i] = 0.0
+                    if sim_log is not None and getattr(self, 'verbose', False):
+                        try:
+                            sim_log.debug('[COLREGS] linger_early_release agent=%s timer_cleared', i)
+                        except Exception:
+                            pass
+                else:
+                    # preserve give-way role and stored avoidance commands
+                    head[i] = self.crossing_heading[i]
+                    speed_des[i] = self.crossing_speed[i]
+                    role[i] = 'give_way'
+                    # keep acting as give-way until the next tick reevaluates
+                    if sim_log is not None and getattr(self, 'verbose', False):
+                        try:
+                            sim_log.debug('[COLREGS] linger_active agent=%s d_cpa=%s t_cpa=%s', i, d_cpa, t_cpa)
+                        except Exception:
+                            pass
+                    continue
+            # If we already have an active crossing lock, pre-populate the
+            # outputs so the rest of the simulation immediately treats the
+            # agent as 'give_way' while the dedicated maintenance block
+            # below still runs and may clear the lock if conditions allow.
+            if self.crossing_lock[i] >= 0:
+                try:
+                    head[i] = self.crossing_heading[i]
+                    speed_des[i] = self.crossing_speed[i]
+                    role[i] = 'give_way'
+                except Exception:
+                    # defensive fallback: leave defaults
+                    pass
            
             hd    = psi_i           # default heading
             rl    = 'neutral'       # default role
@@ -882,29 +1496,124 @@ class ship:
                         print(f"[{i}] dist={dist:6.0f} dCPA={d_cpa:6.0f} rr={range_rate: .2f} "
                               f"Δψ={np.degrees(hdg_dev):4.1f} danger={still_danger}")
     
-                if still_danger:                    
+                if still_danger:
                     hd = self.crossing_heading[i]
                     speed_des[i] = self.crossing_speed[i]
                     rl = 'give_way'
                     role[i] = rl
                     head[i] = hd
+                    # instrumentation: report that we remain locked on a contact
+                    try:
+                        from emergent.ship_abm.simulation_core import log as sim_log
+                        msg = f'[COLREGS] lock_active agent={i} tgt={tgt} dist={dist:.1f} dCPA={d_cpa:5.1f} tCPA={t_cpa:5.1f} rr={range_rate: .3f} Δψ={np.degrees(hdg_dev):4.1f} post_avoid={self.post_avoid_timer[i]:.1f} linger={self.crossing_linger_timer[i]:.1f}'
+                        if getattr(self, 'verbose', False):
+                            try:
+                                sim_log.info(msg)
+                            except Exception:
+                                print(msg)
+                        else:
+                            # also print to stdout for quick visibility in logs
+                            print(msg)
+                    except Exception:
+                        print(f"[COLREGS] lock_active agent={i} tgt={tgt} dCPA={d_cpa:5.1f} tCPA={t_cpa:5.1f} rr={range_rate: .3f} Δψ={np.degrees(hdg_dev):4.1f}")
                     continue
                 else:
-                    # lock cleared
+                    # lock cleared: set linger/post-avoid timers to avoid immediate flip-flop.
+                    # We *do not* immediately zero crossing_heading/speed here — keep them
+                    # available while crossing_linger_timer elapses so the give-way state
+                    # remains consistent for the configured duration.
+                    # clear the lock and record it in logs for post-mortem
+                    prev_tgt = tgt
                     self.crossing_lock[i] = -1
                     self.lock_init_psi[i] = np.nan
-                    self.post_avoid_timer[i] = COLLISION_AVOIDANCE["post_avoid_time"]
+                    # Set post-avoid timer. Shorten it when relative closing
+                    # speeds are low so agents don't remain forced in a
+                    # post-avoid state longer than required. This reduces the
+                    # time window where we suppress normal navigation when
+                    # contacts are barely moving relative to each other.
+                    base_post = COLLISION_AVOIDANCE["post_avoid_time"]
+                    try:
+                        rel_speed = np.linalg.norm(rel_w)
+                    except Exception:
+                        rel_speed = 0.0
+                    # Assumption: for relative speeds >= 2.0 m/s use full timer;
+                    # for very small rel speeds scale down to 20% of base.
+                    # (These numbers are conservative defaults; adjust in
+                    # config if desired.)
+                    scale = np.clip(rel_speed / 2.0, 0.2, 1.0)
+                    self.post_avoid_timer[i] = base_post * scale
+                    # small debug print for post-mortem when verbose
+                    try:
+                        print(f"[COLREGS] lock_cleared agent={i} tgt={tgt} rel_speed={rel_speed:.2f} post_avoid_set={self.post_avoid_timer[i]:.2f}s (scale={scale:.2f})")
+                    except Exception:
+                        pass
+                    # set the linger timer (seconds)
+                    self.crossing_linger_timer[i] = self.crossing_linger_default
 
-                    # flush controller memory so she doesn’t “drag her feet”
-                    self.integral[i]        = 0.0
-                    self.prev_error[i]      = 0.0
-                    self.prev_rudder[i]     = 0.0
-                    self.smoothed_rudder[i] = 0.0
+                    # debug log when lock clears for post-mortem
+                    try:
+                        from emergent.ship_abm.simulation_core import log as sim_log
+                        msg = (f'[COLREGS] lock_cleared agent={i} tgt={tgt} dist={dist:.1f} '
+                               f'dCPA={d_cpa:5.1f} tCPA={t_cpa:5.1f} rr={range_rate: .3f} '
+                               f'Δψ={np.degrees(hdg_dev):4.1f} set_linger={self.crossing_linger_timer[i]:4.1f}s '
+                               f'post_avoid={self.post_avoid_timer[i]:4.1f}s flush_integrator=True')
+                        try:
+                            sim_log.info(msg)
+                        except Exception:
+                            print(msg)
+                    except Exception:
+                        # fallback minimal print
+                        try:
+                            print(f"[COLREGS] lock_cleared agent={i} tgt={tgt}")
+                        except Exception:
+                            pass
+                    # keep flagged_give_way True so the UI can persistently show the
+                    # vessel that recently gave way until operator acknowledgement
+                    try:
+                        self.flagged_give_way[i] = True
+                    except Exception:
+                        pass
+                    # also print a dedicated lock_cleared line for easier parsing
+                    try:
+                        print(f"[COLREGS] lock_cleared agent={i} prev_tgt={prev_tgt} set_linger={self.crossing_linger_timer[i]:.1f}s post_avoid={self.post_avoid_timer[i]:.1f}s")
+                    except Exception:
+                        try:
+                            print(f"[COLREGS] lock_cleared agent={i} prev_tgt={prev_tgt}")
+                        except Exception:
+                            pass
 
-                    # hand control back to the route follower
-                    head[i]      = psi_i
-                    speed_des[i] = self.desired_speed[i]
-                    role[i]      = 'neutral'
+                    # flush controller memory now to avoid integrator-driven late hard-over
+                    try:
+                        # mark transient per-agent flush indicator for instrumentation
+                        try:
+                            self._last_integrator_flushed[int(i)] = True
+                        except Exception:
+                            try:
+                                # fallback to scalar attr (older runs)
+                                self._last_integrator_flushed = True
+                                self._last_integrator_flushed_idx = int(i)
+                            except Exception:
+                                pass
+                        self.integral[i]        = 0.0
+                    except Exception:
+                        pass
+                    try:
+                        self.prev_error[i]      = 0.0
+                    except Exception:
+                        pass
+                    try:
+                        self.prev_rudder[i]     = 0.0
+                    except Exception:
+                        pass
+                    try:
+                        self.smoothed_rudder[i] = 0.0
+                    except Exception:
+                        pass
+
+                    # preserve give-way role until linger expires (handled at top of loop)
+                    role[i] = 'give_way'
+                    head[i] = self.crossing_heading[i]
+                    speed_des[i] = self.crossing_speed[i]
                     continue
 
             # --- Emergency braking / astern thrust ---
@@ -938,22 +1647,50 @@ class ship:
                 bearing = ((np.arctan2(delta[1], delta[0])
                            - psi_i + np.pi) % (2*np.pi) - np.pi)
 
+                # Diagnostic: print per-contact metrics when verbose to help
+                # determine why give-way rules do/don't trigger.
+                try:
+                    if getattr(self, 'verbose', False) or PID_DEBUG:
+                        print(f"[COLREGS-DBG] agent={i} contact={j} dist={dist:.1f} d_brk={d_brk:.1f} bearing_deg={np.degrees(bearing):.1f} t_cpa={t_cpa:.1f} d_cpa={d_cpa:.1f}")
+                except Exception:
+                    pass
+
                 # Rule 14: head-on (mutual give-way)
                 TURN_14 = np.radians(COLLISION_AVOIDANCE['headon_turn_deg'])  # 30 deg
 
                 if abs(bearing) < np.radians(10):
                     if dist < d_brk:
                         rl = 'give_way'
-                        hd = (psi_i - TURN_14) % (2*np.pi)      # >> starboard turn
+                        # choose the nearest equivalent to avoid ±180° flips
+                        hd_tmp = (psi_i - TURN_14) % (2*np.pi)
+                        hd = _nearest_heading(hd_tmp, psi_i)
                         speed_des[i] = -self.max_reverse_speed[i]
                     else:
                         rl = 'give_way'
-                        hd = (psi_i - TURN_14) % (2*np.pi)
+                        hd_tmp = (psi_i - TURN_14) % (2*np.pi)
+                        hd = _nearest_heading(hd_tmp, psi_i)
                         speed_des[i] = 5.0
                     self.crossing_lock[i]    = j
                     self.lock_init_psi[i]    = psi_i     # cache heading at lock-on
-                    self.crossing_heading[i] = hd
+                    # store nearest-equivalent heading relative to current psi
+                    try:
+                        self.crossing_heading[i] = _nearest_heading(hd, psi_i)
+                    except Exception:
+                        self.crossing_heading[i] = hd
                     self.crossing_speed[i]   = speed_des[i]
+                    # mark the vessel as having given way (UI-visible)
+                    try:
+                        self.flagged_give_way[i] = True
+                    except Exception:
+                        pass
+                    # ensure we always print a lock-set line for forensic logs
+                    try:
+                        print(f"[COLREGS] lock_set agent={i} tgt={j} dist={dist:.1f} dCPA={d_cpa:5.1f} tCPA={t_cpa:5.1f} rr={range_rate: .3f} psi={np.degrees(psi_i):.1f}")
+                    except Exception:
+                        try:
+                            print(f"[COLREGS] lock_set agent={i} tgt={j}")
+                        except Exception:
+                            pass
                     give_way_found = True
                     break
 
@@ -963,21 +1700,44 @@ class ship:
                 if 0 < bearing < np.pi/2:
                     if dist < d_brk:
                         rl = 'give_way'
-                        hd = (psi_i - TURN_15) % (2*np.pi)
+                        hd_tmp = (psi_i - TURN_15) % (2*np.pi)
+                        hd = _nearest_heading(hd_tmp, psi_i)
                         speed_des[i] = -self.max_reverse_speed[i]
                         self.crossing_lock[i] = j
-                        self.crossing_heading[i] = hd
+                        try:
+                            self.crossing_heading[i] = _nearest_heading(hd, psi_i)
+                        except Exception:
+                            self.crossing_heading[i] = hd
                         self.crossing_speed[i] = speed_des[i]
+                        try:
+                            self.flagged_give_way[i] = True
+                        except Exception:
+                            pass
+                            try:
+                                print(f"[COLREGS] lock_set agent={i} tgt={j} dist={dist:.1f} dCPA={d_cpa:5.1f} tCPA={t_cpa:5.1f} rr={range_rate: .3f} psi={np.degrees(psi_i):.1f}")
+                            except Exception:
+                                try:
+                                    print(f"[COLREGS] lock_set agent={i} tgt={j}")
+                                except Exception:
+                                    pass
                         give_way_found = True
                         break
                     else:
                         rl = 'give_way'
-                        hd = (psi_i - TURN_15) % (2*np.pi)
+                        hd_tmp = (psi_i - TURN_15) % (2*np.pi)
+                        hd = _nearest_heading(hd_tmp, psi_i)
                         sf = max(0.3, min(1.0, dist/safe_dist))
                         speed_des[i] = self.desired_speed[i] * sf
                         self.crossing_lock[i] = j
-                        self.crossing_heading[i] = hd
+                        try:
+                            self.crossing_heading[i] = _nearest_heading(hd, psi_i)
+                        except Exception:
+                            self.crossing_heading[i] = hd
                         self.crossing_speed[i] = speed_des[i]                        
+                        try:
+                            self.flagged_give_way[i] = True
+                        except Exception:
+                            pass
                         give_way_found = True
                         break
 
@@ -986,11 +1746,26 @@ class ship:
 
                     rl = 'give_way'
                     # now turn starboard by 10°
-                    hd = (psi_i - np.pi/18) % (2*np.pi)
+                    hd_tmp = (psi_i - np.pi/18) % (2*np.pi)
+                    hd = _nearest_heading(hd_tmp, psi_i)
                     speed_des[i] = min(self.desired_speed[i] * 1.2, self.max_speed[i])
                     self.crossing_lock[i] = j
-                    self.crossing_heading[i] = hd
+                    try:
+                        self.crossing_heading[i] = _nearest_heading(hd, psi_i)
+                    except Exception:
+                        self.crossing_heading[i] = hd
                     self.crossing_speed[i] = speed_des[i]                    
+                    try:
+                        self.flagged_give_way[i] = True
+                    except Exception:
+                        pass
+                    try:
+                        print(f"[COLREGS] lock_set agent={i} tgt={j} dist={dist:.1f} dCPA={d_cpa:5.1f} tCPA={t_cpa:5.1f} rr={range_rate: .3f} psi={np.degrees(psi_i):.1f}")
+                    except Exception:
+                        try:
+                            print(f"[COLREGS] lock_set agent={i} tgt={j}")
+                        except Exception:
+                            pass
                     give_way_found = True
                     self.lock_init_psi[i] = psi_i
 
@@ -1014,6 +1789,18 @@ class ship:
         # DEBUG
         #print(f"[COLREGS QC] roles = {role}")
         self._last_role = role
+        # clear transient per-agent integrator-flush indicators so they flag only for one tick
+        try:
+            if hasattr(self, '_last_integrator_flushed'):
+                try:
+                    # vectorized clear (reset all to False)
+                    self._last_integrator_flushed[:] = False
+                except Exception:
+                    # fallback: scalar clear
+                    self._last_integrator_flushed = False
+                    self._last_integrator_flushed_idx = -1
+        except Exception:
+            pass
         return head, speed_des, rpm, role
 
     def compensate_heading(self,
