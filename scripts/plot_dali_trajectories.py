@@ -1,14 +1,33 @@
-import pandas as pd
-import matplotlib.pyplot as plt
 from pathlib import Path
-from pyproj import Transformer
+import json
+import codecs
 import numpy as np
+import pandas as pd
+import matplotlib as mpl
+mpl.use('Agg')
+import matplotlib.pyplot as plt
+from pyproj import Transformer
 
 OUT = Path('outputs/dali_scenario')
 OUT.mkdir(parents=True, exist_ok=True)
 
-def load_trajectories(outdir=OUT):
-    files = sorted(outdir.glob('run_*_trajectory.csv'))
+
+def read_json_bom(path: Path):
+    raw = path.read_bytes()
+    if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(b"\xff\xfe"):
+        return json.loads(raw.decode('utf-16'))
+    if raw.startswith(codecs.BOM_UTF16_BE) or raw.startswith(b"\xfe\xff"):
+        return json.loads(raw.decode('utf-16'))
+    if raw.startswith(codecs.BOM_UTF8) or raw.startswith(b"\xef\xbb\xbf"):
+        return json.loads(raw.decode('utf-8-sig'))
+    try:
+        return json.loads(raw.decode('utf-8'))
+    except Exception:
+        return json.loads(raw.decode('latin-1'))
+
+
+def load_trajectories(output_dir: Path):
+    files = sorted(output_dir.glob('run_*_trajectory.csv'))
     trajs = []
     for f in files:
         try:
@@ -18,329 +37,239 @@ def load_trajectories(outdir=OUT):
             pass
     return trajs
 
-def plot(trajs, config_path='scenarios/dali_bridge_collision_config.json', out_png=None):
-    import json
-    from pathlib import Path as _P
-    import codecs as _codecs
+
+def plot_dali(output_dir: str, config_path: str, out_png: str = None):
+    out = Path(output_dir)
+    trajs = load_trajectories(out)
+    if not trajs:
+        raise SystemExit(f'No trajectory CSVs found in {out}')
+
     cfg = None
     try:
-        raw = _P(config_path).read_bytes()
-        if raw.startswith(b"\xff\xfe") or raw.startswith(_codecs.BOM_UTF16_LE):
-            text = raw.decode('utf-16')
-        elif raw.startswith(b"\xfe\xff") or raw.startswith(_codecs.BOM_UTF16_BE):
-            text = raw.decode('utf-16')
-        elif raw.startswith(_codecs.BOM_UTF8) or raw.startswith(b"\xef\xbb\xbf"):
-            text = raw.decode('utf-8-sig')
-        else:
-            try:
-                text = raw.decode('utf-8')
-            except Exception:
-                text = raw.decode('latin-1')
-        cfg = json.loads(text)
+        cfg = read_json_bom(Path(config_path))
     except Exception as e:
-        print('Could not read config at', config_path, ':', e)
-        cfg = None
-    # extract waypoints and incident (lon, lat)
+        print('Warning: could not read config; proceeding with UTM-only plot:', e)
+
+    # determine UTM/crs
+    crs = None
+    transformer = None
+    sx = sy = bx = by = None
     if cfg is not None:
         try:
-            wps = cfg['route']['waypoints_lonlat'][0]
-            start_lon, start_lat = wps[0]
+            port = cfg['simulation']['port_name']
+            from emergent.ship_abm.simulation_core import simulation
+            sim = simulation(port_name=port, dt=1.0, T=1.0, n_agents=0, load_enc=False)
+            crs = sim.crs_utm
         except Exception:
-            start_lon = start_lat = None
-        try:
-            bridge_lon = cfg['incident_data']['collision_coordinates']['lon']
-            bridge_lat = cfg['incident_data']['collision_coordinates']['lat']
-        except Exception:
-            bridge_lon = bridge_lat = None
-    else:
-        start_lon = start_lat = bridge_lon = bridge_lat = None
-
-    # If config missing, try to infer approximate start from first trajectory file (UTM coords -> leave None)
-
-    # Use UTM projection of the simulation to get consistent meters coords
-    # If we have config, compute UTM transformer from midpoint lon; otherwise plot raw UTM from files
-    if start_lon is None or bridge_lon is None:
-        # fallback: just compute bounds from trajectories and plot in meters
-        fig, ax = plt.subplots(figsize=(8,10))
-        ax.add_patch(plt.Rectangle((0,0), 1, 1, color='#e6f3ff', zorder=0))
-        for name, df in trajs:
+            # fallback from lon
             try:
-                xs = df['x_m'].values
-                ys = df['y_m'].values
-                ax.plot(xs, ys, alpha=0.8, linewidth=1)
+                lon = float(cfg['route']['waypoints_lonlat'][0][0][0])
+                utm_zone = int((lon + 180) // 6) + 1
+                crs = f'EPSG:{32600 + utm_zone}'
             except Exception:
-                pass
-        ax.set_aspect('equal', 'box')
-        ax.set_xlabel('X (m)')
-        ax.set_ylabel('Y (m)')
-        ax.set_title('MV Dali Trajectories (UTM meters)')
-        out_png = OUT / 'dali_trajectories.png'
-        plt.savefig(out_png, dpi=200)
-        print('Wrote', out_png)
-        return
+                crs = None
+        if crs is not None:
+            transformer = Transformer.from_crs('EPSG:4326', crs, always_xy=True)
+            try:
+                start = cfg['route']['waypoints_lonlat'][0][0]
+                sx, sy = transformer.transform(float(start[0]), float(start[1]))
+            except Exception:
+                sx = sy = None
+            try:
+                bridge = cfg['incident_data']['collision_coordinates']
+                bx, by = transformer.transform(float(bridge['lon']), float(bridge['lat']))
+            except Exception:
+                bx = by = None
 
-    midlon = (start_lon + bridge_lon) / 2.0
-    utm_zone = int((midlon + 180) // 6) + 1
-    utm_epsg = 32600 + utm_zone
-    transformer = Transformer.from_crs('EPSG:4326', f'EPSG:{utm_epsg}', always_xy=True)
-    sx, sy = transformer.transform(start_lon, start_lat)
-    bx, by = transformer.transform(bridge_lon, bridge_lat)
-
-    fig, ax = plt.subplots(figsize=(8,10))
-
-    # compute bounds from trajs
-    all_x = np.hstack([df['x_m'].values for _, df in trajs if 'x_m' in df.columns]) if trajs else np.array([sx, bx])
-    all_y = np.hstack([df['y_m'].values for _, df in trajs if 'y_m' in df.columns]) if trajs else np.array([sy, by])
+    # compute bounds from trajectories
+    all_x = np.hstack([df['x_m'].values for _, df in trajs if 'x_m' in df.columns])
+    all_y = np.hstack([df['y_m'].values for _, df in trajs if 'y_m' in df.columns])
     xmin, xmax = float(np.min(all_x)), float(np.max(all_x))
     ymin, ymax = float(np.min(all_y)), float(np.max(all_y))
     padx = max((xmax - xmin) * 0.05, 100.0)
     pady = max((ymax - ymin) * 0.05, 100.0)
+
+    fig, ax = plt.subplots(figsize=(9, 9))
     ax.set_xlim(xmin - padx, xmax + padx)
     ax.set_ylim(ymin - pady, ymax + pady)
 
-    # Pale-blue water background
-    ax.add_patch(plt.Rectangle((xmin - padx, ymin - pady), (xmax - xmin) + 2*padx, (ymax - ymin) + 2*pady, color='#e6f3ff', zorder=0))
+    # pale-blue water background (draw first with slight transparency)
+    water_rect = plt.Rectangle((xmin - padx, ymin - pady), (xmax - xmin) + 2*padx, (ymax - ymin) + 2*pady,
+                               facecolor='#e6f3ff', edgecolor='none', alpha=0.9, zorder=0)
+    ax.add_patch(water_rect)
 
-    # Try to instantiate sim and load ENC (best-effort)
-    sim_enc = None
-    try:
-        from emergent.ship_abm.simulation_core import simulation
-        sim_enc = simulation(port_name=cfg['simulation']['port_name'], dt=1.0, T=1.0, n_agents=0, load_enc=True)
-    except Exception:
-        sim_enc = None
-
-    # Draw ENC land polygons if present
-    try:
-        enc = sim_enc.enc_data if sim_enc is not None else None
-        if enc and 'LNDARE' in enc:
-            lnds = enc.get('LNDARE')
-            if isinstance(lnds, list):
-                for gdf in lnds:
-                    for geom in getattr(gdf, 'geometry', []):
-                        try:
-                            if hasattr(geom, 'exterior'):
-                                xs, ys = geom.exterior.xy
-                            else:
-                                xs, ys = geom.xy
-                            ax.fill(xs, ys, facecolor='#d9d0b8', edgecolor='#bba977', zorder=1)
-                        except Exception:
-                            pass
-            else:
-                for geom in getattr(lnds, 'geometry', []):
+    # best-effort ENC overlay (robust handling)
+    enc_drawn = False
+    def iter_geom_xy(geom):
+        # return list of (xs, ys) sequences for Polygon/MultiPolygon/LineString
+        try:
+            from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString
+            if geom is None:
+                return []
+            if geom.geom_type == 'Polygon':
+                try:
+                    xs, ys = geom.exterior.xy
+                    return [(xs, ys)]
+                except Exception:
+                    return []
+            if geom.geom_type == 'MultiPolygon':
+                seqs = []
+                for p in geom.geoms:
                     try:
-                        if hasattr(geom, 'exterior'):
-                            xs, ys = geom.exterior.xy
-                        else:
-                            xs, ys = geom.xy
-                        ax.fill(xs, ys, facecolor='#d9d0b8', edgecolor='#bba977', zorder=1)
+                        xs, ys = p.exterior.xy
+                        seqs.append((xs, ys))
                     except Exception:
                         pass
-    except Exception:
-        pass
-
-    # Trajectories
-    colors = plt.cm.get_cmap('tab10')
-    for i, f in enumerate(files):
-        try:
-            df = pd.read_csv(f)
-            ax.plot(df['x_m'], df['y_m'], '-', alpha=0.9, linewidth=1.2, color=colors(i % 10), zorder=5)
-            ax.plot(df['x_m'].iloc[0], df['y_m'].iloc[0], 'o', color=colors(i % 10), zorder=6)
-            ax.plot(df['x_m'].iloc[-1], df['y_m'].iloc[-1], 's', color=colors(i % 10), zorder=6)
-        except Exception as e:
-            print('Failed to plot', f, e)
-
-    # plot start and bridge
-    ax.scatter([sx], [sy], c='green', s=100, label='Start', zorder=7)
-    # Bridge: try to find separate bridge shapefile in outputs or use config point
-    bridge_drawn = False
-    try:
-        # look for bridge files in OUT
-        bfiles = list(_P('outputs/dali_scenario').glob('bridge.*')) + list(_P('outputs/dali_scenario').glob('bridge_*.*'))
-        if bfiles:
-            import geopandas as gpd
-            for bf in bfiles:
+                return seqs
+            if geom.geom_type in ('LineString', 'LinearRing'):
                 try:
-                    g = gpd.read_file(bf)
-                    g = g.to_crs(f'EPSG:{utm_epsg}')
-                    g.plot(ax=ax, facecolor='#bba977', edgecolor='#8c6d3f', zorder=2)
-                    bridge_drawn = True
+                    xs, ys = geom.xy
+                    return [(xs, ys)]
+                except Exception:
+                    return []
+            if geom.geom_type == 'MultiLineString':
+                seqs = []
+                for l in geom.geoms:
+                    try:
+                        xs, ys = l.xy
+                        seqs.append((xs, ys))
+                    except Exception:
+                        pass
+                return seqs
+        except Exception:
+            return []
+
+    if cfg is not None and crs is not None:
+        try:
+            from emergent.ship_abm.simulation_core import simulation
+            sim_enc = simulation(port_name=cfg['simulation']['port_name'], dt=1.0, T=1.0, n_agents=0, load_enc=True)
+            enc = getattr(sim_enc, 'enc_data', {})
+            if enc:
+                # compute combined ENC bounds for diagnostics and potential extent expansion
+                try:
+                    enc_bounds = None
+                    for layer_gdf in enc.values():
+                        if layer_gdf is None:
+                            continue
+                        if isinstance(layer_gdf, list):
+                            for gdf in layer_gdf:
+                                if getattr(gdf, 'empty', True):
+                                    continue
+                                b = gdf.total_bounds
+                                if enc_bounds is None:
+                                    enc_bounds = b.copy()
+                                else:
+                                    enc_bounds[0] = min(enc_bounds[0], b[0])
+                                    enc_bounds[1] = min(enc_bounds[1], b[1])
+                                    enc_bounds[2] = max(enc_bounds[2], b[2])
+                                    enc_bounds[3] = max(enc_bounds[3], b[3])
+                        else:
+                            gdf = layer_gdf
+                            if getattr(gdf, 'empty', True):
+                                continue
+                            b = gdf.total_bounds
+                            if enc_bounds is None:
+                                enc_bounds = b.copy()
+                            else:
+                                enc_bounds[0] = min(enc_bounds[0], b[0])
+                                enc_bounds[1] = min(enc_bounds[1], b[1])
+                                enc_bounds[2] = max(enc_bounds[2], b[2])
+                                enc_bounds[3] = max(enc_bounds[3], b[3])
+                    if enc_bounds is not None:
+                        print('ENC combined bbox (UTM):', tuple(enc_bounds))
+                        traj_bb = (xmin, ymin, xmax, ymax)
+                        enc_bb = tuple(enc_bounds)
+                        # quick intersection
+                        inter = not (enc_bb[2] < traj_bb[0] or traj_bb[2] < enc_bb[0] or enc_bb[3] < traj_bb[1] or traj_bb[3] < enc_bb[1])
+                        print('ENC intersects trajectories:', inter)
+                        # if ENC doesn't intersect but is nearby, optionally expand extent to include small overlap
+                        if not inter:
+                            # expand plot extent to include both (helps visualizing nearby ENC)
+                            xmin = min(xmin, enc_bb[0])
+                            ymin = min(ymin, enc_bb[1])
+                            xmax = max(xmax, enc_bb[2])
+                            ymax = max(ymax, enc_bb[3])
+                            padx = max((xmax - xmin) * 0.05, 100.0)
+                            pady = max((ymax - ymin) * 0.05, 100.0)
+                            ax.set_xlim(xmin - padx, xmax + padx)
+                            ax.set_ylim(ymin - pady, ymax + pady)
+                except Exception as _:
+                    pass
+                # diagnostic: print available layers and counts
+                try:
+                    layers = {k: (len(v) if isinstance(v, list) else (0 if v is None else 1)) for k, v in enc.items()}
+                    print('ENC layers present:', layers)
                 except Exception:
                     pass
-    except Exception:
-        pass
-    if not bridge_drawn:
-        ax.scatter([bx], [by], c='red', s=80, marker='x', label='Bridge (incident)', zorder=8)
+                # draw land
+                lnds = enc.get('LNDARE')
+                if lnds is not None:
+                    if isinstance(lnds, list):
+                        for gdf in lnds:
+                            for geom in getattr(gdf, 'geometry', []):
+                                for xs, ys in iter_geom_xy(geom):
+                                    try:
+                                        ax.fill(xs, ys, facecolor='#d9d0b8', edgecolor='#bba977', zorder=3)
+                                    except Exception:
+                                        pass
+                    else:
+                        for geom in getattr(lnds, 'geometry', []):
+                            for xs, ys in iter_geom_xy(geom):
+                                try:
+                                    ax.fill(xs, ys, facecolor='#d9d0b8', edgecolor='#bba977', zorder=1)
+                                except Exception:
+                                    pass
+                # draw shoreline
+                coal = enc.get('COALNE')
+                if coal is not None:
+                    try:
+                        if isinstance(coal, list):
+                            for gdf in coal:
+                                for geom in getattr(gdf, 'geometry', []):
+                                    for xs, ys in iter_geom_xy(geom):
+                                        try:
+                                            ax.plot(xs, ys, color='#666666', linewidth=0.8, zorder=4)
+                                        except Exception:
+                                            pass
+                        else:
+                            for geom in getattr(coal, 'geometry', []):
+                                for xs, ys in iter_geom_xy(geom):
+                                    try:
+                                        ax.plot(xs, ys, color='#888888', linewidth=0.6, zorder=2)
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+                enc_drawn = True
+        except Exception as e:
+            print('ENC load/draw failed:', e)
 
-    ax.set_aspect('equal', adjustable='box')
-    ax.set_xlabel('UTM X (m)')
-    ax.set_ylabel('UTM Y (m)')
-    ax.set_title('MV Dali Trajectories (case runs)')
-    ax.legend()
-    fig.tight_layout()
-    if out_png is None:
-        out_png = OUT / 'dali_trajectories.png'
-    plt.savefig(out_png, dpi=200)
-    print('Wrote', out_png)
-
-if __name__ == '__main__':
-    trajs = load_trajectories()
-    if not trajs:
-        print('No trajectory files found in', OUT)
-    else:
-        plot(trajs)
-import sys
-import matplotlib as mpl
-mpl.use('Agg')
-import matplotlib.pyplot as plt
-import pandas as pd
-from pathlib import Path
-import numpy as np
-from pyproj import Transformer
-
-from pathlib import Path as _P
-
-def plot_dali(output_dir: str, config_path: str, out_png: str = None):
-    cfg = None
-    import json
-    from pathlib import Path as _P
-    import codecs as _codecs
-    try:
-        raw = _P(config_path).read_bytes()
-        if raw.startswith(b"\xff\xfe") or raw.startswith(_codecs.BOM_UTF16_LE):
-            text = raw.decode('utf-16')
-        elif raw.startswith(b"\xfe\xff") or raw.startswith(_codecs.BOM_UTF16_BE):
-            text = raw.decode('utf-16')
-        elif raw.startswith(_codecs.BOM_UTF8) or raw.startswith(b"\xef\xbb\xbf"):
-            text = raw.decode('utf-8-sig')
-        else:
-            try:
-                text = raw.decode('utf-8')
-            except Exception:
-                text = raw.decode('latin-1')
-        cfg = json.loads(text)
-    except Exception as e:
-        print('Could not read config at', config_path, ':', e)
-        cfg = None
-
-    out = Path(output_dir)
-    files = sorted(out.glob('run_*_trajectory.csv'))
-    if not files:
-        raise SystemExit(f'No trajectory CSVs found in {out}')
-
-    port = cfg['simulation']['port_name']
-    # instantiate a small simulation object to get the sim CRS
-    try:
-        from emergent.ship_abm.simulation_core import simulation
-        sim = simulation(port_name=port, dt=1.0, T=1.0, n_agents=0, load_enc=False)
-        crs = sim.crs_utm
-    except Exception:
-        # fallback: approximate UTM zone from first waypoint lon
-        wp = cfg['route']['waypoints_lonlat'][0][0]
-        lon = float(wp[0])
-        utm_zone = int((lon + 180) // 6) + 1
-        crs = f"EPSG:{32600 + utm_zone}"
-
-    transformer = Transformer.from_crs('EPSG:4326', crs, always_xy=True)
-
-    # Bridge coordinates
-    bridge = cfg.get('incident_data', {}).get('collision_coordinates', None)
-    if bridge:
-        bx, by = transformer.transform(bridge['lon'], bridge['lat'])
-    else:
-        bx = by = None
-
-    # waypoints
-    wps = cfg.get('route', {}).get('waypoints_lonlat', [])
-    wp_xy = []
-    for wp in wps:
+    # draw trajectories
+    colors = plt.cm.get_cmap('tab10')
+    for i, (name, df) in enumerate(trajs):
         try:
-            x, y = transformer.transform(wp[0][0], wp[0][1])
-            gx, gy = transformer.transform(wp[-1][0], wp[-1][1])
-            wp_xy.append(((x, y), (gx, gy)))
+            ax.plot(df['x_m'], df['y_m'], '-', color=colors(i % 10), linewidth=1.2, zorder=5)
+            ax.plot(df['x_m'].iloc[0], df['y_m'].iloc[0], 'o', color=colors(i % 10), zorder=6)
+            ax.plot(df['x_m'].iloc[-1], df['y_m'].iloc[-1], 's', color=colors(i % 10), zorder=6)
         except Exception:
             pass
 
-    fig, ax = plt.subplots(figsize=(8, 8))
-
-    # Pale-blue water background
-    try:
-        xmin = min([min(pd.read_csv(f)['x_m']) for f in files])
-        xmax = max([max(pd.read_csv(f)['x_m']) for f in files])
-        ymin = min([min(pd.read_csv(f)['y_m']) for f in files])
-        ymax = max([max(pd.read_csv(f)['y_m']) for f in files])
-    except Exception:
-        xmin, ymin, xmax, ymax = sim.minx, sim.miny, sim.maxx, sim.maxy if 'sim' in locals() else (0,0,1,1)
-
-    padx = (xmax - xmin) * 0.05 if xmax > xmin else 1000
-    pady = (ymax - ymin) * 0.05 if ymax > ymin else 1000
-    ax.set_xlim(xmin - padx, xmax + padx)
-    ax.set_ylim(ymin - pady, ymax + pady)
-    ax.add_patch(plt.Rectangle((xmin - padx, ymin - pady), (xmax - xmin) + 2*padx, (ymax - ymin) + 2*pady, color='#e6f3ff', zorder=0))
-
-    # Draw ENC land polygons (LNDARE) if available
-    try:
-        from emergent.ship_abm.simulation_core import simulation
-        # instantiate sim to get enc_data if possible (non-destructive)
-        sim = simulation(port_name=cfg['simulation']['port_name'], dt=1.0, T=1.0, n_agents=0, load_enc=False)
-        enc = None
-        try:
-            # reuse sim.load_enc_features to populate enc_data if ENC files are available
-            sim.load_enc_features(None, verbose=False)
-            enc = sim.enc_data
-        except Exception:
-            enc = getattr(sim, 'enc_data', None)
-        if enc and 'LNDARE' in enc:
-            # enc['LNDARE'] may be a list of GeoDataFrames
-            lnds = enc.get('LNDARE')
-            if isinstance(lnds, list):
-                for gdf in lnds:
-                    try:
-                        for geom in gdf.geometry:
-                            xs, ys = geom.exterior.xy if hasattr(geom, 'exterior') else (geom.xy[0], geom.xy[1])
-                            ax.fill(xs, ys, facecolor='#d9d0b8', edgecolor='#bba977', zorder=1)
-                    except Exception:
-                        pass
-            else:
-                try:
-                    for geom in lnds.geometry:
-                        xs, ys = geom.exterior.xy if hasattr(geom, 'exterior') else (geom.xy[0], geom.xy[1])
-                        ax.fill(xs, ys, facecolor='#d9d0b8', edgecolor='#bba977', zorder=1)
-                except Exception:
-                    pass
-    except Exception:
-        # if ENC cannot be loaded, skip basemap overlay
-        pass
-
-    colors = plt.cm.get_cmap('tab10')
-    for i, f in enumerate(files):
-        try:
-            df = pd.read_csv(f)
-            ax.plot(df['x_m'], df['y_m'], '-', color=colors(i % 10), label=f.name, zorder=5)
-            ax.plot(df['x_m'].iloc[0], df['y_m'].iloc[0], 'o', color=colors(i % 10), zorder=6)
-            ax.plot(df['x_m'].iloc[-1], df['y_m'].iloc[-1], 's', color=colors(i % 10), zorder=6)
-        except Exception as e:
-            print('Failed to plot', f, e)
-
-    # plot waypoints
-    for (s, g) in wp_xy:
-        ax.plot([s[0]], [s[1]], marker='*', color='green', markersize=10, zorder=7)
-        ax.plot([g[0]], [g[1]], marker='D', color='orange', markersize=8, zorder=7)
-        ax.plot([s[0], g[0]], [s[1], g[1]], '--', color='gray', zorder=6)
-
+    # draw start and bridge
+    if sx is not None and sy is not None:
+        ax.scatter([sx], [sy], c='green', s=100, label='Start', zorder=7)
     if bx is not None and by is not None:
-        ax.plot([bx], [by], 'x', color='red', markersize=12, label='Bridge incident', zorder=8)
+        ax.scatter([bx], [by], c='red', marker='x', s=80, label='Bridge', zorder=8)
 
     ax.set_aspect('equal', adjustable='box')
-    ax.set_title('Dali scenario trajectories')
-    ax.grid(True, zorder=9)
-    ax.legend(loc='best', fontsize='small')
+    ax.set_title('MV Dali Trajectories')
+    ax.legend(loc='best')
     fig.tight_layout()
 
     if out_png is None:
-        out_png = out / 'dali_trajectories.png'
+        out_png = out / 'dali_trajectories_with_enc.png' if enc_drawn else out / 'dali_trajectories.png'
     else:
         out_png = Path(out_png)
-    fig.savefig(out_png, dpi=200)
+    fig.savefig(out_png, dpi=200, bbox_inches='tight')
     print('Wrote', out_png)
 
 
@@ -348,7 +277,7 @@ if __name__ == '__main__':
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument('--config', required=True)
-    p.add_argument('--output-dir', default='outputs/dali_scenario')
+    p.add_argument('--output-dir', default=str(OUT))
     p.add_argument('--out', default=None)
     args = p.parse_args()
     plot_dali(args.output_dir, args.config, args.out)
