@@ -38,6 +38,36 @@ def run_single_scenario(config, env_datetime, run_id, output_dir,
     sim.waypoints = [waypoints_lonlat]
     sim.spawn_speed = speed_ms
     sim.spawn()
+    # Force the simulation to use the configured start waypoint (prevents previous runs from spawning elsewhere)
+    try:
+        from pyproj import Transformer
+        latlon_to_utm = Transformer.from_crs('EPSG:4326', sim.crs_utm, always_xy=True)
+        start_lon, start_lat = float(waypoints_lonlat[0][0]), float(waypoints_lonlat[0][1])
+        sx, sy = latlon_to_utm.transform(start_lon, start_lat)
+        # compute heading toward second waypoint if available
+        if len(waypoints_lonlat) > 1:
+            nxt_lon, nxt_lat = float(waypoints_lonlat[1][0]), float(waypoints_lonlat[1][1])
+            nx, ny = latlon_to_utm.transform(nxt_lon, nxt_lat)
+            psi0 = float(np.arctan2(ny - sy, nx - sx))
+        else:
+            psi0 = float(sim.psi[0])
+        sim.pos[:, 0] = (sx, sy)
+        sim.psi[0] = psi0
+        try:
+            gx, gy = latlon_to_utm.transform(float(waypoints_lonlat[-1][0]), float(waypoints_lonlat[-1][1]))
+            sim.goals[:, 0] = (gx, gy)
+        except Exception:
+            pass
+        # ensure ship internals reflect the enforced start
+        try:
+            if hasattr(sim, 'ship'):
+                setattr(sim.ship, 'x', sim.pos[0, 0])
+                setattr(sim.ship, 'y', sim.pos[1, 0])
+        except Exception:
+            pass
+    except Exception:
+        # best-effort only; if conversion fails keep original spawn
+        pass
     if power_loss_lon is not None and power_loss_lat is not None and power_loss_radius_m is not None:
         print(f"  Running simulation (spatial power loss at lon={power_loss_lon}, lat={power_loss_lat}, radius={power_loss_radius_m} m)")
     else:
@@ -124,8 +154,30 @@ def main():
     args = parser.parse_args()
     if args.seed:
         np.random.seed(args.seed)
-    with open(args.config, 'r') as f:
-        config = json.load(f)
+    # Robust config load: read raw bytes, detect BOM/encoding, then json.loads
+    from pathlib import Path as _Path
+    import codecs as _codecs
+    raw = _Path(args.config).read_bytes()
+    cfg_text = None
+    try:
+        # UTF-16 LE BOM
+        if raw.startswith(b"\xff\xfe") or raw.startswith(_codecs.BOM_UTF16_LE):
+            cfg_text = raw.decode('utf-16')
+        # UTF-16 BE BOM
+        elif raw.startswith(b"\xfe\xff") or raw.startswith(_codecs.BOM_UTF16_BE):
+            cfg_text = raw.decode('utf-16')
+        # UTF-8 BOM
+        elif raw.startswith(_codecs.BOM_UTF8) or raw.startswith(b"\xef\xbb\xbf"):
+            cfg_text = raw.decode('utf-8-sig')
+        else:
+            # try utf-8, fall back to latin-1
+            try:
+                cfg_text = raw.decode('utf-8')
+            except Exception:
+                cfg_text = raw.decode('latin-1')
+        config = json.loads(cfg_text)
+    except Exception as e:
+        raise RuntimeError(f"Failed to read config {args.config}: {e}")
     output_dir = Path(config['output']['output_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
     print("\nMV DALI SCENARIO - ENVIRONMENTAL SENSITIVITY ANALYSIS")
