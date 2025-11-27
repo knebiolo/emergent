@@ -1953,19 +1953,93 @@ class simulation:
         if any ship hull polygon intersects land.
         """
         events = []
-        # If no waterway geometry is available, return empty
-        land_geoms = list(getattr(self, 'waterway', gpd.GeoDataFrame()).geometry)
+        # Collect land/bridge geometries to test for allision. Include coastline (COALNE)
+        # and explicit bridge polygons (BRIDGE). Handle cases where enc_data layers
+        # may be a GeoDataFrame or a list of GeoDataFrames.
+        land_geoms = []
+        try:
+            waterway = getattr(self, 'waterway', None)
+            if waterway is not None:
+                # waterway can be a GeoDataFrame or list-like
+                try:
+                    if hasattr(waterway, 'geometry'):
+                        land_geoms.extend([g for g in list(waterway.geometry) if g is not None])
+                    else:
+                        # assume iterable of GeoDataFrames
+                        for item in waterway:
+                            if getattr(item, 'geometry', None) is not None:
+                                land_geoms.extend([g for g in list(item.geometry) if g is not None])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # also include any BRIDGE layer(s) from ENC data
+        try:
+            bridge_layer = None
+            if getattr(self, 'enc_data', None) is not None:
+                bridge_layer = self.enc_data.get('BRIDGE')
+            if bridge_layer is not None:
+                try:
+                    if hasattr(bridge_layer, 'geometry'):
+                        land_geoms.extend([g for g in list(bridge_layer.geometry) if g is not None])
+                    else:
+                        for item in bridge_layer:
+                            if getattr(item, 'geometry', None) is not None:
+                                land_geoms.extend([g for g in list(item.geometry) if g is not None])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if not land_geoms:
             return events
 
-        ship_polys = [ShapelyPolygon(patch.get_xy()) for patch in self.patches]
+        # Build ship polygons from current hull geometry (works in headless mode too)
+        ship_polys = []
+        for i in range(self.n):
+            try:
+                ship_polys.append(self._current_hull_poly(i))
+            except Exception:
+                # fallback to any existing patch geometry
+                try:
+                    if i < len(self.patches):
+                        ship_polys.append(ShapelyPolygon(self.patches[i].get_xy()))
+                    else:
+                        ship_polys.append(ShapelyPolygon())
+                except Exception:
+                    ship_polys.append(ShapelyPolygon())
+
+        # Test intersections; ignore tiny spurious overlaps below `collision_tol_area`.
         for i, ship_poly in enumerate(ship_polys):
+            if ship_poly is None or ship_poly.is_empty:
+                continue
             for land in land_geoms:
-                if ship_poly.intersects(land):
-                    inter = ship_poly.intersection(land)
-                    ev = {'t': float(t), 'i': int(i), 'contact_area': float(inter.area)}
-                    log.error(f"Allision detected: Ship{i} with shore at t={t:.2f}s")
-                    events.append(ev)
+                try:
+                    if ship_poly.intersects(land):
+                        inter = ship_poly.intersection(land)
+                        if inter is None:
+                            continue
+                        # If intersection has area (Polygon), use area threshold
+                        area = float(getattr(inter, 'area', 0.0))
+                        if area >= float(getattr(self, 'collision_tol_area', 1.0)):
+                            ev = {'t': float(t), 'i': int(i), 'contact_area': area}
+                            log.error(f"Allision detected: Ship{i} with shore at t={t:.2f}s (area={area:.2f})")
+                            events.append(ev)
+                            continue
+                        # Otherwise, check if intersection has a measurable length (LineString/MultiLineString)
+                        length = float(getattr(inter, 'length', 0.0))
+                        length_tol = float(getattr(self, 'collision_length_tol', 1.0))
+                        if length >= length_tol:
+                            ev = {'t': float(t), 'i': int(i), 'contact_length': length}
+                            log.error(f"Allision detected (line): Ship{i} with shore at t={t:.2f}s (length={length:.2f})")
+                            events.append(ev)
+                            continue
+                        # handle point intersections (very small) if necessary — use distance threshold
+                        # otherwise treat as non-collision
+                except Exception:
+                    # geometry operations can raise for invalid geometries; skip
+                    continue
         # record to persistent list
         for e in events:
             self.allision_events.append(e)

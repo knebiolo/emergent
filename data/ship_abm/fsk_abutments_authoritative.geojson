@@ -1,0 +1,22 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "FSK_abutment_authoritative_1",
+        "source": "Wikipedia (references NTSB DCA24MM031 preliminary report)",
+        "source_url": "https://en.wikipedia.org/wiki/Francis_Scott_Key_Bridge_collapse",
+        "source_note": "Latitude/Longitude taken from Wikipedia article (39°12'56\"N 76°31'47\"W) and converted to EPSG:32618 UTM.",
+        "crs": "EPSG:32618"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          367938.3394552566,
+          4341812.20361122
+        ]
+      }
+    }
+  ]
+}

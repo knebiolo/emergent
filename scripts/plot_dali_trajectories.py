@@ -341,6 +341,67 @@ def plot_dali(output_dir: str, config_path: str, out_png: str = None):
     if bx is not None and by is not None:
         ax.scatter([bx], [by], c='red', marker='x', s=80, label='Bridge', zorder=8)
 
+    # load authoritative abutments if present
+    try:
+        import geopandas as gpd
+        auth_path = Path('data/ship_abm/fsk_abutments_authoritative.geojson')
+        if auth_path.exists():
+            gdf = gpd.read_file(str(auth_path))
+            if getattr(gdf, 'crs', None) is None:
+                # assume already in sim UTM or EPSG:32618
+                try:
+                    gdf.set_crs(crs, inplace=True)
+                except Exception:
+                    gdf.set_crs('EPSG:32618', inplace=True)
+            elif crs is not None and gdf.crs != crs:
+                try:
+                    gdf = gdf.to_crs(crs)
+                except Exception:
+                    pass
+            for i, geom in enumerate(getattr(gdf, 'geometry', []) if getattr(gdf, 'geometry', None) is not None else []):
+                try:
+                    if geom is None:
+                        continue
+                    x, y = geom.x, geom.y
+                    ax.scatter([x], [y], marker='*', c='blue', s=140, zorder=9, label='Authoritative Abutment' if i == 0 else None)
+                    # annotate with name if present
+                    name = gdf.iloc[i].get('name', None) if len(gdf) > i else None
+                    if name:
+                        ax.text(x, y, name, color='blue', fontsize=8, zorder=10)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # load refined abutments (local PCA/snapped) and plot as magenta X
+    try:
+        ref_path = Path('data/ship_abm/fsk_abutments_refined.geojson')
+        if ref_path.exists():
+            ref_gdf = gpd.read_file(str(ref_path))
+            if getattr(ref_gdf, 'crs', None) is None:
+                try:
+                    ref_gdf.set_crs(crs, inplace=True)
+                except Exception:
+                    ref_gdf.set_crs('EPSG:32618', inplace=True)
+            elif crs is not None and ref_gdf.crs != crs:
+                try:
+                    ref_gdf = ref_gdf.to_crs(crs)
+                except Exception:
+                    pass
+            for i, geom in enumerate(getattr(ref_gdf, 'geometry', []) if getattr(ref_gdf, 'geometry', None) is not None else []):
+                try:
+                    if geom is None:
+                        continue
+                    x, y = geom.x, geom.y
+                    ax.plot([x], [y], marker='x', color='magenta', markersize=10, mew=2, zorder=9, label='Refined Abutment' if i == 0 else None)
+                    name = ref_gdf.iloc[i].get('name', None) if len(ref_gdf) > i else None
+                    if name:
+                        ax.text(x, y, name, color='magenta', fontsize=8, zorder=10)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     ax.set_aspect('equal', adjustable='box')
     ax.set_title('MV Dali Trajectories')
     ax.legend(loc='best')

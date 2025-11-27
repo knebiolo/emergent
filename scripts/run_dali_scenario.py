@@ -14,7 +14,8 @@ def random_recent_datetime():
     return now - timedelta(days=days_back, hours=hours)
 
 def run_single_scenario(config, env_datetime, run_id, output_dir,
-                        power_loss_lon=None, power_loss_lat=None, power_loss_radius_m=None):
+                        power_loss_lon=None, power_loss_lat=None, power_loss_radius_m=None,
+                        skip_env: bool = False):
     cfg = config['simulation']
     dt, T = cfg['dt'], cfg['T']
     port = cfg['port_name']
@@ -28,13 +29,16 @@ def run_single_scenario(config, env_datetime, run_id, output_dir,
     print(f"  Environmental datetime: {env_datetime}")
     sim = simulation(port_name=port, dt=dt, T=T, n_agents=1, load_enc=True, verbose=False)
     cbofs_loaded = False
-    try:
-        print(f"  Loading CBOFS for {env_datetime}...")
-        sim.load_environmental_forcing(start=env_datetime)
-        cbofs_loaded = True
-        print(f"  CBOFS loaded successfully")
-    except Exception as e:
-        print(f"  Warning: Could not load CBOFS: {e}")
+    if not skip_env:
+        try:
+            print(f"  Loading CBOFS for {env_datetime}...")
+            sim.load_environmental_forcing(start=env_datetime)
+            cbofs_loaded = True
+            print(f"  CBOFS loaded successfully")
+        except Exception as e:
+            print(f"  Warning: Could not load CBOFS: {e}")
+    else:
+        print('  Skipping environmental forcing (no-ENV mode)')
     sim.waypoints = [waypoints_lonlat]
     sim.spawn_speed = speed_ms
     sim.spawn()
@@ -148,6 +152,7 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('--n-runs', type=int, default=10)
     parser.add_argument('--seed', type=int, default=None)
+    parser.add_argument('--no-env', action='store_true', dest='no_env', help='Skip loading environmental forcing (useful for local/speed runs)')
     parser.add_argument('--power-loss-lon', type=float, default=None, help='Longitude of spatial power loss trigger')
     parser.add_argument('--power-loss-lat', type=float, default=None, help='Latitude of spatial power loss trigger')
     parser.add_argument('--power-loss-radius-m', type=float, default=None, help='Radius (m) around lon/lat to trigger power loss')
@@ -196,7 +201,8 @@ def main():
             output_dir,
             power_loss_lon=args.power_loss_lon,
             power_loss_lat=args.power_loss_lat,
-            power_loss_radius_m=args.power_loss_radius_m
+            power_loss_radius_m=args.power_loss_radius_m,
+            skip_env=args.no_env
         )
         results.append(result)
     results_df = pd.DataFrame(results)
