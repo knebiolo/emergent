@@ -1238,6 +1238,8 @@ class simulation():
         
         # initialize odometer
         self.kcal = self.arr.zeros(num_agents)           #kilo calorie counter
+        # cache for per-timestep precomputed pixel indices
+        self._pixel_index_cache = {}
     
         # create a project database and write initial arrays to HDF
         self.hdf5 = h5py.File(self.db, 'w')
@@ -2050,8 +2052,11 @@ class simulation():
         - self.heading: The heading for each agent in radians.
         - self.max_practical_sog: The maximum practical speed over ground for each agent as a 2D vector (m/s).
         """
-        # get the x, y position of the agent 
-        row, col = geo_to_pixel(self.X, self.Y, self.vel_dir_rast_transform)
+        # get the x, y position of the agent (use cache if available)
+        if 'vel' in self._pixel_index_cache:
+            row, col = self._pixel_index_cache['vel']
+        else:
+            row, col = geo_to_pixel(self.X, self.Y, self.vel_dir_rast_transform)
             
         # get the initial heading values
         values = self.sample_environment(self.vel_dir_rast_transform,'vel_dir')
@@ -2081,7 +2086,10 @@ class simulation():
         # Vectorized: compute mental-map cell indices for all agents and set
         # the corresponding cells in the in-memory accumulator. We do not
         # perform HDF5 writes here to avoid many small write calls.
-        rows, cols = geo_to_pixel(self.X, self.Y, self.mental_map_transform)
+        if 'mental_map' in self._pixel_index_cache:
+            rows, cols = self._pixel_index_cache['mental_map']
+        else:
+            rows, cols = geo_to_pixel(self.X, self.Y, self.mental_map_transform)
 
         # Round/clip to integer cell indices
         rows = np.clip(np.round(rows).astype(int), 0, self.mental_map_accumulator.shape[1] - 1)
@@ -2108,7 +2116,12 @@ class simulation():
         # Convert geographic coordinates to refugia-map pixel coordinates
         # use the refugia map transform if available, otherwise fall back
         transform = getattr(self, 'refugia_map_transform', self.mental_map_transform)
-        rows, cols = geo_to_pixel(self.X, self.Y, transform)
+        # use cached indices for refugia/mental map transforms if available
+        key = 'refugia' if hasattr(self, 'refugia_map_transform') else 'mental_map'
+        if key in self._pixel_index_cache:
+            rows, cols = self._pixel_index_cache[key]
+        else:
+            rows, cols = geo_to_pixel(self.X, self.Y, transform)
 
         # Determine refugia dataset shape (use first agent dataset as reference)
         try:
@@ -2193,6 +2206,31 @@ class simulation():
             except Exception:
                 # If mapping fails for any reason, silently fall back to raster values
                 self.use_hecras = False
+
+    def precompute_pixel_indices(self):
+        """
+        Precompute and cache row/col indices for commonly used raster transforms
+        for the current agent positions. This avoids calling geo_to_pixel multiple
+        times per timestep across different cue functions.
+        """
+        X = self.X
+        Y = self.Y
+        cache = {}
+        mapping = {
+            'depth': getattr(self, 'depth_rast_transform', None),
+            'vel': getattr(self, 'vel_mag_rast_transform', None),
+            'vel_dir': getattr(self, 'vel_dir_rast_transform', None),
+            'refugia': getattr(self, 'refugia_map_transform', None),
+            'mental_map': getattr(self, 'mental_map_transform', None)
+        }
+        for key, transform in mapping.items():
+            if transform is None:
+                cache[key] = (np.full_like(X, -1, dtype=int), np.full_like(Y, -1, dtype=int))
+            else:
+                rows, cols = geo_to_pixel(X, Y, transform)
+                cache[key] = (rows.astype(np.int32), cols.astype(np.int32))
+
+        self._pixel_index_cache = cache
 
     def enable_hecras(self, hecras_nodes, hecras_node_fields, k=3):
         """Enable HECRAS mapping for the simulation.
@@ -3323,9 +3361,11 @@ class simulation():
             # Step 1: Get the x, y position of the agents
             x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
         
-            # Step 2: Convert these positions to mental map's pixel indices
-            mental_map_rows, mental_map_cols = geo_to_pixel(x, y, 
-                                                            self.simulation.depth_rast_transform)
+            # Step 2: Convert these positions to mental map's pixel indices (use cache if available)
+            if 'mental_map' in self.simulation._pixel_index_cache:
+                mental_map_rows, mental_map_cols = self.simulation._pixel_index_cache['mental_map']
+            else:
+                mental_map_rows, mental_map_cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
         
             # Define buffer zone around current positions
             buff = 10
@@ -3420,7 +3460,10 @@ class simulation():
             x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
         
             # Step 2: Convert these positions to mental map's pixel indices
-            refugia_map_rows, refugia_map_cols = geo_to_pixel(x, y, self.simulation.refugia_map_transform)
+            if 'refugia' in self.simulation._pixel_index_cache:
+                refugia_map_rows, refugia_map_cols = self.simulation._pixel_index_cache['refugia']
+            else:
+                refugia_map_rows, refugia_map_cols = geo_to_pixel(x, y, self.simulation.refugia_map_transform)
         
             # Define buffer zone around current positions
             buff = 50
@@ -3515,8 +3558,11 @@ class simulation():
             # get the x, y position of the agent 
             x, y = (self.simulation.X, self.simulation.Y)
             
-            # find the row and column in the direction raster
-            rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
+            # find the row and column in the direction raster (use cache if available)
+            if 'depth' in self.simulation._pixel_index_cache:
+                rows, cols = self.simulation._pixel_index_cache['depth']
+            else:
+                rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
             
             # Access the velocity dataset from the HDF5 file by slicing and dicing
             
@@ -3669,8 +3715,10 @@ class simulation():
             # get the x, y position of the agent 
             x, y = (np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y))
             
-            # find the row and column in the direction raster
-            rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
+            if 'depth' in self.simulation._pixel_index_cache:
+                rows, cols = self.simulation._pixel_index_cache['depth']
+            else:
+                rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
             
             # get slices 
             xmin = cols - buff
@@ -3791,8 +3839,10 @@ class simulation():
             # get the x, y position of the agent 
             x, y = (self.simulation.X, self.simulation.Y)
         
-            # find the row and column in the direction raster
-            rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
+            if 'depth' in self.simulation._pixel_index_cache:
+                rows, cols = self.simulation._pixel_index_cache['depth']
+            else:
+                rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
         
             # calculate array slice bounds for each agent
             xmin = cols - buff
@@ -3937,8 +3987,10 @@ class simulation():
             # get the x, y position of the agent 
             x, y = (self.simulation.X, self.simulation.Y)
         
-            # find the row and column in the direction raster
-            rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
+            if 'depth' in self.simulation._pixel_index_cache:
+                rows, cols = self.simulation._pixel_index_cache['depth']
+            else:
+                rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
         
             # calculate array slice bounds for each agent
             xmin = cols - buff
@@ -4903,6 +4955,13 @@ class simulation():
         
         # Sense the environment
         self.environment()
+
+        # Precompute pixel indices for this timestep to avoid repeated geo_to_pixel calls
+        try:
+            self.precompute_pixel_indices()
+        except Exception:
+            # If precompute fails, do not block timestep (fallback to on-demand geo_to_pixel)
+            pass
         
         # update refugia map
         self.update_refugia_map(self.vel_mag)
