@@ -2175,6 +2175,26 @@ class simulation():
         self.wet = sampled['wetted']
         self.distance_to = sampled['distance_to']
         self.current_longitudes = self.compute_linear_positions(self.longitudinal)
+
+        # If HECRAS mapping is present, use it to override/supplement raster samples
+        # Expect: self.hecras_map built by `build_hecras_mapping` and
+        # self.hecras_node_fields a dict of nodal arrays {'depth':..., 'vel_x':..., 'vel_y':...}
+        if hasattr(self, 'hecras_map') and hasattr(self, 'hecras_node_fields'):
+            try:
+                M = self.hecras_map['indices'].shape[0]
+                # apply mapping to each field and assign to agent arrays
+                if 'depth' in self.hecras_node_fields:
+                    vals = self.apply_hecras_mapping(self.hecras_node_fields['depth'])
+                    self.depth = np.asarray(vals).flatten()
+                if 'vel_x' in self.hecras_node_fields:
+                    vals = self.apply_hecras_mapping(self.hecras_node_fields['vel_x'])
+                    self.x_vel = np.asarray(vals).flatten()
+                if 'vel_y' in self.hecras_node_fields:
+                    vals = self.apply_hecras_mapping(self.hecras_node_fields['vel_y'])
+                    self.y_vel = np.asarray(vals).flatten()
+            except Exception:
+                # If mapping fails, continue with raster-sampled values
+                pass
         
     
         # Avoid divide by zero by setting zero velocities to a small number
@@ -3827,21 +3847,17 @@ class simulation():
             # get data
             data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     '../data/wave_drag_huges_2004_fig3.csv')
-
-            hughes = pd.read_csv(data_dir)
-
-            hughes.sort_values(by = 'body_depths_submerged',
-                               ascending = True,
-                               inplace = True)
-            # fit function
-            wave_drag_fun = UnivariateSpline(hughes.body_depths_submerged,
-                                             hughes.wave_drag_multiplier,
-                                             k = 3, ext = 0)
-
-            # how submerged are these fish - that's how many
-            body_depths = self.simulation.z / (self.simulation.body_depth / 100.)
-
-            self.simulation.wave_drag = np.where(body_depths >=3, 1, wave_drag_fun(body_depths))
+            try:
+                hughes = pd.read_csv(data_dir)
+                hughes.sort_values(by='body_depths_submerged', ascending=True, inplace=True)
+                wave_drag_fun = UnivariateSpline(hughes.body_depths_submerged,
+                                                 hughes.wave_drag_multiplier,
+                                                 k=3, ext=0)
+                body_depths = self.simulation.z / (self.simulation.body_depth / 100.)
+                self.simulation.wave_drag = np.where(body_depths >= 3, 1, wave_drag_fun(body_depths))
+            except Exception:
+                # Fallback: if CSV not available, assume no additional wave drag
+                self.simulation.wave_drag = np.ones_like(self.simulation.z)
            
         def wave_drag_cue(self, weight):
             """
