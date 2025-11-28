@@ -2498,18 +2498,20 @@ class simulation():
 
             swim_speed_cms = ideal_swim_speed * 100.
         
-            # Data for interpolation
-            length_dat = np.array([5., 10., 15., 20., 25., 30., 40., 50., 60.])
-            speed_dat = np.array([37.4, 58., 75.1, 90.1, 104., 116., 140., 161., 181.])
-            amp_dat = np.array([1.06, 2.01, 3., 4.02, 4.91, 5.64, 6.78, 7.67, 8.4])
-            wave_dat = np.array([53.4361, 82.863, 107.2632, 131.7, 148.125, 166.278, 199.5652, 230.0044, 258.3])
-            edge_dat = np.array([1., 2., 3., 4., 5., 6., 8., 10., 12.])
-        
-            # Interpolation with extrapolation using UnivariateSpline
-            A_spline = UnivariateSpline(length_dat, amp_dat, k = 2, ext = 0)
-            V_spline = UnivariateSpline(speed_dat, wave_dat, k = 1, ext = 0)
-            B_spline = UnivariateSpline(length_dat, edge_dat, k = 1, ext = 0)
-        
+            # Cache splines on the simulation object to avoid recreating every timestep
+            if not hasattr(self.simulation, '_thrust_splines'):
+                length_dat = np.array([5., 10., 15., 20., 25., 30., 40., 50., 60.])
+                speed_dat = np.array([37.4, 58., 75.1, 90.1, 104., 116., 140., 161., 181.])
+                amp_dat = np.array([1.06, 2.01, 3., 4.02, 4.91, 5.64, 6.78, 7.67, 8.4])
+                wave_dat = np.array([53.4361, 82.863, 107.2632, 131.7, 148.125, 166.278, 199.5652, 230.0044, 258.3])
+                edge_dat = np.array([1., 2., 3., 4., 5., 6., 8., 10., 12.])
+                self.simulation._thrust_splines = (
+                    UnivariateSpline(length_dat, amp_dat, k=2, ext=0),
+                    UnivariateSpline(speed_dat, wave_dat, k=1, ext=0),
+                    UnivariateSpline(length_dat, edge_dat, k=1, ext=0)
+                )
+
+            A_spline, V_spline, B_spline = self.simulation._thrust_splines
             A = A_spline(length_cm)
             V = V_spline(swim_speed_cms)
             B = B_spline(length_cm)
@@ -2591,11 +2593,20 @@ class simulation():
             wave_dat = np.array([53.4361,82.863,107.2632,131.7,148.125,166.278,199.5652,230.0044,258.3])
             edge_dat = np.array([1.,2.,3.,4.,5.,6.,8.,10.,12.])
             
-            # Interpolation with extrapolation using UnivariateSpline
-            A_spline = UnivariateSpline(length_dat, amp_dat, k = 2, ext = 0)
-            V_spline = UnivariateSpline(speed_dat, wave_dat, k = 1, ext = 0)
-            B_spline = UnivariateSpline(length_dat, edge_dat, k = 1, ext = 0)
-        
+            # Cache splines (shared with thrust_fun)
+            if not hasattr(self.simulation, '_thrust_splines'):
+                length_dat = np.array([5.,10.,15.,20.,25.,30.,40.,50.,60.])
+                speed_dat = np.array([37.4,58.,75.1,90.1,104.,116.,140.,161.,181.])
+                amp_dat = np.array([1.06,2.01,3.,4.02,4.91,5.64,6.78,7.67,8.4])
+                wave_dat = np.array([53.4361,82.863,107.2632,131.7,148.125,166.278,199.5652,230.0044,258.3])
+                edge_dat = np.array([1.,2.,3.,4.,5.,6.,8.,10.,12.])
+                self.simulation._thrust_splines = (
+                    UnivariateSpline(length_dat, amp_dat, k=2, ext=0),
+                    UnivariateSpline(speed_dat, wave_dat, k=1, ext=0),
+                    UnivariateSpline(length_dat, edge_dat, k=1, ext=0)
+                )
+
+            A_spline, V_spline, B_spline = self.simulation._thrust_splines
             A = A_spline(lengths_cm)
             V = V_spline(swim_speeds_cms)
             B = B_spline(lengths_cm)
@@ -2911,10 +2922,14 @@ class simulation():
                                         water_velocities * 0.2,
                                         water_velocities * 1.)
         
-            # Ensure non-zero fish velocity for calculation
+            # Ensure non-zero fish velocity for calculation (avoid division by zero)
             fish_speeds = np.linalg.norm(fish_velocities, axis=-1)
-            fish_speeds[fish_speeds == 0.0] = 0.0001
-            fish_velocities[fish_speeds == 0.0] = [0.0001, 0.0001]
+            zero_mask = fish_speeds == 0.0
+            if np.any(zero_mask):
+                fish_speeds = fish_speeds.copy()
+                fish_speeds[zero_mask] = 1e-4
+                fish_velocities = fish_velocities.copy()
+                fish_velocities[zero_mask] = 1e-4
         
             # Calculate kinematic viscosity and density based on water temperature
             viscosity = self.kin_visc(self.simulation.water_temp)
@@ -2939,12 +2954,13 @@ class simulation():
             # Calculate drag coefficients
             drag_coeffs = self.drag_coeff(reynolds_numbers)
         
-            # Calculate relative velocities and their norms
+            # Calculate relative velocities and norms once
             relative_velocities = fish_velocities - water_velocities
-            relative_speeds_squared = np.linalg.norm(relative_velocities, axis=-1)**2
-        
-            # Calculate unit vectors for fish velocities
-            unit_relative_vector= np.nan_to_num(relative_velocities / np.linalg.norm(relative_velocities, axis=1)[:,np.newaxis])
+            rel_norms = np.linalg.norm(relative_velocities, axis=-1)
+            rel_norms_safe = rel_norms.copy()
+            rel_norms_safe[rel_norms_safe == 0] = 1e-6
+            relative_speeds_squared = rel_norms**2
+            unit_relative_vector = relative_velocities / rel_norms_safe[:, np.newaxis]
 
             # Calculate drag forces
             drags = np.where(mask[:,np.newaxis],
