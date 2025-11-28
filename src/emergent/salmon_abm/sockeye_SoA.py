@@ -1496,6 +1496,27 @@ class simulation():
                             ds[:, :] = existing
                             # clear accumulator for this agent
                             acc.fill(0)
+                    # Flush refugia accumulators if present
+                    try:
+                        refugia_grp = self.hdf5['refugia']
+                        for aid in range(self.num_agents):
+                            acc_r = getattr(self, 'refugia_accumulator', None)
+                            if acc_r is None:
+                                break
+                            acc_arr = acc_r[aid]
+                            if not np.any(acc_arr):
+                                continue
+                            dsr = refugia_grp.get(str(aid))
+                            if dsr is None:
+                                continue
+                            # read existing and overwrite where accumulator non-zero
+                            existing_r = dsr[:, :]
+                            mask = acc_arr != 0
+                            existing_r[mask] = acc_arr[mask]
+                            dsr[:, :] = existing_r
+                            acc_arr.fill(0)
+                    except Exception:
+                        pass
                 except Exception:
                     # If memory group doesn't exist or write fails, skip silently
                     pass
@@ -1670,10 +1691,69 @@ class simulation():
         self.longitudinal = line_gdf.geometry[0]  # Assuming there's only one line feature
         
     def compute_linear_positions(self, line):
-        # Assuming you have numpy arrays `x` and `y` for the coordinates of agents
-        points = np.array([Point(x, y) for x, y in zip(self.X, self.Y)])
-        '''Vectorized function to compute linear distance along the longitudinal line'''
-        return np.array([line.project(point) for point in points])
+        # Vectorized projection of points onto a polyline (line can be a shapely LineString)
+        # Convert line coordinates to numpy arrays
+        coords = np.asarray(line.coords)
+        xs_line = coords[:, 0]
+        ys_line = coords[:, 1]
+
+        # Agent points
+        px = self.X.flatten()
+        py = self.Y.flatten()
+
+        # Helper: project points to cumulative distance along polyline
+        def _project_points_onto_line_numpy(xs_line, ys_line, px, py):
+            # segments
+            seg_x0 = xs_line[:-1]
+            seg_y0 = ys_line[:-1]
+            seg_x1 = xs_line[1:]
+            seg_y1 = ys_line[1:]
+            vx = seg_x1 - seg_x0
+            vy = seg_y1 - seg_y0
+            seg_len = np.hypot(vx, vy)
+            cumlen = np.concatenate([[0.0], np.cumsum(seg_len)])
+
+            # For each point, compute projection onto each segment, pick the closest
+            # vectorized over segments using broadcasting where feasible
+            # px shape (M,), seg_x0 shape (S,) -> we compute per-point per-segment
+            M = px.size
+            S = seg_x0.size
+
+            # Expand arrays
+            px_e = px[:, None]
+            py_e = py[:, None]
+            x0_e = seg_x0[None, :]
+            y0_e = seg_y0[None, :]
+            vx_e = vx[None, :]
+            vy_e = vy[None, :]
+            seg_len_e = seg_len[None, :]
+
+            wx = px_e - x0_e
+            wy = py_e - y0_e
+            # projection factor along each segment (t) = (w.v) / (v.v)
+            denom = vx_e * vx_e + vy_e * vy_e
+            # avoid div0
+            denom = np.where(denom == 0, 1e-12, denom)
+            t = (wx * vx_e + wy * vy_e) / denom
+            t_clamped = np.clip(t, 0.0, 1.0)
+
+            # Closest point coords
+            cx = x0_e + t_clamped * vx_e
+            cy = y0_e + t_clamped * vy_e
+
+            # distances squared from point to projected point
+            d2 = (px_e - cx) ** 2 + (py_e - cy) ** 2
+
+            # choose segment with minimum distance
+            idx = np.argmin(d2, axis=1)
+            # gather t and cumulative length per point
+            chosen_t = t_clamped[np.arange(M), idx]
+            chosen_seg = idx
+            distances_along = cumlen[chosen_seg] + chosen_t * seg_len[chosen_seg]
+            return distances_along
+
+        dists = _project_points_onto_line_numpy(xs_line, ys_line, px, py)
+        return dists.reshape(self.X.shape)
 
     def boundary_surface(self):
         
@@ -1752,24 +1832,25 @@ class simulation():
                            Shape: (self.num_agents, self.width, self.height)
         """
 
-        # Create groups for organization (optional)
-        mem_data = self.hdf5.create_group("refugia")
-        refugia_height = np.round(self.height/self.refugia_cell_size,0).astype(np.int32) + 1
-        refugia_width = np.round(self.width/self.refugia_cell_size,0).astype(np.int32) + 1
-        # create a memory map array
-        for i in np.arange(self.num_agents):
-            mem_data.create_dataset('%s'%(i), (refugia_height, refugia_width), dtype = 'f4')
-            self.hdf5['refugia/%s'%(i)][:, :] = self.arr.zeros((refugia_height, 
-                                                               refugia_width))
+        # Ensure refugia group exists and create per-agent datasets
+        mem_grp = self.hdf5.require_group('refugia')
+        refugia_height = int(np.round(self.height / self.refugia_cell_size)) + 1
+        refugia_width = int(np.round(self.width / self.refugia_cell_size)) + 1
 
-        # Apply the scaling
-        self.refugia_map_transform = Affine(self.refugia_cell_size, 
-                                           self.depth_rast_transform.b, 
-                                           self.depth_rast_transform.c,
-                                           self.depth_rast_transform.d,
-                                           -self.refugia_cell_size,
-                                           self.depth_rast_transform.f)
-           
+        for i in range(self.num_agents):
+            name = str(i)
+            if name not in mem_grp:
+                mem_grp.create_dataset(name, shape=(refugia_height, refugia_width), dtype='f4',
+                                       chunks=(1, min(refugia_width, 4096)))
+                mem_grp[name][:, :] = np.zeros((refugia_height, refugia_width), dtype='f4')
+
+        # Apply the scaling transform for refugia
+        self.refugia_map_transform = Affine(self.refugia_cell_size, 0.0, self.depth_rast_transform.c,
+                                           0.0, -self.refugia_cell_size, self.depth_rast_transform.f)
+
+        # In-memory refugia accumulator (stores float values per agent)
+        self.refugia_accumulator = np.zeros((self.num_agents, refugia_height, refugia_width), dtype='f4')
+
         self.hdf5.flush()
  
     def sample_environment(self, transform, raster_name):
@@ -2024,32 +2105,36 @@ class simulation():
     
         The mental map is stored in an HDF5 dataset with shape (num_agents, width, height), where each 'slice' corresponds to an agent's mental map.
         """
-        # Convert geographic coordinates to mental-map pixel coordinates
-        rows, cols = geo_to_pixel(self.X, self.Y, self.mental_map_transform)
+        # Convert geographic coordinates to refugia-map pixel coordinates
+        # use the refugia map transform if available, otherwise fall back
+        transform = getattr(self, 'refugia_map_transform', self.mental_map_transform)
+        rows, cols = geo_to_pixel(self.X, self.Y, transform)
 
-        # Convert to integer and clip to dataset bounds
-        rows = np.clip(np.round(rows).astype(int), 0, int(np.round(self.height / self.avoid_cell_size)))
-        cols = np.clip(np.round(cols).astype(int), 0, int(np.round(self.width / self.avoid_cell_size)))
+        # Determine refugia dataset shape (use first agent dataset as reference)
+        try:
+            sample_ds = next(iter(self.hdf5['refugia'].values()))
+            max_row = sample_ds.shape[0] - 1
+            max_col = sample_ds.shape[1] - 1
+        except Exception:
+            max_row = int(np.round(self.height / self.refugia_cell_size))
+            max_col = int(np.round(self.width / self.refugia_cell_size))
 
-        # Batch update: for each unique (r,c) pair, increment or set current timestep
-        mem_group = self.hdf5['memory']
-        for i in range(self.num_agents):
-            ds = mem_group.get(str(i))
-            if ds is None:
-                continue
+        rows = np.clip(np.round(rows).astype(int), 0, max_row)
+        cols = np.clip(np.round(cols).astype(int), 0, max_col)
+
+        # Populate in-memory refugia accumulator for each agent
+        agents = np.arange(self.num_agents, dtype=int)
+        # Ensure current_velocity is an array
+        cv = np.asarray(current_velocity)
+        for i in agents:
             r = rows[i]
             c = cols[i]
-            # Read a small tile, update, write back to minimize Python-HDF5 calls
             try:
-                val = ds[r, c]
-                ds[r, c] = current_timestep
+                self.refugia_accumulator[i, r, c] = float(cv[i])
             except Exception:
-                pass
-        # avoid flushing every timestep to reduce I/O pressure
-                single_arr[0,rows,cols] = refugia
-                self.hdf5['refugia/%s'%(i)][:, :] = single_arr
-        
-        self.hdf5.flush()
+                continue
+
+        # Flushing to HDF5 happens in `timestep_flush` in batch.
 
     def environment(self):
         """

@@ -11,7 +11,7 @@ sys.path.insert(0, str(src))
 
 # Import necessary modules
 import emergent.salmon_abm.sockeye_SoA as sockeye_mod
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, LineString
 
 # Monkeypatch geopandas.read_file to avoid reading from network files
 try:
@@ -88,6 +88,9 @@ sim = sockeye_mod.simulation(model_dir=str(root), model_name='prof_min', crs='EP
                               water_temp=10.0, start_polygon=None, env_files=env_files,
                               longitudinal_profile=None, fish_length=500, num_timesteps=200, num_agents=50, use_gpu=False)
 
+# Use a simple LineString for longitudinal profile to avoid LinearIterator errors
+sim.longitudinal = LineString([(0, 0), (0, 63)])
+
 # Create a basic PID controller
 pid = sockeye_mod.PID_controller(n_agents=50, k_p=0.1, k_i=0.0, k_d=0.0)
 
@@ -95,7 +98,7 @@ pid = sockeye_mod.PID_controller(n_agents=50, k_p=0.1, k_i=0.0, k_d=0.0)
 pr = cProfile.Profile()
 pr.enable()
 try:
-    for t in range(50):
+    for t in range(500):
         sim.timestep(t, 1.0, None, pid)
 except Exception as e:
     print('timestep raised exception:', e)
