@@ -1111,6 +1111,10 @@ class simulation():
          - Agent properties that do not change with time are written to the HDF5 file.
         """        
         self.arr = get_arr(use_gpu)
+        # HDF5 buffering parameters
+        self.flush_interval = 50  # timesteps between HDF5 flushes (configurable)
+        self._hdf5_buffers = {}
+        self._buffer_pos = 0
         
         # If we are tuning the PID controller, special settings used
         if pid_tuning:
@@ -1258,6 +1262,17 @@ class simulation():
         self.enviro_import(os.path.join(model_dir,env_files['vel_mag']),'velocity magnitude') 
         self.enviro_import(os.path.join(model_dir,env_files['wetted']),'wetted')
         self.hdf5.flush()
+        # Initialize in-memory buffers for per-timestep datasets to reduce small writes
+        buf_len = min(self.flush_interval, max(1, self.num_timesteps))
+        buffer_shape = (self.num_agents, buf_len)
+        dset_names = [
+            "X","Y","Z","prev_X","prev_Y","heading","sog","ideal_sog","swim_speed",
+            "battery","swim_behav","swim_mode","recover_stopwatch","ttfr","time_out_of_water",
+            "drag","thrust","Hz","bout_no","dist_per_bout","bout_dur","time_of_jump","kcal"
+        ]
+        for name in dset_names:
+            self._hdf5_buffers[name] = np.zeros(buffer_shape, dtype='float32')
+        self._buffer_pos = 0
         
         # import longitudinal shapefile
         self.longitude = self.longitudinal_import(longitudinal_profile)
@@ -1417,37 +1432,74 @@ class simulation():
     def timestep_flush(self, timestep):
         if self.pid_tuning == False:
             '''function writes to the open hdf5 file '''
-            
-            # write time step data to hdf
-            self.hdf5['agent_data/X'][..., timestep] = self.X.astype('float32')
-            self.hdf5['agent_data/Y'][..., timestep] = self.Y.astype('float32')
-            self.hdf5['agent_data/Z'][..., timestep] = self.z.astype('float32')
-            self.hdf5['agent_data/prev_X'][..., timestep] = self.prev_X.astype('float32')
-            self.hdf5['agent_data/prev_Y'][..., timestep] = self.prev_Y.astype('float32')
-            self.hdf5['agent_data/heading'][..., timestep] = self.heading.astype('float32')
-            self.hdf5['agent_data/sog'][..., timestep] = self.sog.astype('float32')
-            self.hdf5['agent_data/ideal_sog'][..., timestep] = self.ideal_sog.astype('float32')
-            self.hdf5['agent_data/swim_speed'][..., timestep] = self.swim_speed.astype('float32')
-            self.hdf5['agent_data/battery'][..., timestep] = self.battery.astype('float32')
-            self.hdf5['agent_data/swim_behav'][..., timestep] = self.swim_behav.astype('float32')
-            self.hdf5['agent_data/swim_mode'][..., timestep] = self.swim_mode.astype('float32')
-            self.hdf5['agent_data/recover_stopwatch'][..., timestep] = self.recover_stopwatch.astype('float32')
-            self.hdf5['agent_data/ttfr'][..., timestep] = self.ttfr.astype('float32')
-            self.hdf5['agent_data/time_out_of_water'][..., timestep] = self.time_out_of_water.astype('float32')
-            self.hdf5['agent_data/drag'][..., timestep] = np.linalg.norm(self.drag, axis = -1).astype('float32')
-            self.hdf5['agent_data/thrust'][..., timestep] = np.linalg.norm(self.thrust, axis = -1).astype('float32')
-            self.hdf5['agent_data/Hz'][..., timestep] = self.Hz.astype('float32')
-            self.hdf5['agent_data/bout_no'][..., timestep] = self.bout_no.astype('float32')
-            self.hdf5['agent_data/dist_per_bout'][..., timestep] = self.dist_per_bout.astype('float32')
-            self.hdf5['agent_data/bout_dur'][..., timestep] = self.bout_dur.astype('float32')
-            self.hdf5['agent_data/kcal'][..., timestep] = self.kcal.astype('float32')
+            # write into in-memory buffers and flush periodically
+            buf_vals = {
+                'X': self.X.astype('float32'),
+                'Y': self.Y.astype('float32'),
+                'Z': self.z.astype('float32'),
+                'prev_X': self.prev_X.astype('float32'),
+                'prev_Y': self.prev_Y.astype('float32'),
+                'heading': self.heading.astype('float32'),
+                'sog': self.sog.astype('float32'),
+                'ideal_sog': self.ideal_sog.astype('float32'),
+                'swim_speed': self.swim_speed.astype('float32'),
+                'battery': self.battery.astype('float32'),
+                'swim_behav': self.swim_behav.astype('float32'),
+                'swim_mode': self.swim_mode.astype('float32'),
+                'recover_stopwatch': self.recover_stopwatch.astype('float32'),
+                'ttfr': self.ttfr.astype('float32'),
+                'time_out_of_water': self.time_out_of_water.astype('float32'),
+                'drag': np.linalg.norm(self.drag, axis=-1).astype('float32'),
+                'thrust': np.linalg.norm(self.thrust, axis=-1).astype('float32'),
+                'Hz': self.Hz.astype('float32'),
+                'bout_no': self.bout_no.astype('float32'),
+                'dist_per_bout': self.dist_per_bout.astype('float32'),
+                'bout_dur': self.bout_dur.astype('float32'),
+                'kcal': self.kcal.astype('float32')
+            }
 
-            #self.hdf5['agent_data/time_of_jump'][..., timestep] = self.time_of_jump.astype('float32')
-    
-    
-            # # Periodically flush data to ensure it's written to disk
-            if timestep % 100 == 0:  # Adjust this value based on your needs
-                self.hdf5.flush()            
+            pos = self._buffer_pos
+            for k, v in buf_vals.items():
+                if k in self._hdf5_buffers:
+                    self._hdf5_buffers[k][:, pos] = v
+
+            self._buffer_pos += 1
+            if self._buffer_pos >= self.flush_interval or timestep == (self.num_timesteps - 1):
+                write_len = self._buffer_pos
+                t_end = timestep
+                t_start = t_end - write_len + 1
+                for k, buf in self._hdf5_buffers.items():
+                    ds_name = f'agent_data/{k}'
+                    if ds_name in self.hdf5:
+                        try:
+                            self.hdf5[ds_name][:, t_start:t_end+1] = buf[:, :write_len]
+                        except Exception:
+                            for offset in range(write_len):
+                                self.hdf5[ds_name][:, t_start + offset] = buf[:, offset]
+                # reset buffer
+                for k in list(self._hdf5_buffers.keys()):
+                    self._hdf5_buffers[k][:] = 0
+                self._buffer_pos = 0
+                # Flush mental-map accumulators to HDF5 in a batched manner
+                try:
+                    mem_grp = self.hdf5['memory']
+                    for aid in range(self.num_agents):
+                        ds = mem_grp.get(str(aid))
+                        if ds is None:
+                            continue
+                        # Logical OR the accumulator into the stored dataset
+                        acc = self.mental_map_accumulator[aid]
+                        if np.any(acc):
+                            # read existing, OR, and write back in one shot
+                            existing = ds[:, :]
+                            np.maximum(existing, acc, out=existing)
+                            ds[:, :] = existing
+                            # clear accumulator for this agent
+                            acc.fill(0)
+                except Exception:
+                    # If memory group doesn't exist or write fails, skip silently
+                    pass
+                self.hdf5.flush()
 
     def enviro_import(self, data_dir, surface_type):
         """
@@ -1659,20 +1711,32 @@ class simulation():
                            Shape: (self.num_agents, self.width, self.height)
         """
 
-        # Create groups for organization (optional)
-        mem_data = self.hdf5.create_group("memory")
-        avoid_height = np.round(self.height/self.avoid_cell_size,0).astype(np.int32) + 1
-        avoid_width = np.round(self.width/self.avoid_cell_size,0).astype(np.int32) + 1
-        # create a memory map array (use small dtype to save memory)
-        zeros = np.zeros((avoid_height, avoid_width), dtype='i2')
-        for i in np.arange(self.num_agents):
-            mem_data.create_dataset(str(i), data=zeros, dtype='i2', chunks=(min(64, avoid_height), min(64, avoid_width)))
+        # Ensure a 'memory' group exists and create compact per-agent avoid maps.
+        mem_data = self.hdf5.require_group('memory')
 
-        # Apply the scaling: set transform to align mental map cell centers with world coords
-        # Use affine parameters a, e as cell sizes
+        avoid_height = int(np.round(self.height / self.avoid_cell_size)) + 1
+        avoid_width = int(np.round(self.width / self.avoid_cell_size)) + 1
+
+        # Create per-agent datasets (if missing) using a compact dtype and
+        # row-friendly chunking so our grouped-row reads/writes are efficient.
+        for i in range(self.num_agents):
+            name = str(i)
+            if name not in mem_data:
+                mem_data.create_dataset(name, shape=(avoid_height, avoid_width),
+                                        dtype='i2', chunks=(1, min(avoid_width, 4096)))
+
+        # Transform mapping agent coords -> mental map cell indices
         self.mental_map_transform = Affine(self.avoid_cell_size, 0.0, self.depth_rast_transform.c,
                                            0.0, -self.avoid_cell_size, self.depth_rast_transform.f)
-        
+
+        # In-memory accumulator to batch per-timestep updates; dtype u1 is enough
+        # since we only flag visited cells (0/1). Shape: (num_agents, H, W)
+        self.mental_map_accumulator = np.zeros((self.num_agents, avoid_height, avoid_width), dtype='u1')
+
+        # How frequently (timesteps) to flush the accumulator to HDF5.
+        # Default kept at 50 unless user sets `mental_map_flush_interval` earlier.
+        self.mental_map_flush_interval = getattr(self, 'mental_map_flush_interval', 50)
+
         self.hdf5.flush()
         
     def initialize_refugia_map(self):
@@ -1797,6 +1861,65 @@ class simulation():
         result = np.empty_like(result_s)
         result[order_s] = result_s
         return result
+
+    def build_hecras_mapping(self, hecras_nodes, abm_points, k=3, eps=1e-8):
+        """Precompute KDTree mapping from irregular HECRAS nodes to ABM points.
+
+        hecras_nodes: (N,2) array of node coordinates (x,y)
+        abm_points: (M,2) array of target ABM coordinates (x,y) to interpolate
+        k: number of nearest HECRAS nodes to use for interpolation
+
+        Stores in self.hecras_map a dict with:
+         - 'indices': (M,k) int array of nearest node indices
+         - 'weights': (M,k) float array of weights (sum to 1)
+
+        Weighting uses inverse-distance with small eps to avoid div0.
+        """
+        hecras_nodes = np.asarray(hecras_nodes, dtype=float)
+        abm_points = np.asarray(abm_points, dtype=float)
+
+        tree = cKDTree(hecras_nodes)
+        dists, inds = tree.query(abm_points, k=k, n_jobs=-1)
+        # ensure shapes (M,k)
+        if k == 1:
+            dists = dists[:, None]
+            inds = inds[:, None]
+
+        # inverse-distance weights
+        inv = 1.0 / (dists + eps)
+        w = inv / np.sum(inv, axis=1)[:, None]
+
+        self.hecras_map = {
+            'indices': inds.astype(np.int32),
+            'weights': w.astype(np.float32),
+            'nodes': hecras_nodes
+        }
+
+        return self.hecras_map
+
+    def apply_hecras_mapping(self, hecras_field):
+        """Apply precomputed HECRAS mapping to a HECRAS nodal field.
+
+        hecras_field: (N,) or (N,...) array of nodal values. If multiple
+        attributes per node, shape should be (N, attrs) and result is (M, attrs).
+
+        Returns interpolated values at ABM points as (M,) or (M, attrs).
+        """
+        if not hasattr(self, 'hecras_map'):
+            raise RuntimeError('HECRAS map not built. Call build_hecras_mapping first.')
+
+        inds = self.hecras_map['indices']
+        w = self.hecras_map['weights']
+
+        hecras_field = np.asarray(hecras_field)
+        # if field is 1D
+        if hecras_field.ndim == 1:
+            sampled = np.sum(hecras_field[inds] * w, axis=1)
+            return sampled
+        else:
+            # hecras_field shape: (N, attrs)
+            sampled = np.einsum('mk,mk->m', hecras_field[inds], w)
+            return sampled
     
     def initial_swim_speed(self):
         """
@@ -1874,26 +1997,19 @@ class simulation():
     
         The mental map is stored in an HDF5 dataset with shape (num_agents, width, height), where each 'slice' corresponds to an agent's mental map.
         """
-        # Convert geographic coordinates to pixel coordinates for each agent
+        # Vectorized: compute mental-map cell indices for all agents and set
+        # the corresponding cells in the in-memory accumulator. We do not
+        # perform HDF5 writes here to avoid many small write calls.
         rows, cols = geo_to_pixel(self.X, self.Y, self.mental_map_transform)
-    
-        # Ensure rows and cols are within the bounds of the mental map
-        rows = self.arr.clip(rows, 0, self.height - 1)
-        cols = self.arr.clip(cols, 0, self.width - 1)
 
-        # get velocity and coords raster per agent
-        for i in np.arange(self.num_agents):
-            if self.num_agents > 1:
-                try:
-                    self.hdf5['memory/%s'%(i)][rows[i],cols[i]] = current_timestep
-                except:
-                    pass
-            else:
-                single_arr = np.array([self.hdf5['memory/%s'%(i)]])
-                single_arr[0,rows,cols] = current_timestep
-                self.hdf5['memory/%s'%(i)][:, :] = single_arr
-        
-        self.hdf5.flush()
+        # Round/clip to integer cell indices
+        rows = np.clip(np.round(rows).astype(int), 0, self.mental_map_accumulator.shape[1] - 1)
+        cols = np.clip(np.round(cols).astype(int), 0, self.mental_map_accumulator.shape[2] - 1)
+
+        agents = np.arange(self.num_agents, dtype=int)
+        self.mental_map_accumulator[agents, rows, cols] = 1
+
+        # Do not flush here; flushing happens in `timestep_flush` to batch writes.
 
     def update_refugia_map(self, current_velocity):
         """
