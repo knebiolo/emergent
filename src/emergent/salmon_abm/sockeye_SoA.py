@@ -1871,13 +1871,22 @@ class simulation():
         rows, cols = geo_to_pixel(self.X, self.Y, transform)
 
         # Use the already open HDF5 file object to read the specified raster dataset (no flush)
-        raster_dataset = self.hdf5['environment/%s' % (raster_name)]
+        env = self.hdf5['environment']
+        raster_dataset = env[raster_name] if raster_name in env else self.hdf5['environment/%s' % (raster_name)]
 
         # Ensure that the indices are within the bounds of the raster data
         rows = np.clip(np.round(rows).astype(int), 0, raster_dataset.shape[0] - 1)
         cols = np.clip(np.round(cols).astype(int), 0, raster_dataset.shape[1] - 1)
 
-        # Use grouped-row efficient indexing to avoid reading whole array into memory
+        # If agents are clustered in a small bbox, read a single contiguous block and slice
+        rmin, rmax = rows.min(), rows.max()
+        cmin, cmax = cols.min(), cols.max()
+        if (rmax - rmin + 1) * (cmax - cmin + 1) <= max(4 * self.num_agents, 256):
+            block = raster_dataset[rmin:rmax+1, cmin:cmax+1]
+            vals = block[rows - rmin, cols - cmin]
+            return np.asarray(vals).flatten()
+
+        # fallback to grouped-row efficient indexing
         values = self._h5_advanced_index(raster_dataset, rows, cols)
         return np.asarray(values).flatten()
 
@@ -1892,12 +1901,76 @@ class simulation():
         rows = np.clip(np.round(rows).astype(int), 0, self.height - 1)
         cols = np.clip(np.round(cols).astype(int), 0, self.width - 1)
 
+        # prepare results container
         results = {}
+
+        # compute bbox
+        rmin, rmax = rows.min(), rows.max()
+        cmin, cmax = cols.min(), cols.max()
+
+        # Heuristic: if bbox area is small, use multi-raster window read
+        bbox_area = (rmax - rmin + 1) * (cmax - cmin + 1)
+        if bbox_area <= max(4 * self.num_agents, 256):
+            # use cache-backed multi-raster reader
+            patches = self._read_env_window_multi(rmin, rmax, cmin, cmax, raster_names)
+            # slice per-agent values from each patch
+            for name in raster_names:
+                block = patches[name]
+                vals = block[rows - rmin, cols - cmin]
+                results[name] = np.asarray(vals).flatten()
+            return results
+
+        # fallback: grouped row reads
         env = self.hdf5['environment']
         for name in raster_names:
             dset = env[name]
             results[name] = np.asarray(self._h5_advanced_index(dset, rows, cols)).flatten()
         return results
+
+    def _read_env_window_multi(self, rmin, rmax, cmin, cmax, raster_names):
+        """Read multiple rasters in a single HDF5 window and return a dict name->2D array.
+
+        Uses an LRU cache keyed by (rmin,rmax,cmin,cmax,tuple(raster_names)) to avoid
+        repeating identical reads across timesteps.
+        """
+        # Build cache on first use
+        if not hasattr(self, '_env_window_cache'):
+            from collections import OrderedDict
+
+            class _LRUCache:
+                def __init__(self, maxsize=64):
+                    self.maxsize = maxsize
+                    self.od = OrderedDict()
+
+                def get(self, key):
+                    try:
+                        val = self.od.pop(key)
+                        self.od[key] = val
+                        return val
+                    except KeyError:
+                        return None
+
+                def put(self, key, val):
+                    if key in self.od:
+                        self.od.pop(key)
+                    self.od[key] = val
+                    if len(self.od) > self.maxsize:
+                        self.od.popitem(last=False)
+
+            self._env_window_cache = _LRUCache(maxsize=128)
+
+        key = (int(rmin), int(rmax), int(cmin), int(cmax), tuple(raster_names))
+        cached = self._env_window_cache.get(key)
+        if cached is not None:
+            return cached
+
+        env = self.hdf5['environment']
+        out = {}
+        for name in raster_names:
+            out[name] = env[name][rmin:rmax+1, cmin:cmax+1]
+
+        self._env_window_cache.put(key, out)
+        return out
 
     def _h5_advanced_index(self, dset, rows, cols):
         """Efficiently gather values from an HDF5 2D dataset given row,col arrays.
@@ -4501,49 +4574,66 @@ class simulation():
             # Arbitrate between different behaviors
             # how many f4cks does this fish have?
             tolerance = 50000
-            
-            # add up vectors, but make sure it's not greater than the tolerance
-            vec_sum_migratory = np.zeros_like(rheotaxis)
-            vec_sum_tired = np.zeros_like(rheotaxis)
-                    
+
+            # Vectorized accumulation: stack ordered cues and add them while the
+            # accumulated magnitude per-agent is below tolerance. This avoids
+            # creating many large temporaries with np.where and removes Python
+            # level loops over agents.
+            num_agents = self.num_agents
+            # Build ordered list of migratory cues (exclude refugia)
+            migratory_cues = []
             for i in order_dict.keys():
                 cue = order_dict[i]
-                vec = cue_dict[cue]
                 if cue != 'refugia':
-                    #print ('in school cue:%s'%(cue))
-                    vec_sum_migratory = np.where(np.linalg.norm(vec_sum_migratory, axis = -1)[:,np.newaxis] < tolerance,
-                                       vec_sum_migratory + vec,
-                                       vec_sum_migratory)
-                        
-            for i in np.arange(0,3,1):
-                cue = low_bat_cue_dict[i]
-                vec = cue_dict[cue]
-                vec_sum_tired = np.where(np.linalg.norm(vec_sum_tired, axis = -1)[:,np.newaxis] < tolerance,
-                                   vec_sum_tired + vec,
-                                   vec_sum_tired)
-                        
+                    migratory_cues.append(cue_dict[cue])
+            if len(migratory_cues) > 0:
+                # shape to (num_cues, num_agents, 2)
+                migr_cues = np.stack(migratory_cues, axis=0)
+                # transpose to (num_agents, num_cues, 2)
+                migr_cues = np.transpose(migr_cues, (1, 0, 2))
+            else:
+                migr_cues = np.zeros((num_agents, 0, 2))
+
+            vec_sum_migratory = np.zeros((num_agents, 2), dtype=float)
+            # iterate over cues (small loop over number of cues)
+            for j in range(migr_cues.shape[1]):
+                add = migr_cues[:, j, :]
+                mask = np.linalg.norm(vec_sum_migratory, axis=1) < tolerance
+                if not np.any(mask):
+                    break
+                vec_sum_migratory[mask] += add[mask]
+
+            # low-battery cues (small set)
+            low_cues = [low_bat_cue_dict[i] for i in sorted(low_bat_cue_dict.keys())]
+            low_stack = [cue_dict[c] for c in low_cues]
+            if len(low_stack) > 0:
+                low_cues_arr = np.stack(low_stack, axis=0)
+                low_cues_arr = np.transpose(low_cues_arr, (1, 0, 2))
+            else:
+                low_cues_arr = np.zeros((num_agents, 0, 2))
+
+            vec_sum_tired = np.zeros((num_agents, 2), dtype=float)
+            for j in range(low_cues_arr.shape[1]):
+                add = low_cues_arr[:, j, :]
+                mask = np.linalg.norm(vec_sum_tired, axis=1) < tolerance
+                if not np.any(mask):
+                    break
+                vec_sum_tired[mask] += add[mask]
+
             # now creating a heading vector for each fish - which is complicated because they are in different behavioral modes 
-            head_vec = np.zeros_like(rheotaxis)
-            
-            # when actively migrating
-            head_vec = np.where(self.simulation.swim_behav[:,np.newaxis] == 1,
-                                vec_sum_migratory,
-                                head_vec)
-            
-            # when fish is tired and looking for refugia
-            head_vec = np.where(self.simulation.swim_behav[:,np.newaxis] == 2, 
-                                vec_sum_tired,
-                                head_vec)
-            
-            # when fish is tired and recovering
-            head_vec = np.where(self.simulation.swim_behav[:,np.newaxis] == 3, 
-                                vec_sum_tired,
-                                head_vec)
-            
-            # for those unfortunate souls lost in eddies
-            head_vec = np.where(self.simulation.in_eddy[:,np.newaxis] == 1, 
-                                cue_dict['border'] + cue_dict['shallow'],
-                                head_vec)
+            head_vec = np.zeros((num_agents, 2), dtype=float)
+
+            # assign by behavior masks (vectorized indexing)
+            migr_mask = (self.simulation.swim_behav == 1)
+            tired_mask = (self.simulation.swim_behav == 2) | (self.simulation.swim_behav == 3)
+            eddy_mask = (self.simulation.in_eddy == 1)
+
+            if np.any(migr_mask):
+                head_vec[migr_mask] = vec_sum_migratory[migr_mask]
+            if np.any(tired_mask):
+                head_vec[tired_mask] = vec_sum_tired[tired_mask]
+            if np.any(eddy_mask):
+                head_vec[eddy_mask] = (cue_dict['border'] + cue_dict['shallow'])[eddy_mask]
             
             if len(head_vec.shape) == 2:
                 return np.arctan2(head_vec[:, 1], head_vec[:, 0])
@@ -5062,12 +5152,12 @@ class simulation():
         t0 = time.time()
         if self.pid_tuning == False:
             if video == True:
-                # get depth raster
+                # get depth raster (only when producing video)
                 depth_arr = self.hdf5['environment/depth'][:]
                 x_vel = self.hdf5['environment/vel_x'][:]
                 y_vel = self.hdf5['environment/vel_y'][:]
                 center = self.hdf5['environment/distance_to'][:]
-                
+
                 # assuming raster data has been masked in ArcGIS 
                 no_data_value = -9999.
                 depth_masked = np.ma.masked_equal(depth_arr, no_data_value)
@@ -5083,17 +5173,15 @@ class simulation():
                     self.depth_rast_transform[5]  # Top: y offset
                 ]
 
-            
-                #depth_arr = self.hdf5['environment/wetted_perim'][:]
                 height = depth_arr.shape[0]
                 width = depth_arr.shape[1]
-            
+
                 # # define metadata for movie
                 FFMpegWriter = manimation.writers['ffmpeg']
                 metadata = dict(title= model_name, artist='Matplotlib',
                                 comment='emergent model run %s'%(datetime.now()))
                 writer = FFMpegWriter(fps = np.round(30/dt,0), metadata=metadata)
-        
+
                 #initialize plot
                 fig, ax = plt.subplots(figsize = (9,6), dpi = 250.)
                 cmap = plt.cm.gray  # Or any colormap that suits your visualization
@@ -5102,16 +5190,15 @@ class simulation():
                 initial_frame_size = 100  # Adjust as needed
                 min_zoom_level = 5.0  # No zoom (closest view)
                 max_zoom_level = 7.0  # Maximum zoom out level
-                
+
                 ax.imshow(depth_masked,
                           origin='upper',
                           cmap=cmap,
                           extent=extent)
-                #ax.set_aspect(0.5) 
-                
+
                 # Subsampling factor - adjust this to reduce the density of the quiver plot
                 subsample_factor = 10
-                
+
                 # Subsampled meshgrid for the quiver plot
                 x, y = np.meshgrid(
                     np.arange(extent[0], extent[1], (extent[1] - extent[0]) / width),
@@ -5123,15 +5210,15 @@ class simulation():
                 subsampled_y = y[::subsample_factor, ::subsample_factor]
                 subsampled_x_vel = x_vel_masked[::subsample_factor, ::subsample_factor]
                 subsampled_y_vel = y_vel_masked[::subsample_factor, ::subsample_factor]
-                
+
                 # Calculate half subsample distances for offsets
                 half_subsample_x = (extent[1] - extent[0]) / width / subsample_factor / 2
                 half_subsample_y = (extent[3] - extent[2]) / height / subsample_factor / 2
-                
+
                 # Adjust subsampled meshgrid coordinates to center the quiver arrows
                 subsampled_x_centered = subsampled_x - subsample_factor / 2. # half_subsample_x
                 subsampled_y_centered = subsampled_y + subsample_factor #/ 2. # half_subsample_y
-                
+
                 ax.quiver(subsampled_x_centered,
                           subsampled_y_centered[::-1],
                           subsampled_x_vel,
@@ -5146,95 +5233,94 @@ class simulation():
 
                 plt.xlabel('Easting')
                 plt.ylabel('Northing')
-                
+
                 dpi = fig.get_dpi()
-                
+
                 # Get current size in inches and compute size in pixels
                 width_inch, height_inch = fig.get_size_inches()
                 width_px, height_px = width_inch * dpi, height_inch * dpi
-                
+
                 # Ensure dimensions are even
                 if width_px % 2 != 0:
                     width_inch += 1 / dpi
                 if height_px % 2 != 0:
                     height_inch += 1 / dpi
-                
+
                 # Update figure size
                 fig.set_size_inches(width_inch, height_inch)
-                
+
                 # Update the frames for the movie
                 with writer.saving(fig, 
                                     os.path.join(self.model_dir,'%s.mp4'%(model_name)),
                                     dpi = dpi):
-                
+
                     # set up PID controller 
                     pid_controller = PID_controller(self.num_agents,
                                                     k_p, 
                                                     k_i, 
                                                     k_d)
-                    
+
                     pid_controller.interp_PID()
                     for i in range(int(n)):
                         self.timestep(i, dt, g, pid_controller)
                         # we want to follow the top performing fish - calculate the top 25% by longitude
-                        
+
                         # Step 1: Determine the threshold for the top X%
                         sorted_indices = np.argsort(self.current_longitudes)  # Get indices that would sort the array
-                        
+
                         # Index to slice the top 25%
                         top_25_percent_index = int(len(self.current_longitudes) * 0.75)
                         threshold_top_25 = self.current_longitudes[sorted_indices[top_25_percent_index]]
-                        
+
                         # Index to slice the top 50%
                         top_50_percent_index = int(len(self.current_longitudes) * 0.50)
                         threshold_top_50 = self.current_longitudes[sorted_indices[top_50_percent_index]]
-                        
+
                         # Index to slice the top 75%
                         top_75_percent_index = int(len(self.current_longitudes) * 0.25)
                         threshold_top_75 = self.current_longitudes[sorted_indices[top_75_percent_index]]
-                        
+
                         # Step 2: Create a mask for the top 75%
                         mask = (self.current_longitudes >= threshold_top_75) & (self.dead != 1)
-                        
+
                         # Step 3: Calculate the mean x and y positions for the top 75%
                         center_x = np.mean(self.X[mask])
                         center_y = np.mean(self.Y[mask])
-                        
+
                         # Step 4: Calculate the spread of agents using standard deviation
                         spread_x = np.std(self.X[mask])
                         spread_y = np.std(self.Y[mask])
                         spread = max(spread_x, spread_y)  # Use the larger spread in case the distribution is elongated
-                
+
                         # Map the spread to a zoom level within the defined range
                         spread_normalized = (spread - np.min([spread_x, spread_y])) / (np.max([spread_x, spread_y]) - np.min([spread_x, spread_y]))
                         zoom_level = min_zoom_level + (max_zoom_level - min_zoom_level) * spread_normalized
-                        
+
                         # Calculate dynamic frame size based on the zoom level
                         dynamic_frame_size = initial_frame_size * zoom_level
-                    
-                        
+
                         # Dynamic span for the x-axis based on zoom level or data distribution
                         x_span = dynamic_frame_size  # This can be adjusted based on your zoom logic
-                        
+
                         # Calculate y-span to maintain a 10x5 aspect ratio
                         y_span = x_span / 2  # To maintain the 10x5 aspect ratio
-    
+
                         # Set the axes limits while maintaining the aspect ratio
                         ax.set_xlim(center_x - x_span / 2, center_x + x_span / 2)
                         ax.set_ylim(center_y - y_span / 2, center_y + y_span / 2)            
-                        
+
                         # Update timestep display
                         timestep_text.set_text(f'Timestep: {i}')
-                        
+
                         # Calculate the RGB colors using vectorized operations
                         # Green (0, 1, 0) to Red (1, 0, 0) based on the battery state
                         colors = np.column_stack([1 - self.battery, 
                                                   self.battery, 
                                                   np.zeros_like(self.battery)])
-                        
+
                         # Overriding the color for dead agents to magenta (1, 0, 1)
                         colors[self.dead == 1] = [1, 0, 1]  # Magenta
-        
+
                         # Update the positions ('offsets') of the agents in the scatter plot
                         agent_scatter.set_offsets(np.column_stack([self.X, self.Y]))
                         # Update the colors of each agent
@@ -5242,57 +5328,56 @@ class simulation():
                             agent_scatter.set_facecolor(colors)
                         except ValueError:
                             pass
-        
+
                         # write frame
                         plt.tight_layout()
-                        
+
                         dpi = fig.get_dpi()
-                        
+
                         # Get current size in inches and compute size in pixels
                         width_inch, height_inch = fig.get_size_inches()
                         width_px, height_px = width_inch * dpi, height_inch * dpi
-                        
+
                         # Ensure dimensions are even
                         if width_px % 2 != 0:
                             width_inch += 1 / dpi
                         if height_px % 2 != 0:
                             height_inch += 1 / dpi
-                        
+
                         # Update figure size
                         fig.set_size_inches(width_inch, height_inch)
-                        
+
                         writer.grab_frame()
                         plt.draw()
                         plt.pause(0.01) 
-                            
+
                         print ('Time Step %s complete'%(i))
-                
+
                     # clean up
                     writer.finish()
                     self.hdf5.flush()
                     self.hdf5.close()
-                    #depth.close()     
                     t1 = time.time() 
-        
+
             else:
-                #TODO make PID controller a function of length and water velocity
+                # TODO make PID controller a function of length and water velocity
                 pid_controller = PID_controller(self.num_agents,
                                                 k_p, 
                                                 k_i, 
                                                 k_d)
-                
+
                 pid_controller.interp_PID()
-                
+
                 # iterate over timesteps 
                 for i in range(int(n)):
                     self.timestep(i, dt, g, pid_controller)
                     print ('Time Step %s complete'%(i))
-                    
+
                 # close and cleanup
                 self.hdf5.flush()
                 self.hdf5.close()
                 t1 = time.time() 
-                    
+
         else:
             pid_controller = PID_controller(self.num_agents,
                                             k_p, 
@@ -5300,13 +5385,13 @@ class simulation():
                                             k_d)
             for i in range(n):
                 self.timestep(i, dt, g, pid_controller)
-                
+
                 print ('Time Step %s %s %s %s %s %s complete'%(i,i,i,i,i,i))
-                
+
                 if i == range(n)[-1]:
                     self.hdf5.close()
                     sys.exit()
-        
+
         print ('ABM took %s to compile'%(t1-t0))
 
         
