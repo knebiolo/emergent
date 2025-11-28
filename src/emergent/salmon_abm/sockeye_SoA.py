@@ -1527,7 +1527,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("wetted", (height, width), dtype='f4')
+            env_data.create_dataset("wetted", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/wetted'][:, :] = arr
             
         elif surface_type == 'velocity x':
@@ -1538,7 +1538,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_x", (height, width), dtype='f4')
+            env_data.create_dataset("vel_x", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/vel_x'][:, :] = arr
 
         elif surface_type == 'velocity y':
@@ -1549,7 +1549,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_y", (height, width), dtype='f4')
+            env_data.create_dataset("vel_y", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/vel_y'][:, :] = arr
             
         elif surface_type == 'depth':
@@ -1560,7 +1560,7 @@ class simulation():
             arr = src.read(1)
            
             # create an hdf5 array and write to it
-            env_data.create_dataset("depth", (height, width), dtype='f4')
+            env_data.create_dataset("depth", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/depth'][:, :] =arr
             
         elif surface_type == 'wsel':
@@ -1571,7 +1571,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("wsel", (height, width), dtype='f4')
+            env_data.create_dataset("wsel", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/wsel'][:, :] = src.read(1)
             
         elif surface_type == 'elevation':
@@ -1582,7 +1582,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("elevation", (height, width), dtype='f4')#, data = src.read(1))
+            env_data.create_dataset("elevation", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/elevation'][:, :] = arr
                 
         elif surface_type == 'velocity direction':          
@@ -1593,7 +1593,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_dir", (height, width), dtype='f4')#, data = src.read(1))
+            env_data.create_dataset("vel_dir", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/vel_dir'][:, :] = src.read(1) 
                 
         elif surface_type == 'velocity magnitude': 
@@ -1604,7 +1604,7 @@ class simulation():
             arr = src.read(1)
             
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_mag", (height, width), dtype='f4')#, data = src.read(1))
+            env_data.create_dataset("vel_mag", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/vel_mag'][:, :] = arr
             
         self.width = width
@@ -1730,13 +1730,8 @@ class simulation():
         rows = np.clip(np.round(rows).astype(int), 0, raster_dataset.shape[0] - 1)
         cols = np.clip(np.round(cols).astype(int), 0, raster_dataset.shape[1] - 1)
 
-        try:
-            # Try direct advanced indexing (may fail for h5py if indices are not monotonic)
-            values = raster_dataset[rows, cols]
-        except Exception:
-            # Fallback: read into memory then index (safe)
-            arr = raster_dataset[:]
-            values = arr[rows, cols]
+        # Use grouped-row efficient indexing to avoid reading whole array into memory
+        values = self._h5_advanced_index(raster_dataset, rows, cols)
         return np.asarray(values).flatten()
 
     def batch_sample_environment(self, transforms, raster_names):
@@ -1754,12 +1749,54 @@ class simulation():
         env = self.hdf5['environment']
         for name in raster_names:
             dset = env[name]
-            try:
-                results[name] = np.asarray(dset[rows, cols]).flatten()
-            except Exception:
-                arr = dset[:]
-                results[name] = np.asarray(arr[rows, cols]).flatten()
+            results[name] = np.asarray(self._h5_advanced_index(dset, rows, cols)).flatten()
         return results
+
+    def _h5_advanced_index(self, dset, rows, cols):
+        """Efficiently gather values from an HDF5 2D dataset given row,col arrays.
+
+        h5py does not support arbitrary advanced indexing when index arrays are
+        unordered. This helper groups positions by row, reads contiguous slices
+        for each unique row, and assembles results in the original order. This
+        avoids loading the full dataset into memory and minimizes I/O.
+        """
+        rows = np.asarray(rows, dtype=int)
+        cols = np.asarray(cols, dtype=int)
+
+        # Bound check
+        rows = np.clip(rows, 0, dset.shape[0] - 1)
+        cols = np.clip(cols, 0, dset.shape[1] - 1)
+
+        # Group indices by row
+        order = np.arange(len(rows))
+        # Lexsort by rows then cols to allow contiguous reads
+        sorter = np.lexsort((cols, rows))
+        rows_s = rows[sorter]
+        cols_s = cols[sorter]
+        order_s = order[sorter]
+
+        result_s = np.empty_like(rows_s, dtype=dset.dtype)
+
+        # iterate contiguous runs of same row
+        start = 0
+        n = len(rows_s)
+        while start < n:
+            r = rows_s[start]
+            end = start + 1
+            while end < n and rows_s[end] == r:
+                end += 1
+
+            # we have indices for row r in cols_s[start:end]
+            c_inds = cols_s[start:end]
+            # read the row once
+            row_data = dset[r, :]
+            result_s[start:end] = row_data[c_inds]
+            start = end
+
+        # restore original order
+        result = np.empty_like(result_s)
+        result[order_s] = result_s
+        return result
     
     def initial_swim_speed(self):
         """
