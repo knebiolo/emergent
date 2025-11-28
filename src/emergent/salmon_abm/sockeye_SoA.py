@@ -2176,25 +2176,36 @@ class simulation():
         self.distance_to = sampled['distance_to']
         self.current_longitudes = self.compute_linear_positions(self.longitudinal)
 
-        # If HECRAS mapping is present, use it to override/supplement raster samples
-        # Expect: self.hecras_map built by `build_hecras_mapping` and
-        # self.hecras_node_fields a dict of nodal arrays {'depth':..., 'vel_x':..., 'vel_y':...}
-        if hasattr(self, 'hecras_map') and hasattr(self, 'hecras_node_fields'):
+        # Use HECRAS mapping only when explicitly enabled by the user via
+        # `enable_hecras(...)`. Raster sampling remains the default fallback.
+        if getattr(self, 'use_hecras', False):
             try:
-                M = self.hecras_map['indices'].shape[0]
-                # apply mapping to each field and assign to agent arrays
-                if 'depth' in self.hecras_node_fields:
-                    vals = self.apply_hecras_mapping(self.hecras_node_fields['depth'])
-                    self.depth = np.asarray(vals).flatten()
-                if 'vel_x' in self.hecras_node_fields:
-                    vals = self.apply_hecras_mapping(self.hecras_node_fields['vel_x'])
-                    self.x_vel = np.asarray(vals).flatten()
-                if 'vel_y' in self.hecras_node_fields:
-                    vals = self.apply_hecras_mapping(self.hecras_node_fields['vel_y'])
-                    self.y_vel = np.asarray(vals).flatten()
+                if hasattr(self, 'hecras_node_fields') and hasattr(self, 'hecras_map'):
+                    if 'depth' in self.hecras_node_fields:
+                        vals = self.apply_hecras_mapping(self.hecras_node_fields['depth'])
+                        self.depth = np.asarray(vals).flatten()
+                    if 'vel_x' in self.hecras_node_fields:
+                        vals = self.apply_hecras_mapping(self.hecras_node_fields['vel_x'])
+                        self.x_vel = np.asarray(vals).flatten()
+                    if 'vel_y' in self.hecras_node_fields:
+                        vals = self.apply_hecras_mapping(self.hecras_node_fields['vel_y'])
+                        self.y_vel = np.asarray(vals).flatten()
             except Exception:
-                # If mapping fails, continue with raster-sampled values
-                pass
+                # If mapping fails for any reason, silently fall back to raster values
+                self.use_hecras = False
+
+    def enable_hecras(self, hecras_nodes, hecras_node_fields, k=3):
+        """Enable HECRAS mapping for the simulation.
+
+        - hecras_nodes: (N,2) array of HECRAS node coordinates
+        - hecras_node_fields: dict of nodal arrays e.g. {'depth':..., 'vel_x':..., 'vel_y':...}
+        - k: number of nearest nodes to use for inverse-distance interpolation
+        """
+        # build mapping for the current agent positions
+        agent_points = np.vstack([self.X.flatten(), self.Y.flatten()]).T
+        self.build_hecras_mapping(hecras_nodes, agent_points, k=k)
+        self.hecras_node_fields = hecras_node_fields
+        self.use_hecras = True
         
     
         # Avoid divide by zero by setting zero velocities to a small number
@@ -3218,6 +3229,50 @@ class simulation():
         def __init__(self, dt, simulation_object):
             self.dt = dt
             self.simulation = simulation_object
+
+        def _batch_read_env_patches(self, dataset_name, row_mins, row_maxs, col_mins, col_maxs, target_shape=None):
+            """
+            Read a single global window from an HDF5 2D dataset that covers all per-agent
+            requested patches, then slice out each agent's patch from that global window.
+
+            Returns an array of shape (num_agents, patch_h, patch_w).
+            """
+            num_agents = len(row_mins)
+
+            ds = self.simulation.hdf5[dataset_name]
+            height, width = ds.shape
+
+            # ensure integer arrays
+            row_mins = np.asarray(row_mins, dtype=int)
+            row_maxs = np.asarray(row_maxs, dtype=int)
+            col_mins = np.asarray(col_mins, dtype=int)
+            col_maxs = np.asarray(col_maxs, dtype=int)
+
+            global_rmin = max(0, np.min(row_mins))
+            global_rmax = min(height, np.max(row_maxs))
+            global_cmin = max(0, np.min(col_mins))
+            global_cmax = min(width, np.max(col_maxs))
+
+            if global_rmin >= global_rmax or global_cmin >= global_cmax:
+                # nothing to read -> return zeros
+                ph = 0 if target_shape is None else target_shape[0]
+                pw = 0 if target_shape is None else target_shape[1]
+                return np.zeros((num_agents, ph, pw), dtype=ds.dtype)
+
+            global_block = ds[global_rmin:global_rmax, global_cmin:global_cmax]
+
+            patches = []
+            for r0, r1, c0, c1 in zip(row_mins, row_maxs, col_mins, col_maxs):
+                lo_r = r0 - global_rmin
+                hi_r = r1 - global_rmin
+                lo_c = c0 - global_cmin
+                hi_c = c1 - global_cmin
+                patch = global_block[lo_r:hi_r, lo_c:hi_c]
+                if target_shape is not None:
+                    patch = standardize_shape(patch, target_shape=target_shape)
+                patches.append(patch)
+
+            return np.stack(patches)
             
         def already_been_here(self, weight, t):
             """
@@ -3460,20 +3515,15 @@ class simulation():
             ymin = ymin.astype(np.int32)
             ymax = ymax.astype(np.int32)
 
-            # Create slices
-            slices = [(agent, slice(y0, y1), slice(x0, x1)) 
-                      for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),
-                                                       ymin.flatten(), 
-                                                       ymax.flatten(),
-                                                       xmin.flatten(), 
-                                                       xmax.flatten()
-                                                       )
-                      ]
+            # Prepare per-agent bounding boxes and read patches in one HDF5 read
+            row_mins = ymin
+            row_maxs = ymax
+            col_mins = xmin
+            col_maxs = xmax
 
-            # get velocity and coords raster per agent
-            vel3d = np.stack([standardize_shape(self.simulation.hdf5['environment/vel_mag'][sl[-2:]]) for sl in slices])
-            x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]]) for sl in slices])
-            y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]]) for sl in slices])
+            vel3d = self._batch_read_env_patches('environment/vel_mag', row_mins, row_maxs, col_mins, col_maxs, target_shape=(2*buff+1,2*buff+1))
+            x_coords = self._batch_read_env_patches('x_coords', row_mins, row_maxs, col_mins, col_maxs, target_shape=(2*buff+1,2*buff+1))
+            y_coords = self._batch_read_env_patches('y_coords', row_mins, row_maxs, col_mins, col_maxs, target_shape=(2*buff+1,2*buff+1))
             
             vel3d_multiplier = calculate_front_masks(self.simulation.heading.flatten(), 
                                                      x_coords, 
@@ -3618,19 +3668,13 @@ class simulation():
             ymin = np.clip(ymin, 0, self.simulation.hdf5['environment/distance_to'].shape[0] - 1)
             ymax = np.clip(ymax, 0, self.simulation.hdf5['environment/distance_to'].shape[0])
         
-            # Create slices
-            slices = [(agent, slice(y0, y1), slice(x0, x1)) 
-                      for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),
-                                                       ymin.flatten(), 
-                                                       ymax.flatten(),
-                                                       xmin.flatten(), 
-                                                       xmax.flatten()
-                                                       )
-                      ]
-            x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]],
-                                                   target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices]) 
-            y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]],
-                                                   target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices])       
+            row_mins = ymin
+            row_maxs = ymax
+            col_mins = xmin
+            col_maxs = xmax
+
+            x_coords = self._batch_read_env_patches('x_coords', row_mins, row_maxs, col_mins, col_maxs, target_shape=(2 * buff + 1,2 * buff + 1))
+            y_coords = self._batch_read_env_patches('y_coords', row_mins, row_maxs, col_mins, col_maxs, target_shape=(2 * buff + 1,2 * buff + 1))
 
             front_multiplier = calculate_front_masks(self.simulation.heading,
                                                      x_coords,
@@ -3638,7 +3682,7 @@ class simulation():
                                                      self.simulation.X, 
                                                      self.simulation.Y)
             # get distance to border raster per agent
-            dist3d = np.stack([standardize_shape(self.simulation.hdf5['environment/distance_to'][sl[-2:]]) for sl in slices]) * front_multiplier
+            dist3d = self._batch_read_env_patches('environment/distance_to', row_mins, row_maxs, col_mins, col_maxs, target_shape=(2 * buff + 1,2 * buff + 1)) * front_multiplier
             
             num_agents, rows, cols = dist3d.shape
             
@@ -3751,24 +3795,15 @@ class simulation():
             #min_depth = (self.simulation.body_depth * 1.1) / 100.# Use advanced indexing to create a boolean mask for the slices
             min_depth = self.simulation.too_shallow
             
-            # Create slices
-            slices = [(agent, slice(y0, y1), slice(x0, x1)) 
-                      for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),  
-                                                       ymin.flatten(), 
-                                                       ymax.flatten(),
-                                                       xmin.flatten(),
-                                                       xmax.flatten())
-                      ]
-            
+            row_mins = ymin
+            row_maxs = ymax
+            col_mins = xmin
+            col_maxs = xmax
 
-            # get depth raster per agent
-            depths = np.stack([standardize_shape(self.simulation.hdf5['environment/depth'][sl[-2:]],
-                                                 target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices])        
-            x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]],
-                                                   target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices]) 
-            y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]],
-                                                   target_shape=(2 * buff + 1,2 * buff + 1)) for sl in slices])       
-            
+            depths = self._batch_read_env_patches('environment/depth', row_mins, row_maxs, col_mins, col_maxs, target_shape=(2 * buff + 1,2 * buff + 1))
+            x_coords = self._batch_read_env_patches('x_coords', row_mins, row_maxs, col_mins, col_maxs, target_shape=(2 * buff + 1,2 * buff + 1))
+            y_coords = self._batch_read_env_patches('y_coords', row_mins, row_maxs, col_mins, col_maxs, target_shape=(2 * buff + 1,2 * buff + 1))
+
             front_multiplier = calculate_front_masks(self.simulation.heading,
                                                      x_coords,
                                                      y_coords,
@@ -3903,29 +3938,21 @@ class simulation():
             # Initialize an array to hold the direction vectors for each agent
             direction_vectors = np.zeros((len(x), 2), dtype=float)
             
-            # Create slices
-            slices = [(agent, slice(y0, y1), slice(x0, x1)) 
-                      for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),
-                                                       ymin.flatten(), 
-                                                       ymax.flatten() ,
-                                                       xmin.flatten(), 
-                                                       xmax.flatten()
-                                                       )
-                      ]
-            
-            # get depth raster per agent
-            #dep3D = np.stack([self.hdf5['environment/depth'][sl[-2:]] for sl in slices])
-            dep3D = np.stack([standardize_shape(self.simulation.hdf5['environment/depth'][sl[-2:]]) for sl in slices])
-            x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]]) for sl in slices])
-            y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]]) for sl in slices])
-            
+            row_mins = ymin
+            row_maxs = ymax
+            col_mins = xmin
+            col_maxs = xmax
+
+            dep3D = self._batch_read_env_patches('environment/depth', row_mins, row_maxs, col_mins, col_maxs)
+            x_coords = self._batch_read_env_patches('x_coords', row_mins, row_maxs, col_mins, col_maxs)
+            y_coords = self._batch_read_env_patches('y_coords', row_mins, row_maxs, col_mins, col_maxs)
+
             dep3D_multiplier = calculate_front_masks(self.simulation.heading.flatten(), 
                                                      x_coords, 
                                                      y_coords, 
                                                      self.simulation.X.flatten(), 
                                                      self.simulation.Y.flatten(), 
                                                      behind_value = 99999.9)
-                
             dep3D = dep3D * dep3D_multiplier
 
             num_agents, rows, cols = dep3D.shape
