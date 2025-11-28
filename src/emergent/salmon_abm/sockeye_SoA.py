@@ -1140,8 +1140,29 @@ class simulation():
         self.sim_length(fish_length)
         self.sim_weight()
         self.sim_body_depth()
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/recovery.csv')
-        recover = pd.read_csv(data_dir)        
+        # Locate recovery.csv robustly: try module-relative, repo data locations, or search upwards
+        from pathlib import Path
+        file_candidates = []
+        module_dir = Path(__file__).resolve().parent
+        # module relative
+        file_candidates.append(module_dir.joinpath('..', 'data', 'recovery.csv'))
+        # repo-level data paths (walk up parents)
+        for p in module_dir.parents[:6]:
+            file_candidates.append(p.joinpath('data', 'salmon_abm', 'recovery.csv'))
+            file_candidates.append(p.joinpath('data', 'recovery.csv'))
+        # also check known workspace location (OneDrive path)
+        file_candidates.append(Path(r"C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\data\salmon_abm\recovery.csv"))
+
+        data_dir = None
+        for candidate in file_candidates:
+            if candidate.exists():
+                data_dir = str(candidate)
+                break
+
+        if data_dir is None:
+            raise FileNotFoundError('Could not locate recovery.csv in repo; looked at: %s' % ','.join([str(p) for p in file_candidates]))
+
+        recover = pd.read_csv(data_dir)
         recover['Seconds'] = recover.Minutes * 60.
         self.recovery = CubicSpline(recover.Seconds, recover.Recovery, extrapolate = True,)
         del recover

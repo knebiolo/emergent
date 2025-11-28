@@ -1,4 +1,4 @@
-# Emergent 🚢 🐟# emergent
+# Emergent 
 
 Python software using agent based models to solve complex spatial problems.  This software was written alongside my dissertation (Nebiolo 2017).   
 
@@ -22,11 +22,11 @@ If you are a Python developer and want to help out, please send an email to kevi
 
 Otherwise, feel free to post in Discussions.  
 
-## 🎯 What is Emergent?
+## What is Emergent?
 
 **Emergent** is a framework for simulating complex adaptive systems where simple individual behaviors lead to sophisticated group patterns. The software includes two major agent-based models:
 
-### 1. **Ship ABM** - Maritime Navigation with Real-World Forcing 🚢
+### 1. **Ship ABM** - Maritime Navigation with Real-World Forcing 
 Simulate vessel traffic in harbors and waterways with realistic environmental conditions:
 - **Real-time ocean currents** from NOAA Operational Forecast Systems (OFS)
 - **Real-time wind data** from HRRR, ERA5, and NOAA meteorological models
@@ -37,7 +37,7 @@ Simulate vessel traffic in harbors and waterways with realistic environmental co
 
 **Supported Harbors** (with real NOAA data):
 - Baltimore, MD (Chesapeake Bay)
-- Galveston, TX (Gulf of Mexico) ⭐ **Fully operational with currents + winds**
+- Galveston, TX (Gulf of Mexico)  **Fully operational with currents + winds**
 - New Orleans, LA (Gulf of Mexico)
 - San Francisco Bay, CA (Pacific Coast)
 - Seattle, WA (Puget Sound)
@@ -45,7 +45,7 @@ Simulate vessel traffic in harbors and waterways with realistic environmental co
 - Los Angeles, CA (Southern California)
 - New York, NY (Atlantic Coast)
 
-### 2. **Salmon ABM** - Fish Passage and Migration 🐟
+### 2. **Salmon ABM** - Fish Passage and Migration 
 Model fish behavior and movement through river systems and hydroelectric facilities:
 - Energetic-based decision making
 - Hydraulic forcing from HEC-RAS models
@@ -54,7 +54,7 @@ Model fish behavior and movement through river systems and hydroelectric facilit
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -89,7 +89,7 @@ pip install -e .
 
 ---
 
-## 📖 Usage
+## Usage
 
 ### Ship ABM - Interactive GUI
 
@@ -142,11 +142,11 @@ print(f"Wind: {winds[0]} m/s")
 
 ---
 
-## 🌊 Environmental Data Sources
+## Environmental Data Sources
 
 ### Ocean Currents (NOAA OFS)
 - **CBOFS**: Chesapeake Bay (ROMS, 10s cycles)
-- **NGOFS2**: Northern Gulf of Mexico (FVCOM, 500k+ elements) ⭐
+- **NGOFS2**: Northern Gulf of Mexico (FVCOM, 500k+ elements) 
 - **SFBOFS**: San Francisco Bay (FVCOM, 100k+ elements)
 - **SSCOFS**: Salish Sea / Puget Sound (FVCOM, 430k+ elements)
 - **WCOFS**: West Coast (ROMS, surface-only)
@@ -158,7 +158,7 @@ All data accessed anonymously from AWS S3: `s3://noaa-nos-ofs-pds/`
 
 ---
 
-## 📊 Features
+## Features
 
 ### Ship ABM
 - ✅ **Real ocean currents** from 6 NOAA operational forecast models
@@ -175,7 +175,7 @@ All data accessed anonymously from AWS S3: `s3://noaa-nos-ofs-pds/`
 
 ---
 
-## 🛠️ Development
+## Development
 
 ### Project Structure
 ```
@@ -216,7 +216,7 @@ See **`SHIP_ABM_TODO.md`** for detailed roadmap and priorities.
 
 ---
 
-## 🐛 Known Issues
+## Known Issues
 
 See `SHIP_ABM_TODO.md` for complete list. Key issues:
 1. Wind loading works for NGOFS2 (Galveston, New Orleans) but needs fixes for ROMS models
@@ -225,7 +225,7 @@ See `SHIP_ABM_TODO.md` for complete list. Key issues:
 
 ---
 
-## 📖 Citation
+## Citation
 
 ```bibtex
 @phdthesis{nebiolo2017emergent,
@@ -238,10 +238,10 @@ See `SHIP_ABM_TODO.md` for complete list. Key issues:
 
 ---
 
-## 📧 Contact
+## Contact
 
 **Kevin Nebiolo, PhD**  
-Principal Scientist, Kleinschmidt Associates  
+Senior Scientist, Kleinschmidt Associates  
 Email: kevin.nebiolo@kleinschmidtgroup.com
 
 **Getting Involved**:
@@ -251,13 +251,13 @@ Email: kevin.nebiolo@kleinschmidtgroup.com
 
 ---
 
-## 📜 License
+## License
 
 MIT License - see [LICENSE](LICENSE) file
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **NOAA**: Operational Forecast Systems and public AWS data
 - **NCEP**: HRRR high-resolution weather data
@@ -265,7 +265,7 @@ MIT License - see [LICENSE](LICENSE) file
 
 ---
 
-## 🗓️ Recent Updates
+## Recent Updates
 
 ### October 2, 2025 - Infrastructure Improvements
 - ✅ Created `setup.py` for proper package installation
@@ -278,4 +278,3 @@ MIT License - see [LICENSE](LICENSE) file
 
 ---
 
-**Built with ❤️ for the maritime and aquatic science communities**
