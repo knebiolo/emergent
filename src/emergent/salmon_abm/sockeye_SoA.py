@@ -1379,29 +1379,31 @@ class simulation():
         agent_data.create_dataset("opt_wat_depth", (self.num_agents,), dtype='f4')
       
         # Create datasets for agent properties that change with time
-        agent_data.create_dataset("X", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("Y", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("Z", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("prev_X", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("prev_Y", (self.num_agents, self.num_timesteps), dtype='f4')            
-        agent_data.create_dataset("heading", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("sog", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("ideal_sog", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("swim_speed", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("battery", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("swim_behav", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("swim_mode", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("recover_stopwatch", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("ttfr", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("time_out_of_water", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("drag", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("thrust", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("Hz", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("bout_no", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("dist_per_bout", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("bout_dur", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("time_of_jump", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("kcal", (self.num_agents, self.num_timesteps), dtype='f4')
+        # Use chunking optimized for column (per-timestep) writes: chunks=(num_agents,1)
+        chunk_shape = (self.num_agents, 1)
+        agent_data.create_dataset("X", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("Y", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("Z", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("prev_X", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("prev_Y", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("heading", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("sog", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("ideal_sog", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("swim_speed", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("battery", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("swim_behav", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("swim_mode", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("recover_stopwatch", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("ttfr", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("time_out_of_water", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("drag", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("thrust", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("Hz", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("bout_no", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("dist_per_bout", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("bout_dur", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("time_of_jump", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        agent_data.create_dataset("kcal", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
         
         # Set attributes (metadata) if needed
         self.hdf5.attrs['simulation_name'] = "%s Sockeye Movement Simulation"%(self.basin)
@@ -1661,20 +1663,16 @@ class simulation():
         mem_data = self.hdf5.create_group("memory")
         avoid_height = np.round(self.height/self.avoid_cell_size,0).astype(np.int32) + 1
         avoid_width = np.round(self.width/self.avoid_cell_size,0).astype(np.int32) + 1
-        # create a memory map array
+        # create a memory map array (use small dtype to save memory)
+        zeros = np.zeros((avoid_height, avoid_width), dtype='i2')
         for i in np.arange(self.num_agents):
-            mem_data.create_dataset('%s'%(i), (avoid_height, avoid_width), dtype = 'f4')
-            self.hdf5['memory/%s'%(i)][:, :] = self.arr.zeros((avoid_height, 
-                                                               avoid_width))
+            mem_data.create_dataset(str(i), data=zeros, dtype='i2', chunks=(min(64, avoid_height), min(64, avoid_width)))
 
-        # Apply the scaling
-        self.mental_map_transform = Affine(self.avoid_cell_size, 
-                                           self.depth_rast_transform.b, 
-                                           self.depth_rast_transform.c,
-                                           self.depth_rast_transform.d,
-                                           -self.avoid_cell_size,
-                                           self.depth_rast_transform.f)
-           
+        # Apply the scaling: set transform to align mental map cell centers with world coords
+        # Use affine parameters a, e as cell sizes
+        self.mental_map_transform = Affine(self.avoid_cell_size, 0.0, self.depth_rast_transform.c,
+                                           0.0, -self.avoid_cell_size, self.depth_rast_transform.f)
+        
         self.hdf5.flush()
         
     def initialize_refugia_map(self):
@@ -1725,23 +1723,43 @@ class simulation():
         # Get the row, col indices for the coordinates
         rows, cols = geo_to_pixel(self.X, self.Y, transform)
 
-        # Use the already open HDF5 file object to read the specified raster dataset
-        raster_dataset = self.hdf5['environment/%s'%(raster_name)][:]  # Adjust the path as needed
+        # Use the already open HDF5 file object to read the specified raster dataset (no flush)
+        raster_dataset = self.hdf5['environment/%s' % (raster_name)]
 
-        # Sample the raster values using the row, col indices
         # Ensure that the indices are within the bounds of the raster data
-        rows = np.clip(rows, 0, raster_dataset.shape[0] - 1)
-        cols = np.clip(cols, 0, raster_dataset.shape[1] - 1)
-        
-        if self.num_agents > 1:
+        rows = np.clip(np.round(rows).astype(int), 0, raster_dataset.shape[0] - 1)
+        cols = np.clip(np.round(cols).astype(int), 0, raster_dataset.shape[1] - 1)
+
+        try:
+            # Try direct advanced indexing (may fail for h5py if indices are not monotonic)
             values = raster_dataset[rows, cols]
-        else:
-            values = np.array([raster_dataset[rows, cols]])
-        
-        #self.hdf5['environment/%s'%(raster_name)] = raster_dataset
-        self.hdf5.flush()
-        
-        return values.flatten()  
+        except Exception:
+            # Fallback: read into memory then index (safe)
+            arr = raster_dataset[:]
+            values = arr[rows, cols]
+        return np.asarray(values).flatten()
+
+    def batch_sample_environment(self, transforms, raster_names):
+        """Sample multiple rasters in a single pass and return dict of name->values.
+
+        transforms: list of Affine transforms matching raster_names.
+        raster_names: list of dataset names in HDF5 'environment' group.
+        """
+        # compute pixel indices once using the first transform (assumes same grid)
+        rows, cols = geo_to_pixel(self.X, self.Y, transforms[0])
+        rows = np.clip(np.round(rows).astype(int), 0, self.height - 1)
+        cols = np.clip(np.round(cols).astype(int), 0, self.width - 1)
+
+        results = {}
+        env = self.hdf5['environment']
+        for name in raster_names:
+            dset = env[name]
+            try:
+                results[name] = np.asarray(dset[rows, cols]).flatten()
+            except Exception:
+                arr = dset[:]
+                results[name] = np.asarray(arr[rows, cols]).flatten()
+        return results
     
     def initial_swim_speed(self):
         """
@@ -1853,25 +1871,28 @@ class simulation():
     
         The mental map is stored in an HDF5 dataset with shape (num_agents, width, height), where each 'slice' corresponds to an agent's mental map.
         """
-        # Convert geographic coordinates to pixel coordinates for each agent
-        rows, cols = geo_to_pixel(self.X, self.Y, self.refugia_map_transform)
-    
-        # Ensure rows and cols are within the bounds of the mental map
-        rows = self.arr.clip(rows, 0, self.height - 1)
-        cols = self.arr.clip(cols, 0, self.width - 1)
+        # Convert geographic coordinates to mental-map pixel coordinates
+        rows, cols = geo_to_pixel(self.X, self.Y, self.mental_map_transform)
 
-        # identify velocity refugia, if current velocity is less than the maximum sustained swim speed, it's a velocity refugia
-        refugia = np.where(current_velocity < self.max_s_U,1,0)
-        
-        # get velocity and coords raster per agent
-        for i in np.arange(self.num_agents):
-            if self.num_agents > 1:
-                try:
-                    self.hdf5['refugia/%s'%(i)][rows[i],cols[i]] = refugia
-                except:
-                    pass
-            else:
-                single_arr = np.array([self.hdf5['refugia/%s'%(i)]])
+        # Convert to integer and clip to dataset bounds
+        rows = np.clip(np.round(rows).astype(int), 0, int(np.round(self.height / self.avoid_cell_size)))
+        cols = np.clip(np.round(cols).astype(int), 0, int(np.round(self.width / self.avoid_cell_size)))
+
+        # Batch update: for each unique (r,c) pair, increment or set current timestep
+        mem_group = self.hdf5['memory']
+        for i in range(self.num_agents):
+            ds = mem_group.get(str(i))
+            if ds is None:
+                continue
+            r = rows[i]
+            c = cols[i]
+            # Read a small tile, update, write back to minimize Python-HDF5 calls
+            try:
+                val = ds[r, c]
+                ds[r, c] = current_timestep
+            except Exception:
+                pass
+        # avoid flushing every timestep to reduce I/O pressure
                 single_arr[0,rows,cols] = refugia
                 self.hdf5['refugia/%s'%(i)][:, :] = single_arr
         
@@ -1902,22 +1923,19 @@ class simulation():
             # `agents_within_buffers_dict` and `closest_agent_dict` are available for further processing.
         """
         # (The rest of your function code follows here...)        
-        # create geodataframe from X and Y points
-        points = [Point(x, y) for x, y in zip(self.X, self.Y)]
-        
-        # Now create a GeoDataFrame
-        gdf = gpd.GeoDataFrame(geometry=points)
-        
-        # If you have an associated CRS (Coordinate Reference System), you can set it like this:
-        gdf.set_crs(epsg=self.crs, inplace=True)
-        
-        # get depth, x_vel, and y_vel at every agent position
-        self.depth = self.sample_environment(self.depth_rast_transform, 'depth')
-        self.x_vel = self.sample_environment(self.vel_x_rast_transform, 'vel_x')
-        self.y_vel = self.sample_environment(self.vel_y_rast_transform, 'vel_y')
-        self.vel_mag = self.sample_environment(self.vel_mag_rast_transform, 'vel_mag')
-        self.wet = self.sample_environment(self.wetted_transform, 'wetted')
-        self.distance_to = self.sample_environment(self.depth_rast_transform, 'distance_to')
+        # Convert positions into a simple Nx2 array — avoid GeoDataFrame/CRS overhead
+        # and batch-sample environment rasters
+        names = ['depth', 'vel_x', 'vel_y', 'vel_mag', 'wetted', 'distance_to']
+        transforms = [self.depth_rast_transform, self.vel_x_rast_transform, self.vel_y_rast_transform,
+                  self.vel_mag_rast_transform, self.wetted_transform, self.depth_rast_transform]
+
+        sampled = self.batch_sample_environment(transforms, names)
+        self.depth = sampled['depth']
+        self.x_vel = sampled['vel_x']
+        self.y_vel = sampled['vel_y']
+        self.vel_mag = sampled['vel_mag']
+        self.wet = sampled['wetted']
+        self.distance_to = sampled['distance_to']
         self.current_longitudes = self.compute_linear_positions(self.longitudinal)
         
     
