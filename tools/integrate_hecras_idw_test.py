@@ -14,15 +14,26 @@ print('Plan:', plan)
 # fake simulation object
 sim = types.SimpleNamespace()
 
+# request multiple fields commonly used in the sim
+fields = [
+    'Cells Minimum Elevation',
+    'Water Surface',
+    'Cell Velocity - Velocity X',
+    'Cell Velocity - Velocity Y'
+]
+
 # load and cache
-m = load_hecras_plan_cached(sim, str(plan), field_name='Cells Minimum Elevation')
+m = load_hecras_plan_cached(sim, str(plan), field_names=fields)
 print('Cached map coords:', m.coords.shape[0])
 
 # sample 20 random agent points near valid coords
 rng = np.random.default_rng(1)
 idx = rng.choice(m.coords.shape[0], size=20, replace=False)
 agent_xy = m.coords[idx] + rng.normal(scale=0.2, size=(20,2))
-vals = map_hecras_for_agents(sim, agent_xy, str(plan), field_name='Cells Minimum Elevation', k=8)
-for i,(xy,v) in enumerate(zip(agent_xy, vals)):
-    print(f'{i:2d}: {xy[0]:.3f},{xy[1]:.3f} -> {v:.6f}')
+out = map_hecras_for_agents(sim, agent_xy, str(plan), field_names=fields, k=8)
+
+for i, xy in enumerate(agent_xy):
+    vals = [out[f][i] for f in fields]
+    print(f"{i:2d}: {xy[0]:.3f},{xy[1]:.3f} -> " + ", ".join([f"{v:.6f}" for v in vals]))
+
 print('Done')
