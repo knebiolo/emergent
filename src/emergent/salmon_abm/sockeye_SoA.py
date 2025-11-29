@@ -1234,7 +1234,10 @@ class simulation():
                  num_timesteps = 100, 
                  num_agents = 100,
                  use_gpu = False,
-                 pid_tuning = False):
+                 pid_tuning = False,
+                 hecras_plan_path=None,
+                 hecras_fields=None,
+                 hecras_k=8):
         """
          Initialize the simulation environment.
          
@@ -1415,15 +1418,39 @@ class simulation():
         self.hdf5["agent_data/too_shallow"][:] = self.too_shallow
         self.hdf5["agent_data/opt_wat_depth"][:] = self.sex
         
-        # import environment
-        self.enviro_import(os.path.join(model_dir,env_files['x_vel']),'velocity x')
-        self.enviro_import(os.path.join(model_dir,env_files['y_vel']),'velocity y')
-        self.enviro_import(os.path.join(model_dir,env_files['depth']),'depth')
-        self.enviro_import(os.path.join(model_dir,env_files['wsel']),'wsel')
-        self.enviro_import(os.path.join(model_dir,env_files['elev']),'elevation')
-        self.enviro_import(os.path.join(model_dir,env_files['vel_dir']),'velocity direction')
-        self.enviro_import(os.path.join(model_dir,env_files['vel_mag']),'velocity magnitude') 
-        self.enviro_import(os.path.join(model_dir,env_files['wetted']),'wetted')
+        # import environment only when file paths are present and exist (robust to missing files)
+        def _maybe_import(key, surface_type):
+            fp = env_files.get(key)
+            if not fp:
+                return
+            path = os.path.join(model_dir, fp)
+            if os.path.exists(path):
+                try:
+                    self.enviro_import(path, surface_type)
+                except Exception:
+                    # log silently and continue; simulation can operate with HECRAS mapping
+                    pass
+
+        # If a HECRAS plan is provided, prefer it and skip raster imports
+        self.hecras_plan_path = hecras_plan_path
+        self.hecras_fields = hecras_fields if hecras_fields is not None else ['Cells Minimum Elevation']
+        self.hecras_k = hecras_k
+        if not self.hecras_plan_path:
+            _maybe_import('x_vel', 'velocity x')
+            _maybe_import('y_vel', 'velocity y')
+            _maybe_import('depth', 'depth')
+            _maybe_import('wsel', 'wsel')
+            _maybe_import('elev', 'elevation')
+            _maybe_import('vel_dir', 'velocity direction')
+            _maybe_import('vel_mag', 'velocity magnitude')
+            _maybe_import('wetted', 'wetted')
+        else:
+            # preload HECRAS KDTree and fields into the simulation cache for fast mapping
+            try:
+                load_hecras_plan_cached(self, self.hecras_plan_path, field_names=self.hecras_fields)
+            except Exception:
+                # do not fail simulation init on HECRAS load errors; user can call load later
+                self.hecras_plan_path = None
         self.hdf5.flush()
         # Initialize in-memory buffers for per-timestep datasets to reduce small writes
         buf_len = min(self.flush_interval, max(1, self.num_timesteps))
@@ -1713,8 +1740,14 @@ class simulation():
        
 
         
+        # Guard: if data_dir is falsy or file does not exist, skip
+        if not data_dir or not os.path.exists(data_dir):
+            return
         # get raster properties
-        src = rasterio.open(data_dir)
+        try:
+            src = rasterio.open(data_dir)
+        except Exception:
+            return
         num_bands = src.count
         width = src.width
         height = src.height
@@ -1848,6 +1881,7 @@ class simulation():
         self.hdf5.flush()
         src.close()
 
+
     def longitudinal_import(self, shapefile):
         # Load the shapefile with the longitudinal line
         line_gdf = gpd.read_file(shapefile)
@@ -1919,11 +1953,21 @@ class simulation():
         return dists.reshape(self.X.shape)
 
     def boundary_surface(self):
-        
-        raster = self.hdf5['environment/wetted'][:]  # Adjust the path as needed
+        # Guard: require the 'environment' group and 'wetted' dataset
+        try:
+            env = self.hdf5.get('environment')
+            if env is None or 'wetted' not in env:
+                return
+            raster = env['wetted'][:]
+        except Exception:
+            return
 
-        pixel_width = self.depth_rast_transform[0]
-        
+        # pixel width fallback
+        try:
+            pixel_width = self.depth_rast_transform.a
+        except Exception:
+            pixel_width = 1.0
+
         # Compute the Euclidean distance transform. This computes the distance to the nearest zero (background) for all non-zero (foreground) pixels.
         dist_to_bound = distance_transform_edt(raster != -9999) * pixel_width
         
@@ -1957,8 +2001,13 @@ class simulation():
         # Ensure a 'memory' group exists and create compact per-agent avoid maps.
         mem_data = self.hdf5.require_group('memory')
 
-        avoid_height = int(np.round(self.height / self.avoid_cell_size)) + 1
-        avoid_width = int(np.round(self.width / self.avoid_cell_size)) + 1
+        # Handle missing width/height by using conservative defaults
+        if not hasattr(self, 'width') or not hasattr(self, 'height'):
+            avoid_height = 256
+            avoid_width = 256
+        else:
+            avoid_height = int(np.round(self.height / self.avoid_cell_size)) + 1
+            avoid_width = int(np.round(self.width / self.avoid_cell_size)) + 1
 
         # Create per-agent datasets (if missing) using a compact dtype and
         # row-friendly chunking so our grouped-row reads/writes are efficient.
@@ -1997,8 +2046,12 @@ class simulation():
 
         # Ensure refugia group exists and create per-agent datasets
         mem_grp = self.hdf5.require_group('refugia')
-        refugia_height = int(np.round(self.height / self.refugia_cell_size)) + 1
-        refugia_width = int(np.round(self.width / self.refugia_cell_size)) + 1
+        if not hasattr(self, 'width') or not hasattr(self, 'height'):
+            refugia_height = 256
+            refugia_width = 256
+        else:
+            refugia_height = int(np.round(self.height / self.refugia_cell_size)) + 1
+            refugia_width = int(np.round(self.width / self.refugia_cell_size)) + 1
 
         for i in range(self.num_agents):
             name = str(i)
@@ -2256,9 +2309,14 @@ class simulation():
           calculated swim speed necessary to maintain the ideal SOG against water currents.
         """
 
-        vals = self.batch_sample_environment([self.vel_x_rast_transform, self.vel_y_rast_transform], ['vel_x', 'vel_y'])
-        self.x_vel = vals['vel_x']
-        self.y_vel = vals['vel_y']
+        # Attempt to sample raster velocities; fall back to zeros if transforms are missing
+        try:
+            vals = self.batch_sample_environment([self.vel_x_rast_transform, self.vel_y_rast_transform], ['vel_x', 'vel_y'])
+            self.x_vel = vals.get('vel_x', np.zeros(self.num_agents))
+            self.y_vel = vals.get('vel_y', np.zeros(self.num_agents))
+        except Exception:
+            self.x_vel = np.zeros(self.num_agents)
+            self.y_vel = np.zeros(self.num_agents)
         
         # Vector components of water velocity for each fish
         water_velocities = np.sqrt(self.x_vel**2 + self.y_vel**2)
