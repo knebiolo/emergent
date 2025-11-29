@@ -118,6 +118,28 @@ class HECRASMap:
         mapped = np.sum(vals * w, axis=1)
         return mapped
 
+
+def load_hecras_plan_cached(simulation, plan_path, field_name='Cells Minimum Elevation'):
+    """Load a HECRAS plan and cache HECRASMap on the simulation object.
+
+    Stores in `simulation._hecras_maps` dict keyed by (plan_path, field_name).
+    """
+    if not hasattr(simulation, '_hecras_maps'):
+        simulation._hecras_maps = {}
+    key = (str(plan_path), field_name)
+    if key not in simulation._hecras_maps:
+        simulation._hecras_maps[key] = HECRASMap(str(plan_path), field_name=field_name)
+    return simulation._hecras_maps[key]
+
+
+def map_hecras_for_agents(simulation, agent_xy, plan_path, field_name='Cells Minimum Elevation', k=8):
+    """Map `agent_xy` (N x 2) positions to HECRAS field values using cached map.
+
+    Returns an array of length N of mapped floats.
+    """
+    m = load_hecras_plan_cached(simulation, plan_path, field_name=field_name)
+    return m.map_idw(agent_xy, k=k)
+
 # End HECRAS helpers
 
 # Get the directory of the current script
