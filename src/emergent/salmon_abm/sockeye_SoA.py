@@ -74,6 +74,52 @@ warnings.filterwarnings("ignore")
 
 np.set_printoptions(suppress=True)
 
+# --- HECRAS IDW mapping helpers (read-only, KDTree cached) -----------------
+class HECRASMap:
+    """Lightweight container for a HECRAS plan KDTree and field values.
+
+    Usage:
+      m = HECRASMap(plan_path, field_name='Cells Minimum Elevation')
+      vals = m.map_idw(query_pts, k=8)
+    """
+    def __init__(self, plan_path, field_name='Cells Minimum Elevation'):
+        self.plan_path = plan_path
+        self.field_name = field_name
+        self._load_plan()
+
+    def _load_plan(self):
+        with h5py.File(self.plan_path, 'r') as h:
+            coords = h['/Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:]
+            field = h[f'/Geometry/2D Flow Areas/2D area/{self.field_name}'][:]
+
+        # filter finite field cells
+        mask = np.isfinite(field)
+        self.coords = coords[mask].astype(np.float64)
+        self.field = field[mask].astype(np.float64)
+        # build KDTree once
+        self.tree = cKDTree(self.coords)
+
+    def map_idw(self, query_pts, k=8, eps=1e-8):
+        """Map `query_pts` (N x 2) to field values via k-NN inverse-distance weighting.
+
+        Returns an array of length N with mapped float64 values.
+        """
+        query = np.asarray(query_pts, dtype=np.float64)
+        if query.ndim == 1:
+            query = query.reshape(1, 2)
+        dists, inds = self.tree.query(query, k=k)
+        # normalize shapes
+        if k == 1:
+            dists = dists[:, None]
+            inds = inds[:, None]
+        inv = 1.0 / (dists + eps)
+        w = inv / np.sum(inv, axis=1)[:, None]
+        vals = self.field[inds]
+        mapped = np.sum(vals * w, axis=1)
+        return mapped
+
+# End HECRAS helpers
+
 # Get the directory of the current script
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -2095,8 +2141,9 @@ class simulation():
           calculated swim speed necessary to maintain the ideal SOG against water currents.
         """
 
-        self.x_vel = self.sample_environment(self.vel_x_rast_transform, 'vel_x')
-        self.y_vel = self.sample_environment(self.vel_y_rast_transform, 'vel_y')
+        vals = self.batch_sample_environment([self.vel_x_rast_transform, self.vel_y_rast_transform], ['vel_x', 'vel_y'])
+        self.x_vel = vals['vel_x']
+        self.y_vel = vals['vel_y']
         
         # Vector components of water velocity for each fish
         water_velocities = np.sqrt(self.x_vel**2 + self.y_vel**2)
@@ -2132,7 +2179,7 @@ class simulation():
             row, col = geo_to_pixel(self.X, self.Y, self.vel_dir_rast_transform)
             
         # get the initial heading values
-        values = self.sample_environment(self.vel_dir_rast_transform,'vel_dir')
+        values = self.batch_sample_environment([self.vel_dir_rast_transform], ['vel_dir'])['vel_dir']
         
         # set direction 
         self.heading = self.arr.where(values < 0, 
@@ -3732,18 +3779,15 @@ class simulation():
             # Convert self.length to a NumPy array if it's a CuPy array
             length_numpy = self.simulation.length#.get() if isinstance(self.length, cp.ndarray) else self.length
         
+            # Batch sample x and y velocity to avoid repeated HDF reads
+            vals = self.simulation.batch_sample_environment([self.simulation.vel_dir_rast_transform,
+                                                            self.simulation.vel_dir_rast_transform],
+                                                           ['vel_x', 'vel_y'])
+            x_vel = vals['vel_x']
+            y_vel = vals['vel_y']
             if downstream == False:
-                # Sample the environment to get the velocity direction and adjust to point upstream
-                x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform,
-                                                           'vel_x') * -1
-                y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform,
-                                                           'vel_y') * -1
-            else:
-                # Sample the environment to get the velocity direction and adjust to point upstream
-                x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform,
-                                                           'vel_x')
-                y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform,
-                                                           'vel_y')
+                x_vel = x_vel * -1
+                y_vel = y_vel * -1
             
             # Calculate the unit vector in the upstream direction
             v = np.column_stack([x_vel, y_vel])  
