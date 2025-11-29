@@ -1237,7 +1237,8 @@ class simulation():
                  pid_tuning = False,
                  hecras_plan_path=None,
                  hecras_fields=None,
-                 hecras_k=8):
+                 hecras_k=8,
+                 use_hecras=False):
         """
          Initialize the simulation environment.
          
@@ -1435,6 +1436,7 @@ class simulation():
         self.hecras_plan_path = hecras_plan_path
         self.hecras_fields = hecras_fields if hecras_fields is not None else ['Cells Minimum Elevation']
         self.hecras_k = hecras_k
+        self.use_hecras = bool(use_hecras)
         if not self.hecras_plan_path:
             _maybe_import('x_vel', 'velocity x')
             _maybe_import('y_vel', 'velocity y')
@@ -2018,8 +2020,31 @@ class simulation():
                                         dtype='i2', chunks=(1, min(avoid_width, 4096)))
 
         # Transform mapping agent coords -> mental map cell indices
-        self.mental_map_transform = Affine(self.avoid_cell_size, 0.0, self.depth_rast_transform.c,
-                                           0.0, -self.avoid_cell_size, self.depth_rast_transform.f)
+        if hasattr(self, 'depth_rast_transform') and self.depth_rast_transform is not None:
+            base_transform = self.depth_rast_transform
+        else:
+            # Fallback: derive approximate transform from HECRAS coords if available
+            base_transform = None
+            try:
+                if hasattr(self, '_hecras_maps') and len(self._hecras_maps) > 0:
+                    # use first cached map
+                    m = next(iter(self._hecras_maps.values()))
+                    coords = m.coords
+                    minx = float(coords[:, 0].min())
+                    maxy = float(coords[:, 1].max())
+                    base_transform = Affine(self.avoid_cell_size, 0.0, minx,
+                                            0.0, -self.avoid_cell_size, maxy)
+                    # set width/height approximate if missing
+                    if not hasattr(self, 'width') or not hasattr(self, 'height'):
+                        xrange = float(coords[:, 0].max() - coords[:, 0].min())
+                        yrange = float(coords[:, 1].max() - coords[:, 1].min())
+                        self.width = int(np.ceil(xrange / self.avoid_cell_size)) + 1
+                        self.height = int(np.ceil(yrange / self.avoid_cell_size)) + 1
+            except Exception:
+                base_transform = Affine(self.avoid_cell_size, 0.0, 0.0, 0.0, -self.avoid_cell_size, 0.0)
+
+        self.mental_map_transform = Affine(self.avoid_cell_size, 0.0, base_transform.c,
+                                           0.0, -self.avoid_cell_size, base_transform.f)
 
         # In-memory accumulator to batch per-timestep updates; dtype u1 is enough
         # since we only flag visited cells (0/1). Shape: (num_agents, H, W)
@@ -2060,9 +2085,24 @@ class simulation():
                                        chunks=(1, min(refugia_width, 4096)))
                 mem_grp[name][:, :] = np.zeros((refugia_height, refugia_width), dtype='f4')
 
-        # Apply the scaling transform for refugia
-        self.refugia_map_transform = Affine(self.refugia_cell_size, 0.0, self.depth_rast_transform.c,
-                                           0.0, -self.refugia_cell_size, self.depth_rast_transform.f)
+        # Apply the scaling transform for refugia (fallback to HECRAS-derived transform)
+        if hasattr(self, 'depth_rast_transform') and self.depth_rast_transform is not None:
+            base_t = self.depth_rast_transform
+        else:
+            try:
+                if hasattr(self, '_hecras_maps') and len(self._hecras_maps) > 0:
+                    m = next(iter(self._hecras_maps.values()))
+                    coords = m.coords
+                    minx = float(coords[:, 0].min())
+                    maxy = float(coords[:, 1].max())
+                    base_t = Affine(self.refugia_cell_size, 0.0, minx, 0.0, -self.refugia_cell_size, maxy)
+                else:
+                    base_t = Affine(self.refugia_cell_size, 0.0, 0.0, 0.0, -self.refugia_cell_size, 0.0)
+            except Exception:
+                base_t = Affine(self.refugia_cell_size, 0.0, 0.0, 0.0, -self.refugia_cell_size, 0.0)
+
+        self.refugia_map_transform = Affine(self.refugia_cell_size, 0.0, base_t.c,
+                                           0.0, -self.refugia_cell_size, base_t.f)
 
         # In-memory refugia accumulator (stores float values per agent)
         self.refugia_accumulator = np.zeros((self.num_agents, refugia_height, refugia_width), dtype='f4')
@@ -2110,6 +2150,12 @@ class simulation():
         transforms: list of Affine transforms matching raster_names.
         raster_names: list of dataset names in HDF5 'environment' group.
         """
+        # If the first transform is None, rasters are unavailable (HECRAS-only mode)
+        if transforms is None or transforms[0] is None:
+            # return NaN arrays for each requested raster name
+            results = {name: np.full(self.num_agents, np.nan, dtype=float) for name in raster_names}
+            return results
+
         # compute pixel indices once using the first transform (assumes same grid)
         rows, cols = geo_to_pixel(self.X, self.Y, transforms[0])
         rows = np.clip(np.round(rows).astype(int), 0, self.height - 1)
@@ -2346,18 +2392,28 @@ class simulation():
         - self.max_practical_sog: The maximum practical speed over ground for each agent as a 2D vector (m/s).
         """
         # get the x, y position of the agent (use cache if available)
-        if 'vel' in self._pixel_index_cache:
-            row, col = self._pixel_index_cache['vel']
-        else:
-            row, col = geo_to_pixel(self.X, self.Y, self.vel_dir_rast_transform)
-            
-        # get the initial heading values
-        values = self.batch_sample_environment([self.vel_dir_rast_transform], ['vel_dir'])['vel_dir']
-        
-        # set direction 
-        self.heading = self.arr.where(values < 0, 
-                                               (self.arr.radians(360) + values) - self.arr.radians(180), 
-                                               values - self.arr.radians(180))
+        try:
+            if 'vel' in self._pixel_index_cache:
+                row, col = self._pixel_index_cache['vel']
+            else:
+                row, col = geo_to_pixel(self.X, self.Y, self.vel_dir_rast_transform)
+
+            # get the initial heading values from vel_dir raster
+            values = self.batch_sample_environment([self.vel_dir_rast_transform], ['vel_dir'])['vel_dir']
+
+            # set direction using raster-derived values (degrees -> radians adjustment)
+            self.heading = self.arr.where(values < 0,
+                                           (self.arr.radians(360) + values) - self.arr.radians(180),
+                                           values - self.arr.radians(180))
+        except Exception:
+            # Fallback: compute heading from vector velocity components (x_vel, y_vel)
+            try:
+                vals_deg = np.degrees(np.arctan2(self.y_vel, self.x_vel))
+            except Exception:
+                vals_deg = np.zeros(self.num_agents, dtype=float)
+
+            # Convert degrees to radians and shift by 180 degrees (consistent with raster logic)
+            self.heading = np.deg2rad(vals_deg) - np.pi
 
         # set initial max practical speed over ground as well
         self.max_practical_sog = self.arr.array([self.sog * self.arr.cos(self.heading), 
@@ -2470,8 +2526,14 @@ class simulation():
         # Convert positions into a simple Nx2 array — avoid GeoDataFrame/CRS overhead
         # and batch-sample environment rasters
         names = ['depth', 'vel_x', 'vel_y', 'vel_mag', 'wetted', 'distance_to']
-        transforms = [self.depth_rast_transform, self.vel_x_rast_transform, self.vel_y_rast_transform,
-                  self.vel_mag_rast_transform, self.wetted_transform, self.depth_rast_transform]
+        # Build transforms defensively — some may be missing when running HECRAS-only
+        transforms = []
+        transforms.append(getattr(self, 'depth_rast_transform', None))
+        transforms.append(getattr(self, 'vel_x_rast_transform', None))
+        transforms.append(getattr(self, 'vel_y_rast_transform', None))
+        transforms.append(getattr(self, 'vel_mag_rast_transform', None))
+        transforms.append(getattr(self, 'wetted_transform', None))
+        transforms.append(getattr(self, 'depth_rast_transform', None))
 
         sampled = self.batch_sample_environment(transforms, names)
         self.depth = sampled['depth']
@@ -2494,23 +2556,26 @@ class simulation():
             # `out` is either array (single field) or dict of arrays
             if isinstance(out, dict):
                 for fname, arr in out.items():
-                    # map common field name variants to simulation attributes
-                    lname = fname.lower()
-                    if 'elev' in lname or 'minimum elevation' in lname:
-                        self.depth = arr  # elevation can be used as depth proxy if desired
-                    elif 'water surface' in lname or 'water surface' in fname.lower() or 'wsel' in lname:
-                        self.wsel = arr
-                    elif 'velocity x' in lname or 'vel_x' in lname or 'cell velocity - velocity x' in lname.lower():
-                        self.x_vel = arr
-                    elif 'velocity y' in lname or 'vel_y' in lname or 'cell velocity - velocity y' in lname.lower():
-                        self.y_vel = arr
-                    else:
-                        # store under a generic attribute name using sanitized field name
-                        attr = 'hecras_' + fname.replace(' ', '_').replace('/', '_').lower()
-                        setattr(self, attr, arr)
+                    # store HECRAS-mapped fields under hecras_<name>
+                    attr = 'hecras_' + fname.replace(' ', '_').replace('/', '_').lower()
+                    setattr(self, attr, arr)
+                    # if use_hecras is True, override common attributes
+                    if self.use_hecras:
+                        lname = fname.lower()
+                        if 'elev' in lname or 'minimum elevation' in lname:
+                            # prefer wsel - elev for depth if both present later
+                            self.depth = arr
+                        elif 'water surface' in lname or 'wsel' in lname:
+                            self.wsel = arr
+                        elif 'velocity x' in lname or 'vel_x' in lname or 'cell velocity - velocity x' in lname.lower():
+                            self.x_vel = arr
+                        elif 'velocity y' in lname or 'vel_y' in lname or 'cell velocity - velocity y' in lname.lower():
+                            self.y_vel = arr
             else:
-                # single-field array -> set depth by default
-                self.depth = out
+                # single-field array -> store as hecras_<fieldname> and optionally override depth
+                setattr(self, 'hecras_' + field_names[0].replace(' ', '_').lower(), out)
+                if self.use_hecras:
+                    self.depth = out
 
         # Use HECRAS mapping only when explicitly enabled by the user via
         # `enable_hecras(...)`. Raster sampling remains the default fallback.
