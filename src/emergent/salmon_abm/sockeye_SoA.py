@@ -235,6 +235,48 @@ def map_hecras_for_agents(simulation, agent_xy, plan_path, field_names=None, k=8
 
 # End HECRAS helpers
 
+
+def compute_affine_from_hecras(coords, target_cell_size=None):
+    """Compute a conservative Affine transform from HECRAS cell center coordinates.
+
+    Strategy:
+    - Compute nearest-neighbor distances for a random subset of points and take the median spacing.
+    - Use that spacing as the `x`/`y` pixel size (square cells).
+    - Use the min-x and max-y of coords as the origin (upper-left corner), adjusting by half-cell.
+
+    Returns an `Affine` suitable for rasterizing / geo_to_pixel mapping.
+    """
+    coords = np.asarray(coords, dtype=np.float64)
+    if coords.ndim != 2 or coords.shape[1] != 2 or coords.shape[0] == 0:
+        return Affine(1.0, 0.0, 0.0, 0.0, -1.0, 0.0)
+
+    n = coords.shape[0]
+    # sample up to 2000 points for spacing calc
+    sample_n = min(2000, n)
+    idx = np.random.choice(n, size=sample_n, replace=False)
+    sample = coords[idx]
+
+    # build KDTree and get 2nd NN distances (first is zero/self)
+    tree = cKDTree(coords)
+    dists, _ = tree.query(sample, k=2)
+    # second column are nearest neighbor distances
+    nn = dists[:, 1]
+    # median spacing
+    median_spacing = float(np.median(nn))
+    if target_cell_size is not None:
+        # prefer requested target_cell_size if provided but don't exceed median spacing
+        cell = float(target_cell_size)
+    else:
+        cell = max(median_spacing, 1e-6)
+
+    minx = float(coords[:, 0].min())
+    maxy = float(coords[:, 1].max())
+    # use minx, maxy as upper-left corner but shift by half-cell to center cells
+    origin_x = minx - 0.5 * cell
+    origin_y = maxy + 0.5 * cell
+
+    return Affine(cell, 0.0, origin_x, 0.0, -cell, origin_y)
+
 # Get the directory of the current script
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -2023,28 +2065,23 @@ class simulation():
         if hasattr(self, 'depth_rast_transform') and self.depth_rast_transform is not None:
             base_transform = self.depth_rast_transform
         else:
-            # Fallback: derive approximate transform from HECRAS coords if available
+            # Fallback: derive transform from HECRAS coords when available
             base_transform = None
             try:
                 if hasattr(self, '_hecras_maps') and len(self._hecras_maps) > 0:
-                    # use first cached map
                     m = next(iter(self._hecras_maps.values()))
                     coords = m.coords
-                    minx = float(coords[:, 0].min())
-                    maxy = float(coords[:, 1].max())
-                    base_transform = Affine(self.avoid_cell_size, 0.0, minx,
-                                            0.0, -self.avoid_cell_size, maxy)
-                    # set width/height approximate if missing
+                    base_transform = compute_affine_from_hecras(coords, target_cell_size=self.avoid_cell_size)
+                    # set width/height approximate if missing using coords bbox
                     if not hasattr(self, 'width') or not hasattr(self, 'height'):
                         xrange = float(coords[:, 0].max() - coords[:, 0].min())
                         yrange = float(coords[:, 1].max() - coords[:, 1].min())
                         self.width = int(np.ceil(xrange / self.avoid_cell_size)) + 1
                         self.height = int(np.ceil(yrange / self.avoid_cell_size)) + 1
             except Exception:
-                base_transform = Affine(self.avoid_cell_size, 0.0, 0.0, 0.0, -self.avoid_cell_size, 0.0)
+                base_transform = compute_affine_from_hecras(np.array([[0.0, 0.0]]), target_cell_size=self.avoid_cell_size)
 
-        self.mental_map_transform = Affine(self.avoid_cell_size, 0.0, base_transform.c,
-                                           0.0, -self.avoid_cell_size, base_transform.f)
+        self.mental_map_transform = compute_affine_from_hecras(base_transform * 0.0 if False else np.array([[base_transform.c, base_transform.f]]), target_cell_size=self.avoid_cell_size) if False else base_transform
 
         # In-memory accumulator to batch per-timestep updates; dtype u1 is enough
         # since we only flag visited cells (0/1). Shape: (num_agents, H, W)
@@ -2081,9 +2118,9 @@ class simulation():
         for i in range(self.num_agents):
             name = str(i)
             if name not in mem_grp:
+                # create dataset with default fill (do not write large zero block)
                 mem_grp.create_dataset(name, shape=(refugia_height, refugia_width), dtype='f4',
-                                       chunks=(1, min(refugia_width, 4096)))
-                mem_grp[name][:, :] = np.zeros((refugia_height, refugia_width), dtype='f4')
+                                       chunks=(1, min(refugia_width, 4096)), fillvalue=0.0)
 
         # Apply the scaling transform for refugia (fallback to HECRAS-derived transform)
         if hasattr(self, 'depth_rast_transform') and self.depth_rast_transform is not None:
@@ -2093,16 +2130,13 @@ class simulation():
                 if hasattr(self, '_hecras_maps') and len(self._hecras_maps) > 0:
                     m = next(iter(self._hecras_maps.values()))
                     coords = m.coords
-                    minx = float(coords[:, 0].min())
-                    maxy = float(coords[:, 1].max())
-                    base_t = Affine(self.refugia_cell_size, 0.0, minx, 0.0, -self.refugia_cell_size, maxy)
+                    base_t = compute_affine_from_hecras(coords, target_cell_size=self.refugia_cell_size)
                 else:
-                    base_t = Affine(self.refugia_cell_size, 0.0, 0.0, 0.0, -self.refugia_cell_size, 0.0)
+                    base_t = compute_affine_from_hecras(np.array([[0.0, 0.0]]), target_cell_size=self.refugia_cell_size)
             except Exception:
-                base_t = Affine(self.refugia_cell_size, 0.0, 0.0, 0.0, -self.refugia_cell_size, 0.0)
+                base_t = compute_affine_from_hecras(np.array([[0.0, 0.0]]), target_cell_size=self.refugia_cell_size)
 
-        self.refugia_map_transform = Affine(self.refugia_cell_size, 0.0, base_t.c,
-                                           0.0, -self.refugia_cell_size, base_t.f)
+        self.refugia_map_transform = base_t
 
         # In-memory refugia accumulator (stores float values per agent)
         self.refugia_accumulator = np.zeros((self.num_agents, refugia_height, refugia_width), dtype='f4')
