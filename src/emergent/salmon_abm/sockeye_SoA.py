@@ -725,6 +725,150 @@ def compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wav
     else:
         return _compute_drags_numpy(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav)
 
+# --- Additional Numba helpers for other hotspots ---
+if _HAS_NUMBA:
+    @njit(parallel=True)
+    def _project_points_onto_line_numba(xs_line, ys_line, px, py):
+        # compute segment vectors
+        S = xs_line.size - 1
+        seg_x0 = xs_line[:S]
+        seg_y0 = ys_line[:S]
+        seg_x1 = xs_line[1:]
+        seg_y1 = ys_line[1:]
+        vx = seg_x1 - seg_x0
+        vy = seg_y1 - seg_y0
+        seg_len = np.empty(S, dtype=np.float64)
+        for j in range(S):
+            seg_len[j] = math.hypot(vx[j], vy[j])
+        cumlen = np.empty(S + 1, dtype=np.float64)
+        cumlen[0] = 0.0
+        for j in range(S):
+            cumlen[j + 1] = cumlen[j] + seg_len[j]
+
+        M = px.size
+        out = np.empty(M, dtype=np.float64)
+        for i in prange(M):
+            best_d2 = 1e308
+            best_dist = 0.0
+            xi = px[i]
+            yi = py[i]
+            for j in range(S):
+                x0 = seg_x0[j]
+                y0 = seg_y0[j]
+                dx = vx[j]
+                dy = vy[j]
+                denom = dx * dx + dy * dy
+                if denom == 0.0:
+                    t = 0.0
+                else:
+                    t = ((xi - x0) * dx + (yi - y0) * dy) / denom
+                    if t < 0.0:
+                        t = 0.0
+                    elif t > 1.0:
+                        t = 1.0
+                cx = x0 + t * dx
+                cy = y0 + t * dy
+                d2 = (xi - cx) * (xi - cx) + (yi - cy) * (yi - cy)
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best_dist = cumlen[j] + t * seg_len[j]
+            out[i] = best_dist
+        return out
+else:
+    def _project_points_onto_line_numba(xs_line, ys_line, px, py):
+        # fallback to numpy implementation
+        seg_x0 = xs_line[:-1]
+        seg_y0 = ys_line[:-1]
+        seg_x1 = xs_line[1:]
+        seg_y1 = ys_line[1:]
+        vx = seg_x1 - seg_x0
+        vy = seg_y1 - seg_y0
+        seg_len = np.hypot(vx, vy)
+        cumlen = np.concatenate([[0.0], np.cumsum(seg_len)])
+        M = px.size
+        px_e = px[:, None]
+        py_e = py[:, None]
+        x0_e = seg_x0[None, :]
+        y0_e = seg_y0[None, :]
+        vx_e = vx[None, :]
+        vy_e = vy[None, :]
+        wx = px_e - x0_e
+        wy = py_e - y0_e
+        denom = vx_e * vx_e + vy_e * vy_e
+        denom = np.where(denom == 0, 1e-12, denom)
+        t = (wx * vx_e + wy * vy_e) / denom
+        t_clamped = np.clip(t, 0.0, 1.0)
+        cx = x0_e + t_clamped * vx_e
+        cy = y0_e + t_clamped * vy_e
+        d2 = (px_e - cx) ** 2 + (py_e - cy) ** 2
+        idx = np.argmin(d2, axis=1)
+        chosen_t = t_clamped[np.arange(M), idx]
+        chosen_seg = idx
+        distances_along = cumlen[chosen_seg] + chosen_t * seg_len[chosen_seg]
+        return distances_along
+
+if _HAS_NUMBA:
+    @njit(parallel=True)
+    def _swim_speeds_numba(x_vel, y_vel, sog, heading):
+        n = sog.size
+        out = np.empty(n, dtype=np.float64)
+        for i in prange(n):
+            fx = sog[i] * math.cos(heading[i])
+            fy = sog[i] * math.sin(heading[i])
+            rx = fx - x_vel[i]
+            ry = fy - y_vel[i]
+            out[i] = math.hypot(rx, ry)
+        return out
+else:
+    def _swim_speeds_numba(x_vel, y_vel, sog, heading):
+        fish_velocities_x = sog * np.cos(heading)
+        fish_velocities_y = sog * np.sin(heading)
+        relx = fish_velocities_x - x_vel
+        rely = fish_velocities_y - y_vel
+        return np.sqrt(relx * relx + rely * rely)
+
+if _HAS_NUMBA:
+    @njit(parallel=True)
+    def _calc_battery_numba(battery, per_rec, ttf, mask_sustained, dt):
+        n = battery.size
+        # apply sustained recovery
+        for i in prange(n):
+            if mask_sustained[i]:
+                battery[i] = battery[i] + per_rec[i]
+        # non-sustained: scale battery by remaining ttf
+        for i in prange(n):
+            if not mask_sustained[i]:
+                ttf0 = ttf[i] * battery[i]
+                if ttf0 <= 0.0:
+                    battery[i] = 0.0
+                else:
+                    ttf1 = ttf0 - dt
+                    ratio = ttf1 / ttf0
+                    if ratio < 0.0:
+                        ratio = 0.0
+                    battery[i] = battery[i] * ratio
+        # clip
+        for i in prange(n):
+            if battery[i] < 0.0:
+                battery[i] = 0.0
+            elif battery[i] > 1.0:
+                battery[i] = 1.0
+        return battery
+else:
+    def _calc_battery_numba(battery, per_rec, ttf, mask_sustained, dt):
+        # numpy fallback
+        battery = battery.copy()
+        battery[mask_sustained] += per_rec[mask_sustained]
+        mask_non = ~mask_sustained
+        ttf0 = ttf[mask_non] * battery[mask_non]
+        ttf1 = ttf0 - dt
+        # avoid division by zero
+        safe = ttf0 != 0
+        ratio = np.ones_like(ttf0)
+        ratio[safe] = np.maximum(0.0, ttf1[safe] / ttf0[safe])
+        battery[mask_non] = battery[mask_non] * ratio
+        np.clip(battery, 0.0, 1.0, out=battery)
+        return battery
 
 # Precompile numba functions at import time to avoid first-call JIT overhead
 if _HAS_NUMBA:
@@ -734,6 +878,9 @@ if _HAS_NUMBA:
         _ = _compute_drags_numba(dummy, dummy, dummy, dummy, np.ones(n, dtype=np.bool_), 1.0, np.ones(n), np.ones(n), np.ones(n), np.zeros(n, dtype=np.int64))
         _ = _bout_distance_numba(dummy, dummy, dummy, dummy)
         _ = _time_to_fatigue_numba(dummy, np.ones(n, dtype=np.bool_), np.zeros(n, dtype=np.bool_), 0.0, 0.0, 0.0, 0.0)
+        _ = _project_points_onto_line_numba(dummy, dummy, dummy, dummy)
+        _ = _swim_speeds_numba(dummy, dummy, dummy, dummy)
+        _ = _calc_battery_numba(dummy, dummy, dummy, np.ones(n, dtype=np.bool_), 0.1)
     except Exception:
         pass
 
@@ -2561,7 +2708,14 @@ class simulation():
             distances_along = cumlen[chosen_seg] + chosen_t * seg_len[chosen_seg]
             return distances_along
 
-        dists = _project_points_onto_line_numpy(xs_line, ys_line, px, py)
+        # prefer numba helper when available
+        if _HAS_NUMBA:
+            try:
+                dists = _project_points_onto_line_numba(xs_line, ys_line, px, py)
+            except Exception:
+                dists = _project_points_onto_line_numpy(xs_line, ys_line, px, py)
+        else:
+            dists = _project_points_onto_line_numpy(xs_line, ys_line, px, py)
         return dists.reshape(self.X.shape)
 
     def boundary_surface(self):
@@ -5700,7 +5854,13 @@ class simulation():
                                                self.simulation.sog * np.sin(self.simulation.heading)))
         
             # Calculate swim speeds for each fish (relative to water)
-            swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=-1)
+            if _HAS_NUMBA:
+                try:
+                    swim_speeds = _swim_speeds_numba(self.simulation.x_vel, self.simulation.y_vel, self.simulation.sog, self.simulation.heading)
+                except Exception:
+                    swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=-1)
+            else:
+                swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=-1)
             # Shift the circular buffer and insert the new swim speeds
             self.simulation.swim_speeds[:, :-1] = self.simulation.swim_speeds[:, 1:]
             self.simulation.swim_speeds[:, -1] = swim_speeds
@@ -5856,29 +6016,34 @@ class simulation():
             
             # get fish that are swimming at a sustained level
             mask_sustained = mask_dict['sustained']
-            
-            # Update battery levels for sustained swimming mode
             if mask_sustained.ndim == 2:
                 mask_sustained = mask_sustained.squeeze()
-            if self.simulation.num_agents > 1:
-                self.simulation.battery[mask_sustained] += per_rec[mask_sustained]
+            # ensure shapes
+            battery = self.simulation.battery
+            per_rec_arr = per_rec
+            ttf_arr = ttf
+            # use numba kernel when available
+            if _HAS_NUMBA:
+                try:
+                    new_batt = _calc_battery_numba(battery, per_rec_arr, ttf_arr, mask_sustained, self.dt)
+                    self.simulation.battery = new_batt
+                except Exception:
+                    # fallback to original numpy behavior
+                    battery[mask_sustained] += per_rec_arr[mask_sustained]
+                    mask_non_sustained = ~mask_sustained
+                    ttf0 = ttf_arr[mask_non_sustained] * battery[mask_non_sustained]
+                    ttf1 = ttf0 - self.dt
+                    safe = ttf0 != 0
+                    battery[mask_non_sustained] *= np.where(safe, np.maximum(0.0, ttf1 / ttf0), 0.0)
+                    self.simulation.battery = np.clip(battery, 0, 1)
             else:
-                self.simulation.battery[mask_sustained.flatten()] += per_rec[mask_sustained.flatten()]
-        
-            # Update battery levels for non-sustained swimming modes
-            mask_non_sustained = ~mask_sustained
-            if self.simulation.num_agents > 1:
-                 ttf0 = ttf[mask_non_sustained] * self.simulation.battery[mask_non_sustained]
-            else:
-                ttf0 = ttf[mask_non_sustained.flatten()] * self.simulation.battery[mask_non_sustained.flatten()]
-    
-            ttf1 = ttf0 - self.dt
-            if self.simulation.num_agents > 1:
-                self.simulation.battery[mask_non_sustained] *= np.nan_to_num(ttf1 / ttf0)
-            else:
-                self.simulation.battery[mask_non_sustained.flatten()] *= ttf1.flatten() / ttf0.flatten()            
-            
-            self.simulation.battery = np.clip(self.simulation.battery, 0, 1)
+                battery[mask_sustained] += per_rec_arr[mask_sustained]
+                mask_non_sustained = ~mask_sustained
+                ttf0 = ttf_arr[mask_non_sustained] * battery[mask_non_sustained]
+                ttf1 = ttf0 - self.dt
+                safe = ttf0 != 0
+                battery[mask_non_sustained] *= np.where(safe, np.maximum(0.0, ttf1 / ttf0), 0.0)
+                self.simulation.battery = np.clip(battery, 0, 1)
             
         def set_swim_behavior(self, battery_state_dict):
             '''
