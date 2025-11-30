@@ -600,7 +600,7 @@ def geo_to_pixel(X, Y, transform):
     """
     # Try to use vectorized affine math if transform exposes coefficients
     try:
-        inv = ~transform
+        inv = get_inv_transform(getattr(transform, '__self__', None) or globals().get('sim', None), transform)
         # inv is an Affine; compute cols, rows via inv.c + inv.a*(x+0.5) + inv.b*(y+0.5)
         xs = np.asarray(X, dtype=float)
         ys = np.asarray(Y, dtype=float)
@@ -629,6 +629,30 @@ def geo_to_pixel_from_inv(inv, X, Y):
     cols = inv.c + inv.a * (xs + 0.0) + inv.b * (ys + 0.0)
     rows = inv.f + inv.d * (xs + 0.0) + inv.e * (ys + 0.0)
     return np.rint(rows).astype(int), np.rint(cols).astype(int)
+
+
+def get_inv_transform(sim, transform):
+    """Return cached inverse affine for `transform` on `sim`.
+
+    Caches by id(transform) to avoid repeated Affine inversion costs.
+    """
+    try:
+        key = id(transform)
+    except Exception:
+        return ~transform
+    cache = getattr(sim, '_inv_transform_cache', None)
+    if cache is None:
+        cache = {}
+        sim._inv_transform_cache = cache
+    inv = cache.get(key)
+    if inv is None:
+        try:
+            inv = ~transform
+        except Exception:
+            # best-effort: return direct invertible object
+            return ~transform
+        cache[key] = inv
+    return inv
 
 
 def pixel_to_geo(transform, rows, cols):
@@ -1647,6 +1671,9 @@ class simulation():
             except Exception:
                 self._log_writer = None
                 self._memmap_writer = None
+
+        # cache for inverse Affine transforms to avoid repeated `~transform` calls
+        self._inv_transform_cache = {}
         # HDF5 buffering parameters
         self.flush_interval = 50  # timesteps between HDF5 flushes (configurable)
         self._hdf5_buffers = {}
@@ -2634,8 +2661,8 @@ class simulation():
 
         # compute pixel indices once using the first transform (assumes same grid)
         try:
-            # prefer using a precomputed inverse affine if available to avoid per-point ops
-            inv = ~transforms[0]
+            # prefer using a cached inverse affine to avoid repeated inversion
+            inv = get_inv_transform(self, transforms[0])
             rows, cols = geo_to_pixel_from_inv(inv, self.X, self.Y)
         except Exception:
             rows, cols = geo_to_pixel(self.X, self.Y, transforms[0])
@@ -3139,7 +3166,7 @@ class simulation():
                 cache[key] = (np.full_like(X, -1, dtype=int), np.full_like(Y, -1, dtype=int))
             else:
                 try:
-                    inv = ~transform
+                    inv = get_inv_transform(self, transform)
                     rows, cols = geo_to_pixel_from_inv(inv, X, Y)
                 except Exception:
                     rows, cols = geo_to_pixel(X, Y, transform)
