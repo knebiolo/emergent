@@ -18,9 +18,14 @@ jobs:
       - name: Install requirements
         run: |
           python -m pip install -r requirements.txt
-      - name: Warmup numba cache
+      - name: Warmup numba cache (Linux)
+        if: runner.os == 'Linux'
         run: |
           python tools/numba_warmup.py
+      - name: Warmup numba cache (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pwsh -Command "scripts\warmup.ps1"
       - name: Run short benchmark
         run: |
           NUMBA_NUM_THREADS=4 NUMBA_DEFAULT_NUM_THREADS=4 python tools/profile_timestep_cprofile.py --agents 200 --timesteps 5 --out tools/ci_profile.pstats

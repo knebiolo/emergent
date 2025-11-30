@@ -1,6 +1,6 @@
 # Final Performance Report
 
-Benchmark: 2000 agents × 50 timesteps
+Benchmark: 2000 agents Ã— 50 timesteps
 
 ## premerge
 - pstats file: `tools/profile_2000_premerge.pstats`
