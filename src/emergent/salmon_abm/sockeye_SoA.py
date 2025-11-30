@@ -1287,6 +1287,135 @@ def pixel_to_geo(transform, rows, cols):
 
     return xs, ys
 
+# --- Safety wrappers to ensure stable Numba specializations ---
+def _wrap_project_points_onto_line_numba(xs_line, ys_line, px, py):
+    xs = np.ascontiguousarray(xs_line, dtype=np.float64)
+    ys = np.ascontiguousarray(ys_line, dtype=np.float64)
+    pxx = np.ascontiguousarray(px, dtype=np.float64)
+    pyy = np.ascontiguousarray(py, dtype=np.float64)
+    return _project_points_onto_line_numba(xs, ys, pxx, pyy)
+
+def _wrap_drag_fun_numba(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, out=None):
+    fx_a = np.ascontiguousarray(fx, dtype=np.float64)
+    fy_a = np.ascontiguousarray(fy, dtype=np.float64)
+    wx_a = np.ascontiguousarray(wx, dtype=np.float64)
+    wy_a = np.ascontiguousarray(wy, dtype=np.float64)
+    mask_a = np.ascontiguousarray(np.asarray(mask, dtype=np.bool_), dtype=np.bool_)
+    sa = np.ascontiguousarray(surface_areas, dtype=np.float64)
+    dc = np.ascontiguousarray(drag_coeffs, dtype=np.float64)
+    wd = np.ascontiguousarray(wave_drag, dtype=np.float64)
+    if out is None:
+        out = np.zeros((fx_a.size, 2), dtype=np.float64)
+    else:
+        out = np.ascontiguousarray(out, dtype=np.float64)
+    return _drag_fun_numba(fx_a, fy_a, wx_a, wy_a, mask_a, float(density), sa, dc, wd, np.ascontiguousarray(np.asarray(swim_behav, dtype=np.int64)), out)
+
+def _wrap_merged_battery_numba(battery, per_rec, ttf, mask_sustained, dt):
+    batt = np.ascontiguousarray(battery, dtype=np.float64)
+    perr = np.ascontiguousarray(per_rec, dtype=np.float64)
+    ttf_a = np.ascontiguousarray(ttf, dtype=np.float64)
+    mask_a = np.ascontiguousarray(np.asarray(mask_sustained, dtype=np.bool_), dtype=np.bool_)
+    return _merged_battery_numba(batt, perr, ttf_a, mask_a, float(dt))
+
+# Optional merged drag + battery kernel (single-pass). Not wired automatically; available for experiments.
+if _HAS_NUMBA:
+    @njit(parallel=True, cache=True)
+    def _drag_and_battery_numba(sog, heading, x_vel, y_vel, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, battery, per_rec, ttf, dt):
+        n = sog.size
+        drags = np.zeros((n, 2), dtype=np.float64)
+        for i in prange(n):
+            if not mask[i]:
+                drags[i, 0] = 0.0
+                drags[i, 1] = 0.0
+            else:
+                fx = sog[i] * math.cos(heading[i])
+                fy = sog[i] * math.sin(heading[i])
+                relx = fx - x_vel[i]
+                rely = fy - y_vel[i]
+                rel = math.hypot(relx, rely)
+                if rel < 1e-12:
+                    rel = 1e-12
+                unitx = relx / rel
+                unity = rely / rel
+                relsq = rel * rel
+                pref = -0.5 * (density * 1000.0) * (surface_areas[i] / (100.0 ** 2)) * drag_coeffs[i] * relsq * wave_drag[i]
+                dx = pref * unitx
+                dy = pref * unity
+                # clip for holding behavior
+                if swim_behav[i] == 3:
+                    mag = math.hypot(dx, dy)
+                    if mag > 5.0:
+                        scale = 5.0 / mag
+                        dx *= scale
+                        dy *= scale
+                drags[i, 0] = dx
+                drags[i, 1] = dy
+            # battery update (single-pass, same logic as merged_battery)
+            b = battery[i]
+            if per_rec is not None and per_rec.size == n and per_rec[i] is not None:
+                # sustained mask is approximated by per_rec>0 here; caller should pass mask if precise
+                if per_rec[i] > 0.0:
+                    b = b + per_rec[i]
+                else:
+                    t0 = ttf[i] * b
+                    if t0 <= 0.0:
+                        b = 0.0
+                    else:
+                        t1 = t0 - dt
+                        ratio = t1 / t0
+                        if ratio < 0.0:
+                            ratio = 0.0
+                        b = b * ratio
+            # clip
+            if b < 0.0:
+                b = 0.0
+            elif b > 1.0:
+                b = 1.0
+            battery[i] = b
+        return drags, battery
+else:
+    def _drag_and_battery_numba(sog, heading, x_vel, y_vel, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, battery, per_rec, ttf, dt):
+        # fallback numpy implementation
+        fx = sog * np.cos(heading)
+        fy = sog * np.sin(heading)
+        relx = fx - x_vel
+        rely = fy - y_vel
+        rel = np.sqrt(relx * relx + rely * rely)
+        rel = np.where(rel == 0, 1e-12, rel)
+        unitx = relx / rel
+        unity = rely / rel
+        relsq = rel * rel
+        pref = -0.5 * (density * 1000.0) * (surface_areas / (100.0 ** 2)) * drag_coeffs * relsq * wave_drag
+        dx = pref * unitx
+        dy = pref * unity
+        drags = np.stack((dx, dy), axis=1)
+        mask_arr = np.asarray(mask, dtype=np.bool_)
+        drag_mags = np.sqrt(drags[:,0]**2 + drags[:,1]**2)
+        mask_excess = (swim_behav == 3) & (drag_mags > 5.0)
+        if np.any(mask_excess):
+            scales = 5.0 / drag_mags[mask_excess]
+            drags[mask_excess,0] *= scales
+            drags[mask_excess,1] *= scales
+        drags[~mask_arr] = 0.0
+        # battery update
+        batt = battery.copy()
+        for i in range(batt.size):
+            if per_rec is not None and per_rec.size == batt.size:
+                if per_rec[i] > 0.0:
+                    batt[i] = batt[i] + per_rec[i]
+                else:
+                    t0 = ttf[i] * batt[i]
+                    if t0 <= 0.0:
+                        batt[i] = 0.0
+                    else:
+                        t1 = t0 - dt
+                        ratio = t1 / t0
+                        if ratio < 0.0:
+                            ratio = 0.0
+                        batt[i] = batt[i] * ratio
+        np.clip(batt, 0.0, 1.0, out=batt)
+        return drags, batt
+
 
 def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist'):
     """
@@ -3485,7 +3614,7 @@ class simulation():
         # prefer numba helper when available
         if _HAS_NUMBA:
             try:
-                dists = _project_points_onto_line_numba(xs_line, ys_line, px, py)
+                dists = _wrap_project_points_onto_line_numba(xs_line, ys_line, px, py)
             except Exception:
                 dists = _project_points_onto_line_numpy(xs_line, ys_line, px, py)
         else:
@@ -5090,9 +5219,9 @@ class simulation():
             out = np.zeros((n,2), dtype=np.float64)
             try:
                 if _HAS_NUMBA:
-                    out = _drag_fun_numba(fx, fy, wx, wy, mask, float(density), surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav, out)
+                    out = _wrap_drag_fun_numba(fx, fy, wx, wy, mask, float(density), surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav, out)
                 else:
-                    out = _drag_fun_numba(fx, fy, wx, wy, mask, float(density), surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav, out)
+                    out = _wrap_drag_fun_numba(fx, fy, wx, wy, mask, float(density), surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav, out)
             except Exception:
                 # fallback
                 out = compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav)
@@ -6919,7 +7048,7 @@ class simulation():
                     per_rec_a = np.ascontiguousarray(per_rec_arr, dtype=np.float64)
                     ttf_a = np.ascontiguousarray(ttf_arr, dtype=np.float64)
                     mask_sust = np.asarray(mask_sustained, dtype=np.bool_)
-                    new_batt = _merged_battery_numba(batt, per_rec_a, ttf_a, mask_sust, float(self.dt))
+                    new_batt = _wrap_merged_battery_numba(batt, per_rec_a, ttf_a, mask_sust, float(self.dt))
                     self.simulation.battery = new_batt
                 except Exception:
                     # fallback to original numpy behavior
@@ -7066,8 +7195,33 @@ class simulation():
             # assess recovery
             per_rec = self.recovery()
 
-            # check battery (uses earlier numba battery helper via calc_battery)
-            self.calc_battery(per_rec, ttf,  mask_dict)
+            # check battery: try single-pass merged drag+battery kernel for fewer Python<->Numba boundaries
+            try:
+                # prepare contiguous arrays
+                sog_a = np.ascontiguousarray(self.simulation.sog, dtype=np.float64)
+                heading_a = np.ascontiguousarray(self.simulation.heading, dtype=np.float64)
+                xv_a = np.ascontiguousarray(self.simulation.x_vel, dtype=np.float64)
+                yv_a = np.ascontiguousarray(self.simulation.y_vel, dtype=np.float64)
+                mask_a = np.ascontiguousarray(self.simulation.alive_mask if hasattr(self.simulation, 'alive_mask') else np.ones(self.simulation.num_agents, dtype=np.bool_), dtype=np.bool_)
+                surf_a = np.ascontiguousarray(self.simulation.calc_surface_area(self.simulation.length), dtype=np.float64)
+                dragc_a = np.ascontiguousarray(self.simulation.drag_coeff(np.linalg.norm(np.stack((self.simulation.x_vel, self.simulation.y_vel), axis=-1), axis=-1) * (self.simulation.length/1000.) / np.maximum(self.kin_visc(self.simulation.water_temp), 1e-12)), dtype=np.float64)
+                wave_a = np.ascontiguousarray(self.simulation.wave_drag, dtype=np.float64)
+                batt_a = np.ascontiguousarray(self.simulation.battery, dtype=np.float64)
+                per_rec_a = np.ascontiguousarray(per_rec, dtype=np.float64)
+                ttf_a = np.ascontiguousarray(ttf, dtype=np.float64)
+                swim_behav_a = np.ascontiguousarray(self.simulation.swim_behav, dtype=np.int64)
+                # call single-pass kernel: returns drags, updated battery
+                new_drags, new_batt = _drag_and_battery_numba(sog_a, heading_a, xv_a, yv_a, mask_a, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf_a, dragc_a, wave_a, swim_behav_a, batt_a, per_rec_a, ttf_a, float(self.dt))
+                # write back
+                try:
+                    self.simulation.drag = new_drags
+                    self.simulation.battery = new_batt
+                except Exception:
+                    self.simulation.drag = np.ascontiguousarray(new_drags)
+                    self.simulation.battery = np.ascontiguousarray(new_batt)
+            except Exception:
+                # fallback: previous behavior
+                self.calc_battery(per_rec, ttf,  mask_dict)
             
             # set battery masks
             battery_dict = dict()
