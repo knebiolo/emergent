@@ -1567,7 +1567,9 @@ class simulation():
                  hecras_fields=None,
                  hecras_k=8,
                  use_hecras=False,
-                 hecras_write_rasters=False):
+                 hecras_write_rasters=False,
+                 defer_hdf=False,
+                 defer_log_dir=None):
         """
          Initialize the simulation environment.
          
@@ -1605,6 +1607,17 @@ class simulation():
          - Agent properties that do not change with time are written to the HDF5 file.
         """        
         self.arr = get_arr(use_gpu)
+        # deferred HDF logging — when True, per-timestep agent data is written
+        # to fast binary .npz logs in `defer_log_dir` via LogWriter and converted later.
+        self.defer_hdf = defer_hdf
+        self.defer_log_dir = defer_log_dir
+        if self.defer_hdf:
+            try:
+                from emergent.io.log_writer import LogWriter
+                log_dir = self.defer_log_dir or os.path.join(self.model_dir, 'logs', 'deferred')
+                self._log_writer = LogWriter(log_dir)
+            except Exception:
+                self._log_writer = None
         # HDF5 buffering parameters
         self.flush_interval = 50  # timesteps between HDF5 flushes (configurable)
         self._hdf5_buffers = {}
@@ -1990,14 +2003,26 @@ class simulation():
                 write_len = self._buffer_pos
                 t_end = timestep
                 t_start = t_end - write_len + 1
-                for k, buf in self._hdf5_buffers.items():
-                    ds_name = f'agent_data/{k}'
-                    if ds_name in self.hdf5:
+                # If deferring HDF writes, write buffered agent arrays to the fast LogWriter
+                if getattr(self, 'defer_hdf', False) and getattr(self, '_log_writer', None) is not None:
+                    # write each buffered timestep separately for compatibility with converter
+                    for offset in range(write_len):
+                        t_idx = t_start + offset
+                        # construct a dict of arrays for this timestep
+                        arrays = {k: self._hdf5_buffers[k][:, offset].astype('f4') for k in self._hdf5_buffers.keys()}
                         try:
-                            self.hdf5[ds_name][:, t_start:t_end+1] = buf[:, :write_len]
+                            self._log_writer.append(t_idx, arrays)
                         except Exception:
-                            for offset in range(write_len):
-                                self.hdf5[ds_name][:, t_start + offset] = buf[:, offset]
+                            pass
+                else:
+                    for k, buf in self._hdf5_buffers.items():
+                        ds_name = f'agent_data/{k}'
+                        if ds_name in self.hdf5:
+                            try:
+                                self.hdf5[ds_name][:, t_start:t_end+1] = buf[:, :write_len]
+                            except Exception:
+                                for offset in range(write_len):
+                                    self.hdf5[ds_name][:, t_start + offset] = buf[:, offset]
                 # reset buffer
                 for k in list(self._hdf5_buffers.keys()):
                     self._hdf5_buffers[k][:] = 0

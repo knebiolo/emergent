@@ -89,7 +89,8 @@ def build_sim(num_agents, use_hecras=True, hecras_write_rasters=False):
     sim = simulation(model_dir=str(model_dir), model_name='prof_test', crs='EPSG:4326', basin='Nushagak River',
                      water_temp=10.0, start_polygon=start_polygon, env_files=env_files,
                      longitudinal_profile=longitudinal_profile, fish_length=500, num_timesteps=100, num_agents=num_agents, use_gpu=False,
-                     hecras_plan_path=None, hecras_fields=None, hecras_k=8, use_hecras=use_hecras, hecras_write_rasters=hecras_write_rasters)
+                     hecras_plan_path=None, hecras_fields=None, hecras_k=8, use_hecras=use_hecras, hecras_write_rasters=hecras_write_rasters,
+                     defer_hdf=True, defer_log_dir=os.path.join(repo_root, 'tools', 'profile_log'))
     # Ensure mental_map_transform exists to satisfy geo_to_pixel
     try:
         import rasterio
@@ -104,14 +105,22 @@ def build_sim(num_agents, use_hecras=True, hecras_write_rasters=False):
     # Provide minimal raster transform placeholders expected by environment sampling
     class _AffStub:
         def __init__(self):
-            pass
+            # coefficients roughly matching an identity transform
+            self.a = 1.0
+            self.b = 0.0
+            self.c = 0.0
+            self.d = 0.0
+            self.e = 1.0
+            self.f = 0.0
         def __invert__(self):
             return self
         def __mul__(self, other):
-            # emulate Affine * (x, y) -> (col, row) by simple floor conversion
+            # emulate Affine * (cols, rows) -> (x, y)
             try:
-                x, y = other
-                return (int(x), int(y))
+                cols, rows = other
+                x = self.c + self.a * (cols + 0.5) + self.b * (rows + 0.5)
+                y = self.f + self.d * (cols + 0.5) + self.e * (rows + 0.5)
+                return (x, y)
             except Exception:
                 return other
     for name in ('vel_dir_rast_transform','vel_mag_rast_transform','depth_rast_transform','x_coords_transform','y_coords_transform'):
@@ -134,25 +143,46 @@ def build_sim(num_agents, use_hecras=True, hecras_write_rasters=False):
         with h5py.File(temp_h5, 'w') as f:
             env = f.create_group('environment')
             shape = (sim.height, sim.width)
-            env.create_dataset('vel_mag', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
-            env.create_dataset('vel_dir', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
-            env.create_dataset('vel_x', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
-            env.create_dataset('vel_y', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
-            env.create_dataset('depth', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
-            env.create_dataset('wetted', shape, dtype='f4', data=np.ones(shape, dtype='f4'))
-            env.create_dataset('distance_to', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
+            data_zero = np.zeros(shape, dtype='f4')
+            data_one = np.ones(shape, dtype='f4')
+            # create datasets under /environment
+            env.create_dataset('vel_mag', shape, dtype='f4', data=data_zero)
+            env.create_dataset('vel_dir', shape, dtype='f4', data=data_zero)
+            env.create_dataset('vel_x', shape, dtype='f4', data=data_zero)
+            env.create_dataset('vel_y', shape, dtype='f4', data=data_zero)
+            env.create_dataset('depth', shape, dtype='f4', data=data_zero)
+            env.create_dataset('wetted', shape, dtype='f4', data=data_one)
+            env.create_dataset('distance_to', shape, dtype='f4', data=data_zero)
             # Also provide x_coords and y_coords arrays matching raster centers
             xs = np.tile(np.arange(sim.width, dtype='f4'), (sim.height,1))
             ys = np.tile(np.arange(sim.height, dtype='f4')[:,None], (1,sim.width))
             env.create_dataset('x_coords', shape, dtype='f4', data=xs)
             env.create_dataset('y_coords', shape, dtype='f4', data=ys)
+            # Duplicate top-level datasets for code paths expecting root-level names
+            for name in ('vel_mag','vel_dir','vel_x','vel_y','depth','wetted','distance_to','x_coords','y_coords'):
+                f.create_dataset(name, data=env[name])
+            # provide an empty refugia group with dataset '0' to satisfy lookups
+            refug = f.create_group('refugia')
+            refug.create_dataset('0', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
+            # minimal memory and migrate groups
+            mem = f.create_group('memory')
+            mem.create_dataset('0', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
+            mig = f.create_group('migrate')
+            mig.create_dataset('0', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
     except Exception:
         # best-effort; if file creation fails, continue without it
         temp_h5 = None
 
     # attach the hdf5 file to the simulation (open for read)
     if temp_h5 is not None and os.path.exists(temp_h5):
-        sim.hdf5 = h5py.File(temp_h5, 'r')
+        fobj = h5py.File(temp_h5, 'r')
+        # some code paths access sim.simulation.hdf5 - ensure both references exist
+        sim.hdf5 = fobj
+        try:
+            sim.simulation = type('S', (), {})()
+            sim.simulation.hdf5 = fobj
+        except Exception:
+            pass
 
     return sim
 
@@ -170,6 +200,12 @@ def profile_run(num_agents, timesteps, out_stats='profile.pstats'):
     pid = PID_controller(num_agents, k_p=1.0, k_i=0.0, k_d=0.0)
     try:
         pid.interp_PID()
+    except Exception:
+        pass
+    # simplify behavior arbitration to avoid needing full environment cues
+    try:
+        if hasattr(sim, 'behavior') and sim.behavior is not None:
+            sim.behavior.arbitrate = (lambda self_obj, tt: getattr(sim, 'heading', np.zeros(getattr(sim, 'num_agents', 1))))
     except Exception:
         pass
     for t in range(timesteps):
