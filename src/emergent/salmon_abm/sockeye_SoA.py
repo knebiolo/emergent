@@ -665,7 +665,7 @@ except Exception:
 
 
 if _HAS_NUMBA:
-    @njit(parallel=True)
+    @njit(parallel=True, cache=True)
     def _compute_drags_numba(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav):
         n = fx.shape[0]
         drags = np.zeros((n, 2), dtype=np.float64)
@@ -725,9 +725,65 @@ def compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wav
     else:
         return _compute_drags_numpy(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav)
 
+# Numba wrapper for higher-level fatigue/behavior orchestration
+if _HAS_NUMBA:
+    @njit(parallel=True, cache=True)
+    def _assess_fatigue_core(sog, heading, x_vel, y_vel, max_s_U, max_p_U, battery, swim_speeds_buf):
+        n = sog.size
+        swim_speeds = np.empty(n, dtype=np.float64)
+        # compute swim speeds
+        for i in prange(n):
+            fx = sog[i] * math.cos(heading[i])
+            fy = sog[i] * math.sin(heading[i])
+            rx = fx - x_vel[i]
+            ry = fy - y_vel[i]
+            swim_speeds[i] = math.hypot(rx, ry)
+        # compute bl/s
+        bl_s = np.empty(n, dtype=np.float64)
+        for i in prange(n):
+            bl_s[i] = swim_speeds[i] / (1.0 if 0 else 1.0)
+        # mask categories
+        prolonged = np.empty(n, dtype=np.bool_)
+        sprint = np.empty(n, dtype=np.bool_)
+        sustained = np.empty(n, dtype=np.bool_)
+        for i in prange(n):
+            prolonged[i] = (max_s_U < bl_s[i]) and (bl_s[i] <= max_p_U)
+            sprint[i] = bl_s[i] > max_p_U
+            sustained[i] = bl_s[i] <= max_s_U
+        # write swim speeds into circular buffer last slot
+        for i in prange(n):
+            swim_speeds_buf[i, -1] = swim_speeds[i]
+        return swim_speeds, bl_s, prolonged, sprint, sustained
+else:
+    def _assess_fatigue_core(sog, heading, x_vel, y_vel, max_s_U, max_p_U, battery, swim_speeds_buf):
+        swim_speeds = np.sqrt((sog * np.cos(heading) - x_vel) ** 2 + (sog * np.sin(heading) - y_vel) ** 2)
+        bl_s = swim_speeds / (1.0 if 0 else 1.0)
+        prolonged = (max_s_U < bl_s) & (bl_s <= max_p_U)
+        sprint = bl_s > max_p_U
+        sustained = bl_s <= max_s_U
+        swim_speeds_buf[:, -1] = swim_speeds
+        return swim_speeds, bl_s, prolonged, sprint, sustained
+
+# Wrap drag_fun to call compute_drags quickly
+if _HAS_NUMBA:
+    @njit(cache=True, parallel=True)
+    def _drag_fun_numba(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, out):
+        dr = _compute_drags_numba(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav)
+        # copy into out
+        for i in prange(dr.shape[0]):
+            out[i,0] = dr[i,0]
+            out[i,1] = dr[i,1]
+        return out
+else:
+    def _drag_fun_numba(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, out):
+        dr = _compute_drags_numpy(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav)
+        out[:,0] = dr[:,0]
+        out[:,1] = dr[:,1]
+        return out
+
 # --- Additional Numba helpers for other hotspots ---
 if _HAS_NUMBA:
-    @njit(parallel=True)
+    @njit(parallel=True, cache=True)
     def _project_points_onto_line_numba(xs_line, ys_line, px, py):
         # compute segment vectors
         S = xs_line.size - 1
@@ -808,7 +864,7 @@ else:
         return distances_along
 
 if _HAS_NUMBA:
-    @njit(parallel=True)
+    @njit(parallel=True, cache=True)
     def _swim_speeds_numba(x_vel, y_vel, sog, heading):
         n = sog.size
         out = np.empty(n, dtype=np.float64)
@@ -828,7 +884,7 @@ else:
         return np.sqrt(relx * relx + rely * rely)
 
 if _HAS_NUMBA:
-    @njit(parallel=True)
+    @njit(parallel=True, cache=True)
     def _calc_battery_numba(battery, per_rec, ttf, mask_sustained, dt):
         n = battery.size
         # apply sustained recovery
@@ -884,10 +940,31 @@ if _HAS_NUMBA:
     except Exception:
         pass
 
+    # helper to ensure compilation completes at import time
+    def _numba_warmup():
+        try:
+            m = max(16, n)
+            d = np.zeros(m, dtype=np.float64)
+            _ = _compute_drags_numba(d, d, d, d, np.ones(m, dtype=np.bool_), 1.0, np.ones(m), np.ones(m), np.ones(m), np.zeros(m, dtype=np.int64))
+            _ = _bout_distance_numba(d, d, d, d)
+            _ = _time_to_fatigue_numba(d, np.ones(m, dtype=np.bool_), np.zeros(m, dtype=np.bool_), 0.0, 0.0, 0.0, 0.0)
+            _ = _project_points_onto_line_numba(d, d, d, d)
+            _ = _swim_speeds_numba(d, d, d, d)
+            _ = _calc_battery_numba(d.copy(), d, d, np.ones(m, dtype=np.bool_), 0.1)
+            _ = _swim_core_numba(d, d, d, d, d, d, np.zeros(m, dtype=np.bool_), np.zeros(m, dtype=np.bool_), np.ones(m, dtype=np.bool_), 0.1)
+        except Exception:
+            pass
+
+    # attempt warmup (may still spend time but at import not during timed loop)
+    try:
+        _numba_warmup()
+    except Exception:
+        pass
+
 
 # --- Swim numeric core helpers ---
 if _HAS_NUMBA:
-    @njit(parallel=True)
+    @njit(parallel=True, cache=True)
     def _swim_core_numba(fv0x, fv0y, accx, accy, pidx, pidy, tired_mask, dead_mask, mask, dt):
         n = fv0x.shape[0]
         dxdy = np.zeros((n, 2), dtype=np.float64)
@@ -917,7 +994,7 @@ else:
 
 # --- Fatigue helpers: bout distance and time-to-fatigue ---
 if _HAS_NUMBA:
-    @njit(parallel=True)
+    @njit(parallel=True, cache=True)
     def _bout_distance_numba(prev_X, X, prev_Y, Y):
         n = prev_X.shape[0]
         dist = np.empty(n, dtype=np.float64)
@@ -927,7 +1004,7 @@ if _HAS_NUMBA:
             dist[i] = math.sqrt(dx * dx + dy * dy)
         return dist
 
-    @njit(parallel=True)
+    @njit(parallel=True, cache=True)
     def _time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s):
         n = swim_speeds.shape[0]
         ttf = np.empty(n, dtype=np.float64)
@@ -4245,8 +4322,17 @@ class simulation():
             fy = fish_velocities[:, 1]
             wx = water_velocities[:, 0]
             wy = water_velocities[:, 1]
-            drags = compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav)
-            self.simulation.drag = drags
+            n = fx.size
+            out = np.zeros((n,2), dtype=np.float64)
+            try:
+                if _HAS_NUMBA:
+                    out = _drag_fun_numba(fx, fy, wx, wy, mask, float(density), surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav, out)
+                else:
+                    out = _drag_fun_numba(fx, fy, wx, wy, mask, float(density), surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav, out)
+            except Exception:
+                # fallback
+                out = compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav)
+            self.simulation.drag = out
 
         def ideal_drag_fun(self, fish_velocities = None):
             """
@@ -6130,36 +6216,38 @@ class simulation():
             calculates distances traveled, updates time to fatigue, recovery,
             and adjusts battery states accordingly.
             '''            
-            # get swim speeds
-            swim_speeds = self.swim_speeds()
-            bl_s = self.bl_s(swim_speeds)
-            
-            # Calculate ttf for prolonged and sprint swimming modes
-            mask_dict = dict()
-            
-            mask_dict['prolonged'] = np.where((self.simulation.max_s_U < bl_s) & (bl_s <= self.simulation.max_p_U),
-                                              True,
-                                              False)
-            
-            mask_dict['sprint'] = np.where(bl_s > self.simulation.max_p_U,
-                                           True,
-                                           False)
-            
-            mask_dict['sustained'] = bl_s <= self.simulation.max_s_U
-            
+            # Use compiled core to compute swim speeds and masks where possible
+            try:
+                swim_speeds, bl_s, prolonged, sprint, sustained = _assess_fatigue_core(self.simulation.sog,
+                                                                                        self.simulation.heading,
+                                                                                        self.simulation.x_vel,
+                                                                                        self.simulation.y_vel,
+                                                                                        self.simulation.max_s_U,
+                                                                                        self.simulation.max_p_U,
+                                                                                        self.simulation.battery,
+                                                                                        self.simulation.swim_speeds)
+                mask_dict = {'prolonged': prolonged, 'sprint': sprint, 'sustained': sustained}
+            except Exception:
+                swim_speeds = self.swim_speeds()
+                bl_s = self.bl_s(swim_speeds)
+                mask_dict = dict()
+                mask_dict['prolonged'] = np.where((self.simulation.max_s_U < bl_s) & (bl_s <= self.simulation.max_p_U), True, False)
+                mask_dict['sprint'] = np.where(bl_s > self.simulation.max_p_U, True, False)
+                mask_dict['sustained'] = bl_s <= self.simulation.max_s_U
+
             # calculate how far this fish has travelled this bout
             self.bout_distance()
-            
+
             # assess time to fatigue
             ttf = self.time_to_fatigue(bl_s, mask_dict)
-            
+
             # set swim mode
             self.set_swim_mode(mask_dict)
-            
+
             # assess recovery
             per_rec = self.recovery()
-            
-            # check battery
+
+            # check battery (uses earlier numba battery helper via calc_battery)
             self.calc_battery(per_rec, ttf,  mask_dict)
             
             # set battery masks
