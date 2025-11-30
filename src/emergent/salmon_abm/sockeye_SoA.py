@@ -304,6 +304,204 @@ def ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=None, targ
     simulation.hdf_height = height
     simulation.hdf_width = width
 
+
+def map_hecras_to_env_rasters(simulation, plan_path, field_names=None, k=8):
+    """Map HECRAS nodal fields onto the full environment raster grid and write
+    them into `simulation.hdf5['environment']` datasets. This is called each
+    timestep in HECRAS mode so legacy raster readers see a time-varying grid.
+
+    - field_names: list of HECRAS field names to map; if None, use simulation.hecras_fields
+    - k: IDW neighbors
+    """
+    if not hasattr(simulation, 'hdf5') or getattr(simulation, 'hdf5', None) is None:
+        return False
+    if field_names is None:
+        field_names = getattr(simulation, 'hecras_fields', None) or []
+
+    # ensure x/y coords exist
+    try:
+        ensure_hdf_coords_from_hecras(simulation, plan_path, target_transform=getattr(simulation, 'depth_rast_transform', None))
+    except Exception:
+        pass
+
+    env = simulation.hdf5.require_group('environment')
+
+    # build flattened grid coordinates (cache on simulation)
+    if not hasattr(simulation, '_hecras_grid_xy') or simulation._hecras_grid_xy is None:
+        if 'x_coords' in simulation.hdf5 and 'y_coords' in simulation.hdf5:
+            xarr = np.asarray(simulation.hdf5['x_coords'])
+            yarr = np.asarray(simulation.hdf5['y_coords'])
+            h, w = xarr.shape
+            XX = xarr.flatten()
+            YY = yarr.flatten()
+            simulation._hecras_grid_shape = (h, w)
+            simulation._hecras_grid_xy = np.column_stack((XX, YY))
+        else:
+            # fallback: derive from HECRAS coords directly
+            try:
+                m = load_hecras_plan_cached(simulation, plan_path, field_names=[field_names[0]] if field_names else None)
+                coords = m.coords
+                aff = compute_affine_from_hecras(coords)
+                # create small raster extent based on coords and median spacing
+                cell = abs(aff.a)
+                minx = float(coords[:, 0].min())
+                maxx = float(coords[:, 0].max())
+                miny = float(coords[:, 1].min())
+                maxy = float(coords[:, 1].max())
+                w = max(1, int(np.ceil((maxx - minx) / cell)))
+                h = max(1, int(np.ceil((maxy - miny) / cell)))
+                cols = np.arange(w)
+                rows = np.arange(h)
+                colg, rowg = np.meshgrid(cols, rows)
+                xs, ys = pixel_to_geo(aff, rowg, colg)
+                simulation._hecras_grid_shape = (h, w)
+                simulation._hecras_grid_xy = np.column_stack((xs.flatten(), ys.flatten()))
+            except Exception:
+                return False
+
+    grid_xy = simulation._hecras_grid_xy
+    h, w = simulation._hecras_grid_shape
+
+    # load HECRAS map and map all requested fields for the whole grid
+    try:
+        m = load_hecras_plan_cached(simulation, plan_path, field_names=field_names or [])
+    except Exception:
+        m = None
+
+    # if map couldn't be loaded, bail
+    if m is None:
+        return False
+
+    # perform IDW mapping on grid (may be large)
+    try:
+        mapped = m.map_idw(grid_xy, k=k)
+    except Exception:
+        # per-field fallback: try mapping each field separately
+        mapped = {}
+        for fname in field_names:
+            try:
+                vals = m.map_idw(grid_xy, k=k)[fname]
+            except Exception:
+                vals = np.full((grid_xy.shape[0],), np.nan)
+            mapped[fname] = vals
+
+    # write mapped arrays to environment datasets; use normalized short names
+    for fname, vals in mapped.items():
+        short = fname.lower().replace(' ', '_').replace('/', '_')
+        # choose sensible environment dataset name mapping
+        if 'velocity' in short and ('x' in short or 'velocity_x' in short or 'vel_x' in short):
+            dname = 'vel_x'
+        elif 'velocity' in short and ('y' in short or 'velocity_y' in short or 'vel_y' in short):
+            dname = 'vel_y'
+        elif 'depth' in short or 'hydraulic_depth' in short:
+            dname = 'depth'
+        elif 'water_surface' in short or 'wsel' in short:
+            dname = 'wsel'
+        else:
+            dname = short
+
+        arr = np.asarray(vals).reshape((h, w))
+        if dname not in env:
+            env.create_dataset(dname, data=arr.astype('f4'), shape=(h, w), dtype='f4', chunks=(min(256, h), min(256, w)))
+        else:
+            try:
+                env[dname][:, :] = arr.astype('f4')
+            except Exception:
+                # replace dataset if incompatible
+                del env[dname]
+                env.create_dataset(dname, data=arr.astype('f4'), shape=(h, w), dtype='f4', chunks=(min(256, h), min(256, w)))
+
+    # compute vel_mag and vel_dir if vel_x/vel_y present
+    try:
+        vx = env['vel_x'][:]
+        vy = env['vel_y'][:]
+        mag = np.sqrt(vx * vx + vy * vy)
+        dir_ = np.arctan2(vy, vx)
+        if 'vel_mag' not in env:
+            env.create_dataset('vel_mag', data=mag.astype('f4'), shape=(h, w), dtype='f4', chunks=(min(256, h), min(256, w)))
+        else:
+            env['vel_mag'][:, :] = mag.astype('f4')
+        if 'vel_dir' not in env:
+            env.create_dataset('vel_dir', data=dir_.astype('f4'), shape=(h, w), dtype='f4', chunks=(min(256, h), min(256, w)))
+        else:
+            env['vel_dir'][:, :] = dir_.astype('f4')
+    except Exception:
+        pass
+
+    # flush HDF to make sure subsequent reads see latest values (caller may disable flushes)
+    try:
+        simulation.hdf5.flush()
+    except Exception:
+        pass
+
+    return True
+
+
+def map_hecras_to_env_rasters(simulation, plan_path, raster_names, k=8):
+    """Map HECRAS nodal fields onto the HDF5 `environment` rasters and write them.
+
+    This flattens the HDF `x_coords`/`y_coords` arrays to a list of points, runs
+    IDW mapping via the cached HECRASMap, reshapes back to grid, and writes into
+    `simulation.hdf5['environment'][name]` for each requested raster name.
+    """
+    hdf = getattr(simulation, 'hdf5', None)
+    if hdf is None:
+        return
+    if 'x_coords' not in hdf or 'y_coords' not in hdf:
+        # try to create coords
+        ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=(getattr(simulation,'height',None) or 0, getattr(simulation,'width',None) or 0), target_transform=getattr(simulation,'depth_rast_transform', None))
+    if 'x_coords' not in hdf or 'y_coords' not in hdf:
+        return
+
+    xs = np.asarray(hdf['x_coords'][:], dtype=float)
+    ys = np.asarray(hdf['y_coords'][:], dtype=float)
+    # flatten
+    flat_x = xs.ravel()
+    flat_y = ys.ravel()
+    pts = np.column_stack((flat_x, flat_y))
+
+    # map each requested raster name to a candidate HECRAS field
+    candidate_map = {
+        'depth': 'Cell Hydraulic Depth',
+        'vel_x': 'Cell Velocity - Velocity X',
+        'vel_y': 'Cell Velocity - Velocity Y',
+        'vel_mag': 'Velocity Magnitude',
+        'vel_dir': 'Velocity Direction',
+        'wetted': 'Wetted'
+    }
+
+    # ensure environment group exists
+    env = hdf.require_group('environment')
+
+    # perform IDW mapping for flat grid points
+    for rn in raster_names:
+        field = candidate_map.get(rn, None)
+        if field is None:
+            # create empty dataset if missing
+            if rn not in env:
+                env.create_dataset(rn, shape=xs.shape, dtype='f4', fillvalue=np.nan)
+            continue
+        try:
+            mapped = map_hecras_for_agents(simulation, pts, plan_path, field_names=[field], k=k)
+            mapped = np.asarray(mapped).reshape(xs.shape)
+        except Exception:
+            mapped = np.full(xs.shape, np.nan, dtype=float)
+        # write into environment dataset (create if missing)
+        if rn not in env:
+            env.create_dataset(rn, shape=xs.shape, dtype='f4', fillvalue=np.nan)
+        try:
+            env[rn][:] = mapped.astype('f4')
+        except Exception:
+            try:
+                # fallback slower write
+                env[rn][...] = mapped.astype('f4')
+            except Exception:
+                pass
+    try:
+        hdf.flush()
+    except Exception:
+        pass
+
 # End HECRAS helpers
 
 
@@ -2255,6 +2453,63 @@ class simulation():
         transforms: list of Affine transforms matching raster_names.
         raster_names: list of dataset names in HDF5 'environment' group.
         """
+        # If running in HECRAS mode, map HECRAS values for agents each timestep
+        if getattr(self, 'use_hecras', False) and getattr(self, 'hecras_plan_path', None):
+            # ensure we have x_coords/y_coords in HDF for legacy consumers
+            try:
+                target_shape = None
+                target_transform = getattr(self, 'depth_rast_transform', None)
+                if hasattr(self, 'height') and hasattr(self, 'width'):
+                    target_shape = (self.height, self.width)
+                ensure_hdf_coords_from_hecras(self, self.hecras_plan_path, target_shape=target_shape, target_transform=target_transform)
+            except Exception:
+                pass
+
+            # Update full environment rasters from HECRAS plan each timestep so
+            # legacy raster consumers see changing velocity/depth fields.
+            try:
+                map_hecras_to_env_rasters(self, self.hecras_plan_path, field_names=getattr(self, 'hecras_fields', None), k=getattr(self, 'hecras_k', 8))
+            except Exception:
+                pass
+
+            # Map HECRAS values directly to agents for requested raster names
+            agent_xy = np.column_stack((self.X, self.Y))
+            # also populate environment rasters from HECRAS onto HDF each timestep
+            try:
+                map_hecras_to_env_rasters(self, self.hecras_plan_path, raster_names, k=k)
+            except Exception:
+                pass
+
+            results = {}
+            # candidate HECRAS field name choices per raster_name
+            candidates = {
+                'depth': ['Cell Hydraulic Depth', 'Water Surface', 'Cells Minimum Elevation', 'Cell Hydraulic Depth'],
+                'vel_x': ['Cell Velocity - Velocity X', 'Velocity X', 'Vel X', 'Cell Velocity X'],
+                'vel_y': ['Cell Velocity - Velocity Y', 'Velocity Y', 'Vel Y', 'Cell Velocity Y'],
+                'vel_mag': ['Velocity Magnitude', 'Velocity Speed', 'Cell Velocity Magnitude', 'Cell Velocity - Velocity Magnitude'],
+                'wetted': ['Wetted', 'Wetted Area', 'WettedIndicator'],
+                'distance_to': ['Distance', 'Distance To']
+            }
+            k = getattr(self, 'hecras_k', 8)
+            for name in raster_names:
+                mapped = None
+                if name in candidates:
+                    for cand in candidates[name]:
+                        try:
+                            vals = map_hecras_for_agents(self, agent_xy, self.hecras_plan_path, field_names=[cand], k=k)
+                            # map_hecras_for_agents returns array for single field
+                            if vals is not None:
+                                mapped = np.asarray(vals).flatten()
+                                break
+                        except Exception:
+                            mapped = None
+                            continue
+                # fallback: fill with NaN
+                if mapped is None:
+                    mapped = np.full(self.num_agents, np.nan, dtype=float)
+                results[name] = mapped
+            return results
+
         # If the first transform is None, rasters are unavailable (HECRAS-only mode)
         if transforms is None or transforms[0] is None:
             # return NaN arrays for each requested raster name
