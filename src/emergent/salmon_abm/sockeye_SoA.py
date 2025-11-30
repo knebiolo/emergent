@@ -432,7 +432,7 @@ def map_hecras_to_env_rasters(simulation, plan_path, field_names=None, k=8):
 
     # flush HDF to make sure subsequent reads see latest values (caller may disable flushes)
     try:
-        simulation.hdf5.flush()
+        safe_flush(simulation.hdf5)
     except Exception:
         pass
 
@@ -500,7 +500,21 @@ def map_hecras_to_env_rasters(simulation, plan_path, raster_names, k=8):
             except Exception:
                 pass
     try:
-        hdf.flush()
+        # if hdf is a file object, flush; if it's a group, try to get parent file
+        if hasattr(hdf, 'flush'):
+            hdf.flush()
+        else:
+            # try to get filename and open file to flush
+            fname = getattr(hdf, 'filename', None) or getattr(hdf, 'name', None)
+            if fname:
+                try:
+                    with h5py.File(fname, 'r+') as hw:
+                        try:
+                            hw.flush()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -655,6 +669,43 @@ def get_inv_transform(sim, transform):
             return ~transform
         cache[key] = inv
     return inv
+
+
+def safe_flush(hdf):
+    """Safely flush an h5py file or group.
+
+    Attempts to call `.flush()` on the object if present, otherwise tries
+    to obtain a file object or filename and flush that file. Swallows
+    all exceptions to avoid interrupting callers.
+    """
+    try:
+        if hasattr(hdf, 'flush'):
+            try:
+                hdf.flush()
+                return
+            except Exception:
+                pass
+        # h5py Group has .file attribute referencing the File object
+        fobj = getattr(hdf, 'file', None)
+        if fobj is not None and hasattr(fobj, 'flush'):
+            try:
+                fobj.flush()
+                return
+            except Exception:
+                pass
+        # fallback: try to open by filename and flush
+        fname = getattr(hdf, 'filename', None) or getattr(hdf, 'name', None)
+        if fname:
+            try:
+                with h5py.File(fname, 'r+') as hw:
+                    try:
+                        hw.flush()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 # --- Performance helpers for simulation math ---
@@ -1114,7 +1165,7 @@ def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', w
         # nothing to do
         arr = np.full(mask.shape, np.nan, dtype=np.float32)
         env.create_dataset(out_name, data=arr, dtype='f4')
-        hdf.flush()
+        safe_flush(hdf)
         return arr
 
     idx_flat = -np.ones(h * w, dtype=np.int32)
@@ -1204,7 +1255,7 @@ def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', w
         else:
             env.create_dataset(out_name, data=out_arr, dtype='f4')
         try:
-            hdf.flush()
+            safe_flush(hdf)
         except Exception:
             pass
         wrote = True
@@ -1230,6 +1281,146 @@ def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', w
             # As a last resort, skip write and return the array
             pass
     return out_arr
+
+
+def compute_coarsened_alongstream_raster(simulation, factor=4, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist'):
+    """
+    Compute an along-stream distance raster at a coarser resolution and upsample
+    back to the simulation raster resolution. This reduces precompute cost for
+    large models while providing a fast per-agent sampling raster.
+
+    Parameters:
+    - simulation: simulation instance with `hdf5` open and raster transforms.
+    - factor: integer downsampling factor (e.g., 4 means coarse pixels are 4x4 blocks).
+    - outlet_xy, depth_name, wetted_name: forwarded to the underlying compute.
+    - out_name: dataset name to write (same as compute_alongstream_raster by default).
+
+    Returns: upsampled 2D numpy array at original raster size (float32).
+    """
+    hdf = getattr(simulation, 'hdf5', None)
+    if hdf is None:
+        raise RuntimeError('simulation.hdf5 is required')
+    env = hdf.get('environment')
+    if env is None:
+        raise RuntimeError('environment group missing in HDF')
+
+    # read rasters
+    if depth_name in env:
+        depth = np.asarray(env[depth_name][:], dtype=np.float32)
+        mask = np.isfinite(depth) & (depth > 0.0)
+    elif wetted_name in env:
+        wett = np.asarray(env[wetted_name][:])
+        mask = (wett != 0)
+    else:
+        raise RuntimeError('Neither depth nor wetted raster found')
+
+    h, w = mask.shape
+    # compute coarse dims
+    ch = max(1, h // factor)
+    cw = max(1, w // factor)
+
+    # shrink arrays by block-mean / any-true mask
+    depth_coarse = np.full((ch, cw), np.nan, dtype=np.float32)
+    mask_coarse = np.zeros((ch, cw), dtype=bool)
+    for i in range(ch):
+        for j in range(cw):
+            r0 = i * factor
+            c0 = j * factor
+            block = mask[r0:r0 + factor, c0:c0 + factor]
+            if np.any(block):
+                mask_coarse[i, j] = True
+                # average depth where present
+                if depth_name in env:
+                    db = depth[r0:r0 + factor, c0:c0 + factor]
+                    vals = db[np.isfinite(db) & (db > 0.0)]
+                    if vals.size:
+                        depth_coarse[i, j] = float(np.mean(vals))
+                    else:
+                        depth_coarse[i, j] = np.nan
+                else:
+                    depth_coarse[i, j] = 1.0
+
+    # Create a temporary in-memory simulation-like object for the coarse grid
+    class _MiniSim:
+        pass
+    minisim = _MiniSim()
+    # set a dummy transform that scales pixels accordingly
+    try:
+        t = getattr(simulation, 'depth_rast_transform', None)
+        if t is None:
+            t = getattr(simulation, 'vel_mag_rast_transform', None)
+    except Exception:
+        t = None
+    if t is None:
+        # unit transform
+        from rasterio.transform import Affine as _Affine
+        origin_x = 0.0
+        origin_y = 0.0
+        tcoarse = _Affine.scale(1, -1)
+    else:
+        # scale pixel sizes by factor and keep origin
+        from rasterio.transform import Affine as _Affine
+        tcoarse = _Affine(t.a * factor, t.b, t.c, t.d, t.e * factor, t.f)
+
+    minisim.depth_rast_transform = tcoarse
+    # create a small HDF-like group in memory: we'll write temporary datasets to disk via h5py
+    # reuse existing HDF file path to create a transient group 'tmp_coarse' then call compute_alongstream_raster
+    fname = getattr(hdf, 'filename', None) or getattr(hdf, 'name', None)
+    if not fname:
+        # fallback: call compute_alongstream_raster directly on full grid
+        return compute_alongstream_raster(simulation, outlet_xy=outlet_xy, depth_name=depth_name, wetted_name=wetted_name, out_name=out_name)
+
+    import h5py
+    tmp_name = 'tmp_coarse'
+    with h5py.File(fname, 'r+') as hw:
+        if tmp_name in hw:
+            del hw[tmp_name]
+        g = hw.create_group(tmp_name)
+        # create coarse environment subgroup
+        envc = g.create_group('environment')
+        # write coarse rasters
+        envc.create_dataset('depth', data=depth_coarse.astype('f4'))
+        envc.create_dataset('wetted', data=mask_coarse.astype('i1'))
+        # create x_coords/y_coords for coarse grid based on tcoarse
+        cols = np.arange(cw, dtype=np.float32)
+        rows = np.arange(ch, dtype=np.float32)
+        colg, rowg = np.meshgrid(cols, rows)
+        xs, ys = pixel_to_geo(tcoarse, rowg, colg)
+        envc.create_dataset('x_coords', data=xs.astype('f4'))
+        envc.create_dataset('y_coords', data=ys.astype('f4'))
+        # attach this group to minisim by setting its hdf5 attr to a lightweight object
+        minisim.hdf5 = hw[tmp_name]
+        minisim.depth_rast_transform = tcoarse
+        # run compute on the coarse group
+        coarse_out = compute_alongstream_raster(minisim, outlet_xy=outlet_xy, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist')
+        # upsample coarse_out back to original resolution by nearest neighbor repeat
+        upsampled = np.repeat(np.repeat(coarse_out, factor, axis=0), factor, axis=1)
+        upsampled = upsampled[:h, :w]
+        # write upsampled raster to main environment via existing function (attempt re-open)
+        try:
+            env = hw.require_group('environment')
+            if out_name in env:
+                try:
+                    env[out_name][:] = upsampled.astype('f4')
+                except Exception:
+                    del env[out_name]
+                    env.create_dataset(out_name, data=upsampled.astype('f4'), dtype='f4')
+            else:
+                env.create_dataset(out_name, data=upsampled.astype('f4'), dtype='f4')
+            hw.flush()
+        except Exception:
+            # if writing to same file is not desired, just return the upsampled array
+            pass
+
+    # clean up temp group
+    try:
+        with h5py.File(fname, 'r+') as hw2:
+            if tmp_name in hw2:
+                del hw2[tmp_name]
+    except Exception:
+        pass
+
+    return upsampled.astype(np.float32)
 
 def standardize_shape(arr, target_shape=(5, 5), fill_value=np.nan):
     if arr.shape != target_shape:

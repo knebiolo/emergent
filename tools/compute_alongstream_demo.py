@@ -28,3 +28,11 @@ if hf is not None:
 
 arr = compute_alongstream_raster(sim)
 print('alongstream raster stats: min', np.nanmin(arr), 'max', np.nanmax(arr), 'mean', np.nanmean(arr))
+arr2 = None
+try:
+    arr2 = None
+    from emergent.salmon_abm.sockeye_SoA import compute_coarsened_alongstream_raster
+    arr2 = compute_coarsened_alongstream_raster(sim, factor=4)
+    print('coarsened alongstream raster stats: min', np.nanmin(arr2), 'max', np.nanmax(arr2), 'mean', np.nanmean(arr2))
+except Exception as e:
+    print('coarsened compute failed:', e)
