@@ -827,6 +827,98 @@ else:
         swim_speeds_buf[:, -1] = swim_speeds
         return swim_speeds, bl_s, prolonged, sprint, sustained
 
+
+# Merged kernel: compute swim speeds, fatigue masks, and drags in one pass
+if _HAS_NUMBA:
+    @njit(parallel=True, cache=True)
+    def _merged_swim_drag_fatigue_numba(sog, heading, x_vel, y_vel, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, max_s_U, max_p_U, battery, swim_speeds_buf):
+        n = sog.size
+        swim_speeds = np.empty(n, dtype=np.float64)
+        bl_s = np.empty(n, dtype=np.float64)
+        prolonged = np.empty(n, dtype=np.bool_)
+        sprint = np.empty(n, dtype=np.bool_)
+        sustained = np.empty(n, dtype=np.bool_)
+        drags = np.zeros((n, 2), dtype=np.float64)
+        for i in prange(n):
+            if not mask[i]:
+                swim_speeds[i] = 0.0
+                bl_s[i] = 0.0
+                prolonged[i] = False
+                sprint[i] = False
+                sustained[i] = False
+                drags[i, 0] = 0.0
+                drags[i, 1] = 0.0
+                continue
+            # fish velocity components
+            fx = sog[i] * math.cos(heading[i])
+            fy = sog[i] * math.sin(heading[i])
+            # relative to water
+            rx = fx - x_vel[i]
+            ry = fy - y_vel[i]
+            s = math.hypot(rx, ry)
+            swim_speeds[i] = s
+            # preserve existing bl_s semantics (previous implementation used a placeholder)
+            bl_s[i] = s
+            # fatigue masks
+            prolonged[i] = (max_s_U[i] < bl_s[i]) and (bl_s[i] <= max_p_U[i])
+            sprint[i] = bl_s[i] > max_p_U[i]
+            sustained[i] = bl_s[i] <= max_s_U[i]
+            # write into circular buffer last slot
+            swim_speeds_buf[i, -1] = swim_speeds[i]
+
+            # compute drag (same as _compute_drags_numba)
+            rvx = fx - x_vel[i]
+            rvy = fy - y_vel[i]
+            rel = math.hypot(rvx, rvy)
+            if rel < 1e-6:
+                rel = 1e-6
+            unitx = rvx / rel
+            unity = rvy / rel
+            relsq = rel * rel
+            pref = -0.5 * (density * 1000.0) * (surface_areas[i] / (100.0 ** 2)) * drag_coeffs[i] * relsq * wave_drag[i]
+            dx = pref * unitx
+            dy = pref * unity
+            mag = math.hypot(dx, dy)
+            if swim_behav[i] == 3 and mag > 5.0:
+                scale = 5.0 / mag
+                dx *= scale
+                dy *= scale
+            drags[i, 0] = dx
+            drags[i, 1] = dy
+        return swim_speeds, bl_s, prolonged, sprint, sustained, drags
+else:
+    def _merged_swim_drag_fatigue_numba(sog, heading, x_vel, y_vel, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, max_s_U, max_p_U, battery, swim_speeds_buf):
+        # numpy fallback implementing the same logic in vectorized form
+        fx = sog * np.cos(heading)
+        fy = sog * np.sin(heading)
+        rx = fx - x_vel
+        ry = fy - y_vel
+        swim_speeds = np.sqrt(rx * rx + ry * ry)
+        bl_s = swim_speeds.copy()
+        prolonged = (max_s_U < bl_s) & (bl_s <= max_p_U)
+        sprint = bl_s > max_p_U
+        sustained = bl_s <= max_s_U
+        # write into last slot
+        swim_speeds_buf[:, -1] = swim_speeds
+        rel = np.maximum(np.sqrt((fx - x_vel) ** 2 + (fy - y_vel) ** 2), 1e-6)
+        unitx = (fx - x_vel) / rel
+        unity = (fy - y_vel) / rel
+        relsq = rel * rel
+        pref = -0.5 * (density * 1000.0) * (surface_areas / (100.0 ** 2)) * drag_coeffs * relsq * wave_drag
+        dx = pref * unitx
+        dy = pref * unity
+        drags = np.stack((dx, dy), axis=1)
+        mask_arr = np.asarray(mask, dtype=np.bool_)
+        # clip excessive drags for holding behavior
+        drag_mags = np.sqrt(drags[:, 0] ** 2 + drags[:, 1] ** 2)
+        mask_excess = (swim_behav == 3) & (drag_mags > 5.0)
+        if np.any(mask_excess):
+            scales = 5.0 / drag_mags[mask_excess]
+            drags[mask_excess, 0] *= scales
+            drags[mask_excess, 1] *= scales
+        drags[~mask_arr] = 0.0
+        return swim_speeds, bl_s, prolonged, sprint, sustained, drags
+
 # Wrap drag_fun to call compute_drags quickly
 if _HAS_NUMBA:
     @njit(cache=True, parallel=True)
@@ -6885,8 +6977,18 @@ class simulation():
                 maxp = np.ascontiguousarray(self.simulation.max_p_U, dtype=np.float64)
                 batt = np.ascontiguousarray(self.simulation.battery, dtype=np.float64)
                 swim_buf = np.ascontiguousarray(self.simulation.swim_speeds, dtype=np.float64)
-                swim_speeds, bl_s, prolonged, sprint, sustained = _assess_fatigue_core(sog_a, heading_a, xv, yv, maxs, maxp, batt, swim_buf)
+                # use merged kernel to compute swim speeds, fatigue masks, and drags
+                mask_arr = np.ascontiguousarray(self.simulation.alive_mask if hasattr(self.simulation, 'alive_mask') else np.ones(self.simulation.num_agents, dtype=np.bool_), dtype=np.bool_)
+                surf = np.ascontiguousarray(self.simulation.calc_surface_area(self.simulation.length), dtype=np.float64)
+                dragc = np.ascontiguousarray(self.simulation.drag_coeff(np.linalg.norm(np.stack((self.simulation.x_vel, self.simulation.y_vel), axis=-1), axis=-1) * (self.simulation.length/1000.) / np.maximum(self.kin_visc(self.simulation.water_temp), 1e-12)), dtype=np.float64)
+                wave = np.ascontiguousarray(self.simulation.wave_drag, dtype=np.float64)
+                swim_speeds, bl_s, prolonged, sprint, sustained, drags = _merged_swim_drag_fatigue_numba(sog_a, heading_a, xv, yv, mask_arr, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf, dragc, wave, self.simulation.swim_behav, maxs, maxp, batt, swim_buf)
                 mask_dict = {'prolonged': prolonged, 'sprint': sprint, 'sustained': sustained}
+                # set drag into simulation state
+                try:
+                    self.simulation.drag = drags
+                except Exception:
+                    self.simulation.drag = np.ascontiguousarray(drags)
             except Exception:
                 swim_speeds = self.swim_speeds()
                 bl_s = self.bl_s(swim_speeds)
