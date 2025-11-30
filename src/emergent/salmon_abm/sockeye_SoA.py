@@ -1549,7 +1549,8 @@ class simulation():
                  hecras_plan_path=None,
                  hecras_fields=None,
                  hecras_k=8,
-                 use_hecras=False):
+                 use_hecras=False,
+                 hecras_write_rasters=False):
         """
          Initialize the simulation environment.
          
@@ -1748,6 +1749,7 @@ class simulation():
         self.hecras_fields = hecras_fields if hecras_fields is not None else ['Cells Minimum Elevation']
         self.hecras_k = hecras_k
         self.use_hecras = bool(use_hecras)
+        self.hecras_write_rasters = bool(hecras_write_rasters)
         if not self.hecras_plan_path:
             _maybe_import('x_vel', 'velocity x')
             _maybe_import('y_vel', 'velocity y')
@@ -2465,20 +2467,16 @@ class simulation():
             except Exception:
                 pass
 
-            # Update full environment rasters from HECRAS plan each timestep so
-            # legacy raster consumers see changing velocity/depth fields.
-            try:
-                map_hecras_to_env_rasters(self, self.hecras_plan_path, field_names=getattr(self, 'hecras_fields', None), k=getattr(self, 'hecras_k', 8))
-            except Exception:
-                pass
+            # Optionally update full environment rasters from HECRAS each timestep
+            # (controlled by `self.hecras_write_rasters`, default False for speed).
+            if getattr(self, 'hecras_write_rasters', False):
+                try:
+                    map_hecras_to_env_rasters(self, self.hecras_plan_path, field_names=getattr(self, 'hecras_fields', None), k=getattr(self, 'hecras_k', 8))
+                except Exception:
+                    pass
 
             # Map HECRAS values directly to agents for requested raster names
             agent_xy = np.column_stack((self.X, self.Y))
-            # also populate environment rasters from HECRAS onto HDF each timestep
-            try:
-                map_hecras_to_env_rasters(self, self.hecras_plan_path, raster_names, k=k)
-            except Exception:
-                pass
 
             results = {}
             # candidate HECRAS field name choices per raster_name

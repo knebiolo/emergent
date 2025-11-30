@@ -19,6 +19,7 @@ parser.add_argument('--num-agents', type=int, required=True)
 parser.add_argument('--timesteps', type=int, default=20)
 parser.add_argument('--out', type=str, required=True)
 parser.add_argument('--hecras_k', type=int, default=8)
+parser.add_argument('--write-rasters', action='store_true', help='If set, write full environment rasters from HECRAS each timestep (slower)')
 args = parser.parse_args()
 
 plan = Path(r"c:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\data\salmon_abm\20240506\Nuyakuk_Production_.p05.hdf")
@@ -34,7 +35,7 @@ sim = simulation(model_dir='.', model_name='fullbench', crs='EPSG:32604', basin=
                  num_agents=args.num_agents,
                  hecras_plan_path=str(plan), hecras_fields=['Cells Minimum Elevation', 'Water Surface',
                                                           'Cell Velocity - Velocity X', 'Cell Velocity - Velocity Y'],
-                 hecras_k=args.hecras_k, use_hecras=True)
+                 hecras_k=args.hecras_k, use_hecras=True, hecras_write_rasters=bool(args.write_rasters))
 
 # preload HECRAS
 load_hecras_plan_cached(sim, sim.hecras_plan_path, field_names=sim.hecras_fields)
