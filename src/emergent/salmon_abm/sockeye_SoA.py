@@ -1569,7 +1569,8 @@ class simulation():
                  use_hecras=False,
                  hecras_write_rasters=False,
                  defer_hdf=False,
-                 defer_log_dir=None):
+                 defer_log_dir=None,
+                 defer_log_fmt='npz'):
         """
          Initialize the simulation environment.
          
@@ -1611,13 +1612,24 @@ class simulation():
         # to fast binary .npz logs in `defer_log_dir` via LogWriter and converted later.
         self.defer_hdf = defer_hdf
         self.defer_log_dir = defer_log_dir
+        self.defer_log_fmt = defer_log_fmt
         if self.defer_hdf:
             try:
-                from emergent.io.log_writer import LogWriter
                 log_dir = self.defer_log_dir or os.path.join(self.model_dir, 'logs', 'deferred')
-                self._log_writer = LogWriter(log_dir)
+                if getattr(self, 'defer_log_fmt', 'npz') == 'memmap':
+                    from emergent.io.log_writer_memmap import MemmapLogWriter
+                    # we don't yet have num_timesteps and num_agents until after init; create placeholder
+                    # actual memmaps will be created after agent arrays are allocated; store config for later
+                    self._memmap_config = {'out_dir': log_dir}
+                    self._log_writer = None
+                    self._memmap_writer = None
+                else:
+                    from emergent.io.log_writer import LogWriter
+                    self._log_writer = LogWriter(log_dir)
+                    self._memmap_writer = None
             except Exception:
                 self._log_writer = None
+                self._memmap_writer = None
         # HDF5 buffering parameters
         self.flush_interval = 50  # timesteps between HDF5 flushes (configurable)
         self._hdf5_buffers = {}
@@ -2004,16 +2016,35 @@ class simulation():
                 t_end = timestep
                 t_start = t_end - write_len + 1
                 # If deferring HDF writes, write buffered agent arrays to the fast LogWriter
-                if getattr(self, 'defer_hdf', False) and getattr(self, '_log_writer', None) is not None:
-                    # write each buffered timestep separately for compatibility with converter
-                    for offset in range(write_len):
-                        t_idx = t_start + offset
-                        # construct a dict of arrays for this timestep
-                        arrays = {k: self._hdf5_buffers[k][:, offset].astype('f4') for k in self._hdf5_buffers.keys()}
+                if getattr(self, 'defer_hdf', False):
+                    # If memmap writer requested, initialize it on first flush
+                    if getattr(self, 'defer_log_fmt', 'npz') == 'memmap' and getattr(self, '_memmap_writer', None) is None:
                         try:
-                            self._log_writer.append(t_idx, arrays)
+                            var_shapes = {k: (self.num_agents, self.num_timesteps) for k in self._hdf5_buffers.keys()}
+                            from emergent.io.log_writer_memmap import MemmapLogWriter
+                            out_dir = self._memmap_config.get('out_dir', os.path.join(self.model_dir, 'logs', 'deferred'))
+                            self._memmap_writer = MemmapLogWriter(out_dir, var_shapes, dtype=np.float32)
                         except Exception:
-                            pass
+                            self._memmap_writer = None
+
+                    # write buffered timesteps using memmap writer if available
+                    if getattr(self, '_memmap_writer', None) is not None:
+                        for offset in range(write_len):
+                            t_idx = t_start + offset
+                            arrays = {k: self._hdf5_buffers[k][:, offset].astype('f4') for k in self._hdf5_buffers.keys()}
+                            try:
+                                self._memmap_writer.append(t_idx, arrays)
+                            except Exception:
+                                pass
+                    elif getattr(self, '_log_writer', None) is not None:
+                        # fallback to existing npz writer
+                        for offset in range(write_len):
+                            t_idx = t_start + offset
+                            arrays = {k: self._hdf5_buffers[k][:, offset].astype('f4') for k in self._hdf5_buffers.keys()}
+                            try:
+                                self._log_writer.append(t_idx, arrays)
+                            except Exception:
+                                pass
                 else:
                     for k, buf in self._hdf5_buffers.items():
                         ds_name = f'agent_data/{k}'
