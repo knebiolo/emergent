@@ -2906,6 +2906,28 @@ class simulation():
         self.distance_to = sampled['distance_to']
         self.current_longitudes = self.compute_linear_positions(self.longitudinal)
 
+        # Ensure neighbor lists and closest_agent are present — some code paths
+        # assume these are set before behavior arbitration. Compute fallbacks
+        # here if they do not exist.
+        try:
+            if not hasattr(self, 'closest_agent') or getattr(self, 'closest_agent', None) is None:
+                clean_x = self.X.flatten()[~np.isnan(self.X.flatten())]
+                clean_y = self.Y.flatten()[~np.isnan(self.Y.flatten())]
+                if clean_x.size > 0:
+                    positions = np.vstack([clean_x, clean_y]).T
+                    tree = cKDTree(positions)
+                    distances, indices = tree.query(positions, k=2)
+                    nearest_neighbors = np.where(distances[:, 1] != np.inf, indices[:, 1], np.nan)
+                    self.closest_agent = nearest_neighbors
+                    nearest_neighbor_distances = np.where(distances[:, 1] != np.inf, distances[:, 1], np.nan)
+                    self.nearest_neighbor_distance = nearest_neighbor_distances
+                else:
+                    self.closest_agent = np.full(self.num_agents, np.nan)
+                    self.nearest_neighbor_distance = np.full(self.num_agents, np.nan)
+        except Exception:
+            # If neighbor computation fails, provide a safe fallback
+            self.closest_agent = np.full(self.num_agents, np.nan)
+
         # Optional: override or augment raster-sampled fields with HECRAS plan mapping
         # To enable, set `self.hecras_plan_path` (string path) and `self.hecras_fields` (list of field names)
         if hasattr(self, 'hecras_plan_path') and self.hecras_plan_path:
@@ -4033,6 +4055,14 @@ class simulation():
         def __init__(self, dt, simulation_object):
             self.dt = dt
             self.simulation = simulation_object
+            # convenience copies used throughout behavior methods
+            try:
+                self.num_agents = int(getattr(simulation_object, 'num_agents', 0))
+            except Exception:
+                self.num_agents = 0
+            self.X = getattr(simulation_object, 'X', None)
+            self.Y = getattr(simulation_object, 'Y', None)
+            self.sim_time = 0
 
         def _batch_read_env_patches(self, dataset_name, row_mins, row_maxs, col_mins, col_maxs, target_shape=None):
             """

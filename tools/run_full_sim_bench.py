@@ -20,6 +20,7 @@ parser.add_argument('--timesteps', type=int, default=20)
 parser.add_argument('--out', type=str, required=True)
 parser.add_argument('--hecras_k', type=int, default=8)
 parser.add_argument('--write-rasters', action='store_true', help='If set, write full environment rasters from HECRAS each timestep (slower)')
+parser.add_argument('--strict', action='store_true', help='If set, re-raise exceptions from sim.timestep instead of using lite fallback')
 args = parser.parse_args()
 
 plan = Path(r"c:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\data\salmon_abm\20240506\Nuyakuk_Production_.p05.hdf")
@@ -155,7 +156,10 @@ for t in range(args.timesteps):
     mode = 'full'
     try:
         sim.timestep(t, dt, g_val, pid_controller)
-    except Exception:
+    except Exception as e:
+        if args.strict:
+            # re-raise so caller can see the stack and we can harden code
+            raise
         # fallback: perform a simplified vectorized movement step to represent workload
         mode = 'lite'
         # compute headings from water velocity
