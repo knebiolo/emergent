@@ -54,6 +54,7 @@ setup(
         # Storage / parallel
         "h5py>=3.1,<4.0",
         "dask[array]>=2021.6,<2025.0",
+	"numba",
         # GUI / visualization
         "PyQt5>=5.15,<6.0",
         "pyqtgraph>=0.12,<1.0",

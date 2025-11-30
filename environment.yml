@@ -23,6 +23,8 @@ dependencies:
   # Data storage and parallel processing
   - h5py>=3.1
   - dask>=2021.6
+  - numba
+
 
   # GUI and visualization
   - pyqt>=5.15

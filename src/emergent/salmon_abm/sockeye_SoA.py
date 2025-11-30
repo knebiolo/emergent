@@ -655,6 +655,77 @@ def get_inv_transform(sim, transform):
     return inv
 
 
+# --- Performance helpers for simulation math ---
+try:
+    from numba import njit, prange
+    import math
+    _HAS_NUMBA = True
+except Exception:
+    _HAS_NUMBA = False
+
+
+if _HAS_NUMBA:
+    @njit(parallel=True)
+    def _compute_drags_numba(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav):
+        n = fx.shape[0]
+        drags = np.zeros((n, 2), dtype=np.float64)
+        for i in prange(n):
+            if not mask[i]:
+                continue
+            rvx = fx[i] - wx[i]
+            rvy = fy[i] - wy[i]
+            rel = math.sqrt(rvx * rvx + rvy * rvy)
+            if rel < 1e-6:
+                rel = 1e-6
+            unitx = rvx / rel
+            unity = rvy / rel
+            relsq = rel * rel
+            # drag scalar prefactor
+            pref = -0.5 * (density * 1000.0) * (surface_areas[i] / (100.0 ** 2)) * drag_coeffs[i] * relsq * wave_drag[i]
+            dx = pref * unitx
+            dy = pref * unity
+            mag = math.sqrt(dx * dx + dy * dy)
+            if swim_behav[i] == 3 and mag > 5.0:
+                scale = 5.0 / mag
+                dx *= scale
+                dy *= scale
+            drags[i, 0] = dx
+            drags[i, 1] = dy
+        return drags
+
+
+def _compute_drags_numpy(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav):
+    # vectorized numpy implementation mirroring the previous logic
+    relative_velocities_x = fx - wx
+    relative_velocities_y = fy - wy
+    rel_norms = np.sqrt(relative_velocities_x ** 2 + relative_velocities_y ** 2)
+    rel_norms_safe = np.maximum(rel_norms, 1e-6)
+    unit_x = relative_velocities_x / rel_norms_safe
+    unit_y = relative_velocities_y / rel_norms_safe
+    relsq = rel_norms ** 2
+    pref = -0.5 * (density * 1000.0) * (surface_areas / (100.0 ** 2)) * drag_coeffs * relsq * wave_drag
+    dx = pref * unit_x
+    dy = pref * unit_y
+    drags = np.stack((dx, dy), axis=1)
+    # clip excessive drags for holding behavior
+    drag_mags = np.sqrt(drags[:, 0] ** 2 + drags[:, 1] ** 2)
+    mask_excess = (swim_behav == 3) & (drag_mags > 5.0)
+    if np.any(mask_excess):
+        scales = 5.0 / drag_mags[mask_excess]
+        drags[mask_excess, 0] *= scales
+        drags[mask_excess, 1] *= scales
+    # apply agent mask
+    drags[~mask] = 0.0
+    return drags
+
+
+def compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav):
+    if _HAS_NUMBA:
+        return _compute_drags_numba(fx, fy, wx, wy, mask, float(density), surface_areas.astype(np.float64), drag_coeffs.astype(np.float64), wave_drag.astype(np.float64), swim_behav.astype(np.int64))
+    else:
+        return _compute_drags_numpy(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav)
+
+
 def pixel_to_geo(transform, rows, cols):
     """
     Convert row, column indices in the raster grid to x, y coordinates.
@@ -3934,31 +4005,12 @@ class simulation():
             # Calculate drag coefficients
             drag_coeffs = self.drag_coeff(reynolds_numbers)
         
-            # Calculate relative velocities and norms once
-            relative_velocities = fish_velocities - water_velocities
-            rel_norms = np.linalg.norm(relative_velocities, axis=-1)
-            rel_norms_safe = rel_norms.copy()
-            rel_norms_safe[rel_norms_safe == 0] = 1e-6
-            relative_speeds_squared = rel_norms**2
-            unit_relative_vector = relative_velocities / rel_norms_safe[:, np.newaxis]
-
-            # Calculate drag forces
-            drags = np.where(mask[:,np.newaxis],
-                             -0.5 * (density * 1000) * (surface_areas[:,np.newaxis] / 100**2) \
-                                           * drag_coeffs[:,np.newaxis] * relative_speeds_squared[:, np.newaxis] \
-                                               * unit_relative_vector * self.simulation.wave_drag[:, np.newaxis],0)
-                
-            max_drag_magnitude = 5.  # Set a reasonable limit based on your system's physical reality
-
-            # Calculate the magnitude of each drag force vector
-            drag_magnitudes = np.linalg.norm(drags, axis=1)
-            
-            # Find where the drag exceeds the maximum and scale it down
-            excessive_drag_indices = np.where(np.logical_and( self.simulation.swim_behav == 3,
-                                                             drag_magnitudes > max_drag_magnitude),
-                                              True,False)
-            drags[excessive_drag_indices] = (drags[excessive_drag_indices].T * (max_drag_magnitude / drag_magnitudes[excessive_drag_indices])).T
-                
+            # delegate bulk computation to optimized helper
+            fx = fish_velocities[:, 0]
+            fy = fish_velocities[:, 1]
+            wx = water_velocities[:, 0]
+            wy = water_velocities[:, 1]
+            drags = compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav)
             self.simulation.drag = drags
 
         def ideal_drag_fun(self, fish_velocities = None):
@@ -5568,15 +5620,11 @@ class simulation():
             fish_velocities = np.column_stack((self.simulation.sog * np.cos(self.simulation.heading),
                                                self.simulation.sog * np.sin(self.simulation.heading)))
         
-            # Calculate swim speeds for each fish
+            # Calculate swim speeds for each fish (relative to water)
             swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=-1)
-            
-            # Shift all columns in the array one position to the left
+            # Shift the circular buffer and insert the new swim speeds
             self.simulation.swim_speeds[:, :-1] = self.simulation.swim_speeds[:, 1:]
-        
-            # Insert the new swim speeds into the last column
-            self.simulation.swim_speeds[:, -1] = np.linalg.norm(fish_velocities, axis = -1)
-            
+            self.simulation.swim_speeds[:, -1] = swim_speeds
             return swim_speeds
         
         def bl_s(self, swim_speeds):
