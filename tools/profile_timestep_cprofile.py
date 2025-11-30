@@ -13,6 +13,8 @@ import pstats
 import io
 import os
 import sys
+import numpy as np
+import h5py
 
 # Allow running from repo root when executed from tools/
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -99,6 +101,59 @@ def build_sim(num_agents, use_hecras=True, hecras_write_rasters=False):
                 return self
         sim.mental_map_transform = _AffStub()
 
+    # Provide minimal raster transform placeholders expected by environment sampling
+    class _AffStub:
+        def __init__(self):
+            pass
+        def __invert__(self):
+            return self
+        def __mul__(self, other):
+            # emulate Affine * (x, y) -> (col, row) by simple floor conversion
+            try:
+                x, y = other
+                return (int(x), int(y))
+            except Exception:
+                return other
+    for name in ('vel_dir_rast_transform','vel_mag_rast_transform','depth_rast_transform','x_coords_transform','y_coords_transform'):
+        if not hasattr(sim, name):
+            setattr(sim, name, _AffStub())
+
+    # Provide minimal raster dimensions expected by environment sampling
+    if not hasattr(sim, 'width'):
+        sim.width = 200
+    if not hasattr(sim, 'height'):
+        sim.height = 200
+
+    # Minimal agents_within_buffers to satisfy alignment/avoid cues
+    if not hasattr(sim, 'agents_within_buffers'):
+        sim.agents_within_buffers = [np.array([], dtype=np.int32)]
+
+    # Create a small temporary HDF5 file with minimal environment datasets
+    temp_h5 = os.path.join(repo_root, 'tools', 'temp_profile_env.h5')
+    try:
+        with h5py.File(temp_h5, 'w') as f:
+            env = f.create_group('environment')
+            shape = (sim.height, sim.width)
+            env.create_dataset('vel_mag', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
+            env.create_dataset('vel_dir', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
+            env.create_dataset('vel_x', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
+            env.create_dataset('vel_y', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
+            env.create_dataset('depth', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
+            env.create_dataset('wetted', shape, dtype='f4', data=np.ones(shape, dtype='f4'))
+            env.create_dataset('distance_to', shape, dtype='f4', data=np.zeros(shape, dtype='f4'))
+            # Also provide x_coords and y_coords arrays matching raster centers
+            xs = np.tile(np.arange(sim.width, dtype='f4'), (sim.height,1))
+            ys = np.tile(np.arange(sim.height, dtype='f4')[:,None], (1,sim.width))
+            env.create_dataset('x_coords', shape, dtype='f4', data=xs)
+            env.create_dataset('y_coords', shape, dtype='f4', data=ys)
+    except Exception:
+        # best-effort; if file creation fails, continue without it
+        temp_h5 = None
+
+    # attach the hdf5 file to the simulation (open for read)
+    if temp_h5 is not None and os.path.exists(temp_h5):
+        sim.hdf5 = h5py.File(temp_h5, 'r')
+
     return sim
 
 
@@ -110,10 +165,13 @@ def profile_run(num_agents, timesteps, out_stats='profile.pstats'):
 
     # timestep signature requires (t, dt, g, pid_controller) — pass simple placeholders
     # Create a minimal PID stub if code expects PID controller
-    class _PIDStub:
-        def __init__(self):
-            pass
-    pid = _PIDStub()
+    # instantiate the real PID controller from the module
+    from emergent.salmon_abm.sockeye_SoA import PID_controller
+    pid = PID_controller(num_agents, k_p=1.0, k_i=0.0, k_d=0.0)
+    try:
+        pid.interp_PID()
+    except Exception:
+        pass
     for t in range(timesteps):
         sim.timestep(t, 1.0, 9.81, pid)
 
