@@ -970,6 +970,14 @@ class PID_controller:
         self.integral = np.zeros((np.round(n_agents,0).astype(np.int32),2))
         self.previous_error = np.zeros((np.round(n_agents,0).astype(np.int32),2))
         self.derivative_filtered = np.zeros((np.round(n_agents,0).astype(np.int32),2))
+        # Attempt to initialize PID plane parameters; fall back to safe defaults
+        try:
+            self.interp_PID()
+        except Exception:
+            # Default: P = 1.0 constant, I = 0, D = 0
+            self.P_params = np.array([0.0, 0.0, 1.0])
+            self.I_params = np.array([0.0, 0.0, 0.0])
+            self.D_params = np.array([0.0, 0.0, 0.0])
 
     def update(self, error, dt, status):
         # create a mask - if this fish is fatigued, this doesn't matter
@@ -1059,26 +1067,35 @@ class PID_controller:
         '''
         
         '''
-        # P plane parameters
-        a_P = self.P_params[0]
-        b_P = self.P_params[1]
-        c_P = self.P_params[2]
-        
-        # I plane parameters
-        a_I = self.I_params[0]
-        b_I = self.I_params[1]
-        c_I = self.I_params[2]
-        
-        # D plane parameters
-        a_D = self.D_params[0]
-        b_D = self.D_params[1]
-        c_D = self.D_params[2]        
-        
-        P = a_P * length + b_P * velocity + c_P
-        I = a_I * length + b_I * velocity + c_I
-        D = a_D * length + b_D * velocity + c_D 
-        
-        return P, I, D
+        # Ensure parameters exist
+        a_P, b_P, c_P = self.P_params
+        a_I, b_I, c_I = self.I_params
+        a_D, b_D, c_D = self.D_params
+
+        # Coerce inputs to numpy arrays and broadcast to the same shape
+        vel = np.asarray(velocity)
+        leng = np.asarray(length)
+
+        # If scalars, expand to 1-D arrays
+        if vel.ndim == 0:
+            vel = np.full(1, float(vel))
+        if leng.ndim == 0:
+            leng = np.full(1, float(leng))
+
+        # Broadcast to common shape
+        try:
+            vel_b, leng_b = np.broadcast_arrays(vel, leng)
+        except ValueError:
+            # Fallback: flatten and match lengths if possible
+            vel_b = vel.ravel()
+            leng_b = np.broadcast_to(leng.ravel(), vel_b.shape)
+
+        P = a_P * leng_b + b_P * vel_b + c_P
+        I = a_I * leng_b + b_I * vel_b + c_I
+        D = a_D * leng_b + b_D * vel_b + c_D
+
+        # Return 1-D arrays
+        return np.asarray(P).ravel(), np.asarray(I).ravel(), np.asarray(D).ravel()
     
 class PID_optimization():
     '''
@@ -3973,9 +3990,20 @@ class simulation():
             else:
                 k_p, k_i, k_d = pid_controller.PID_func(np.sqrt(np.power(self.simulation.x_vel,2) + np.power(self.simulation.y_vel,2)),
                                                         self.simulation.length)
-                pid_controller.k_p = np.array([1.])
-                pid_controller.k_i = np.array([0.])
-                pid_controller.k_d = np.array([0.])
+                # Ensure k_p/k_i/k_d are numpy arrays with shape (n_agents,)
+                k_p = np.asarray(k_p)
+                k_i = np.asarray(k_i)
+                k_d = np.asarray(k_d)
+                # If scalars, expand to per-agent arrays
+                if k_p.ndim == 0:
+                    k_p = np.full(self.simulation.num_agents, float(k_p))
+                if k_i.ndim == 0:
+                    k_i = np.full(self.simulation.num_agents, float(k_i))
+                if k_d.ndim == 0:
+                    k_d = np.full(self.simulation.num_agents, float(k_d))
+                pid_controller.k_p = k_p
+                pid_controller.k_i = k_i
+                pid_controller.k_d = k_d
                 
             # Adjust Hzs using the PID controller (vectorized)
             pid_adjustment = pid_controller.update(error, dt, None)
