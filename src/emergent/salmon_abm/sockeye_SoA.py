@@ -233,6 +233,77 @@ def map_hecras_for_agents(simulation, agent_xy, plan_path, field_names=None, k=8
         return next(iter(out.values()))
     return out
 
+
+# Ensure HDF x_coords/y_coords exist when using HECRAS so code expecting raster-style arrays works
+def ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=None, target_transform=None):
+    """Create `x_coords` and `y_coords` datasets in the simulation HDF5 file when missing.
+
+    - `plan_path` : path to HECRAS HDF used to compute affine
+    - `target_shape` : (height, width) to shape outputs; if None, compute from HECRAS coords and transform
+    - `target_transform` : affine to map cols/rows -> x/y; if None derive with compute_affine_from_hecras
+    """
+    hdf = getattr(simulation, 'hdf5', None)
+    if hdf is None:
+        return
+
+    # load coords from HECRAS plan
+    try:
+        with h5py.File(str(plan_path), 'r') as ph:
+            hecras_coords = ph['/Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:]
+    except Exception:
+        hecras_coords = None
+
+    if hecras_coords is None:
+        return
+
+    # derive transform and raster shape if not provided
+    if target_transform is None:
+        target_transform = compute_affine_from_hecras(hecras_coords)
+    if target_shape is None:
+        # attempt to infer reasonable grid extent and size using median spacing
+        aff = target_transform
+        # find bounds from coords
+        minx, miny = float(hecras_coords[:, 0].min()), float(hecras_coords[:, 1].min())
+        maxx, maxy = float(hecras_coords[:, 0].max()), float(hecras_coords[:, 1].max())
+        # compute cols/rows
+        width = max(1, int(np.ceil((maxx - minx) / abs(aff.a))))
+        height = max(1, int(np.ceil((maxy - miny) / abs(aff.e))))
+        target_shape = (height, width)
+
+    height, width = target_shape
+
+    # create datasets if missing
+    if 'x_coords' not in hdf:
+        dset_x = hdf.create_dataset('x_coords', (height, width), dtype='float32')
+    else:
+        dset_x = hdf['x_coords']
+    if 'y_coords' not in hdf:
+        dset_y = hdf.create_dataset('y_coords', (height, width), dtype='float32')
+    else:
+        dset_y = hdf['y_coords']
+
+    # populate once if empty (all zeros or nan)
+    try:
+        existing = np.asarray(dset_x[:])
+        needs_populate = not np.isfinite(existing).any()
+    except Exception:
+        needs_populate = True
+
+    if needs_populate:
+        # build col and row indices then map to geo using target_transform
+        cols = np.arange(width, dtype=np.float64)
+        rows = np.arange(height, dtype=np.float64)
+        col_grid, row_grid = np.meshgrid(cols, rows)
+        # pixel centers to geo
+        xs, ys = pixel_to_geo(target_transform, row_grid, col_grid)
+        dset_x[:, :] = xs.astype('float32')
+        dset_y[:, :] = ys.astype('float32')
+
+    # store transforms on simulation for later geotransform usage
+    simulation.depth_rast_transform = target_transform
+    simulation.hdf_height = height
+    simulation.hdf_width = width
+
 # End HECRAS helpers
 
 
@@ -2197,6 +2268,10 @@ class simulation():
 
         # prepare results container
         results = {}
+
+        # If the HDF5 'environment' group does not exist (HECRAS-only), return NaNs
+        if 'environment' not in self.hdf5:
+            return {name: np.full(self.num_agents, np.nan, dtype=float) for name in raster_names}
 
         # compute bbox
         rmin, rmax = rows.min(), rows.max()
