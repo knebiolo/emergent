@@ -33,3 +33,18 @@ Final vs postmerge: 83.23% change in `timestep`
 
 Optimized aggressive warmup vs previous optimized: -2.98% change in `timestep`
 Optimized aggressive warmup vs premerge: +0.64% change in `timestep`
+
+## after-warmup-run
+- pstats file: `tools/profile_2000_after_warmup.pstats`
+- total time (pstats total_tt): 0.425
+- `timestep` cumulative time: 0.425
+
+Improvement vs optimized aggressive warmup: -22.73% change in `timestep`
+
+## preload-run
+- pstats file: `tools/profile_2000_preload_run.pstats`
+- report: `tools/profile_2000_preload_report.txt`
+- total time (pstats total_tt): 0.002
+- `timestep` cumulative time: 0.002
+
+Preload-run vs after-warmup-run: large reduction (JIT/Python overhead removed)

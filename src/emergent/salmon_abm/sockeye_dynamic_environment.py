@@ -2287,7 +2287,7 @@ class simulation():
                     fish_x_vel = (self.simulation.X - self.simulation.prev_X)/dt
                     fish_y_vel = (self.simulation.Y - self.simulation.prev_Y)/dt
                     fish_dir = np.arctan2(fish_y_vel,fish_x_vel)
-                    fish_mag = np.linalg.norm(np.stack((fish_x_vel,fish_y_vel)).T,axis = -1)
+                    fish_mag = np.hypot(fish_x_vel, fish_y_vel)
 
                     fish_velocities = np.stack((self.simulation.ideal_sog * np.cos(self.simulation.heading),
                                                 self.simulation.ideal_sog * np.sin(self.simulation.heading)),
@@ -4805,7 +4805,7 @@ class simulation():
         fatigue.assess_fatigue()
         
         # Calculate the ratio of ideal speed over ground to the magnitude of water velocity
-        sog_to_water_vel_ratio = self.sog / np.linalg.norm(np.stack((self.x_vel, self.y_vel)).T, axis=-1)
+        sog_to_water_vel_ratio = self.sog / np.hypot(self.x_vel, self.y_vel)
         
         # Calculate the time since the last jump
         time_since_jump = t - self.time_of_jump
