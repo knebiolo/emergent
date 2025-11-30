@@ -726,6 +726,85 @@ def compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wav
         return _compute_drags_numpy(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav)
 
 
+# Precompile numba functions at import time to avoid first-call JIT overhead
+if _HAS_NUMBA:
+    try:
+        n = 8
+        dummy = np.zeros(n, dtype=np.float64)
+        _ = _compute_drags_numba(dummy, dummy, dummy, dummy, np.ones(n, dtype=np.bool_), 1.0, np.ones(n), np.ones(n), np.ones(n), np.zeros(n, dtype=np.int64))
+        _ = _bout_distance_numba(dummy, dummy, dummy, dummy)
+        _ = _time_to_fatigue_numba(dummy, np.ones(n, dtype=np.bool_), np.zeros(n, dtype=np.bool_), 0.0, 0.0, 0.0, 0.0)
+    except Exception:
+        pass
+
+
+# --- Swim numeric core helpers ---
+if _HAS_NUMBA:
+    @njit(parallel=True)
+    def _swim_core_numba(fv0x, fv0y, accx, accy, pidx, pidy, tired_mask, dead_mask, mask, dt):
+        n = fv0x.shape[0]
+        dxdy = np.zeros((n, 2), dtype=np.float64)
+        for i in prange(n):
+            if not mask[i] or dead_mask[i]:
+                continue
+            vx = fv0x[i] + accx[i] * dt
+            vy = fv0y[i] + accy[i] * dt
+            if not tired_mask[i]:
+                vx += pidx[i]
+                vy += pidy[i]
+            dxdy[i, 0] = vx * dt
+            dxdy[i, 1] = vy * dt
+        return dxdy
+else:
+    def _swim_core_numba(fv0x, fv0y, accx, accy, pidx, pidy, tired_mask, dead_mask, mask, dt):
+        vx = fv0x + accx * dt
+        vy = fv0y + accy * dt
+        # apply pid adjustment where not tired
+        vx = np.where(~tired_mask, vx + pidx, vx)
+        vy = np.where(~tired_mask, vy + pidy, vy)
+        # zero dead or masked agents
+        vx = np.where((~mask) | dead_mask, 0.0, vx)
+        vy = np.where((~mask) | dead_mask, 0.0, vy)
+        return np.stack((vx * dt, vy * dt), axis=1)
+
+
+# --- Fatigue helpers: bout distance and time-to-fatigue ---
+if _HAS_NUMBA:
+    @njit(parallel=True)
+    def _bout_distance_numba(prev_X, X, prev_Y, Y):
+        n = prev_X.shape[0]
+        dist = np.empty(n, dtype=np.float64)
+        for i in prange(n):
+            dx = prev_X[i] - X[i]
+            dy = prev_Y[i] - Y[i]
+            dist[i] = math.sqrt(dx * dx + dy * dy)
+        return dist
+
+    @njit(parallel=True)
+    def _time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s):
+        n = swim_speeds.shape[0]
+        ttf = np.empty(n, dtype=np.float64)
+        for i in prange(n):
+            ttf[i] = np.nan
+            s = swim_speeds[i]
+            if mask_prolonged[i]:
+                ttf[i] = math.exp(a_p + s * b_p)
+            if mask_sprint[i]:
+                ttf[i] = math.exp(a_s + s * b_s)
+        return ttf
+else:
+    def _bout_distance_numba(prev_X, X, prev_Y, Y):
+        dx = prev_X - X
+        dy = prev_Y - Y
+        return np.sqrt(dx * dx + dy * dy)
+
+    def _time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s):
+        ttf = np.full_like(swim_speeds, np.nan, dtype=float)
+        ttf = np.where(mask_prolonged, np.exp(a_p + swim_speeds * b_p), ttf)
+        ttf = np.where(mask_sprint, np.exp(a_s + swim_speeds * b_s), ttf)
+        return ttf
+
+
 def pixel_to_geo(transform, rows, cols):
     """
     Convert row, column indices in the raster grid to x, y coordinates.
@@ -1749,6 +1828,8 @@ class simulation():
         self.flush_interval = 50  # timesteps between HDF5 flushes (configurable)
         self._hdf5_buffers = {}
         self._buffer_pos = 0
+
+        # NOTE: Numba helpers are precompiled at module import time when available.
         
         # If we are tuning the PID controller, special settings used
         if pid_tuning:
@@ -4215,17 +4296,15 @@ class simulation():
             self.simulation.integral = pid_controller.integral
             self.simulation.pid_adjustment = pid_adjustment
             
-            # Step 6: add adjustment to original velocity computation       
-            fish_vel_1 = np.where(~tired_mask[:,np.newaxis],
-                                  fish_vel_0 + acc_ini * dt + pid_adjustment,
-                                  fish_vel_0 + acc_ini * dt)
-            
-            fish_vel_1 = np.where(self.simulation.dead[:,np.newaxis] == 1,
-                                  fish_vel_1 * 0,
-                                  fish_vel_1)
-            
-            # Step 7: Prepare for position update
-            dxdy = np.where(mask[:,np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
+            # Step 6: add adjustment to original velocity computation via fast helper
+            fv0x = fish_vel_0[:, 0]
+            fv0y = fish_vel_0[:, 1]
+            accx = acc_ini[:, 0]
+            accy = acc_ini[:, 1]
+            pidx = pid_adjustment[:, 0]
+            pidy = pid_adjustment[:, 1]
+            dead_mask = self.simulation.dead == 1
+            dxdy = _swim_core_numba(fv0x, fv0y, accx, accy, pidx, pidy, tired_mask, dead_mask, mask, dt)
                 
             # if np.any(np.linalg.norm(fish_vel_1,axis = -1) > 2* self.ideal_sog):
             #     print ('fuck - why')
@@ -5652,13 +5731,8 @@ class simulation():
                 per bout and bout duration.
             '''
             # Calculate distances travelled and update bout odometer and duration
-            dist_travelled = np.sqrt((self.simulation.prev_X - self.simulation.X)**2 + \
-                                     (self.simulation.prev_Y - self.simulation.Y)**2)
-                
-            if len(dist_travelled.shape) == 1:
-                self.simulation.dist_per_bout += dist_travelled
-            else:
-                self.simulation.dist_per_bout += dist_travelled.flatten()
+            dist_travelled = _bout_distance_numba(self.simulation.prev_X, self.simulation.X, self.simulation.prev_Y, self.simulation.Y)
+            self.simulation.dist_per_bout += dist_travelled
 
             self.simulation.bout_dur += self.dt
             
@@ -5686,15 +5760,8 @@ class simulation():
                 b_s = self.simulation.b_s
                 lengths = self.simulation.length
                 
-                # Implement T Castro Santos (2005)
-                ttf = np.where(mask_dict['prolonged'], 
-                               np.exp(a_p + swim_speeds * b_p),
-                               ttf)
-                
-                ttf = np.where(mask_dict['sprint'], 
-                               np.exp(a_s + swim_speeds * b_s),
-                               ttf)
-                
+                # Implement T Castro Santos (2005) via optimized helper
+                ttf = _time_to_fatigue_numba(swim_speeds, mask_dict['prolonged'].astype(bool), mask_dict['sprint'].astype(bool), a_p, b_p, a_s, b_s)
                 return ttf
                 
             elif method == 'Katapodis_Gervais':
