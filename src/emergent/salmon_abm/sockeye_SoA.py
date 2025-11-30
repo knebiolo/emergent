@@ -598,20 +598,37 @@ def geo_to_pixel(X, Y, transform):
     - rows: array of row indices
     - cols: array of column indices
     """
-    # Invert the transform to go from geographic to pixel coordinates
-    inv_transform = ~transform
+    # Try to use vectorized affine math if transform exposes coefficients
+    try:
+        inv = ~transform
+        # inv is an Affine; compute cols, rows via inv.c + inv.a*(x+0.5) + inv.b*(y+0.5)
+        xs = np.asarray(X, dtype=float)
+        ys = np.asarray(Y, dtype=float)
+        # Affine multiplication for inverse: (col, row) = inv * (x, y)
+        cols = inv.c + inv.a * (xs + 0.0) + inv.b * (ys + 0.0)
+        rows = inv.f + inv.d * (xs + 0.0) + inv.e * (ys + 0.0)
+        rows = np.rint(rows).astype(int)
+        cols = np.rint(cols).astype(int)
+        return rows, cols
+    except Exception:
+        # Fallback to per-point multiplication
+        inv_transform = ~transform
+        pixels = [inv_transform * (x, y) for x, y in zip(X, Y)]
+        cols, rows = zip(*pixels)
+        rows = np.round(rows).astype(int)
+        cols = np.round(cols).astype(int)
+        return rows, cols
 
-    # Apply the inverted transform to each coordinate pair
-    pixels = [inv_transform * (x, y) for x, y in zip(X, Y)]
+def geo_to_pixel_from_inv(inv, X, Y):
+    """Convert coordinates to pixel indices using precomputed inverse affine `inv`.
 
-    # Separate the pixel coordinates into rows and columns
-    cols, rows = zip(*pixels)
-
-    # Round the values to get pixel indices and convert to integers
-    rows = np.round(rows).astype(int)
-    cols = np.round(cols).astype(int)
-
-    return rows, cols
+    `inv` is expected to have attributes a,b,c,d,e,f (an Affine object).
+    """
+    xs = np.asarray(X, dtype=float)
+    ys = np.asarray(Y, dtype=float)
+    cols = inv.c + inv.a * (xs + 0.0) + inv.b * (ys + 0.0)
+    rows = inv.f + inv.d * (xs + 0.0) + inv.e * (ys + 0.0)
+    return np.rint(rows).astype(int), np.rint(cols).astype(int)
 
 
 def pixel_to_geo(transform, rows, cols):
@@ -1748,6 +1765,23 @@ class simulation():
         
         # initialize movement parameters
         self.drag = self.arr.zeros(num_agents)           # computed theoretical drag
+
+        # If memmap deferred logging is requested, pre-create the memmap writer now
+        if getattr(self, 'defer_hdf', False) and getattr(self, 'defer_log_fmt', 'npz') == 'memmap':
+            try:
+                # variables mirrored from timestep_flush buf_vals
+                vars_to_log = ['X','Y','Z','prev_X','prev_Y','heading','sog','ideal_sog','swim_speed',
+                               'battery','swim_behav','swim_mode','recover_stopwatch','ttfr','time_out_of_water',
+                               'drag','thrust','Hz','bout_no','dist_per_bout','bout_dur','kcal']
+                var_shapes = {k: (self.num_agents, self.num_timesteps) for k in vars_to_log}
+                from emergent.io.log_writer_memmap import MemmapLogWriter
+                out_dir = (self.defer_log_dir or os.path.join(self.model_dir, 'logs', 'deferred'))
+                self._memmap_writer = MemmapLogWriter(out_dir, var_shapes, dtype=np.float32)
+                # also make a small internal mapping so flush uses the same variables
+                self._memmap_vars = vars_to_log
+            except Exception:
+                self._memmap_writer = None
+                self._memmap_vars = []
         self.thrust = self.arr.zeros(num_agents)         # computed theoretical thrust Lighthill 
         self.Hz = self.arr.zeros(num_agents)             # tail beats per second
         self.bout_no = self.arr.zeros(num_agents)        # bout number - new bout whenever fish recovers
@@ -2029,13 +2063,24 @@ class simulation():
 
                     # write buffered timesteps using memmap writer if available
                     if getattr(self, '_memmap_writer', None) is not None:
-                        for offset in range(write_len):
-                            t_idx = t_start + offset
-                            arrays = {k: self._hdf5_buffers[k][:, offset].astype('f4') for k in self._hdf5_buffers.keys()}
+                        # Build a dict of 2D arrays shaped (num_agents, write_len)
+                        arrays_2d = {}
+                        for k in self._hdf5_buffers.keys():
                             try:
-                                self._memmap_writer.append(t_idx, arrays)
+                                arrays_2d[k] = self._hdf5_buffers[k][:, :write_len].astype('f4')
                             except Exception:
-                                pass
+                                arrays_2d[k] = np.zeros((self.num_agents, write_len), dtype='f4')
+                        try:
+                            self._memmap_writer.append_block(t_start, arrays_2d)
+                        except Exception:
+                            # fallback to per-step append on failure
+                            for offset in range(write_len):
+                                t_idx = t_start + offset
+                                arrays = {k: self._hdf5_buffers[k][:, offset].astype('f4') for k in self._hdf5_buffers.keys()}
+                                try:
+                                    self._memmap_writer.append(t_idx, arrays)
+                                except Exception:
+                                    pass
                     elif getattr(self, '_log_writer', None) is not None:
                         # fallback to existing npz writer
                         for offset in range(write_len):
@@ -3072,7 +3117,11 @@ class simulation():
             if transform is None:
                 cache[key] = (np.full_like(X, -1, dtype=int), np.full_like(Y, -1, dtype=int))
             else:
-                rows, cols = geo_to_pixel(X, Y, transform)
+                try:
+                    inv = ~transform
+                    rows, cols = geo_to_pixel_from_inv(inv, X, Y)
+                except Exception:
+                    rows, cols = geo_to_pixel(X, Y, transform)
                 cache[key] = (rows.astype(np.int32), cols.astype(np.int32))
 
         self._pixel_index_cache = cache

@@ -49,6 +49,24 @@ class MemmapLogWriter:
                 # best-effort write without crashing the sim; ignore field on error
                 continue
 
+    def append_block(self, t_start, arrays_2d):
+        """Write blocks of timesteps into memmaps.
+
+        arrays_2d: dict name -> 2D array shaped (num_agents, nsteps)
+        Writes into memmap[:, t_start:t_start+nsteps] for each name present.
+        """
+        for name, arr2d in arrays_2d.items():
+            if name not in self._memmaps:
+                continue
+            try:
+                mm = self._memmaps[name]
+                a2 = np.asarray(arr2d, dtype=self.dtype)
+                # ensure correct shape
+                n_agents, n_steps = a2.shape
+                mm[:, t_start:t_start + n_steps] = a2[:, :]
+            except Exception:
+                continue
+
     def close(self):
         # flush memmaps by deleting references
         self._memmaps.clear()
