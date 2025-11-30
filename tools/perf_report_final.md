@@ -20,3 +20,16 @@ Benchmark: 2000 agents × 50 timesteps
 Post-merge vs premerge: -5.02% change in `timestep`
 Final (battery merge) vs premerge: 74.04% change in `timestep`
 Final vs postmerge: 83.23% change in `timestep`
+
+## optimized-warmup
+- pstats file: `tools/profile_2000_post_swimmerge.pstats`
+- total time (pstats total_tt): 0.565
+- `timestep` cumulative time: 0.564
+
+## optimized-warmup-aggressive
+- pstats file: `tools/profile_2000_post_swimmerge_opt.pstats`
+- total time (pstats total_tt): 0.550
+- `timestep` cumulative time: 0.548
+
+Optimized aggressive warmup vs previous optimized: -2.98% change in `timestep`
+Optimized aggressive warmup vs premerge: +0.64% change in `timestep`

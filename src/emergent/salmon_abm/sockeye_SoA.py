@@ -1040,6 +1040,26 @@ else:
 
 if _HAS_NUMBA:
     @njit(parallel=True, cache=True)
+    def _swim_speeds_numba_v2(x_vel, y_vel, sog, cos_h, sin_h, out):
+        n = sog.size
+        for i in prange(n):
+            fx = sog[i] * cos_h[i]
+            fy = sog[i] * sin_h[i]
+            rx = fx - x_vel[i]
+            ry = fy - y_vel[i]
+            out[i] = math.hypot(rx, ry)
+        return out
+else:
+    def _swim_speeds_numba_v2(x_vel, y_vel, sog, cos_h, sin_h, out):
+        fx = sog * cos_h
+        fy = sog * sin_h
+        relx = fx - x_vel
+        rely = fy - y_vel
+        out[:] = np.sqrt(relx * relx + rely * rely)
+        return out
+
+if _HAS_NUMBA:
+    @njit(parallel=True, cache=True)
     def _calc_battery_numba(battery, per_rec, ttf, mask_sustained, dt):
         n = battery.size
         # apply sustained recovery
@@ -4769,7 +4789,7 @@ class simulation():
                     fish_x_vel = (self.simulation.X - self.simulation.prev_X)/dt
                     fish_y_vel = (self.simulation.Y - self.simulation.prev_Y)/dt
                     fish_dir = np.arctan2(fish_y_vel,fish_x_vel)
-                    fish_mag = np.linalg.norm(np.stack((fish_x_vel,fish_y_vel)).T,axis = -1)
+                    fish_mag = np.hypot(fish_x_vel, fish_y_vel)
 
                     fish_velocities = np.stack((self.simulation.ideal_sog * np.cos(self.simulation.heading),
                                                 self.simulation.ideal_sog * np.sin(self.simulation.heading)),
@@ -6879,7 +6899,7 @@ class simulation():
                     heading = np.ascontiguousarray(self.simulation.heading, dtype=np.float64)
                     mask_arr = np.ascontiguousarray(np.ones(self.simulation.num_agents, dtype=np.bool_), dtype=np.bool_)
                     surf = np.ascontiguousarray(self.simulation.calc_surface_area(self.simulation.length), dtype=np.float64)
-                    dragc = np.ascontiguousarray(self.simulation.drag_coeff(np.linalg.norm(np.stack((self.simulation.x_vel, self.simulation.y_vel), axis=-1), axis=-1) * (self.simulation.length/1000.) / np.maximum(self.kin_visc(self.simulation.water_temp), 1e-12)), dtype=np.float64)
+                    dragc = np.ascontiguousarray(self.simulation.drag_coeff(np.hypot(self.simulation.x_vel, self.simulation.y_vel) * (self.simulation.length/1000.) / np.maximum(self.kin_visc(self.simulation.water_temp), 1e-12)), dtype=np.float64)
                     wave = np.ascontiguousarray(self.simulation.wave_drag, dtype=np.float64)
                     # call merged kernel but do not update battery here
                     ss, bl_s_tmp, prolonged_tmp, sprint_tmp, sustained_tmp, drags_tmp, _ = _drag_and_battery_numba(
@@ -7200,15 +7220,20 @@ class simulation():
                 # use merged kernel to compute swim speeds, fatigue masks, and drags
                 mask_arr = np.ascontiguousarray(self.simulation.alive_mask if hasattr(self.simulation, 'alive_mask') else np.ones(self.simulation.num_agents, dtype=np.bool_), dtype=np.bool_)
                 surf = np.ascontiguousarray(self.simulation.calc_surface_area(self.simulation.length), dtype=np.float64)
-                dragc = np.ascontiguousarray(self.simulation.drag_coeff(np.linalg.norm(np.stack((self.simulation.x_vel, self.simulation.y_vel), axis=-1), axis=-1) * (self.simulation.length/1000.) / np.maximum(self.kin_visc(self.simulation.water_temp), 1e-12)), dtype=np.float64)
+                dragc = np.ascontiguousarray(self.simulation.drag_coeff(np.hypot(self.simulation.x_vel, self.simulation.y_vel) * (self.simulation.length/1000.) / np.maximum(self.kin_visc(self.simulation.water_temp), 1e-12)), dtype=np.float64)
                 wave = np.ascontiguousarray(self.simulation.wave_drag, dtype=np.float64)
-                swim_speeds, bl_s, prolonged, sprint, sustained, drags = _merged_swim_drag_fatigue_numba(sog_a, heading_a, xv, yv, mask_arr, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf, dragc, wave, self.simulation.swim_behav, maxs, maxp, batt, swim_buf)
+                # precompute trig to avoid repeated cos/sin per-element
+                cos_h = np.ascontiguousarray(np.cos(heading_a), dtype=np.float64)
+                sin_h = np.ascontiguousarray(np.sin(heading_a), dtype=np.float64)
+                # reuse an output drags array to avoid extra allocations
+                drags_out = np.zeros((self.simulation.num_agents, 2), dtype=np.float64)
+                swim_speeds, bl_s, prolonged, sprint, sustained = _merged_swim_drag_fatigue_numba_v2(sog_a, cos_h, sin_h, xv, yv, mask_arr, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf, dragc, wave, self.simulation.swim_behav, maxs, maxp, batt, swim_buf, drags_out)
                 mask_dict = {'prolonged': prolonged, 'sprint': sprint, 'sustained': sustained}
-                # set drag into simulation state
+                # set drag into simulation state using the preallocated buffer
                 try:
-                    self.simulation.drag = drags
+                    self.simulation.drag = drags_out
                 except Exception:
-                    self.simulation.drag = np.ascontiguousarray(drags)
+                    self.simulation.drag = np.ascontiguousarray(drags_out)
             except Exception:
                 swim_speeds = self.swim_speeds()
                 bl_s = self.bl_s(swim_speeds)
@@ -7280,31 +7305,20 @@ class simulation():
         """
         Simulates a single time step for all fish in the simulation.
     
-        Parameters:
-        - t: Current simulation time.
-        - dt: Time step duration.
-    
-        The method performs the following operations for each fish:
-        1. Updates the mental map based on the current time.
-        2. Senses the environment to gather necessary data.
-        3. Optimizes vertical position within the water column.
-        4. Calculates the wave drag multiplier based on environmental conditions.
-        5. Assesses fatigue levels to determine energy reserves and swimming capabilities.
-        6. Arbitrates among behavioral cues to decide on actions.
-        7. Decides whether each fish should jump or swim based on their speed, heading, and energy levels.
-        8. Calculates the energy expenditure for the time step.
-        9. Logs the simulation data for the current time step.
-        """
-        # create movement, behavior, and fatigue objects
-        movement = self.movement(self)
-        behavior = self.behavior(t, self)
-        fatigue = self.fatigue(t, dt, self)
-        
-        # Assess mental map
-        self.update_mental_map(t)
-        
-        # Sense the environment
-        self.environment()
+                try:
+                    # Only update battery here; avoid recomputing drags by using drags_out produced above
+                    batt_a = np.ascontiguousarray(self.simulation.battery, dtype=np.float64)
+                    per_rec_a = np.ascontiguousarray(per_rec, dtype=np.float64)
+                    ttf_a = np.ascontiguousarray(ttf, dtype=np.float64)
+                    mask_sust = np.asarray(mask_dict['sustained'], dtype=np.bool_)
+                    new_batt = _wrap_merged_battery_numba(batt_a, per_rec_a, ttf_a, mask_sust, float(self.dt))
+                    try:
+                        self.simulation.battery = new_batt
+                    except Exception:
+                        self.simulation.battery = np.ascontiguousarray(new_batt)
+                except Exception:
+                    # fallback: previous behavior
+                    self.calc_battery(per_rec, ttf,  mask_dict)
 
         # Precompute pixel indices for this timestep to avoid repeated geo_to_pixel calls
         try:
@@ -7326,7 +7340,7 @@ class simulation():
         fatigue.assess_fatigue()
         
         # Calculate the ratio of ideal speed over ground to the magnitude of water velocity
-        sog_to_water_vel_ratio = self.sog / np.linalg.norm(np.stack((self.x_vel, self.y_vel)).T, axis=-1)
+        sog_to_water_vel_ratio = self.sog / np.hypot(self.x_vel, self.y_vel)
         
         # Calculate the sign of the heading and the water flow direction
         heading_sign = np.sign(self.heading)
@@ -7407,28 +7421,27 @@ class simulation():
         - The movie is saved in the directory specified by `self.model_dir`.
         
         Returns:
-        None. The result of the function is the creation of a movie file visualizing the simulation.
-        """        
-        t0 = time.time()
-        if self.pid_tuning == False:
-            if video == True:
-                # get depth raster (only when producing video)
-                depth_arr = self.hdf5['environment/depth'][:]
-                x_vel = self.hdf5['environment/vel_x'][:]
-                y_vel = self.hdf5['environment/vel_y'][:]
-                center = self.hdf5['environment/distance_to'][:]
+        Executes the simulation model over a specified number of time steps and generates a movie of the simulation.
 
-                # assuming raster data has been masked in ArcGIS 
-                no_data_value = -9999.
-                depth_masked = np.ma.masked_equal(depth_arr, no_data_value)
-                depth_masked = np.ma.masked_where(depth_masked < 1e-5, depth_masked) 
-                x_vel_masked = np.ma.masked_equal(x_vel, no_data_value)
-                y_vel_masked = np.ma.masked_equal(y_vel, no_data_value)
+        Parameters:
+        - model_name: A string representing the name of the model, used for titling the output movie.
+        - agents: A list of agent objects that will be simulated.
+        - n: An integer representing the number of time steps to simulate.
+        - dt: The duration of each time step.
 
-                # You need to get the bounds (left, bottom, right, top) from your raster's metadata
-                extent = [
-                    self.depth_rast_transform[2],  # Left: x offset
-                    self.depth_rast_transform[2] + self.depth_rast_transform[0] * self.width,  # Right: x offset + (pixel width * width of the image)
+        The function performs the following operations:
+        1. Initializes the depth raster from the HDF5 dataset.
+        2. Sets up the movie writer with metadata.
+        3. Initializes the plot for the simulation visualization.
+        4. Iterates over the specified number of time steps, updating the agents and capturing each frame.
+        5. Cleans up resources and finalizes the movie file.
+
+        The simulation uses raster data for depth and agent positions to visualize the movement of agents in the environment. The output is a movie file that shows the progression of the simulation over time.
+
+        Note:
+        - The function assumes that the HDF5 dataset, coordinate reference system (CRS), and depth raster transformation are already set as attributes of the class instance.
+        - The function prints the completion of each time step to the console.
+
                     self.depth_rast_transform[5] + self.depth_rast_transform[4] * self.height,  # Bottom: y offset + (pixel height * height of the image)
                     self.depth_rast_transform[5]  # Top: y offset
                 ]
@@ -8534,3 +8547,4 @@ class summary:
             dst.write(self.sd_per_cell, 2)       # Write the standard deviation to the second band
         
         print(f'Dual band raster {output_file} created successfully.')
+    """
