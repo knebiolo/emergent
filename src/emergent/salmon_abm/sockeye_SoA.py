@@ -4134,7 +4134,11 @@ class simulation():
         abm_points = np.asarray(abm_points, dtype=float)
 
         tree = cKDTree(hecras_nodes)
-        dists, inds = tree.query(abm_points, k=k, n_jobs=-1)
+        # Some SciPy versions accept `n_jobs` in cKDTree.query; others do not.
+        try:
+            dists, inds = tree.query(abm_points, k=k, n_jobs=-1)
+        except TypeError:
+            dists, inds = tree.query(abm_points, k=k)
         # ensure shapes (M,k)
         if k == 1:
             dists = dists[:, None]
