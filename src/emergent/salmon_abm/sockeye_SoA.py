@@ -2633,9 +2633,14 @@ class simulation():
             return results
 
         # compute pixel indices once using the first transform (assumes same grid)
-        rows, cols = geo_to_pixel(self.X, self.Y, transforms[0])
-        rows = np.clip(np.round(rows).astype(int), 0, self.height - 1)
-        cols = np.clip(np.round(cols).astype(int), 0, self.width - 1)
+        try:
+            # prefer using a precomputed inverse affine if available to avoid per-point ops
+            inv = ~transforms[0]
+            rows, cols = geo_to_pixel_from_inv(inv, self.X, self.Y)
+        except Exception:
+            rows, cols = geo_to_pixel(self.X, self.Y, transforms[0])
+        rows = np.clip(rows, 0, self.height - 1).astype(int)
+        cols = np.clip(cols, 0, self.width - 1).astype(int)
 
         # prepare results container
         results = {}
@@ -2653,18 +2658,24 @@ class simulation():
         if bbox_area <= max(4 * self.num_agents, 256):
             # use cache-backed multi-raster reader
             patches = self._read_env_window_multi(rmin, rmax, cmin, cmax, raster_names)
-            # slice per-agent values from each patch
-            for name in raster_names:
-                block = patches[name]
-                vals = block[rows - rmin, cols - cmin]
-                results[name] = np.asarray(vals).flatten()
+            # Stack patches into a single array of shape (n_rasters, h, w)
+            stacked = np.stack([patches[name] for name in raster_names], axis=0)
+            # compute local indices into the window
+            r_idx = (rows - rmin).astype(int)
+            c_idx = (cols - cmin).astype(int)
+            # gather values for all rasters and agents in one indexed pass -> shape (n_rasters, num_agents)
+            vals_all = stacked[:, r_idx, c_idx]
+            # assign back to results dict
+            for i, name in enumerate(raster_names):
+                results[name] = np.asarray(vals_all[i]).flatten()
             return results
 
         # fallback: grouped row reads
         env = self.hdf5['environment']
+        h5idx = self._h5_advanced_index
         for name in raster_names:
             dset = env[name]
-            results[name] = np.asarray(self._h5_advanced_index(dset, rows, cols)).flatten()
+            results[name] = np.asarray(h5idx(dset, rows, cols)).flatten()
         return results
 
     def _read_env_window_multi(self, rmin, rmax, cmin, cmax, raster_names):
@@ -2964,17 +2975,27 @@ class simulation():
         rows = np.clip(np.round(rows).astype(int), 0, max_row)
         cols = np.clip(np.round(cols).astype(int), 0, max_col)
 
-        # Populate in-memory refugia accumulator for each agent
+        # Populate in-memory refugia accumulator for each agent (vectorized)
         agents = np.arange(self.num_agents, dtype=int)
-        # Ensure current_velocity is an array
-        cv = np.asarray(current_velocity)
-        for i in agents:
-            r = rows[i]
-            c = cols[i]
+        # Ensure current_velocity is an array of floats
+        cv = np.asarray(current_velocity, dtype=float)
+        # Mask invalid velocities (NaN/inf) to avoid assignment errors
+        valid = np.isfinite(cv)
+        if np.any(valid):
+            ai = agents[valid]
+            ri = rows[valid].astype(int)
+            ci = cols[valid].astype(int)
             try:
-                self.refugia_accumulator[i, r, c] = float(cv[i])
+                self.refugia_accumulator[ai, ri, ci] = cv[valid]
             except Exception:
-                continue
+                # Fallback to safe per-agent assignment if vectorized write fails
+                for i in ai:
+                    r = int(rows[i])
+                    c = int(cols[i])
+                    try:
+                        self.refugia_accumulator[i, r, c] = float(cv[i])
+                    except Exception:
+                        continue
 
         # Flushing to HDF5 happens in `timestep_flush` in batch.
 
