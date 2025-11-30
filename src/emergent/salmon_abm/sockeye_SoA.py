@@ -57,6 +57,8 @@ from scipy.constants import g
 from scipy.spatial import cKDTree#, cdist
 from scipy.stats import beta
 from scipy.ndimage import distance_transform_edt
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra
 import matplotlib.animation as manimation
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -1046,6 +1048,188 @@ def pixel_to_geo(transform, rows, cols):
     ys = transform.f + transform.e * (rows + 0.5)
 
     return xs, ys
+
+
+def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist'):
+    """
+    Compute an along-stream distance raster for the simulation and write it
+    into the HDF under `environment/{out_name}`.
+
+    Strategy:
+    - Use the `wetted` mask (or depth>0) to define traversable cells.
+    - Build a graph connecting 8-neighbors among traversable cells with edge
+      weights equal to Euclidean distance between cell centers (using raster
+      transform pixel sizes).
+    - Run Dijkstra from the selected outlet cell(s) to compute distance-to-outlet
+      for every traversable cell.
+
+    Parameters:
+    - simulation: simulation instance with `hdf5` open and raster transforms.
+    - outlet_xy: (x,y) coordinate of outlet; if None a default downstream cell is chosen.
+    - depth_name, wetted_name: dataset names under `/environment`.
+    - out_name: dataset name to create under `/environment` for results.
+
+    Returns: the computed 2D numpy array (float32) of same shape as rasters.
+    """
+    hdf = getattr(simulation, 'hdf5', None)
+    if hdf is None:
+        raise RuntimeError('simulation.hdf5 is required')
+
+    env = hdf.get('environment')
+    if env is None:
+        raise RuntimeError('environment group missing in HDF')
+
+    # read rasters
+    if depth_name in env:
+        depth = np.asarray(env[depth_name][:], dtype=np.float32)
+        mask = np.isfinite(depth) & (depth > 0.0)
+    elif wetted_name in env:
+        wett = np.asarray(env[wetted_name][:])
+        mask = (wett != 0)
+    else:
+        raise RuntimeError('Neither depth nor wetted raster found')
+
+    # read transforms for pixel spacing
+    try:
+        t = getattr(simulation, 'depth_rast_transform', None)
+        if t is None:
+            # try generic transform
+            t = getattr(simulation, 'vel_mag_rast_transform', None)
+    except Exception:
+        t = None
+    if t is None:
+        # fallback to unit pixels
+        px = py = 1.0
+    else:
+        px = abs(t.a)
+        py = abs(t.e)
+
+    h, w = mask.shape
+
+    # mapping from (r,c) to node id
+    idx = -np.ones(mask.shape, dtype=np.int32)
+    mask_flat = mask.ravel()
+    node_ids = np.nonzero(mask_flat)[0]
+    if node_ids.size == 0:
+        # nothing to do
+        arr = np.full(mask.shape, np.nan, dtype=np.float32)
+        env.create_dataset(out_name, data=arr, dtype='f4')
+        hdf.flush()
+        return arr
+
+    idx_flat = -np.ones(h * w, dtype=np.int32)
+    idx_flat[node_ids] = np.arange(node_ids.size, dtype=np.int32)
+    idx = idx_flat.reshape(h, w)
+
+    # neighbor offsets (8-neighbors)
+    nbrs = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+    rows = []
+    cols = []
+    data = []
+    # build sparse graph
+    for r in range(h):
+        for c in range(w):
+            nid = idx[r, c]
+            if nid < 0:
+                continue
+            for dr, dc in nbrs:
+                rr = r + dr
+                cc = c + dc
+                if rr < 0 or rr >= h or cc < 0 or cc >= w:
+                    continue
+                nid2 = idx[rr, cc]
+                if nid2 < 0:
+                    continue
+                # distance
+                dist = np.hypot(dr * py, dc * px)
+                rows.append(nid)
+                cols.append(nid2)
+                data.append(dist)
+
+    n_nodes = node_ids.size
+    graph = csr_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes))
+
+    # find outlet node(s)
+    if outlet_xy is not None:
+        ox, oy = outlet_xy
+        try:
+            orow, ocol = geo_to_pixel(simulation.depth_rast_transform, [oy], [ox])
+            orow = int(orow[0]); ocol = int(ocol[0])
+        except Exception:
+            orow = None
+        if orow is None or orow < 0 or orow >= h or ocol < 0 or ocol >= w or idx[orow, ocol] < 0:
+            # fallback to nearest wetted cell by Euclidean
+            flat_xy = np.column_stack((env['x_coords'][:].ravel(), env['y_coords'][:].ravel()))
+            dists = np.hypot(flat_xy[:,0] - ox, flat_xy[:,1] - oy)
+            cand = np.argmin(dists)
+            if mask_flat[cand]:
+                outlet_nodes = [idx_flat[cand]]
+            else:
+                # nearest wetted
+                wett_inds = np.nonzero(mask_flat)[0]
+                nearest = wett_inds[np.argmin(dists[wett_inds])]
+                outlet_nodes = [idx_flat[nearest]]
+        else:
+            outlet_nodes = [int(idx[orow, ocol])]
+    else:
+        # default: pick wetted cell with minimal y coordinate (downstream-most)
+        xcoords = env['x_coords'][:]
+        ycoords = env['y_coords'][:]
+        flat_y = ycoords.ravel()
+        wett_inds = np.nonzero(mask_flat)[0]
+        if wett_inds.size == 0:
+            outlet_nodes = [0]
+        else:
+            out_ind = wett_inds[np.argmin(flat_y[wett_inds])]
+            outlet_nodes = [int(idx_flat[out_ind])]
+
+    # run Dijkstra from outlet(s) to all nodes
+    dist_matrix = dijkstra(csgraph=graph, directed=False, indices=outlet_nodes)
+    # dist_matrix shape: (len(outlet_nodes), n_nodes) or (n_nodes,) if one
+    if dist_matrix.ndim == 2:
+        dist = dist_matrix.min(axis=0)
+    else:
+        dist = dist_matrix
+
+    out_arr = np.full(h * w, np.nan, dtype=np.float32)
+    out_arr[node_ids] = dist.astype(np.float32)
+    out_arr = out_arr.reshape(h, w)
+
+    # write to HDF (handle read-only file by reopening in r+ mode)
+    wrote = False
+    try:
+        if out_name in env:
+            env[out_name][:] = out_arr
+        else:
+            env.create_dataset(out_name, data=out_arr, dtype='f4')
+        try:
+            hdf.flush()
+        except Exception:
+            pass
+        wrote = True
+    except (TypeError, ValueError, RuntimeError) as e:
+        # try reopening the underlying file in r+ mode if possible
+        fname = getattr(hdf, 'filename', None) or getattr(hdf, 'name', None)
+        if fname:
+            try:
+                with h5py.File(fname, 'r+') as hw:
+                    envw = hw.require_group('environment')
+                    if out_name in envw:
+                        envw[out_name][:] = out_arr
+                    else:
+                        envw.create_dataset(out_name, data=out_arr, dtype='f4')
+                    try:
+                        hw.flush()
+                    except Exception:
+                        pass
+                    wrote = True
+            except Exception:
+                wrote = False
+        if not wrote:
+            # As a last resort, skip write and return the array
+            pass
+    return out_arr
 
 def standardize_shape(arr, target_shape=(5, 5), fill_value=np.nan):
     if arr.shape != target_shape:
