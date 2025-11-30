@@ -774,16 +774,16 @@ def _compute_drags_numpy(fx, fy, wx, wy, mask, density, surface_areas, drag_coef
 
 def compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav):
     if _HAS_NUMBA:
-        # ensure fixed dtypes to avoid numba recompilation
-        fx = np.asarray(fx, dtype=np.float64)
-        fy = np.asarray(fy, dtype=np.float64)
-        wx = np.asarray(wx, dtype=np.float64)
-        wy = np.asarray(wy, dtype=np.float64)
-        mask = np.asarray(mask, dtype=np.bool_)
-        surface_areas = np.asarray(surface_areas, dtype=np.float64)
-        drag_coeffs = np.asarray(drag_coeffs, dtype=np.float64)
-        wave_drag = np.asarray(wave_drag, dtype=np.float64)
-        swim_behav = np.asarray(swim_behav, dtype=np.int64)
+        # ensure fixed dtypes and contiguous memory to avoid numba recompilation and hidden copies
+        fx = np.ascontiguousarray(fx, dtype=np.float64)
+        fy = np.ascontiguousarray(fy, dtype=np.float64)
+        wx = np.ascontiguousarray(wx, dtype=np.float64)
+        wy = np.ascontiguousarray(wy, dtype=np.float64)
+        mask = np.ascontiguousarray(mask, dtype=np.bool_)
+        surface_areas = np.ascontiguousarray(surface_areas, dtype=np.float64)
+        drag_coeffs = np.ascontiguousarray(drag_coeffs, dtype=np.float64)
+        wave_drag = np.ascontiguousarray(wave_drag, dtype=np.float64)
+        swim_behav = np.ascontiguousarray(swim_behav, dtype=np.int64)
         return _compute_drags_numba(fx, fy, wx, wy, mask, float(density), surface_areas, drag_coeffs, wave_drag, swim_behav)
     else:
         return _compute_drags_numpy(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav)
@@ -1004,9 +1004,12 @@ if _HAS_NUMBA:
         pass
 
     # helper to ensure compilation completes at import time
-    def _numba_warmup():
+    def _numba_warmup(m=None):
         try:
-            m = max(64, n)
+            if m is None:
+                m = max(64, n)
+            else:
+                m = int(m)
             d = np.zeros(m, dtype=np.float64)
             b = np.ones(m, dtype=np.bool_)
             bi = np.zeros(m, dtype=np.int64)
@@ -1025,6 +1028,40 @@ if _HAS_NUMBA:
         _numba_warmup()
     except Exception:
         pass
+
+    def _numba_warmup_for_sim(sim):
+        """Warm Numba kernels using arrays shaped to the given simulation instance.
+
+        This calls `_numba_warmup` with a large `m` and then invokes a small set of
+        kernels using arrays shaped exactly like `sim.num_agents` and `sim.swim_speeds`.
+        """
+        try:
+            n = max(1024, int(getattr(sim, 'num_agents', 128)))
+            _numba_warmup(m=n)
+            # prepare exact-shape arrays
+            na = int(getattr(sim, 'num_agents', n))
+            max_ts = int(getattr(sim, 'swim_speeds', np.zeros((na,1))).shape[1])
+            ones = np.ones(na, dtype=np.float64)
+            zeros = np.zeros(na, dtype=np.float64)
+            bmask = np.ones(na, dtype=np.bool_)
+            bi = np.zeros(na, dtype=np.int64)
+            # exact-shape warmups
+            try:
+                _compute_drags_numba(ones, ones, ones, ones, bmask, 1.0, ones, ones, ones, bi)
+            except Exception:
+                pass
+            try:
+                _swim_speeds_numba(ones, ones, ones, ones)
+            except Exception:
+                pass
+            try:
+                # swim_speeds buffer shaped (na, max_ts)
+                buf = np.zeros((na, max_ts), dtype=np.float64)
+                _assess_fatigue_core(ones, ones, ones, ones, ones, ones, ones, buf)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
 
 # --- Swim numeric core helpers ---
@@ -2604,7 +2641,16 @@ class simulation():
         # Ensure Numba kernels are warmed with representative sizes to avoid JIT stalls in timed loops
         try:
             if _HAS_NUMBA:
-                _numba_warmup()
+                # warmup with representative size to move JIT compile cost out of timed loop
+                warm_n = max(1024, int(getattr(self, 'num_agents', 128)))
+                _numba_warmup(m=warm_n)
+        except Exception:
+            pass
+
+        # perform an exact-shape warmup using this simulation's sizes
+        try:
+            if _HAS_NUMBA:
+                _numba_warmup_for_sim(self)
         except Exception:
             pass
 
@@ -5125,15 +5171,15 @@ class simulation():
             pidy = pid_adjustment[:, 1]
             dead_mask = self.simulation.dead == 1
             try:
-                fv0x_a = np.asarray(fv0x, dtype=np.float64)
-                fv0y_a = np.asarray(fv0y, dtype=np.float64)
-                accx_a = np.asarray(accx, dtype=np.float64)
-                accy_a = np.asarray(accy, dtype=np.float64)
-                pidx_a = np.asarray(pidx, dtype=np.float64)
-                pidy_a = np.asarray(pidy, dtype=np.float64)
-                tired_a = np.asarray(tired_mask, dtype=np.bool_)
-                dead_a = np.asarray(dead_mask, dtype=np.bool_)
-                mask_a = np.asarray(mask, dtype=np.bool_)
+                fv0x_a = np.ascontiguousarray(fv0x, dtype=np.float64)
+                fv0y_a = np.ascontiguousarray(fv0y, dtype=np.float64)
+                accx_a = np.ascontiguousarray(accx, dtype=np.float64)
+                accy_a = np.ascontiguousarray(accy, dtype=np.float64)
+                pidx_a = np.ascontiguousarray(pidx, dtype=np.float64)
+                pidy_a = np.ascontiguousarray(pidy, dtype=np.float64)
+                tired_a = np.ascontiguousarray(tired_mask, dtype=np.bool_)
+                dead_a = np.ascontiguousarray(dead_mask, dtype=np.bool_)
+                mask_a = np.ascontiguousarray(mask, dtype=np.bool_)
                 dxdy = _swim_core_numba(fv0x_a, fv0y_a, accx_a, accy_a, pidx_a, pidy_a, tired_a, dead_a, mask_a, float(dt))
             except Exception:
                 dxdy = _swim_core_numba(fv0x, fv0y, accx, accy, pidx, pidy, tired_mask, dead_mask, mask, dt)
@@ -6534,10 +6580,10 @@ class simulation():
             # Calculate swim speeds for each fish (relative to water)
             if _HAS_NUMBA:
                 try:
-                    x_vel = np.asarray(self.simulation.x_vel, dtype=np.float64)
-                    y_vel = np.asarray(self.simulation.y_vel, dtype=np.float64)
-                    sog = np.asarray(self.simulation.sog, dtype=np.float64)
-                    heading = np.asarray(self.simulation.heading, dtype=np.float64)
+                    x_vel = np.ascontiguousarray(self.simulation.x_vel, dtype=np.float64)
+                    y_vel = np.ascontiguousarray(self.simulation.y_vel, dtype=np.float64)
+                    sog = np.ascontiguousarray(self.simulation.sog, dtype=np.float64)
+                    heading = np.ascontiguousarray(self.simulation.heading, dtype=np.float64)
                     swim_speeds = _swim_speeds_numba(x_vel, y_vel, sog, heading)
                 except Exception:
                     swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=-1)
@@ -6574,10 +6620,10 @@ class simulation():
             '''
             # Calculate distances travelled and update bout odometer and duration
             try:
-                prev_X = np.asarray(self.simulation.prev_X, dtype=np.float64)
-                X = np.asarray(self.simulation.X, dtype=np.float64)
-                prev_Y = np.asarray(self.simulation.prev_Y, dtype=np.float64)
-                Y = np.asarray(self.simulation.Y, dtype=np.float64)
+                prev_X = np.ascontiguousarray(self.simulation.prev_X, dtype=np.float64)
+                X = np.ascontiguousarray(self.simulation.X, dtype=np.float64)
+                prev_Y = np.ascontiguousarray(self.simulation.prev_Y, dtype=np.float64)
+                Y = np.ascontiguousarray(self.simulation.Y, dtype=np.float64)
                 dist_travelled = _bout_distance_numba(prev_X, X, prev_Y, Y)
             except Exception:
                 dist_travelled = _bout_distance_numba(self.simulation.prev_X, self.simulation.X, self.simulation.prev_Y, self.simulation.Y)
@@ -6611,7 +6657,7 @@ class simulation():
                 
                 # Implement T Castro Santos (2005) via optimized helper
                 try:
-                    ss = np.asarray(swim_speeds, dtype=np.float64)
+                    ss = np.ascontiguousarray(swim_speeds, dtype=np.float64)
                     m_pro = np.asarray(mask_dict['prolonged'], dtype=np.bool_)
                     m_sprint = np.asarray(mask_dict['sprint'], dtype=np.bool_)
                     ttf = _time_to_fatigue_numba(ss, m_pro, m_sprint, float(a_p), float(b_p), float(a_s), float(b_s))
@@ -6720,9 +6766,9 @@ class simulation():
             # use numba kernel when available
             if _HAS_NUMBA:
                 try:
-                    batt = np.asarray(battery, dtype=np.float64)
-                    per_rec_a = np.asarray(per_rec_arr, dtype=np.float64)
-                    ttf_a = np.asarray(ttf_arr, dtype=np.float64)
+                    batt = np.ascontiguousarray(battery, dtype=np.float64)
+                    per_rec_a = np.ascontiguousarray(per_rec_arr, dtype=np.float64)
+                    ttf_a = np.ascontiguousarray(ttf_arr, dtype=np.float64)
                     mask_sust = np.asarray(mask_sustained, dtype=np.bool_)
                     new_batt = _calc_battery_numba(batt, per_rec_a, ttf_a, mask_sust, float(self.dt))
                     self.simulation.battery = new_batt
@@ -6831,14 +6877,14 @@ class simulation():
             '''            
             # Use compiled core to compute swim speeds and masks where possible
             try:
-                sog_a = np.asarray(self.simulation.sog, dtype=np.float64)
-                heading_a = np.asarray(self.simulation.heading, dtype=np.float64)
-                xv = np.asarray(self.simulation.x_vel, dtype=np.float64)
-                yv = np.asarray(self.simulation.y_vel, dtype=np.float64)
-                maxs = np.asarray(self.simulation.max_s_U, dtype=np.float64)
-                maxp = np.asarray(self.simulation.max_p_U, dtype=np.float64)
-                batt = np.asarray(self.simulation.battery, dtype=np.float64)
-                swim_buf = np.asarray(self.simulation.swim_speeds, dtype=np.float64)
+                sog_a = np.ascontiguousarray(self.simulation.sog, dtype=np.float64)
+                heading_a = np.ascontiguousarray(self.simulation.heading, dtype=np.float64)
+                xv = np.ascontiguousarray(self.simulation.x_vel, dtype=np.float64)
+                yv = np.ascontiguousarray(self.simulation.y_vel, dtype=np.float64)
+                maxs = np.ascontiguousarray(self.simulation.max_s_U, dtype=np.float64)
+                maxp = np.ascontiguousarray(self.simulation.max_p_U, dtype=np.float64)
+                batt = np.ascontiguousarray(self.simulation.battery, dtype=np.float64)
+                swim_buf = np.ascontiguousarray(self.simulation.swim_speeds, dtype=np.float64)
                 swim_speeds, bl_s, prolonged, sprint, sustained = _assess_fatigue_core(sog_a, heading_a, xv, yv, maxs, maxp, batt, swim_buf)
                 mask_dict = {'prolonged': prolonged, 'sprint': sprint, 'sustained': sustained}
             except Exception:
