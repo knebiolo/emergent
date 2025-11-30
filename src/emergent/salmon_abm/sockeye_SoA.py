@@ -774,7 +774,17 @@ def _compute_drags_numpy(fx, fy, wx, wy, mask, density, surface_areas, drag_coef
 
 def compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav):
     if _HAS_NUMBA:
-        return _compute_drags_numba(fx, fy, wx, wy, mask, float(density), surface_areas.astype(np.float64), drag_coeffs.astype(np.float64), wave_drag.astype(np.float64), swim_behav.astype(np.int64))
+        # ensure fixed dtypes to avoid numba recompilation
+        fx = np.asarray(fx, dtype=np.float64)
+        fy = np.asarray(fy, dtype=np.float64)
+        wx = np.asarray(wx, dtype=np.float64)
+        wy = np.asarray(wy, dtype=np.float64)
+        mask = np.asarray(mask, dtype=np.bool_)
+        surface_areas = np.asarray(surface_areas, dtype=np.float64)
+        drag_coeffs = np.asarray(drag_coeffs, dtype=np.float64)
+        wave_drag = np.asarray(wave_drag, dtype=np.float64)
+        swim_behav = np.asarray(swim_behav, dtype=np.int64)
+        return _compute_drags_numba(fx, fy, wx, wy, mask, float(density), surface_areas, drag_coeffs, wave_drag, swim_behav)
     else:
         return _compute_drags_numpy(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav)
 
@@ -996,15 +1006,17 @@ if _HAS_NUMBA:
     # helper to ensure compilation completes at import time
     def _numba_warmup():
         try:
-            m = max(16, n)
+            m = max(64, n)
             d = np.zeros(m, dtype=np.float64)
-            _ = _compute_drags_numba(d, d, d, d, np.ones(m, dtype=np.bool_), 1.0, np.ones(m), np.ones(m), np.ones(m), np.zeros(m, dtype=np.int64))
+            b = np.ones(m, dtype=np.bool_)
+            bi = np.zeros(m, dtype=np.int64)
+            _ = _compute_drags_numba(d, d, d, d, b, 1.0, np.ones(m, dtype=np.float64), np.ones(m, dtype=np.float64), np.ones(m, dtype=np.float64), bi)
             _ = _bout_distance_numba(d, d, d, d)
-            _ = _time_to_fatigue_numba(d, np.ones(m, dtype=np.bool_), np.zeros(m, dtype=np.bool_), 0.0, 0.0, 0.0, 0.0)
+            _ = _time_to_fatigue_numba(d, b, np.zeros(m, dtype=np.bool_), 0.0, 0.0, 0.0, 0.0)
             _ = _project_points_onto_line_numba(d, d, d, d)
             _ = _swim_speeds_numba(d, d, d, d)
-            _ = _calc_battery_numba(d.copy(), d, d, np.ones(m, dtype=np.bool_), 0.1)
-            _ = _swim_core_numba(d, d, d, d, d, d, np.zeros(m, dtype=np.bool_), np.zeros(m, dtype=np.bool_), np.ones(m, dtype=np.bool_), 0.1)
+            _ = _calc_battery_numba(np.ones(m, dtype=np.float64), d, d, b, 0.1)
+            _ = _swim_core_numba(d, d, d, d, d, d, np.zeros(m, dtype=np.bool_), np.zeros(m, dtype=np.bool_), b, 0.1)
         except Exception:
             pass
 
@@ -2575,6 +2587,26 @@ class simulation():
         # create a project database and write initial arrays to HDF
         self.hdf5 = h5py.File(self.db, 'w')
         self.initialize_hdf5()
+        # Build an in-memory cache of environment rasters to avoid repeated h5py reads
+        self._env_cache = {}
+        try:
+            env = self.hdf5.get('environment')
+            if env is not None:
+                for name in ('depth','wetted','vel_x','vel_y','vel_mag','vel_dir','x_coords','y_coords','along_stream_dist'):
+                    try:
+                        if name in env:
+                            self._env_cache[name] = np.asarray(env[name][:])
+                    except Exception:
+                        self._env_cache[name] = None
+        except Exception:
+            self._env_cache = {}
+
+        # Ensure Numba kernels are warmed with representative sizes to avoid JIT stalls in timed loops
+        try:
+            if _HAS_NUMBA:
+                _numba_warmup()
+        except Exception:
+            pass
 
         # Optionally compute along-stream raster on init if user provided
         # an external environment HDF path via env_files special key 'hecras_hdf'
@@ -3236,9 +3268,14 @@ class simulation():
             env = self.hdf5.get('environment')
             if env is not None and 'along_stream_dist' in env:
                 # sample raster at agent positions (vectorized)
-                xs = env['x_coords'][:]
-                ys = env['y_coords'][:]
-                rast = env['along_stream_dist'][:]
+                # prefer in-memory cache if available
+                xs = self._env_cache.get('x_coords') if getattr(self, '_env_cache', None) is not None else None
+                ys = self._env_cache.get('y_coords') if getattr(self, '_env_cache', None) is not None else None
+                rast = self._env_cache.get('along_stream_dist') if getattr(self, '_env_cache', None) is not None else None
+                if xs is None or ys is None or rast is None:
+                    xs = env['x_coords'][:]
+                    ys = env['y_coords'][:]
+                    rast = env['along_stream_dist'][:]
                 # convert agent XY to pixel indices using inverse transform if available
                 try:
                     inv = get_inv_transform(self, getattr(self, 'depth_rast_transform', None))
@@ -3448,6 +3485,26 @@ class simulation():
         # Get the row, col indices for the coordinates
         rows, cols = geo_to_pixel(self.X, self.Y, transform)
 
+        # Prefer in-memory cache if present to avoid h5py reads
+        cache = getattr(self, '_env_cache', None)
+        if cache is not None and raster_name in cache and cache[raster_name] is not None:
+            data = cache[raster_name]
+            # Ensure that the indices are within the bounds of the raster data
+            rows = np.clip(np.round(rows).astype(int), 0, data.shape[0] - 1)
+            cols = np.clip(np.round(cols).astype(int), 0, data.shape[1] - 1)
+
+            # If agents are clustered in a small bbox, read a single contiguous block and slice
+            rmin, rmax = rows.min(), rows.max()
+            cmin, cmax = cols.min(), cols.max()
+            if (rmax - rmin + 1) * (cmax - cmin + 1) <= max(4 * self.num_agents, 256):
+                block = data[rmin:rmax+1, cmin:cmax+1]
+                vals = block[rows - rmin, cols - cmin]
+                return np.asarray(vals).flatten()
+
+            # fallback to grouped-row efficient indexing on the in-memory array
+            vals = data[rows, cols]
+            return np.asarray(vals).flatten()
+
         # Use the already open HDF5 file object to read the specified raster dataset (no flush)
         env = self.hdf5['environment']
         raster_dataset = env[raster_name] if raster_name in env else self.hdf5['environment/%s' % (raster_name)]
@@ -3546,6 +3603,21 @@ class simulation():
         # prepare results container
         results = {}
 
+        # Prefer in-memory cache if present to avoid repeated h5 reads
+        cache = getattr(self, '_env_cache', None)
+        if cache is not None:
+            out = {}
+            for name in raster_names:
+                arr = cache.get(name)
+                if arr is None:
+                    out[name] = np.full(self.num_agents, np.nan, dtype=float)
+                    continue
+                # sample directly from cached array
+                r_idx = np.clip(np.round(rows).astype(int), 0, arr.shape[0]-1)
+                c_idx = np.clip(np.round(cols).astype(int), 0, arr.shape[1]-1)
+                out[name] = arr[r_idx, c_idx].flatten()
+            return out
+
         # If the HDF5 'environment' group does not exist (HECRAS-only), return NaNs
         if 'environment' not in self.hdf5:
             return {name: np.full(self.num_agents, np.nan, dtype=float) for name in raster_names}
@@ -3615,6 +3687,23 @@ class simulation():
         cached = self._env_window_cache.get(key)
         if cached is not None:
             return cached
+
+        # Prefer to serve from in-memory env cache if present
+        cache = getattr(self, '_env_cache', None)
+        out = {}
+        if cache is not None:
+            can_serve = True
+            for name in raster_names:
+                arr = cache.get(name)
+                if arr is None:
+                    can_serve = False
+                    break
+            if can_serve:
+                for name in raster_names:
+                    arr = cache[name]
+                    out[name] = arr[rmin:rmax+1, cmin:cmax+1]
+                self._env_window_cache.put(key, out)
+                return out
 
         env = self.hdf5['environment']
         out = {}
@@ -5035,7 +5124,19 @@ class simulation():
             pidx = pid_adjustment[:, 0]
             pidy = pid_adjustment[:, 1]
             dead_mask = self.simulation.dead == 1
-            dxdy = _swim_core_numba(fv0x, fv0y, accx, accy, pidx, pidy, tired_mask, dead_mask, mask, dt)
+            try:
+                fv0x_a = np.asarray(fv0x, dtype=np.float64)
+                fv0y_a = np.asarray(fv0y, dtype=np.float64)
+                accx_a = np.asarray(accx, dtype=np.float64)
+                accy_a = np.asarray(accy, dtype=np.float64)
+                pidx_a = np.asarray(pidx, dtype=np.float64)
+                pidy_a = np.asarray(pidy, dtype=np.float64)
+                tired_a = np.asarray(tired_mask, dtype=np.bool_)
+                dead_a = np.asarray(dead_mask, dtype=np.bool_)
+                mask_a = np.asarray(mask, dtype=np.bool_)
+                dxdy = _swim_core_numba(fv0x_a, fv0y_a, accx_a, accy_a, pidx_a, pidy_a, tired_a, dead_a, mask_a, float(dt))
+            except Exception:
+                dxdy = _swim_core_numba(fv0x, fv0y, accx, accy, pidx, pidy, tired_mask, dead_mask, mask, dt)
                 
             # if np.any(np.linalg.norm(fish_vel_1,axis = -1) > 2* self.ideal_sog):
             #     print ('fuck - why')
@@ -6433,7 +6534,11 @@ class simulation():
             # Calculate swim speeds for each fish (relative to water)
             if _HAS_NUMBA:
                 try:
-                    swim_speeds = _swim_speeds_numba(self.simulation.x_vel, self.simulation.y_vel, self.simulation.sog, self.simulation.heading)
+                    x_vel = np.asarray(self.simulation.x_vel, dtype=np.float64)
+                    y_vel = np.asarray(self.simulation.y_vel, dtype=np.float64)
+                    sog = np.asarray(self.simulation.sog, dtype=np.float64)
+                    heading = np.asarray(self.simulation.heading, dtype=np.float64)
+                    swim_speeds = _swim_speeds_numba(x_vel, y_vel, sog, heading)
                 except Exception:
                     swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=-1)
             else:
@@ -6468,7 +6573,14 @@ class simulation():
                 per bout and bout duration.
             '''
             # Calculate distances travelled and update bout odometer and duration
-            dist_travelled = _bout_distance_numba(self.simulation.prev_X, self.simulation.X, self.simulation.prev_Y, self.simulation.Y)
+            try:
+                prev_X = np.asarray(self.simulation.prev_X, dtype=np.float64)
+                X = np.asarray(self.simulation.X, dtype=np.float64)
+                prev_Y = np.asarray(self.simulation.prev_Y, dtype=np.float64)
+                Y = np.asarray(self.simulation.Y, dtype=np.float64)
+                dist_travelled = _bout_distance_numba(prev_X, X, prev_Y, Y)
+            except Exception:
+                dist_travelled = _bout_distance_numba(self.simulation.prev_X, self.simulation.X, self.simulation.prev_Y, self.simulation.Y)
             self.simulation.dist_per_bout += dist_travelled
 
             self.simulation.bout_dur += self.dt
@@ -6498,7 +6610,13 @@ class simulation():
                 lengths = self.simulation.length
                 
                 # Implement T Castro Santos (2005) via optimized helper
-                ttf = _time_to_fatigue_numba(swim_speeds, mask_dict['prolonged'].astype(bool), mask_dict['sprint'].astype(bool), a_p, b_p, a_s, b_s)
+                try:
+                    ss = np.asarray(swim_speeds, dtype=np.float64)
+                    m_pro = np.asarray(mask_dict['prolonged'], dtype=np.bool_)
+                    m_sprint = np.asarray(mask_dict['sprint'], dtype=np.bool_)
+                    ttf = _time_to_fatigue_numba(ss, m_pro, m_sprint, float(a_p), float(b_p), float(a_s), float(b_s))
+                except Exception:
+                    ttf = _time_to_fatigue_numba(swim_speeds, mask_dict['prolonged'].astype(bool), mask_dict['sprint'].astype(bool), a_p, b_p, a_s, b_s)
                 return ttf
                 
             elif method == 'Katapodis_Gervais':
@@ -6602,7 +6720,11 @@ class simulation():
             # use numba kernel when available
             if _HAS_NUMBA:
                 try:
-                    new_batt = _calc_battery_numba(battery, per_rec_arr, ttf_arr, mask_sustained, self.dt)
+                    batt = np.asarray(battery, dtype=np.float64)
+                    per_rec_a = np.asarray(per_rec_arr, dtype=np.float64)
+                    ttf_a = np.asarray(ttf_arr, dtype=np.float64)
+                    mask_sust = np.asarray(mask_sustained, dtype=np.bool_)
+                    new_batt = _calc_battery_numba(batt, per_rec_a, ttf_a, mask_sust, float(self.dt))
                     self.simulation.battery = new_batt
                 except Exception:
                     # fallback to original numpy behavior
@@ -6709,14 +6831,15 @@ class simulation():
             '''            
             # Use compiled core to compute swim speeds and masks where possible
             try:
-                swim_speeds, bl_s, prolonged, sprint, sustained = _assess_fatigue_core(self.simulation.sog,
-                                                                                        self.simulation.heading,
-                                                                                        self.simulation.x_vel,
-                                                                                        self.simulation.y_vel,
-                                                                                        self.simulation.max_s_U,
-                                                                                        self.simulation.max_p_U,
-                                                                                        self.simulation.battery,
-                                                                                        self.simulation.swim_speeds)
+                sog_a = np.asarray(self.simulation.sog, dtype=np.float64)
+                heading_a = np.asarray(self.simulation.heading, dtype=np.float64)
+                xv = np.asarray(self.simulation.x_vel, dtype=np.float64)
+                yv = np.asarray(self.simulation.y_vel, dtype=np.float64)
+                maxs = np.asarray(self.simulation.max_s_U, dtype=np.float64)
+                maxp = np.asarray(self.simulation.max_p_U, dtype=np.float64)
+                batt = np.asarray(self.simulation.battery, dtype=np.float64)
+                swim_buf = np.asarray(self.simulation.swim_speeds, dtype=np.float64)
+                swim_speeds, bl_s, prolonged, sprint, sustained = _assess_fatigue_core(sog_a, heading_a, xv, yv, maxs, maxp, batt, swim_buf)
                 mask_dict = {'prolonged': prolonged, 'sprint': sprint, 'sustained': sustained}
             except Exception:
                 swim_speeds = self.swim_speeds()
