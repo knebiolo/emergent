@@ -37,3 +37,22 @@ python -m pip install pyqt5 pyqtgraph geopandas shapely fiona rtree
 Notes:
 - `load_enc` can block startup if GDAL/Fiona are not available or ENC files are large. Use `load_enc=False` for fast headless testing.
 - If you hit errors in `simulation` or `ship` code, paste the full traceback here and I'll triage.
+
+Numba warmup & performance tips
+--------------------------------
+
+- Recommended environment variables for best throughput on typical dev machines:
+
+```powershell
+$env:NUMBA_NUM_THREADS=4
+$env:NUMBA_DEFAULT_NUM_THREADS=4
+```
+
+- Before running timed/benchmark runs or CI, precompile Numba kernels to avoid first-call JIT overhead:
+
+```powershell
+python tools\numba_warmup.py
+```
+
+- CI: a GitHub Actions workflow `perf-benchmark` is included to run a short warmup and benchmark and upload pstats as artifacts.
+

@@ -1081,6 +1081,52 @@ else:
         np.clip(battery, 0.0, 1.0, out=battery)
         return battery
 
+# Single-pass optimized battery update kernel (merged / faster variant)
+if _HAS_NUMBA:
+    @njit(parallel=True, cache=True)
+    def _merged_battery_numba(battery, per_rec, ttf, mask_sustained, dt):
+        n = battery.size
+        for i in prange(n):
+            b = battery[i]
+            if mask_sustained[i]:
+                b = b + per_rec[i]
+            else:
+                t0 = ttf[i] * b
+                if t0 <= 0.0:
+                    b = 0.0
+                else:
+                    t1 = t0 - dt
+                    ratio = t1 / t0
+                    if ratio < 0.0:
+                        ratio = 0.0
+                    b = b * ratio
+            # clip
+            if b < 0.0:
+                b = 0.0
+            elif b > 1.0:
+                b = 1.0
+            battery[i] = b
+        return battery
+else:
+    def _merged_battery_numba(battery, per_rec, ttf, mask_sustained, dt):
+        # fallback to numpy implementation (single-pass)
+        battery = battery.copy()
+        for i in range(battery.size):
+            if mask_sustained[i]:
+                battery[i] = battery[i] + per_rec[i]
+            else:
+                t0 = ttf[i] * battery[i]
+                if t0 <= 0.0:
+                    battery[i] = 0.0
+                else:
+                    t1 = t0 - dt
+                    ratio = t1 / t0
+                    if ratio < 0.0:
+                        ratio = 0.0
+                    battery[i] = battery[i] * ratio
+        np.clip(battery, 0.0, 1.0, out=battery)
+        return battery
+
 # Precompile numba functions at import time to avoid first-call JIT overhead
 if _HAS_NUMBA:
     try:
@@ -6672,11 +6718,22 @@ class simulation():
             # Calculate swim speeds for each fish (relative to water)
             if _HAS_NUMBA:
                 try:
+                    # Use merged kernel to compute swim speeds and drags when possible
                     x_vel = np.ascontiguousarray(self.simulation.x_vel, dtype=np.float64)
                     y_vel = np.ascontiguousarray(self.simulation.y_vel, dtype=np.float64)
                     sog = np.ascontiguousarray(self.simulation.sog, dtype=np.float64)
                     heading = np.ascontiguousarray(self.simulation.heading, dtype=np.float64)
-                    swim_speeds = _swim_speeds_numba(x_vel, y_vel, sog, heading)
+                    mask_arr = np.ascontiguousarray(np.ones(self.simulation.num_agents, dtype=np.bool_), dtype=np.bool_)
+                    surf = np.ascontiguousarray(self.simulation.calc_surface_area(self.simulation.length), dtype=np.float64)
+                    dragc = np.ascontiguousarray(self.simulation.drag_coeff(np.linalg.norm(np.stack((self.simulation.x_vel, self.simulation.y_vel), axis=-1), axis=-1) * (self.simulation.length/1000.) / np.maximum(self.kin_visc(self.simulation.water_temp), 1e-12)), dtype=np.float64)
+                    wave = np.ascontiguousarray(self.simulation.wave_drag, dtype=np.float64)
+                    ss, bl_s_tmp, prolonged_tmp, sprint_tmp, sustained_tmp, drags_tmp = _merged_swim_drag_fatigue_numba(sog, heading, x_vel, y_vel, mask_arr, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf, dragc, wave, self.simulation.swim_behav, np.ascontiguousarray(self.simulation.max_s_U, dtype=np.float64), np.ascontiguousarray(self.simulation.max_p_U, dtype=np.float64), np.ascontiguousarray(self.simulation.battery, dtype=np.float64), np.ascontiguousarray(self.simulation.swim_speeds, dtype=np.float64))
+                    swim_speeds = ss
+                    # store drags into simulation state for later use
+                    try:
+                        self.simulation.drag = drags_tmp
+                    except Exception:
+                        self.simulation.drag = np.ascontiguousarray(drags_tmp)
                 except Exception:
                     swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=-1)
             else:
@@ -6862,7 +6919,7 @@ class simulation():
                     per_rec_a = np.ascontiguousarray(per_rec_arr, dtype=np.float64)
                     ttf_a = np.ascontiguousarray(ttf_arr, dtype=np.float64)
                     mask_sust = np.asarray(mask_sustained, dtype=np.bool_)
-                    new_batt = _calc_battery_numba(batt, per_rec_a, ttf_a, mask_sust, float(self.dt))
+                    new_batt = _merged_battery_numba(batt, per_rec_a, ttf_a, mask_sust, float(self.dt))
                     self.simulation.battery = new_batt
                 except Exception:
                     # fallback to original numpy behavior
