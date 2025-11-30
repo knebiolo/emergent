@@ -2575,6 +2575,71 @@ class simulation():
         # create a project database and write initial arrays to HDF
         self.hdf5 = h5py.File(self.db, 'w')
         self.initialize_hdf5()
+
+        # Optionally compute along-stream raster on init if user provided
+        # an external environment HDF path via env_files special key 'hecras_hdf'
+        # or if the simulation was given a hecras_plan_path. The user requested
+        # to use the .p05 file in data; if present, compute a coarsened raster.
+        try:
+            # default config (can be overridden by setting these attrs before init)
+            factor = getattr(self, 'alongstream_factor', 4)
+            create_on_init = getattr(self, 'create_alongstream_on_init', True)
+        except Exception:
+            factor = 4
+            create_on_init = True
+
+        if create_on_init:
+            # try to find a matching .p05 in workspace data if a path wasn't provided
+            try:
+                # user-specified override in env_files under key 'hecras_hdf'
+                hecras_hdf = None
+                if isinstance(env_files, dict):
+                    hecras_hdf = env_files.get('hecras_hdf')
+                if not hecras_hdf:
+                    # default path the user indicated
+                    hecras_dir = os.path.join(self.model_dir, 'data', 'salmon_abm', '20240506')
+                    hecras_dir = os.path.normpath(hecras_dir)
+                    candidate = os.path.join(hecras_dir, 'Nuyakuk_Production_.p05.hdf')
+                    if os.path.exists(candidate):
+                        hecras_hdf = candidate
+                # if we found an HDF, set simulation.hdf5 to it for compute, otherwise compute on current file
+                if hecras_hdf and os.path.exists(hecras_hdf):
+                    # If the file is a HECRAS plan HDF without 'environment', use mapping helpers
+                    try:
+                        # ensure x_coords/y_coords and environment rasters via mapping helper
+                        try:
+                            # attempt to map commonly used rasters from HECRAS onto our HDF grid
+                            map_hecras_to_env_rasters(self, hecras_hdf, raster_names=['depth','wetted','vel_x','vel_y'])
+                        except Exception:
+                            # fallback: try loading HECRAS plan into cache (KDTree) and then map
+                            try:
+                                load_hecras_plan_cached(self, hecras_hdf)
+                                map_hecras_to_env_rasters(self, hecras_hdf, raster_names=['depth','wetted','vel_x','vel_y'])
+                            except Exception:
+                                pass
+
+                        # compute coarsened alongstream raster using created env rasters
+                        try:
+                            compute_coarsened_alongstream_raster(self, factor=factor, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist')
+                        except Exception:
+                            try:
+                                compute_alongstream_raster(self, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist')
+                            except Exception:
+                                pass
+                    except Exception:
+                        # if reading external HDF fails, try computing on current hdf5
+                        try:
+                            compute_coarsened_alongstream_raster(self, factor=factor)
+                        except Exception:
+                            pass
+                else:
+                    # compute on in-project HDF if environment rasters were loaded
+                    try:
+                        compute_coarsened_alongstream_raster(self, factor=factor)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             
         # write agent properties that do not change with time
         self.hdf5["agent_data/sex"][:] = self.sex
@@ -2708,7 +2773,10 @@ class simulation():
                 #     self.length = self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
         
         # we can also set these arrays that contain parameters that are a function of length
-        self.length = np.where(self.length < 475.,475.,self.length)
+        # ensure self.length exists (fallback to 475 mm if not previously set)
+        if not hasattr(self, 'length') or self.length is None:
+            self.length = np.repeat(475., self.num_agents)
+        self.length = np.where(self.length < 475., 475., self.length)
         self.sog = self.length/1000. #* 0.8  # sog = speed over ground - assume fish maintain 1 body length per second
         self.ideal_sog = self.length/1000. # self.sog
         self.opt_sog = self.length/1000. #* 0.8
@@ -2735,6 +2803,9 @@ class simulation():
             # else:
             #     self.body_depth = self.arr.exp(-1.938 + np.log(self.length) * 1.084) / 10.
                 
+        # ensure body_depth exists
+        if not hasattr(self, 'body_depth') or self.body_depth is None:
+            self.body_depth = np.repeat(1.0, self.num_agents)
         self.too_shallow = self.body_depth /100. / 2. # m
         self.opt_wat_depth = self.body_depth /100 * 3.0 + self.too_shallow
         
@@ -3160,6 +3231,36 @@ class simulation():
             distances_along = cumlen[chosen_seg] + chosen_t * seg_len[chosen_seg]
             return distances_along
 
+        # If an along-stream raster exists, prefer sampling that raster for speed/scale
+        try:
+            env = self.hdf5.get('environment')
+            if env is not None and 'along_stream_dist' in env:
+                # sample raster at agent positions (vectorized)
+                xs = env['x_coords'][:]
+                ys = env['y_coords'][:]
+                rast = env['along_stream_dist'][:]
+                # convert agent XY to pixel indices using inverse transform if available
+                try:
+                    inv = get_inv_transform(self, getattr(self, 'depth_rast_transform', None))
+                    rows, cols = geo_to_pixel_from_inv(inv, self.X.flatten(), self.Y.flatten())
+                except Exception:
+                    # fallback to brute nearest neighbor in coords arrays
+                    flat_xy = np.column_stack((xs.ravel(), ys.ravel()))
+                    pts = np.column_stack((self.X.flatten(), self.Y.flatten()))
+                    from scipy.spatial import cKDTree
+                    tree = cKDTree(flat_xy)
+                    dists, inds = tree.query(pts, k=1)
+                    rows = (inds // xs.shape[1]).astype(int)
+                    cols = (inds % xs.shape[1]).astype(int)
+                # clamp
+                rows = np.clip(rows, 0, rast.shape[0]-1)
+                cols = np.clip(cols, 0, rast.shape[1]-1)
+                vals = rast[rows, cols]
+                # reshape to agent grid
+                return vals.reshape(self.X.shape)
+        except Exception:
+            pass
+
         # prefer numba helper when available
         if _HAS_NUMBA:
             try:
@@ -3194,13 +3295,28 @@ class simulation():
             env_data = self.hdf5.create_group('environment')
         else:
             env_data = self.hdf5['environment']
-        
+
+        # determine shape for distance dataset
+        if hasattr(self, 'height') and hasattr(self, 'width'):
+            h = int(self.height)
+            w = int(self.width)
+        else:
+            # try to infer from x_coords/y_coords if present
+            try:
+                xs = env_data['x_coords'][:]
+                h, w = xs.shape
+                self.height = h
+                self.width = w
+            except Exception:
+                # cannot determine shape; skip writing
+                return
+
         # Create 'distance_to' dataset and write data
         if 'distance_to' not in env_data:
-            env_data.create_dataset('distance_to', (self.height, self.width), dtype='float32')
-        env_data['distance_to'][:, :] = dist_to_bound  # Corrected dataset name
-        
-        self.hdf5.flush()  # Write changes to HDF5 file
+            env_data.create_dataset('distance_to', (h, w), dtype='float32')
+        env_data['distance_to'][:, :] = dist_to_bound
+
+        safe_flush(self.hdf5)
 
     def initialize_mental_map(self):
         """
