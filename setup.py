@@ -59,6 +59,9 @@ setup(
         "moderngl-window>=2.4,<3.0",
         "pygame>=2.6,<3.0",
         "pillow>=11.0,<12.0",
+        # Image processing
+        "scikit-image>=0.19,<1.0",
+        "matplotlib>=3.4,<4.0",
         # Ocean/atmospheric data
         "xarray>=0.19,<2024.0",
         "fsspec>=2021.8,<2025.0",

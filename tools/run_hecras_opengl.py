@@ -497,7 +497,7 @@ def main():
         try:
             from scipy.ndimage import distance_transform_edt
             # distance to nearest dry cell for water pixels, 0 for dry
-            distance_to_rast = distance_transform_edt(wetted_rast == 0) * resolution
+            distance_to_rast = distance_transform_edt(wetted_rast > 0) * resolution
         except Exception:
             distance_to_rast = np.zeros_like(wetted_rast)
         
@@ -528,6 +528,72 @@ def main():
         _write('y_vel.tif', vel_y_rast)
         _write('vel_dir.tif', vel_dir_rast)
         _write('vel_mag.tif', vel_mag_rast)
+        
+        # Extract channel centerlines from distance_to raster (local maxima = channel centers)
+        from scipy.ndimage import maximum_filter
+        from skimage.morphology import skeletonize
+        from shapely.geometry import LineString, MultiLineString
+        from shapely.ops import linemerge
+        
+        # Find local maxima in distance_to (channel centers)
+        # Use a small neighborhood to identify ridge pixels
+        footprint_size = 5
+        local_max = maximum_filter(distance_to_rast, size=footprint_size)
+        is_ridge = (distance_to_rast == local_max) & (distance_to_rast > 0.5)  # Ridge pixels with at least 0.5m from edge
+        
+        # Skeletonize to get thin centerlines
+        skeleton = skeletonize(is_ridge)
+        
+        # Convert skeleton pixels to LineString(s)
+        from skimage.measure import label
+        labeled = label(skeleton, connectivity=2)
+        
+        centerlines = []
+        for region_id in range(1, labeled.max() + 1):
+            region_mask = (labeled == region_id)
+            ys, xs = np.where(region_mask)
+            if len(xs) < 5:  # Skip very short segments
+                continue
+            # Convert pixel coords to world coords
+            world_coords = []
+            for i in range(len(xs)):
+                x_world = xnew[0, xs[i]]
+                y_world = ynew[ys[i], 0]
+                world_coords.append((x_world, y_world))
+            
+            # Order points along the line (simple: sort by cumulative distance)
+            if len(world_coords) >= 2:
+                # Use NetworkX or simple ordering by connectivity
+                # For now, just create LineString from ordered points
+                line = LineString(world_coords)
+                centerlines.append(line)
+        
+        # Merge into a single MultiLineString or longest line
+        if centerlines:
+            merged = linemerge(centerlines)
+            if isinstance(merged, LineString):
+                main_centerline = merged
+            elif isinstance(merged, MultiLineString):
+                # Pick the longest linestring as main corridor
+                main_centerline = max(merged.geoms, key=lambda g: g.length)
+            else:
+                main_centerline = None
+                
+            if main_centerline and main_centerline.length > 100:  # At least 100m long
+                # Save as shapefile
+                import geopandas as gpd
+                centerline_gdf = gpd.GeoDataFrame([{'geometry': main_centerline}], crs='EPSG:26904')
+                centerline_path = os.path.join(out_dir, 'hecras_centerline.shp')
+                centerline_gdf.to_file(centerline_path)
+                print(f'Extracted centerline: {main_centerline.length:.1f}m, saved to {centerline_path}')
+                long_profile = centerline_path
+            else:
+                print('Could not extract valid centerline from distance_to raster, using external profile')
+                long_profile = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'Longitudinal', 'longitudinal.shp')
+        else:
+            print('No centerlines extracted, using external profile')
+            long_profile = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'Longitudinal', 'longitudinal.shp')
+        
         env_files = {
             'elev': os.path.join(out_dir, 'elev.tif'),
             'depth': os.path.join(out_dir, 'depth.tif'),
@@ -539,8 +605,10 @@ def main():
             'vel_mag': os.path.join(out_dir, 'vel_mag.tif')
         }
         print('Fast KDTree rasterization complete; rasters written to', out_dir)
+        # long_profile determined by centerline extraction above
     else:
         env_files = HECRAS.prepare_hecras_rasters(args.hecras_plan, out_dir, resolution=1.0)
+        long_profile = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'Longitudinal', 'longitudinal.shp')
         
     print(f'Rasters ready in {out_dir}')
     
@@ -555,7 +623,7 @@ def main():
         'water_temp': 10.0,
         'start_polygon': start_poly,
         'env_files': env_files,
-        'longitudinal_profile': None,
+        'longitudinal_profile': long_profile,
         'fish_length': args.fish_length,
         'num_timesteps': args.timesteps,
         'num_agents': args.agents,

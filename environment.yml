@@ -29,6 +29,10 @@ dependencies:
   - pygame>=2.6
   - pillow>=11.0
 
+  # Image processing
+  - scikit-image>=0.19
+  - matplotlib>=3.4
+
   # Network utilities
   - networkx>=2.6
   - requests>=2.25
