@@ -7307,22 +7307,22 @@ class simulation():
             
     def timestep(self, t, dt, g, pid_controller):
         """
-        Simulates a single time step for all fish in the simulation.
+        Simulates a single time step for all fish in the simulation."""
     
-                try:
-                    # Only update battery here; avoid recomputing drags by using drags_out produced above
-                    batt_a = np.ascontiguousarray(self.simulation.battery, dtype=np.float64)
-                    per_rec_a = np.ascontiguousarray(per_rec, dtype=np.float64)
-                    ttf_a = np.ascontiguousarray(ttf, dtype=np.float64)
-                    mask_sust = np.asarray(mask_dict['sustained'], dtype=np.bool_)
-                    new_batt = _wrap_merged_battery_numba(batt_a, per_rec_a, ttf_a, mask_sust, float(self.dt))
-                    try:
-                        self.simulation.battery = new_batt
-                    except Exception:
-                        self.simulation.battery = np.ascontiguousarray(new_batt)
-                except Exception:
-                    # fallback: previous behavior
-                    self.calc_battery(per_rec, ttf,  mask_dict)
+        try:
+            # Only update battery here; avoid recomputing drags by using drags_out produced above
+            batt_a = np.ascontiguousarray(self.simulation.battery, dtype=np.float64)
+            per_rec_a = np.ascontiguousarray(per_rec, dtype=np.float64)
+            ttf_a = np.ascontiguousarray(ttf, dtype=np.float64)
+            mask_sust = np.asarray(mask_dict['sustained'], dtype=np.bool_)
+            new_batt = _wrap_merged_battery_numba(batt_a, per_rec_a, ttf_a, mask_sust, float(self.dt))
+            try:
+                self.simulation.battery = new_batt
+            except Exception:
+                self.simulation.battery = np.ascontiguousarray(new_batt)
+        except Exception:
+            # fallback: previous behavior
+            self.calc_battery(per_rec, ttf,  mask_dict)
 
         # Precompute pixel indices for this timestep to avoid repeated geo_to_pixel calls
         try:
@@ -7401,8 +7401,195 @@ class simulation():
         self.cumulative_time = self.cumulative_time + dt
           
     def run(self, model_name, n, dt, video=False, k_p=None, k_i=None, k_d=None):
-        # Minimal no-op placeholder so module imports cleanly for warmup/profiling
-        return
+        """
+    def run(self, model_name, n, dt, video=False, k_p=None, k_i=None, k_d=None, interactive=False):
+
+        The simulation uses raster data for depth and agent positions to visualize the movement of agents in the environment.
+        When `video` is True this writes an mp4 movie; when `interactive` is True this shows
+        an on-screen real-time animation (no file output). If both are False the simulation
+        runs headless and only prints progress.
+        - model_name: A string representing the name of the model, used for titling the output movie.
+        if self.pid_tuning == False:
+        - n: An integer representing the number of time steps to simulate.
+                else:
+
+                # interactive (real-time) mode: show on-screen animation without saving
+                if interactive:
+                    plt.ion()
+                    fig, ax = plt.subplots(figsize=(10, 5))
+
+                    # display depth raster as background
+                    try:
+                        depth_arr = self.hdf5['environment/depth'][:]
+                        depth = rasterio.MemoryFile()
+                        with depth.open(
+                            driver='GTiff',
+                            height=depth_arr.shape[0],
+                            width=depth_arr.shape[1],
+                            count=1,
+                            dtype='float32',
+                            crs=self.crs,
+                            transform=self.depth_rast_transform
+                        ) as dataset:
+                            img = dataset.read(1)
+                            background = ax.imshow(img,
+                                                   origin='upper',
+                                                   extent=[dataset.bounds[0],
+                                                           dataset.bounds[2],
+                                                           dataset.bounds[1],
+                                                           dataset.bounds[3]],
+                                                   cmap='viridis')
+                    except Exception:
+                        background = None
+
+                    agent_pts, = ax.plot(self.X, self.Y, marker='o', ms=2, ls='', color='red')
+                    ax.set_xlabel('Easting')
+                    ax.set_ylabel('Northing')
+                    fig.canvas.draw()
+
+                    for i in range(int(n)):
+                        self.timestep(i, dt, g, pid_controller)
+                        agent_pts.set_data(self.X, self.Y)
+                        fig.canvas.flush_events()
+                        # small pause to allow GUI event loop to update; cap pause to a reasonable minimum
+                        try:
+                            plt.pause(max(0.001, float(dt)))
+                        except Exception:
+                            time.sleep(max(0.001, float(dt)))
+                        print('Time Step %s complete' % (i))
+
+                    plt.ioff()
+                    try:
+                        self.hdf5.flush()
+                        self.hdf5.close()
+                    except Exception:
+                        pass
+
+                else:
+                    # iterate over timesteps 
+                    for i in range(int(n)):
+                        self.timestep(i, dt, g, pid_controller)
+                        print ('Time Step %s complete'%(i))
+        3. Initializes the plot for the simulation visualization.
+        4. Iterates over the specified number of time steps, updating the agents and capturing each frame.
+        5. Cleans up resources and finalizes the movie file.
+
+        The simulation uses raster data for depth and agent positions to visualize the movement of agents in the environment. The output is a movie file that shows the progression of the simulation over time.
+
+
+
+        Note:
+        - The function assumes that the HDF5 dataset, coordinate reference system (CRS), and depth raster transformation are already set as attributes of the class instance.
+        - The function prints the completion of each time step to the console.
+        - The movie is saved in the directory specified by `self.model_dir`.
+
+        Returns:
+        None. The result of the function is the creation of a movie file visualizing the simulation.
+        """
+        t0 = time.time()
+        if self.pid_tuning == False:
+            if video == True:
+                # get depth raster
+                depth_arr = self.hdf5['environment/depth'][:]
+                depth = rasterio.MemoryFile()
+                height = depth_arr.shape[0]
+                width = depth_arr.shape[1]
+                
+                with depth.open(
+                    driver ='GTiff',
+                    height = depth_arr.shape[0],
+                    width = depth_arr.shape[1],
+                    count =1,
+                    dtype ='float32',
+                    crs = self.crs,
+                    transform = self.depth_rast_transform
+                ) as dataset:
+                    dataset.write(depth_arr, 1)
+        
+                    # define metadata for movie
+                    FFMpegWriter = manimation.writers['ffmpeg']
+                    metadata = dict(title= model_name, artist='Matplotlib',
+                                    comment='emergent model run %s'%(datetime.now()))
+                    writer = FFMpegWriter(fps = np.round(30/dt,0), metadata=metadata)
+        
+                    #initialize plot
+                    fig, ax = plt.subplots(figsize = (10,5))
+        
+                    background = ax.imshow(dataset.read(1),
+                                           origin = 'upper',
+                                           extent = [dataset.bounds[0],
+                                                      dataset.bounds[2],
+                                                      dataset.bounds[1],
+                                                      dataset.bounds[3]])
+        
+                    agent_pts, = plt.plot([], [], marker = 'o', ms = 1, ls = '', color = 'red')
+        
+                    plt.xlabel('Easting')
+                    plt.ylabel('Northing')
+        
+                    # Update the frames for the movie
+                    with writer.saving(fig, 
+                                       os.path.join(self.model_dir,'%s.mp4'%(model_name)), 
+                                       dpi = 300):
+                        # set up PID controller 
+                        #TODO make PID controller a function of length and water velocity
+                        pid_controller = PID_controller(self.num_agents,
+                                                        k_p, 
+                                                        k_i, 
+                                                        k_d)
+                        
+                        pid_controller.interp_PID()
+                        for i in range(int(n)):
+                            self.timestep(i, dt, g, pid_controller)
+        
+                            # write frame
+                            agent_pts.set_data(self.X,
+                                               self.Y)
+                            writer.grab_frame()
+                                
+                            print ('Time Step %s complete'%(i))
+    
+                # clean up
+                writer.finish()
+                self.hdf5.flush()
+                self.hdf5.close()
+                depth.close()     
+                t1 = time.time() 
+            
+            else:
+                #TODO make PID controller a function of length and water velocity
+                pid_controller = PID_controller(self.num_agents,
+                                                k_p, 
+                                                k_i, 
+                                                k_d)
+                
+                pid_controller.interp_PID()
+                
+                # iterate over timesteps 
+                for i in range(int(n)):
+                    self.timestep(i, dt, g, pid_controller)
+                    print ('Time Step %s complete'%(i))
+                    
+                # close and cleanup
+                self.hdf5.flush()
+                self.hdf5.close()
+                t1 = time.time() 
+                    
+        else:
+            pid_controller = PID_controller(self.num_agents,
+                                            k_p, 
+                                            k_i, 
+                                            k_d)
+            for i in range(n):
+                self.timestep(i, dt, g, pid_controller)
+                
+                print ('Time Step %s %s %s %s %s %s complete'%(i,i,i,i,i,i))
+                
+                if i == range(n)[-1]:
+                    self.hdf5.close()
+                    sys.exit()
+            
+        print ('ABM took %s to compile'%(t1-t0))
 
     def close(self):
         self.hdf5.flush()
@@ -8279,4 +8466,4 @@ class summary:
             dst.write(self.sd_per_cell, 2)       # Write the standard deviation to the second band
         
         print(f'Dual band raster {output_file} created successfully.')
-    """
+   
