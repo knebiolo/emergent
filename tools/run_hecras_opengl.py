@@ -682,20 +682,23 @@ def main():
         if 'vel_y' in node_fields:
             sim.y_vel = sim.apply_hecras_mapping(node_fields['vel_y'])
             sim.vel_mag = np.sqrt(sim.x_vel**2 + sim.y_vel**2)
-        # If a distance_to raster was generated, sample its values at HECRAS nodes
-        try:
-            if 'distance_to' in env_files and os.path.exists(env_files['distance_to']):
+        # Sample distance_to raster at HECRAS node locations
+        if 'distance_to' in env_files and os.path.exists(env_files['distance_to']):
+            try:
                 import rasterio
                 with rasterio.open(env_files['distance_to']) as src:
-                    # Use rasterio.sample to read nearest pixel values for node coords
                     coords = [(float(p[0]), float(p[1])) for p in pts]
                     samples = np.fromiter((s[0] for s in src.sample(coords)), dtype=float)
                     node_fields['distance_to'] = samples
-        except Exception:
-            pass
-
+                    print(f"Sampled distance_to at {len(samples)} HECRAS nodes (range: {samples.min():.2f}-{samples.max():.2f}m)")
+            except Exception as e:
+                print(f"Warning: Failed to sample distance_to: {e}")
+        
         if 'distance_to' in node_fields:
             sim.distance_to = sim.apply_hecras_mapping(node_fields['distance_to'])
+            print(f"Applied distance_to to agents (range: {sim.distance_to.min():.2f}-{sim.distance_to.max():.2f}m)")
+        else:
+            print("WARNING: distance_to not available - boundary repulsion will not work!")
         
         # Re-initialize heading now that we have velocities from HECRAS
         flow_direction = np.arctan2(sim.y_vel, sim.x_vel)  # radians
@@ -754,3 +757,5 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
+

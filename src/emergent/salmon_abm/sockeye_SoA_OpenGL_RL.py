@@ -76,6 +76,277 @@ warnings.filterwarnings("ignore")
 
 np.set_printoptions(suppress=True)
 
+# =============================================================================
+# RL Infrastructure for Behavioral Weight Learning
+# =============================================================================
+
+class BehavioralWeights:
+    """Container for instinctual behavioral parameters that persist across simulations.
+    
+    These weights control emergent schooling and navigation behavior:
+    - Schooling dynamics (cohesion, alignment, separation)
+    - Environmental responses (rheotaxis, border avoidance)
+    - Collision avoidance
+    - Energy management strategies
+    
+    Once trained, these weights are frozen and reused across different geometries/scenarios.
+    Spatial knowledge (specific routes, obstacle memory) is reset each simulation.
+    """
+    
+    def __init__(self):
+        # Schooling dynamics (Boids-style)
+        self.cohesion_weight = 1.0        # Attraction to group center
+        self.alignment_weight = 1.0       # Tendency to match neighbors' heading
+        self.separation_weight = 2.0      # Short-range repulsion from neighbors
+        self.separation_radius = 3.0      # Distance (body lengths) for separation
+        
+        # Environmental responses
+        self.rheotaxis_weight = 3.0       # Swim against flow
+        self.border_cue_weight = 50000.0  # Avoid channel edges/banks
+        self.border_threshold_multiplier = 2.0  # Threshold = this × body_length (min 1m)
+        self.border_max_force = 5.0       # Cap border repulsion force
+        
+        # Collision avoidance
+        self.collision_weight = 5.0       # Avoid other agents
+        self.collision_radius = 2.0       # Distance (body lengths) for collision avoidance
+        
+        # Navigation priorities (higher = more important)
+        self.upstream_priority = 1.0      # Weight for upstream progress
+        self.energy_efficiency_priority = 0.5  # Prefer energy-efficient paths
+        
+        # Learning rates (for RL training)
+        self.learning_rate = 0.001
+        self.exploration_epsilon = 0.1
+        
+    def to_dict(self):
+        """Export weights as dictionary for saving."""
+        return {
+            'cohesion_weight': self.cohesion_weight,
+            'alignment_weight': self.alignment_weight,
+            'separation_weight': self.separation_weight,
+            'separation_radius': self.separation_radius,
+            'rheotaxis_weight': self.rheotaxis_weight,
+            'border_cue_weight': self.border_cue_weight,
+            'border_threshold_multiplier': self.border_threshold_multiplier,
+            'border_max_force': self.border_max_force,
+            'collision_weight': self.collision_weight,
+            'collision_radius': self.collision_radius,
+            'upstream_priority': self.upstream_priority,
+            'energy_efficiency_priority': self.energy_efficiency_priority,
+            'learning_rate': self.learning_rate,
+            'exploration_epsilon': self.exploration_epsilon
+        }
+    
+    def from_dict(self, data):
+        """Load weights from dictionary."""
+        for key, value in data.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+    
+    def save(self, filepath):
+        """Save learned weights to JSON file."""
+        import json
+        with open(filepath, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+        print(f"Saved behavioral weights to {filepath}")
+    
+    def load(self, filepath):
+        """Load learned weights from JSON file."""
+        import json
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        self.from_dict(data)
+        print(f"Loaded behavioral weights from {filepath}")
+    
+    def mutate(self, scale=0.1):
+        """Apply small random perturbations for exploration during training."""
+        for attr in ['cohesion_weight', 'alignment_weight', 'separation_weight',
+                     'rheotaxis_weight', 'collision_weight']:
+            current = getattr(self, attr)
+            noise = np.random.normal(0, scale * abs(current))
+            setattr(self, attr, max(0.01, current + noise))
+
+
+class RLTrainer:
+    """Reinforcement learning trainer for behavioral weight optimization.
+    
+    Trains agents to exhibit realistic schooling and upstream migration through
+    reward shaping based on:
+    - Cohesive schooling (agents stay together)
+    - Upstream progress (agents migrate against flow)
+    - Energy efficiency (minimize thrashing/oscillation)
+    - Collision avoidance (maintain personal space)
+    - Boundary avoidance (stay in channel)
+    """
+    
+    def __init__(self, simulation):
+        self.sim = simulation
+        self.behavioral_weights = BehavioralWeights()
+        self.training_history = []
+        
+    def compute_reward(self, prev_state, current_state):
+        """Compute reward for current timestep based on emergent behavior quality.
+        
+        Args:
+            prev_state: dict with previous timestep metrics
+            current_state: dict with current timestep metrics
+            
+        Returns:
+            float: Total reward (higher = better behavior)
+        """
+        reward = 0.0
+        
+        # 1. Schooling cohesion: reward tight, coordinated groups
+        if 'mean_neighbor_distance' in current_state:
+            # Ideal distance: 2-5 body lengths
+            ideal_dist = 3.0 * (self.sim.length.mean() / 1000.0)  # meters
+            dist_error = abs(current_state['mean_neighbor_distance'] - ideal_dist)
+            cohesion_reward = -dist_error / ideal_dist  # Penalty grows with deviation
+            reward += cohesion_reward * 1.0
+        
+        # 2. Upstream progress: reward net forward movement
+        if 'mean_upstream_progress' in current_state:
+            # Positive progress upstream = good
+            upstream_reward = current_state['mean_upstream_progress']
+            reward += upstream_reward * 2.0
+        
+        # 3. Velocity alignment: reward agents swimming in similar directions
+        if 'heading_variance' in current_state:
+            alignment_reward = -current_state['heading_variance']  # Lower variance = better
+            reward += alignment_reward * 0.5
+        
+        # 4. Boundary violations: penalize agents getting too close to banks
+        if 'agents_near_boundary' in current_state:
+            boundary_penalty = -current_state['agents_near_boundary'] * 10.0
+            reward += boundary_penalty
+        
+        # 5. Collision rate: penalize excessive collisions
+        if 'collision_count' in current_state:
+            collision_penalty = -current_state['collision_count'] * 5.0
+            reward += collision_penalty
+        
+        # 6. Energy efficiency: penalize erratic movement
+        if 'mean_acceleration' in current_state and 'mean_acceleration' in prev_state:
+            accel_change = abs(current_state['mean_acceleration'] - prev_state['mean_acceleration'])
+            smoothness_reward = -accel_change * 0.5
+            reward += smoothness_reward
+        
+        # 7. Survival: strong penalty for agents going out of water or dying
+        if 'dead_count' in current_state:
+            mortality_penalty = -current_state['dead_count'] * 100.0
+            reward += mortality_penalty
+        
+        return reward
+    
+    def extract_state_metrics(self):
+        """Extract current simulation state metrics for reward computation."""
+        metrics = {}
+        
+        # Compute mean distance to nearest neighbor (schooling cohesion)
+        if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y'):
+            positions = np.column_stack([self.sim.X, self.sim.Y])
+            alive_mask = (self.sim.dead == 0) if hasattr(self.sim, 'dead') else np.ones(len(self.sim.X), dtype=bool)
+            alive_positions = positions[alive_mask]
+            
+            if len(alive_positions) > 1:
+                from scipy.spatial import cKDTree
+                tree = cKDTree(alive_positions)
+                dists, _ = tree.query(alive_positions, k=2)  # k=2 to get nearest neighbor (excluding self)
+                metrics['mean_neighbor_distance'] = np.mean(dists[:, 1])  # Second column is nearest neighbor
+        
+        # Upstream progress (change in longitudinal position)
+        if hasattr(self.sim, 'longitudes'):
+            metrics['mean_upstream_progress'] = np.mean(self.sim.longitudes - getattr(self.sim, '_prev_longitudes', self.sim.longitudes))
+            self.sim._prev_longitudes = self.sim.longitudes.copy()
+        
+        # Heading variance (alignment metric)
+        if hasattr(self.sim, 'heading'):
+            metrics['heading_variance'] = np.var(self.sim.heading)
+        
+        # Boundary proximity
+        if hasattr(self.sim, 'distance_to'):
+            threshold = 2.0  # meters
+            metrics['agents_near_boundary'] = np.sum(self.sim.distance_to < threshold)
+        
+        # Dead count
+        if hasattr(self.sim, 'dead'):
+            metrics['dead_count'] = np.sum(self.sim.dead)
+        
+        # Mean acceleration (for energy efficiency)
+        if hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
+            velocity = np.sqrt(self.sim.x_vel**2 + self.sim.y_vel**2)
+            metrics['mean_acceleration'] = np.mean(np.abs(velocity - getattr(self.sim, '_prev_velocity', velocity)))
+            self.sim._prev_velocity = velocity.copy()
+        
+        return metrics
+    
+    def train_episode(self, timesteps=100):
+        """Run one training episode with current behavioral weights."""
+        self.sim.apply_behavioral_weights(self.behavioral_weights)
+        
+        episode_reward = 0.0
+        prev_metrics = self.extract_state_metrics()
+        
+        for t in range(timesteps):
+            # Run simulation timestep
+            self.sim.timestep(t, dt=1.0, gravity=9.81, pid_controller=None)
+            
+            # Compute reward
+            current_metrics = self.extract_state_metrics()
+            reward = self.compute_reward(prev_metrics, current_metrics)
+            episode_reward += reward
+            
+            prev_metrics = current_metrics
+        
+        return episode_reward
+    
+    def train(self, num_episodes=100, timesteps_per_episode=100, save_path=None):
+        """Train behavioral weights using policy gradient / evolutionary strategy.
+        
+        Args:
+            num_episodes: Number of training episodes
+            timesteps_per_episode: Timesteps per episode
+            save_path: Path to save best weights (optional)
+        """
+        best_reward = -np.inf
+        best_weights = None
+        
+        print(f"Starting RL training: {num_episodes} episodes × {timesteps_per_episode} timesteps")
+        
+        for episode in range(num_episodes):
+            # Run episode with current weights
+            episode_reward = self.train_episode(timesteps_per_episode)
+            
+            # Track history
+            self.training_history.append({
+                'episode': episode,
+                'reward': episode_reward,
+                'weights': self.behavioral_weights.to_dict()
+            })
+            
+            # Update best weights
+            if episode_reward > best_reward:
+                best_reward = episode_reward
+                best_weights = self.behavioral_weights.to_dict()
+                print(f"Episode {episode}: New best reward = {episode_reward:.2f}")
+                
+                if save_path:
+                    self.behavioral_weights.save(save_path)
+            
+            # Mutate weights for next episode (exploration)
+            self.behavioral_weights.mutate(scale=0.05)
+            
+            # Reset simulation spatial state (keep behavioral weights)
+            self.sim.reset_spatial_state()
+        
+        # Load best weights
+        if best_weights:
+            self.behavioral_weights.from_dict(best_weights)
+            print(f"Training complete. Best reward: {best_reward:.2f}")
+        
+        return self.behavioral_weights
+
+
 # --- HECRAS IDW mapping helpers (read-only, KDTree cached) -----------------
 class HECRASMap:
     """Lightweight container for a HECRAS plan KDTree and field values.
@@ -3122,6 +3393,124 @@ class simulation():
         
         # initialize cumulative time
         self.cumulative_time = 0.
+        
+        # RL: Initialize behavioral weights (will be loaded/trained)
+        self.behavioral_weights = BehavioralWeights()
+        self._initial_positions = None  # Store initial agent positions for spatial reset
+
+    # =============================================================================
+    # RL-Specific Methods for Behavioral Learning
+    # =============================================================================
+    
+    def apply_behavioral_weights(self, weights):
+        """Apply learned behavioral weights to simulation.
+        
+        This updates the force weights used in behavioral cues (cohesion, alignment,
+        separation, border avoidance, etc.) without changing spatial state.
+        
+        Args:
+            weights: BehavioralWeights object with learned parameters
+        """
+        self.behavioral_weights = weights
+        print(f"Applied behavioral weights: cohesion={weights.cohesion_weight:.2f}, "
+              f"separation={weights.separation_weight:.2f}, border={weights.border_cue_weight:.0f}")
+    
+    def reset_spatial_state(self):
+        """Reset all spatial/ephemeral state for a new simulation episode.
+        
+        This preserves learned behavioral weights but resets:
+        - Agent positions (back to starting area)
+        - Velocities and headings (randomized)
+        - Energy/battery levels
+        - Memory buffers (eddy escape, past positions)
+        - Dead/alive status
+        
+        Behavioral weights (cohesion, separation, rheotaxis, etc.) are NOT reset.
+        """
+        # Save initial positions if not already saved
+        if self._initial_positions is None:
+            self._initial_positions = {
+                'X': self.X.copy(),
+                'Y': self.Y.copy(),
+                'Z': self.Z.copy() if hasattr(self, 'Z') else None
+            }
+        
+        # Reset positions to initial state
+        self.X = self._initial_positions['X'].copy()
+        self.Y = self._initial_positions['Y'].copy()
+        if self._initial_positions['Z'] is not None:
+            self.Z = self._initial_positions['Z'].copy()
+        
+        self.prev_X = self.X.copy()
+        self.prev_Y = self.Y.copy()
+        
+        # Reset velocities and heading (randomize based on flow)
+        self.initial_heading()
+        self.initial_swim_speed()
+        
+        # Reset energy/battery
+        if hasattr(self, 'battery'):
+            self.battery = np.ones(self.num_agents) * 100.0  # Full battery
+        
+        # Reset swim behavior state
+        if hasattr(self, 'swim_behav'):
+            self.swim_behav = np.zeros(self.num_agents)
+        if hasattr(self, 'swim_mode'):
+            self.swim_mode = np.ones(self.num_agents)  # Default mode
+        if hasattr(self, 'recover_stopwatch'):
+            self.recover_stopwatch = np.zeros(self.num_agents)
+        
+        # Reset memory buffers
+        max_timesteps = getattr(self, 'swim_speeds', np.array([])).shape[1] if hasattr(self, 'swim_speeds') else 600
+        self.swim_speeds = np.full((self.num_agents, max_timesteps), np.nan)
+        self.past_longitudes = np.full((self.num_agents, max_timesteps), np.nan)
+        self.current_longitudes = np.zeros_like(self.X)
+        self.in_eddy = np.zeros_like(self.X)
+        self.time_since_eddy_escape = np.zeros_like(self.X)
+        
+        # Reset dead/alive status
+        if hasattr(self, 'dead'):
+            self.dead = np.zeros(self.num_agents)
+        if hasattr(self, 'time_out_of_water'):
+            self.time_out_of_water = np.zeros(self.num_agents)
+        
+        # Reset odometer
+        if hasattr(self, 'kcal'):
+            self.kcal = np.zeros(self.num_agents)
+        if hasattr(self, 'dist_per_bout'):
+            self.dist_per_bout = np.zeros(self.num_agents)
+        if hasattr(self, 'bout_dur'):
+            self.bout_dur = np.zeros(self.num_agents)
+        if hasattr(self, 'bout_no'):
+            self.bout_no = np.zeros(self.num_agents)
+        
+        # Clear pixel index cache (spatial)
+        self._pixel_index_cache = {}
+        
+        # Re-sample environmental conditions at reset positions
+        if self.use_hecras and hasattr(self, 'hecras_node_fields'):
+            self.update_hecras_mapping_for_current_positions()
+            if 'depth' in self.hecras_node_fields:
+                self.depth = self.apply_hecras_mapping(self.hecras_node_fields['depth'])
+                self.wet = np.where(self.depth > self.too_shallow / 2.0, 1.0, 0.0)
+            if 'vel_x' in self.hecras_node_fields:
+                self.x_vel = self.apply_hecras_mapping(self.hecras_node_fields['vel_x'])
+            if 'vel_y' in self.hecras_node_fields:
+                self.y_vel = self.apply_hecras_mapping(self.hecras_node_fields['vel_y'])
+                self.vel_mag = np.sqrt(self.x_vel**2 + self.y_vel**2)
+            if 'distance_to' in self.hecras_node_fields:
+                self.distance_to = self.apply_hecras_mapping(self.hecras_node_fields['distance_to'])
+        
+        print("Spatial state reset complete. Behavioral weights preserved.")
+    
+    def save_behavioral_weights(self, filepath):
+        """Save current behavioral weights to file."""
+        self.behavioral_weights.save(filepath)
+    
+    def load_behavioral_weights(self, filepath):
+        """Load pre-trained behavioral weights from file."""
+        self.behavioral_weights.load(filepath)
+        self.apply_behavioral_weights(self.behavioral_weights)
 
     def sim_sex(self):
         """
@@ -7102,18 +7491,22 @@ class simulation():
                 rheotaxis = self.rheo_cue(50000)
 
             else:
-                # calculate attractive forces
-                rheotaxis = self.rheo_cue(25000)          # 25000
-                alignment = self.alignment_cue(20500)     # 20500
-                cohesion = self.cohesion_cue(11000)       # 11000
-                low_speed = self.vel_cue(1500)             # 500 
-                wave_drag = self.wave_drag_cue(0)         # 0                
-                refugia = self.find_nearest_refuge(50000) # 50000
-                # calculate high priority repusive forces
-                border = self.border_cue(50000, t)        # 50000
-                shallow = self.shallow_cue(100000)        # 100000
-                avoid = self.already_been_here(25000, t)  # 25000
-                collision = self.collision_cue(50000)     # 50000 
+                # Get behavioral weights (use learned values if available, otherwise defaults)
+                bw = getattr(self.simulation, 'behavioral_weights', BehavioralWeights())
+                
+                # calculate attractive forces (using learned weights)
+                rheotaxis = self.rheo_cue(bw.rheotaxis_weight * 10000)      # Default: 25000
+                alignment = self.alignment_cue(bw.alignment_weight * 20500) # Default: 20500
+                cohesion = self.cohesion_cue(bw.cohesion_weight * 11000)    # Default: 11000
+                low_speed = self.vel_cue(1500)                               # 1500 (keep fixed)
+                wave_drag = self.wave_drag_cue(0)                            # 0 (keep fixed)
+                refugia = self.find_nearest_refuge(50000)                    # 50000 (keep fixed)
+                
+                # calculate high priority repulsive forces (using learned weights)
+                border = self.border_cue(bw.border_cue_weight, t)           # Default: 50000
+                shallow = self.shallow_cue(100000)                           # 100000 (keep fixed - safety critical)
+                avoid = self.already_been_here(25000, t)                     # 25000 (keep fixed)
+                collision = self.collision_cue(bw.collision_weight * 10000) # Default: 50000
             
             # Create dictionary that has order of behavioral cues
             order_dict = {0: 'shallow',
