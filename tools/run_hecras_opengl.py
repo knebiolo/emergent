@@ -493,6 +493,13 @@ def main():
         
         # Create wetted raster: 1 where depth > 0, 0 elsewhere
         wetted_rast = (depth_rast > 0.0).astype(np.float64)
+        # Generate distance-to-edge raster (meters) using euclidean distance
+        try:
+            from scipy.ndimage import distance_transform_edt
+            # distance to nearest dry cell for water pixels, 0 for dry
+            distance_to_rast = distance_transform_edt(wetted_rast == 0) * resolution
+        except Exception:
+            distance_to_rast = np.zeros_like(wetted_rast)
         
         # Rasterize velocities if available
         if vel_x is not None and vel_y is not None:
@@ -516,6 +523,7 @@ def main():
         _write('elev.tif', elev_rast)
         _write('depth.tif', depth_rast)
         _write('wetted.tif', wetted_rast)
+        _write('distance_to.tif', distance_to_rast)
         _write('x_vel.tif', vel_x_rast)
         _write('y_vel.tif', vel_y_rast)
         _write('vel_dir.tif', vel_dir_rast)
@@ -524,6 +532,7 @@ def main():
             'elev': os.path.join(out_dir, 'elev.tif'),
             'depth': os.path.join(out_dir, 'depth.tif'),
             'wetted': os.path.join(out_dir, 'wetted.tif'),
+            'distance_to': os.path.join(out_dir, 'distance_to.tif'),
             'x_vel': os.path.join(out_dir, 'x_vel.tif'),
             'y_vel': os.path.join(out_dir, 'y_vel.tif'),
             'vel_dir': os.path.join(out_dir, 'vel_dir.tif'),
@@ -605,6 +614,20 @@ def main():
         if 'vel_y' in node_fields:
             sim.y_vel = sim.apply_hecras_mapping(node_fields['vel_y'])
             sim.vel_mag = np.sqrt(sim.x_vel**2 + sim.y_vel**2)
+        # If a distance_to raster was generated, sample its values at HECRAS nodes
+        try:
+            if 'distance_to' in env_files and os.path.exists(env_files['distance_to']):
+                import rasterio
+                with rasterio.open(env_files['distance_to']) as src:
+                    # Use rasterio.sample to read nearest pixel values for node coords
+                    coords = [(float(p[0]), float(p[1])) for p in pts]
+                    samples = np.fromiter((s[0] for s in src.sample(coords)), dtype=float)
+                    node_fields['distance_to'] = samples
+        except Exception:
+            pass
+
+        if 'distance_to' in node_fields:
+            sim.distance_to = sim.apply_hecras_mapping(node_fields['distance_to'])
         
         # Re-initialize heading now that we have velocities from HECRAS
         flow_direction = np.arctan2(sim.y_vel, sim.x_vel)  # radians

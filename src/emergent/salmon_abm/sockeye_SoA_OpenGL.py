@@ -5911,52 +5911,52 @@ class simulation():
             Returns:
             - np.array: Array containing the x and y components of the attraction force for the agents.
             """
-            # HECRAS mode - find low velocity areas as refuge
+            # HECRAS mode - find low velocity areas as refuge (vectorized)
             if getattr(self.simulation, 'use_hecras', False):
                 attractive_forces = np.zeros((self.simulation.num_agents, 2), dtype=float)
                 
-                # Define low velocity threshold as fraction of agent's current velocity
+                # Define low velocity threshold
                 vel_mag = np.sqrt(self.simulation.x_vel**2 + self.simulation.y_vel**2)
-                low_vel_threshold = 0.3 * np.mean(vel_mag)  # Areas with <30% mean velocity
+                low_vel_threshold = 0.3 * np.mean(vel_mag)
                 
-                # For HECRAS, sample neighboring nodes to find direction of lowest velocity
+                # For HECRAS, use KDTree to find nearest low-velocity nodes (vectorized)
                 if hasattr(self.simulation, 'hecras_map') and 'nodes' in self.simulation.hecras_map:
                     hecras_nodes = self.simulation.hecras_map['nodes']
-                    hecras_x = hecras_nodes[:, 0]
-                    hecras_y = hecras_nodes[:, 1]
-                    # Get velocity magnitude from node fields
                     vel_x_field = self.simulation.hecras_node_fields.get('vel_x', np.zeros(len(hecras_nodes)))
                     vel_y_field = self.simulation.hecras_node_fields.get('vel_y', np.zeros(len(hecras_nodes)))
                     hecras_vel_mag = np.sqrt(vel_x_field**2 + vel_y_field**2)
                     
-                    # For each agent, find nearby low-velocity nodes
-                    search_radius = 50.0  # meters
-                    for i in range(self.simulation.num_agents):
-                        # Calculate distances to all HECRAS nodes
-                        dx = hecras_x - self.simulation.X[i]
-                        dy = hecras_y - self.simulation.Y[i]
-                        dist = np.sqrt(dx**2 + dy**2)
+                    # Identify low-velocity refuge nodes
+                    refuge_mask = hecras_vel_mag < low_vel_threshold
+                    if np.any(refuge_mask):
+                        refuge_nodes = hecras_nodes[refuge_mask]
                         
-                        # Find nodes within search radius with low velocity
-                        nearby = dist < search_radius
-                        low_vel = hecras_vel_mag < low_vel_threshold
-                        refuge_candidates = nearby & low_vel
+                        # Build KDTree for refuge nodes (cached if possible)
+                        if not hasattr(self.simulation, '_refuge_tree') or self.simulation._refuge_tree is None:
+                            from scipy.spatial import cKDTree
+                            self.simulation._refuge_tree = cKDTree(refuge_nodes)
+                            self.simulation._refuge_nodes = refuge_nodes
                         
-                        if np.any(refuge_candidates):
-                            # Find nearest refuge candidate
-                            refuge_dists = np.where(refuge_candidates, dist, np.inf)
-                            nearest_idx = np.argmin(refuge_dists)
-                            
-                            # Direction to refuge
-                            refuge_dx = hecras_x[nearest_idx] - self.simulation.X[i]
-                            refuge_dy = hecras_y[nearest_idx] - self.simulation.Y[i]
-                            refuge_dist = np.sqrt(refuge_dx**2 + refuge_dy**2)
-                            
-                            if refuge_dist > 0:
-                                attractive_forces[i, 0] = weight * refuge_dx / refuge_dist
-                                attractive_forces[i, 1] = weight * refuge_dy / refuge_dist
+                        # Query nearest refuge for all agents at once (vectorized)
+                        agent_positions = np.column_stack([self.simulation.X, self.simulation.Y])
+                        dists, idxs = self.simulation._refuge_tree.query(agent_positions, k=1)
+                        
+                        # Calculate direction vectors to nearest refuge
+                        nearest_refuge = self.simulation._refuge_nodes[idxs]
+                        dx = nearest_refuge[:, 0] - self.simulation.X
+                        dy = nearest_refuge[:, 1] - self.simulation.Y
+                        dist_to_refuge = np.sqrt(dx**2 + dy**2) + 1e-6
+                        
+                        # Only apply force if refuge is within search radius
+                        search_radius = 50.0
+                        within_range = dists < search_radius
+                        
+                        # Attractive force magnitude (vectorized)
+                        force_mag = np.where(within_range, weight / dist_to_refuge, 0.0)
+                        attractive_forces[:, 0] = force_mag * (dx / dist_to_refuge)
+                        attractive_forces[:, 1] = force_mag * (dy / dist_to_refuge)
                 
-                return attractive_forces
+                return attractive_forces  # Return (num_agents, 2) to match raster mode
             
             # Original raster-based implementation
             # Step 1: Get the x, y position of the agents
@@ -6199,20 +6199,73 @@ class simulation():
             Calculate the border cue for each agent based on the surrounding distance 
             from the boundary.
             
-            Works in both raster mode (uses distance_to raster) and HECRAS mode (uses wetted area).
-            """
-            
-        def border_cue(self, weight, t):
-            """
-            Calculate the border cue for each agent based on the surrounding distance 
-            from the boundary.
-            
             Works in both raster mode (uses distance_to raster) and HECRAS mode (simplified).
             """
             
-            # HECRAS mode - simplified, rely on shallow_cue to keep fish in water
+            # HECRAS mode - use per-agent `sim.distance_to` (vectorized, fast)
             if getattr(self.simulation, 'use_hecras', False):
-                # No border cue in HECRAS mode - shallow_cue handles boundary avoidance
+                # Get per-agent distance to dry land (meters). If unavailable, fallback to zeros.
+                current_distances = getattr(self.simulation, 'distance_to', None)
+                if current_distances is None:
+                    return np.zeros((2, self.simulation.num_agents), dtype=float)
+
+                # Threshold: activate border cue only within 2 body lengths (~1m for 500mm fish)
+                # Use 2 body lengths or 1m, whichever is larger
+                length_arr = np.asarray(self.simulation.length)
+                if length_arr.size == 1:
+                    body_length_m = float(length_arr.item()) / 1000.0
+                    threshold_m = max(2.0 * body_length_m, 1.0)
+                else:
+                    body_length_m = length_arr / 1000.0
+                    threshold_m = np.maximum(2.0 * body_length_m, 1.0)
+                
+                too_close = current_distances <= threshold_m
+
+                if not np.any(too_close):
+                    return np.zeros((2, self.simulation.num_agents), dtype=float)
+
+                # Find direction to channel center by sampling nearby nodes with higher distance_to values
+                # Use KDTree to find nearby HECRAS nodes
+                if hasattr(self.simulation, 'hecras_map') and 'nodes' in self.simulation.hecras_map:
+                    hecras_nodes = self.simulation.hecras_map['nodes']
+                    
+                    # Get distance_to values at all HECRAS nodes
+                    if hasattr(self.simulation, 'hecras_node_fields') and 'distance_to' in self.simulation.hecras_node_fields:
+                        node_distances = self.simulation.hecras_node_fields['distance_to']
+                        
+                        # For agents near boundary, find nearby node with maximum distance (toward center)
+                        # Use cached KDTree to query k nearest neighbors
+                        from scipy.spatial import cKDTree
+                        if not hasattr(self.simulation, '_hecras_tree_cached'):
+                            self.simulation._hecras_tree_cached = cKDTree(hecras_nodes)
+                        
+                        agent_positions = np.column_stack([self.simulation.X, self.simulation.Y])
+                        # Query 20 nearest neighbors to find direction toward deeper channel
+                        dists, idxs = self.simulation._hecras_tree_cached.query(agent_positions[too_close], k=20)
+                        
+                        # For each agent near boundary, find neighbor with max distance_to
+                        center_direction_x = np.zeros(self.simulation.num_agents)
+                        center_direction_y = np.zeros(self.simulation.num_agents)
+                        
+                        too_close_indices = np.where(too_close)[0]
+                        for i, agent_idx in enumerate(too_close_indices):
+                            neighbor_distances = node_distances[idxs[i]]
+                            max_dist_idx = np.argmax(neighbor_distances)
+                            best_node = hecras_nodes[idxs[i][max_dist_idx]]
+                            
+                            # Direction toward center
+                            dx = best_node[0] - self.simulation.X[agent_idx]
+                            dy = best_node[1] - self.simulation.Y[agent_idx]
+                            dist_to_center = np.sqrt(dx**2 + dy**2) + 1e-6
+                            
+                            # Attractive force toward center
+                            force_mag = weight / dist_to_center
+                            center_direction_x[agent_idx] = force_mag * (dx / dist_to_center)
+                            center_direction_y[agent_idx] = force_mag * (dy / dist_to_center)
+                        
+                        return np.array([center_direction_x, center_direction_y])
+                
+                # Fallback if no HECRAS node data available
                 return np.zeros((2, self.simulation.num_agents), dtype=float)
             
             # Original raster-based implementation
