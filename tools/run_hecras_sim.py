@@ -92,7 +92,7 @@ def try_warmup(n_agents: int = 2000):
     print('No numba warmup helper found; proceeding without warmup')
 
 
-def run_sim(out_png: str, agents: int = 200, timesteps: int = 10, hecras_plan: str | None = None, resolution: float = 1.0, depth_only: bool = False, interactive: bool = False, node_only: bool = False, movie: bool = False, movie_out: str | None = None, fps: int = 10):
+def run_sim(out_png: str, agents: int = 200, timesteps: int = 10, hecras_plan: str | None = None, resolution: float = 1.0, fast_raster: bool = False, interactive: bool = False, node_only: bool = False, movie: bool = False, movie_out: str | None = None, fps: int = 10):
     # Use HECRAS mapping if plan path is provided and exists; otherwise fall back
     env_files = None
     # auto-discover HECRAS .p05 HDF in the project data folder if not explicitly provided
@@ -117,17 +117,24 @@ def run_sim(out_png: str, agents: int = 200, timesteps: int = 10, hecras_plan: s
                 # User explicitly requested node-only: skip full HECRAS interpolation/rasterization.
                 print('Node-only requested: skipping HECRAS raster interpolation (will read nodal arrays directly).')
                 env_files = None
-            elif depth_only:
-                # Fast depth-only extraction: read minimal HDF datasets and rasterize depth and elevation.
+            elif fast_raster:
+                # Fast KDTree rasterization: read HDF datasets and rasterize all fields using nearest-neighbor.
                 import h5py
                 import rasterio
                 from rasterio.transform import Affine
 
-                print('Running depth-only extraction from HECRAS HDF (fast path)')
+                print('Running fast KDTree rasterization from HECRAS HDF')
                 hdf = h5py.File(hecras_dir_noext + '.hdf', 'r')
                 pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
                 wsel = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1]
                 elev = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
+                # Also extract velocities for behavioral cues
+                try:
+                    vel_x = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
+                    vel_y = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
+                except Exception:
+                    vel_x = None
+                    vel_y = None
                 hdf.close()
 
                 # build grid extents
@@ -145,17 +152,46 @@ def run_sim(out_png: str, agents: int = 200, timesteps: int = 10, hecras_plan: s
                 elev_rast = np.asarray(elev)[inds].reshape((len(yint), len(xint)))
                 wsel_rast = np.asarray(wsel)[inds].reshape((len(yint), len(xint)))
                 depth_rast = wsel_rast - elev_rast
+                
+                # Create wetted raster: 1 where depth > 0, 0 elsewhere
+                wetted_rast = (depth_rast > 0.0).astype(np.float64)
+                
+                # Rasterize velocities if available
+                if vel_x is not None and vel_y is not None:
+                    vel_x_rast = np.asarray(vel_x)[inds].reshape((len(yint), len(xint)))
+                    vel_y_rast = np.asarray(vel_y)[inds].reshape((len(yint), len(xint)))
+                    # Calculate velocity direction (radians) and magnitude
+                    vel_dir_rast = np.arctan2(vel_y_rast, vel_x_rast)
+                    vel_mag_rast = np.sqrt(vel_x_rast**2 + vel_y_rast**2)
+                else:
+                    vel_x_rast = np.zeros_like(depth_rast)
+                    vel_y_rast = np.zeros_like(depth_rast)
+                    vel_dir_rast = np.zeros_like(depth_rast)
+                    vel_mag_rast = np.zeros_like(depth_rast)
 
                 transform = Affine.translation(xnew[0][0] - 0.5 * resolution, ynew[0][0] - 0.5 * resolution) * Affine.scale(resolution, -1 * resolution)
                 # write rasters
                 def _write(name, arr):
                     outp = os.path.join(hecras_out_dir, name)
-                    with rasterio.open(outp, mode='w', driver='GTiff', width=arr.shape[1], height=arr.shape[0], count=1, dtype='float64', crs='EPSG:4326', transform=transform) as dst:
+                    with rasterio.open(outp, mode='w', driver='GTiff', width=arr.shape[1], height=arr.shape[0], count=1, dtype='float64', crs='EPSG:26904', transform=transform) as dst:
                         dst.write(arr, 1)
                 _write('elev.tif', elev_rast)
                 _write('depth.tif', depth_rast)
-                env_files = {'elev': os.path.join(hecras_out_dir, 'elev.tif'), 'depth': os.path.join(hecras_out_dir, 'depth.tif')}
-                print('Depth-only extraction complete; rasters written to', hecras_out_dir)
+                _write('wetted.tif', wetted_rast)
+                _write('x_vel.tif', vel_x_rast)
+                _write('y_vel.tif', vel_y_rast)
+                _write('vel_dir.tif', vel_dir_rast)
+                _write('vel_mag.tif', vel_mag_rast)
+                env_files = {
+                    'elev': os.path.join(hecras_out_dir, 'elev.tif'),
+                    'depth': os.path.join(hecras_out_dir, 'depth.tif'),
+                    'wetted': os.path.join(hecras_out_dir, 'wetted.tif'),
+                    'x_vel': os.path.join(hecras_out_dir, 'x_vel.tif'),
+                    'y_vel': os.path.join(hecras_out_dir, 'y_vel.tif'),
+                    'vel_dir': os.path.join(hecras_out_dir, 'vel_dir.tif'),
+                    'vel_mag': os.path.join(hecras_out_dir, 'vel_mag.tif')
+                }
+                print('Fast KDTree rasterization complete; rasters written to', hecras_out_dir)
             else:
                 env_files = HECRAS(model_dir=hecras_out_dir, HECRAS_dir=hecras_dir_noext, resolution=resolution, crs='EPSG:4326')
                 print('HECRAS mapping returned:', env_files)
@@ -204,8 +240,8 @@ def run_sim(out_png: str, agents: int = 200, timesteps: int = 10, hecras_plan: s
         sim_kwargs = dict(
             model_dir=str(REPO_ROOT),
             model_name='hecras_run',
-            crs='EPSG:4326',
-            basin='unknown',
+            crs='EPSG:26904',
+            basin='Nushagak River',
             water_temp=10.0,
             start_polygon=None,
             env_files=env_files,
@@ -415,7 +451,7 @@ def run_sim(out_png: str, agents: int = 200, timesteps: int = 10, hecras_plan: s
         except Exception:
             # if timestep fails, try a generic run() if available
             try:
-                sim.run(timesteps)
+                sim.run(model_name='hecras_run', n=timesteps, dt=1.0, video=False, interactive=False)
                 break
             except Exception:
                 raise
@@ -490,7 +526,7 @@ def main(argv=None):
     parser.add_argument('--hecras-plan', '-p', type=str, default=None)
     parser.add_argument('--resolution', '-r', type=float, default=1.0,
                         help='HECRAS interpolation resolution in native units (coarser -> faster)')
-    parser.add_argument('--depth-only', action='store_true', help='Only extract rasterized depth/elevation (skip velocity interpolation)')
+    parser.add_argument('--fast-raster', action='store_true', help='Fast KDTree rasterization of HECRAS data (skip full interpolation)')
     parser.add_argument('--interactive', action='store_true', help='Show a live interactive plot of the simulation (fall back to PNG if no GUI)')
     parser.add_argument('--node-only', action='store_true', help='Skip HECRAS raster interpolation and use node-based mapping directly (fast)')
     parser.add_argument('--movie', action='store_true', help='Run headless and produce an MP4 (or PNG frames) of the simulation')
@@ -501,9 +537,9 @@ def main(argv=None):
 
     out = args.out
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    # If user didn't explicitly request velocities and resolution is coarse, prefer depth-only fast path
-    depth_only_flag = args.depth_only or (args.resolution > 1.0 and not args.depth_only)
-    run_sim(out, agents=args.agents, timesteps=args.timesteps, hecras_plan=args.hecras_plan, resolution=args.resolution, depth_only=depth_only_flag, interactive=args.interactive, node_only=args.node_only, movie=args.movie, movie_out=args.movie_out, fps=args.fps)
+    # If user didn't explicitly request velocities and resolution is coarse, prefer fast raster path
+    fast_raster_flag = args.fast_raster or (args.resolution > 1.0 and not args.fast_raster)
+    run_sim(out, agents=args.agents, timesteps=args.timesteps, hecras_plan=args.hecras_plan, resolution=args.resolution, fast_raster=fast_raster_flag, interactive=args.interactive, node_only=args.node_only, movie=args.movie, movie_out=args.movie_out, fps=args.fps)
 
 
 if __name__ == '__main__':

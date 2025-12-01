@@ -273,6 +273,10 @@ def ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=None, targ
         target_shape = (height, width)
 
     height, width = target_shape
+    
+    # Skip creation if dimensions are invalid (0,0) - means rasters haven't been imported yet
+    if height == 0 or width == 0:
+        return
 
     # create datasets if missing
     if 'x_coords' not in hdf:
@@ -3030,6 +3034,12 @@ class simulation():
                         pass
             except Exception:
                 pass
+        
+        # Initialize agent properties using the restored methods from backup
+        self.sim_sex()
+        self.sim_length(fish_length)
+        self.sim_weight()
+        self.sim_body_depth()
             
         # write agent properties that do not change with time
         self.hdf5["agent_data/sex"][:] = self.sex
@@ -3038,20 +3048,21 @@ class simulation():
         self.hdf5["agent_data/weight"][:] = self.weight
         self.hdf5["agent_data/body_depth"][:] = self.body_depth
         self.hdf5["agent_data/too_shallow"][:] = self.too_shallow
-        self.hdf5["agent_data/opt_wat_depth"][:] = self.sex
+        self.hdf5["agent_data/opt_wat_depth"][:] = self.opt_wat_depth
         
         # import environment only when file paths are present and exist (robust to missing files)
         def _maybe_import(key, surface_type):
             fp = env_files.get(key)
             if not fp:
                 return
-            path = os.path.join(model_dir, fp)
+            # Use absolute path if provided, otherwise join with model_dir
+            path = fp if os.path.isabs(fp) else os.path.join(model_dir, fp)
             if os.path.exists(path):
-                try:
-                    self.enviro_import(path, surface_type)
-                except Exception:
-                    # log silently and continue; simulation can operate with HECRAS mapping
-                    pass
+                print(f'Importing {key} from {path} as {surface_type}')
+                self.enviro_import(path, surface_type)
+                print(f'Successfully imported {key}')
+            else:
+                print(f'Raster file not found: {path}')
 
         # If a HECRAS plan is provided, prefer it and skip raster imports
         self.hecras_plan_path = hecras_plan_path
@@ -3120,13 +3131,16 @@ class simulation():
         - The method sets the `sex` attribute of the class, which is an array representing the sex of each agent.
         - Currently, the method only has data for the "Nushagak River" basin. For this basin, the sex distribution 
           is determined based on given probabilities for male (0) and female (1).
-        - If the basin is not "Nushagak River", the method does not modify the `sex` attribute.
+        - If the basin is not "Nushagak River", uses default 50/50 distribution.
     
         Attributes set:
         - sex (array): Array of size `num_agents` with values 0 (male) or 1 (female) representing the sex of each agent.
         """
         if self.basin == "Nushagak River":
             self.sex = self.arr.random.choice([0,1], size = self.num_agents, p = [0.503,0.497])
+        else:
+            # Default 50/50 sex distribution for other basins
+            self.sex = self.arr.random.choice([0,1], size = self.num_agents, p = [0.5,0.5])
             
     def sim_length(self, fish_length = None):
         """
@@ -3154,13 +3168,12 @@ class simulation():
         
         else:
             if self.basin == "Nushagak River":
-                self.length=np.where(self.sex=='M',
+                self.length=np.where(self.sex==0,
                          self.arr.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents),
                          self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents))
-                # if self.sex == 'M':
-                #     self.length = self.arr.random.lognormal(mean = 6.426,sigma = 0.072,size = self.num_agents)
-                # else:
-                #     self.length = self.arr.random.lognormal(mean = 6.349,sigma = 0.067,size = self.num_agents)
+            else:
+                # Default length distribution for other basins
+                self.length = self.arr.random.lognormal(mean = 6.39, sigma = 0.07, size = self.num_agents)
         
         # we can also set these arrays that contain parameters that are a function of length
         # ensure self.length exists (fallback to 475 mm if not previously set)
@@ -3185,13 +3198,12 @@ class simulation():
         sex of fish'''
         # body depth is in cm
         if self.basin == "Nushagak River":
-            self.body_depth=np.where(self.sex=='M',
+            self.body_depth=np.where(self.sex==0,
                         self.arr.exp(-1.938 + np.log(self.length) * 1.084 + 0.0435) / 10.,
                         self.arr.exp(-1.938 + np.log(self.length) * 1.084) / 10.)
-            # if self.sex == 'M':
-            #     self.body_depth = self.arr.exp(-1.938 + np.log(self.length) * 1.084 + 0.0435) / 10.
-            # else:
-            #     self.body_depth = self.arr.exp(-1.938 + np.log(self.length) * 1.084) / 10.
+        else:
+            # Default body depth calculation for other basins (sex-averaged)
+            self.body_depth = self.arr.exp(-1.938 + np.log(self.length) * 1.084 + 0.02175) / 10.
                 
         # ensure body_depth exists
         if not hasattr(self, 'body_depth') or self.body_depth is None:
@@ -3409,6 +3421,12 @@ class simulation():
         Raises:
         - ValueError: If the provided surface_type is not recognized.
         """
+        
+        # Helper to create or overwrite HDF5 dataset
+        def _create_or_replace_dataset(group, name, shape, dtype='f4', chunks=None):
+            if name in group:
+                del group[name]
+            return group.create_dataset(name, shape, dtype=dtype, chunks=chunks)
        
 
         
@@ -3430,9 +3448,16 @@ class simulation():
         # Create groups for organization (optional)
         if 'environment' not in self.hdf5:
             env_data = self.hdf5.create_group("environment")
-            self.width = width
-            self.height = height
+        else:
+            env_data = self.hdf5['environment']
+        
+        # Always set width/height from current raster
+        self.width = width
+        self.height = height
 
+        # Create x_coords and y_coords if they don't exist (needed for all behavioral cues)
+        if 'x_coords' not in self.hdf5:
+            print(f"Creating x_coords and y_coords with dimensions: height={height}, width={width}, rows={src.shape[0]}, cols={src.shape[1]}")
             # Get the dimensions of the raster
             rows, cols = src.shape
         
@@ -3442,6 +3467,7 @@ class simulation():
             # Set up HDF5 file and datasets
             dset_x = self.hdf5.create_dataset('x_coords', (height, width), dtype='float32')
             dset_y = self.hdf5.create_dataset('y_coords', (height, width), dtype='float32')
+            print(f"Created datasets with shape: {dset_x.shape}")
         
             # Process and write in chunks
             for i in range(0, rows, chunk_size):
@@ -3454,8 +3480,12 @@ class simulation():
                 # Write the chunk to the HDF5 datasets
                 dset_x[row_chunk, :] = x_coords
                 dset_y[row_chunk, :] = y_coords
+            
+            # Flush to ensure data is written
+            self.hdf5.flush()
+            print(f"Successfully created x_coords and y_coords; flushed to disk. Shape: {dset_x.shape}, first value: {dset_x[0,0]}")
         else:
-            env_data = self.hdf5['environment']
+            print(f"x_coords already exists with shape: {self.hdf5['x_coords'].shape}")
 
         shape = (num_bands, height, width)
         #shape = (num_bands, width, height)
@@ -3468,7 +3498,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("wetted", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
+            _create_or_replace_dataset(env_data, "wetted", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/wetted'][:, :] = arr
             
         elif surface_type == 'velocity x':
@@ -3479,7 +3509,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_x", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
+            _create_or_replace_dataset(env_data, "vel_x", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/vel_x'][:, :] = arr
 
         elif surface_type == 'velocity y':
@@ -3490,7 +3520,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_y", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
+            _create_or_replace_dataset(env_data, "vel_y", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/vel_y'][:, :] = arr
             
         elif surface_type == 'depth':
@@ -3501,7 +3531,7 @@ class simulation():
             arr = src.read(1)
            
             # create an hdf5 array and write to it
-            env_data.create_dataset("depth", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
+            _create_or_replace_dataset(env_data, "depth", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/depth'][:, :] =arr
             
         elif surface_type == 'wsel':
@@ -3512,7 +3542,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("wsel", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
+            _create_or_replace_dataset(env_data, "wsel", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/wsel'][:, :] = src.read(1)
             
         elif surface_type == 'elevation':
@@ -3523,7 +3553,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("elevation", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
+            _create_or_replace_dataset(env_data, "elevation", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/elevation'][:, :] = arr
                 
         elif surface_type == 'velocity direction':          
@@ -3534,7 +3564,7 @@ class simulation():
             arr = src.read(1)
 
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_dir", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
+            _create_or_replace_dataset(env_data, "vel_dir", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/vel_dir'][:, :] = src.read(1) 
                 
         elif surface_type == 'velocity magnitude': 
@@ -3545,7 +3575,7 @@ class simulation():
             arr = src.read(1)
             
             # create an hdf5 array and write to it
-            env_data.create_dataset("vel_mag", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
+            _create_or_replace_dataset(env_data, "vel_mag", (height, width), dtype='f4', chunks=(1, min(width, 4096)))
             self.hdf5['environment/vel_mag'][:, :] = arr
             
         self.width = width
@@ -3556,6 +3586,9 @@ class simulation():
 
     def longitudinal_import(self, shapefile):
         # Load the shapefile with the longitudinal line
+        if shapefile is None:
+            self.longitudinal = None
+            return None
         line_gdf = gpd.read_file(shapefile)
         self.longitudinal = line_gdf.geometry[0]  # Assuming there's only one line feature
         
@@ -3673,6 +3706,9 @@ class simulation():
             if env is None or 'wetted' not in env:
                 return
             raster = env['wetted'][:]
+            # Additional guard: ensure raster has valid shape
+            if raster.size == 0 or raster.shape[0] == 0 or raster.shape[1] == 0:
+                return
         except Exception:
             return
 
@@ -3684,6 +3720,10 @@ class simulation():
 
         # Compute the Euclidean distance transform. This computes the distance to the nearest zero (background) for all non-zero (foreground) pixels.
         dist_to_bound = distance_transform_edt(raster != -9999) * pixel_width
+        
+        # Additional guard: ensure distance transform succeeded
+        if dist_to_bound.size == 0 or dist_to_bound.shape[0] == 0 or dist_to_bound.shape[1] == 0:
+            return
         
         # Create or access 'environment' group
         if 'environment' not in self.hdf5:
@@ -3707,8 +3747,9 @@ class simulation():
                 return
 
         # Create 'distance_to' dataset and write data
-        if 'distance_to' not in env_data:
-            env_data.create_dataset('distance_to', (h, w), dtype='float32')
+        if 'distance_to' in env_data:
+            del env_data['distance_to']
+        env_data.create_dataset('distance_to', (h, w), dtype='float32')
         env_data['distance_to'][:, :] = dist_to_bound
 
         safe_flush(self.hdf5)
@@ -6298,6 +6339,10 @@ class simulation():
             x_coords = self._batch_read_env_patches('x_coords', row_mins, row_maxs, col_mins, col_maxs)
             y_coords = self._batch_read_env_patches('y_coords', row_mins, row_maxs, col_mins, col_maxs)
 
+            # Safety check: if patches are empty (agents out of bounds), return zero vectors
+            if dep3D.size == 0 or dep3D.shape[1] == 0 or dep3D.shape[2] == 0:
+                return np.zeros((2, len(x)), dtype=float)
+
             dep3D_multiplier = calculate_front_masks(self.simulation.heading.flatten(), 
                                                      x_coords, 
                                                      y_coords, 
@@ -6643,7 +6688,55 @@ class simulation():
                 simulation.is_in_eddy(t=100)
             """
             
-            linear_positions = self.simulation.compute_linear_positions(self.simulation.longitudinal)
+            # Compute linear positions based on available data
+            if self.simulation.longitudinal is not None:
+                # Use longitudinal profile shapefile if available
+                linear_positions = self.simulation.compute_linear_positions(self.simulation.longitudinal)
+            else:
+                # For HECRAS mode without longitudinal profile, compute cumulative distance traveled
+                # along the migration path. For upstream migration, this is the integral of movement
+                # against the local flow direction. For downstream, it's movement with the flow.
+                
+                # Initialize on first call
+                if not hasattr(self.simulation, 'cumulative_migration_distance'):
+                    self.simulation.cumulative_migration_distance = np.zeros(self.simulation.num_agents, dtype=float)
+                    self.simulation.prev_X = self.simulation.X.copy()
+                    self.simulation.prev_Y = self.simulation.Y.copy()
+                
+                # Compute displacement since last timestep
+                dx = self.simulation.X.flatten() - self.simulation.prev_X.flatten()
+                dy = self.simulation.Y.flatten() - self.simulation.prev_Y.flatten()
+                
+                # Get local velocity at each agent position
+                if hasattr(self.simulation, 'x_vel') and hasattr(self.simulation, 'y_vel'):
+                    vx = self.simulation.x_vel.flatten()
+                    vy = self.simulation.y_vel.flatten()
+                    
+                    # For upstream migration: progress = movement against flow
+                    # Project displacement onto local upstream direction (-velocity)
+                    # progress = dx*(-vx) + dy*(-vy) normalized by velocity magnitude
+                    vel_mag = np.sqrt(vx**2 + vy**2)
+                    vel_mag = np.where(vel_mag == 0, 1e-12, vel_mag)  # Avoid divide by zero
+                    
+                    # Dot product of displacement with upstream direction (normalized)
+                    migration_upstream = True  # TODO: add parameter
+                    if migration_upstream:
+                        progress_increment = -(dx * vx + dy * vy) / vel_mag
+                    else:
+                        progress_increment = (dx * vx + dy * vy) / vel_mag
+                else:
+                    # No velocity, use straight-line distance (assumes migration is eastward)
+                    progress_increment = dx
+                
+                # Accumulate progress
+                self.simulation.cumulative_migration_distance += progress_increment
+                
+                # Update previous positions
+                self.simulation.prev_X = self.simulation.X.copy()
+                self.simulation.prev_Y = self.simulation.Y.copy()
+                
+                linear_positions = self.simulation.cumulative_migration_distance
+            
             self.current_longitudes = linear_positions
             # Shift data to the left
             self.simulation.past_longitudes[:, :-1] = self.simulation.past_longitudes[:, 1:]
@@ -7309,20 +7402,10 @@ class simulation():
         """
         Simulates a single time step for all fish in the simulation."""
     
-        try:
-            # Only update battery here; avoid recomputing drags by using drags_out produced above
-            batt_a = np.ascontiguousarray(self.simulation.battery, dtype=np.float64)
-            per_rec_a = np.ascontiguousarray(per_rec, dtype=np.float64)
-            ttf_a = np.ascontiguousarray(ttf, dtype=np.float64)
-            mask_sust = np.asarray(mask_dict['sustained'], dtype=np.bool_)
-            new_batt = _wrap_merged_battery_numba(batt_a, per_rec_a, ttf_a, mask_sust, float(self.dt))
-            try:
-                self.simulation.battery = new_batt
-            except Exception:
-                self.simulation.battery = np.ascontiguousarray(new_batt)
-        except Exception:
-            # fallback: previous behavior
-            self.calc_battery(per_rec, ttf,  mask_dict)
+        # Instantiate inner classes for this timestep
+        movement = self.movement(self)
+        behavior = self.behavior(dt, self)
+        fatigue = self.fatigue(t, dt, self)
 
         # Precompute pixel indices for this timestep to avoid repeated geo_to_pixel calls
         try:
@@ -7400,10 +7483,8 @@ class simulation():
         # accumulate time
         self.cumulative_time = self.cumulative_time + dt
           
-    def run(self, model_name, n, dt, video=False, k_p=None, k_i=None, k_d=None):
-        """
     def run(self, model_name, n, dt, video=False, k_p=None, k_i=None, k_d=None, interactive=False):
-
+        """
         The simulation uses raster data for depth and agent positions to visualize the movement of agents in the environment.
         When `video` is True this writes an mp4 movie; when `interactive` is True this shows
         an on-screen real-time animation (no file output). If both are False the simulation
