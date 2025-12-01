@@ -10,7 +10,6 @@ dependencies:
   - numpy>=1.20
   - pandas>=1.3
   - scipy>=1.7
-  - matplotlib>=3.4
 
   # Geospatial libraries
   - geopandas>=0.9
@@ -25,15 +24,10 @@ dependencies:
   - dask>=2021.6
   - numba
 
-
-  # GUI and visualization
-  - pyqt>=5.15
-  - pyqtgraph>=0.12
-
-  # Ocean and atmospheric data
-  - xarray>=0.19
-  - netcdf4>=1.5
-  - h5netcdf>=0.11
+  # OpenGL rendering
+  - moderngl>=5.11
+  - pygame>=2.6
+  - pillow>=11.0
 
   # Network utilities
   - networkx>=2.6
@@ -42,8 +36,12 @@ dependencies:
   # Pip-only dependencies (not in conda-forge or need specific versions)
   - pip
   - pip:
+    - moderngl-window>=2.4
     - fsspec>=2021.8
     - s3fs>=2021.8
+    - xarray>=0.19
+    - netcdf4>=1.5
+    - h5netcdf>=0.11
     - cfgrib>=0.9.10
     - aiobotocore>=2.0
     - aiohttp>=3.7

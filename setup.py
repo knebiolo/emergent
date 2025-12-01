@@ -43,7 +43,6 @@ setup(
         "numpy>=1.20,<2.0",
         "pandas>=1.3,<3.0",
         "scipy>=1.7,<2.0",
-        "matplotlib>=3.4,<4.0",
         # Geospatial
         "geopandas>=0.9,<1.0",
         "shapely>=1.7,<3.0",
@@ -55,9 +54,11 @@ setup(
         "h5py>=3.1,<4.0",
         "dask[array]>=2021.6,<2025.0",
 	"numba",
-        # GUI / visualization
-        "PyQt5>=5.15,<6.0",
-        "pyqtgraph>=0.12,<1.0",
+        # OpenGL rendering
+        "moderngl>=5.11,<6.0",
+        "moderngl-window>=2.4,<3.0",
+        "pygame>=2.6,<3.0",
+        "pillow>=11.0,<12.0",
         # Ocean/atmospheric data
         "xarray>=0.19,<2024.0",
         "fsspec>=2021.8,<2025.0",

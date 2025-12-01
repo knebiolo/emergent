@@ -399,7 +399,7 @@ def run_sim(out_png: str, agents: int = 200, timesteps: int = 10, hecras_plan: s
                 background = None
 
             # initial scatter (empty) — ensure high zorder so points draw above raster
-            scat = ax.scatter([], [], s=36, c='orange', edgecolors='k', alpha=0.95, zorder=10)
+            scat = ax.scatter([], [], s=8, c='orange', edgecolors='k', alpha=0.95, zorder=10)
             ax.set_title(f'HECRAS sim: agents={agents}')
             # If we have a background raster, fix the axis extent so autoscale doesn't hide points
             if background is not None:
@@ -430,21 +430,12 @@ def run_sim(out_png: str, agents: int = 200, timesteps: int = 10, hecras_plan: s
                     mask = np.isfinite(arr).all(axis=1)
                     arr_f = arr[mask]
                     if arr_f.size:
-                        # If we have a background raster, map normalized agent coords [0,1] into raster/world extent
-                        if background is not None:
-                            _, extent = background
-                            left, right, bottom, top = extent
-                            # assume agent X/Y are normalized between 0..1; map to world coords
-                            xs = left + (right - left) * arr_f[:, 0]
-                            ys = bottom + (top - bottom) * arr_f[:, 1]
-                            world_pts = np.column_stack((xs, ys))
-                            scat.set_offsets(world_pts)
-                        else:
-                            scat.set_offsets(arr_f)
+                        # Agent coordinates are already in world/UTM coordinates, use them directly
+                        scat.set_offsets(arr_f)
                         # diagnostic info
                         xmin, ymin = np.min(arr_f[:, 0]), np.min(arr_f[:, 1])
                         xmax, ymax = np.max(arr_f[:, 0]), np.max(arr_f[:, 1])
-                        sample = arr_f[:10].tolist()
+                        sample = arr_f[:5].tolist()
                         print(f't={t}: plotting {len(arr_f)} agents; X range [{xmin:.1f},{xmax:.1f}] Y range [{ymin:.1f},{ymax:.1f}] sample: {sample}')
                     else:
                         scat.set_offsets(np.empty((0, 2)))
