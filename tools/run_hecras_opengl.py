@@ -14,6 +14,10 @@ import sys
 import numpy as np
 from pathlib import Path
 
+# Force unbuffered output
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 # Ensure repository root is on path
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if REPO_ROOT not in sys.path:
@@ -73,6 +77,8 @@ class FishSimViewer(mglw.WindowConfig):
         
         self.fps_counter = 0
         self.fps_timer = 0
+        self.last_timestep_time = 0
+        self.hung_warning_shown = False
         
     def _setup_camera(self):
         """Setup orthographic projection for 2D view."""
@@ -107,12 +113,17 @@ class FishSimViewer(mglw.WindowConfig):
         bottom = center_y - height / 2
         top = center_y + height / 2
         
-        # Orthographic projection matrix (column-major for OpenGL)
+        # Standard orthographic projection formula
+        # This creates the matrix to transform world coordinates to clip space [-1, 1]
+        rl = right - left
+        tb = top - bottom
+        
+        # Column-major matrix for OpenGL
         self.projection = np.array([
-            [2/(right-left), 0, 0, 0],
-            [0, 2/(top-bottom), 0, 0],
+            [2.0/rl, 0, 0, 0],
+            [0, 2.0/tb, 0, 0],
             [0, 0, -1, 0],
-            [-(right+left)/(right-left), -(top+bottom)/(top-bottom), 0, 1]
+            [-(right+left)/rl, -(top+bottom)/tb, 0, 1]
         ], dtype='f4')
         
     def _setup_background(self):
@@ -188,7 +199,7 @@ class FishSimViewer(mglw.WindowConfig):
         }
         """
         
-        # Fragment shader for agents (orange dots with black outline)
+        # Fragment shader for agents (bright cyan dots)
         fragment_shader = """
         #version 330
         out vec4 fragColor;
@@ -199,13 +210,8 @@ class FishSimViewer(mglw.WindowConfig):
             
             if (dist > 1.0) discard;
             
-            // Black outline
-            if (dist > 0.85) {
-                fragColor = vec4(0.0, 0.0, 0.0, 1.0);
-            } else {
-                // Orange fill
-                fragColor = vec4(1.0, 0.6, 0.0, 0.95);
-            }
+            // Bright cyan fill
+            fragColor = vec4(0.0, 1.0, 1.0, 1.0);
         }
         """
         
@@ -236,8 +242,8 @@ class FishSimViewer(mglw.WindowConfig):
                 cmap = self._get_viridis_colormap()
                 rgb = cmap[data]
                 
-                # Flip vertically for OpenGL
-                rgb = np.flipud(rgb)
+                # Don't flip - raster is already in correct orientation
+                # OpenGL texture coords will handle the coordinate system
                 
                 # Create texture
                 self.bg_texture = self.ctx.texture(rgb.shape[:2][::-1], 3, rgb.tobytes())
@@ -281,32 +287,37 @@ class FishSimViewer(mglw.WindowConfig):
             
     def on_render(self, time, frametime):
         """Render frame (required by moderngl-window)."""
-        self.ctx.clear(0.9, 0.1, 0.1)  # Red background to test if anything renders
+        self.ctx.clear(0.1, 0.1, 0.15)  # Dark background
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
         self.ctx.enable(moderngl.PROGRAM_POINT_SIZE)
         
-        # Debug first frame
-        if self.current_timestep == 0:
-            print(f'First render: num_agents={self.num_agents}, bg_vao={self.bg_vao is not None}, has_texture={hasattr(self, "bg_texture")}')
-            if self.sim:
-                print(f'Sim X range: [{self.sim.X.min():.1f}, {self.sim.X.max():.1f}]')
-                print(f'Sim Y range: [{self.sim.Y.min():.1f}, {self.sim.Y.max():.1f}]')
-            print(f'Camera bounds: left={self.left:.1f}, right={self.right:.1f}, bottom={self.bottom:.1f}, top={self.top:.1f}')
-            print(f'Projection matrix:\n{self.projection}')
-            if hasattr(self, 'bg_texture'):
-                print(f'Texture size: {self.bg_texture.width}x{self.bg_texture.height}')
+        # Check if simulation appears to be hung
+        if hasattr(self, 'last_timestep_time') and self.last_timestep_time > 0 and not self.paused:
+            time_since_last = time - self.last_timestep_time
+            if time_since_last > 30.0 and not self.hung_warning_shown:
+                print(f'WARNING: No simulation progress for {time_since_last:.1f}s - may be hung at timestep {self.current_timestep}', flush=True)
+                self.hung_warning_shown = True
+        
+        # Coordinate check on first frame only
+        if self.current_timestep == 0 and self.sim:
+            agent_x_range = (self.sim.X.min(), self.sim.X.max())
+            agent_y_range = (self.sim.Y.min(), self.sim.Y.max())
+            bg_x_range = (self.background_extent[0], self.background_extent[1])
+            bg_y_range = (self.background_extent[2], self.background_extent[3])
+            agents_in_bounds = (agent_x_range[0] >= bg_x_range[0] and agent_x_range[1] <= bg_x_range[1] and
+                                agent_y_range[0] >= bg_y_range[0] and agent_y_range[1] <= bg_y_range[1])
+            if not agents_in_bounds:
+                print(f'WARNING: Agents [{agent_x_range[0]:.0f}-{agent_x_range[1]:.0f}, {agent_y_range[0]:.0f}-{agent_y_range[1]:.0f}] outside background [{bg_x_range[0]:.0f}-{bg_x_range[1]:.0f}, {bg_y_range[0]:.0f}-{bg_y_range[1]:.0f}]')
         
         # Render background
         if self.bg_vao and hasattr(self, 'bg_texture'):
             try:
                 self.bg_program['projection'].write(self.projection.tobytes())
-                self.bg_program['alpha'].value = 1.0  # Full opacity for testing
+                self.bg_program['alpha'].value = 0.7  # Semi-transparent so we can see agents
                 self.bg_texture.use(0)
                 self.bg_program['background'].value = 0
                 self.bg_vao.render()
-                if self.current_timestep == 0:
-                    print('Background rendered')
             except Exception as e:
                 print(f'Background render error: {e}')
                 import traceback
@@ -314,29 +325,67 @@ class FishSimViewer(mglw.WindowConfig):
             
         # Update simulation
         if not self.paused and self.current_timestep < self.timesteps:
+            if self.sim is None:
+                print('ERROR: simulation object is None!')
+                self.paused = True
+                return
+                
             try:
-                old_X = self.sim.X.copy() if self.current_timestep < 3 else None
+                import time
+                import sys
+                t_start = time.time()
+                
+                # Progress logging every 10 timesteps
+                if self.current_timestep % 10 == 0:
+                    print(f'Timestep {self.current_timestep}...', flush=True)
+                    sys.stdout.flush()
+                
+                # Run simulation timestep
                 self.sim.timestep(self.current_timestep, 1.0, 9.81, self.pid)
+                t_sim = time.time() - t_start
+                self.last_timestep_time = time.time()
+                self.hung_warning_shown = False
+                
+                # Warn if timestep is taking too long
+                if t_sim > 5.0:
+                    print(f'WARNING: t={self.current_timestep} took {t_sim:.1f}s (very slow!)', flush=True)
+                elif self.current_timestep < 3 or self.current_timestep % 10 == 0:
+                    print(f't={self.current_timestep}: completed in {t_sim*1000:.1f}ms', flush=True)
+                
                 self.current_timestep += 1
+                
+                # Check for invalid agent positions before updating
+                if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y'):
+                    invalid_x = (~np.isfinite(self.sim.X)).sum()
+                    invalid_y = (~np.isfinite(self.sim.Y)).sum()
+                    if invalid_x > 0 or invalid_y > 0:
+                        print(f'ERROR t={self.current_timestep}: {invalid_x} agents with invalid X, {invalid_y} with invalid Y')
+                        self.paused = True
+                        return
+                
                 self.update_agents()
                 
-                if old_X is not None and self.current_timestep <= 3:
-                    moved = np.abs(self.sim.X - old_X).max()
-                    print(f't={self.current_timestep}: max movement = {moved:.3f} m, X range=[{self.sim.X.min():.1f}, {self.sim.X.max():.1f}]')
+                if self.current_timestep <= 3:
+                    # Check how many are in water
+                    if hasattr(self.sim, 'depth'):
+                        in_water = (self.sim.depth > 0.1).sum()
+                        print(f'  agents in water: {in_water}/{len(self.sim.depth)}')
             except Exception as e:
-                print(f'Simulation error at t={self.current_timestep}: {e}')
+                print('='*80)
+                print(f'!!! SIMULATION ERROR at t={self.current_timestep}: {e}')
+                print('='*80)
                 import traceback
                 traceback.print_exc()
+                print('='*80)
+                print('PAUSING simulation due to error')
                 self.paused = True
                 
         # Render agents
         if self.num_agents > 0:
             try:
                 self.agent_program['projection'].write(self.projection.tobytes())
-                self.agent_program['point_size'].value = 20.0  # Bigger for testing
+                self.agent_program['point_size'].value = 3.0
                 self.agent_vao.render(moderngl.POINTS, vertices=self.num_agents)
-                if self.current_timestep <= 1:
-                    print(f'Agents rendered: {self.num_agents} points')
             except Exception as e:
                 print(f'Agent render error: {e}')
                 import traceback
@@ -382,7 +431,7 @@ def main():
     parser.add_argument('--timesteps', '-t', type=int, default=500)
     parser.add_argument('--agents', '-a', type=int, default=1000)
     parser.add_argument('--hecras-plan', '-p', type=str, default=None)
-    parser.add_argument('--fast-raster', action='store_true')
+    parser.add_argument('--fast-raster', action='store_true', default=True, help='Use fast KDTree rasterization (default)')
     parser.add_argument('--fish-length', type=int, default=500, help='Fish length in mm')
     args = parser.parse_args()
     

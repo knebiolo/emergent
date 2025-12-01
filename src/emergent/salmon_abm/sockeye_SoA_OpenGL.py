@@ -4168,14 +4168,24 @@ class simulation():
         Stores in self.hecras_map a dict with:
          - 'indices': (M,k) int array of nearest node indices
          - 'weights': (M,k) float array of weights (sum to 1)
+         - 'tree': cKDTree of HECRAS nodes (cached for fast re-queries)
+         - 'nodes': HECRAS node coordinates
+         - 'k': number of neighbors
+         - 'eps': epsilon for inverse distance weighting
 
         Weighting uses inverse-distance with small eps to avoid div0.
         """
         hecras_nodes = np.asarray(hecras_nodes, dtype=float)
         abm_points = np.asarray(abm_points, dtype=float)
 
-        tree = cKDTree(hecras_nodes)
-        # Some SciPy versions accept `n_jobs` in cKDTree.query; others do not.
+        # Build KDTree once and cache it
+        if not hasattr(self, 'hecras_map') or self.hecras_map.get('tree') is None:
+            tree = cKDTree(hecras_nodes)
+        else:
+            # Reuse existing tree if nodes haven't changed
+            tree = self.hecras_map['tree']
+            
+        # Query tree for current agent positions
         try:
             dists, inds = tree.query(abm_points, k=k, n_jobs=-1)
         except TypeError:
@@ -4192,10 +4202,44 @@ class simulation():
         self.hecras_map = {
             'indices': inds.astype(np.int32),
             'weights': w.astype(np.float32),
-            'nodes': hecras_nodes
+            'nodes': hecras_nodes,
+            'tree': tree,  # Cache the tree for reuse
+            'k': k,
+            'eps': eps
         }
 
         return self.hecras_map
+    
+    def update_hecras_mapping_for_current_positions(self):
+        """Fast update of HECRAS mapping for current agent positions.
+        
+        Uses cached KDTree to avoid rebuilding. Call this after agents move.
+        """
+        if not hasattr(self, 'hecras_map') or 'tree' not in self.hecras_map:
+            raise RuntimeError('HECRAS mapping not initialized. Call build_hecras_mapping first.')
+        
+        abm_points = np.vstack([self.X.flatten(), self.Y.flatten()]).T
+        tree = self.hecras_map['tree']
+        k = self.hecras_map.get('k', 3)
+        eps = self.hecras_map.get('eps', 1e-8)
+        
+        # Query tree for current positions
+        try:
+            dists, inds = tree.query(abm_points, k=k, n_jobs=-1)
+        except TypeError:
+            dists, inds = tree.query(abm_points, k=k)
+            
+        if k == 1:
+            dists = dists[:, None]
+            inds = inds[:, None]
+        
+        # Recompute weights
+        inv = 1.0 / (dists + eps)
+        w = inv / np.sum(inv, axis=1)[:, None]
+        
+        # Update indices and weights in place
+        self.hecras_map['indices'] = inds.astype(np.int32)
+        self.hecras_map['weights'] = w.astype(np.float32)
 
     def apply_hecras_mapping(self, hecras_field):
         """Apply precomputed HECRAS mapping to a HECRAS nodal field.
@@ -4553,6 +4597,17 @@ class simulation():
         self.hecras_node_fields = hecras_node_fields
         self.use_hecras = True
         self.hecras_mapping_enabled = True  # Flag for behavioral cues to use per-agent velocities
+        
+        # Sample initial HECRAS values at agent positions
+        if 'depth' in hecras_node_fields:
+            self.depth = self.apply_hecras_mapping(hecras_node_fields['depth'])
+            # Compute initial wetted status from depth
+            self.wet = np.where(self.depth > self.too_shallow / 2.0, 1.0, 0.0)
+        if 'vel_x' in hecras_node_fields:
+            self.x_vel = self.apply_hecras_mapping(hecras_node_fields['vel_x'])
+        if 'vel_y' in hecras_node_fields:
+            self.y_vel = self.apply_hecras_mapping(hecras_node_fields['vel_y'])
+            self.vel_mag = np.sqrt(self.x_vel**2 + self.y_vel**2)
         
     
         # Avoid divide by zero by setting zero velocities to a small number
@@ -5668,6 +5723,9 @@ class simulation():
             """
             Calculate repulsive forces based on agents' historical locations within a specified time frame,
             simulating a tendency to avoid areas recently visited.
+            
+            In HECRAS mode: uses in-memory history tracking without HDF5 I/O.
+            In raster mode: uses HDF5 mental map dataset.
         
             This function retrieves the current X and Y positions of agents, converts these positions to
             row and column indices in the mental map's raster grid, and then accesses the relevant sections
@@ -5694,6 +5752,64 @@ class simulation():
             - The method uses a buffer zone, currently set to a 4-cell radius, to limit the computation to a manageable area around each agent.
             - The time-dependent weighting factor (`multiplier`) is applied to cells visited within a specified time range, with a repulsive force applied to these cells.
             """
+            # HECRAS mode - use in-memory history instead of HDF5
+            if getattr(self.simulation, 'use_hecras', False):
+                # For HECRAS mode, track history in memory to avoid HDF5 I/O
+                # Initialize history buffer if it doesn't exist
+                if not hasattr(self.simulation, '_position_history'):
+                    # Store last N positions per agent
+                    history_length = 100
+                    self.simulation._position_history = {
+                        'x': np.zeros((self.simulation.num_agents, history_length)),
+                        'y': np.zeros((self.simulation.num_agents, history_length)),
+                        't': np.zeros((self.simulation.num_agents, history_length)),
+                        'idx': np.zeros(self.simulation.num_agents, dtype=int)  # circular buffer index
+                    }
+                
+                hist = self.simulation._position_history
+                repulsive_forces = np.zeros((self.simulation.num_agents, 2), dtype=float)
+                
+                # Update history for current timestep
+                for i in range(self.simulation.num_agents):
+                    idx = hist['idx'][i]
+                    hist['x'][i, idx] = self.simulation.X[i]
+                    hist['y'][i, idx] = self.simulation.Y[i]
+                    hist['t'][i, idx] = t
+                    hist['idx'][i] = (idx + 1) % hist['x'].shape[1]  # circular buffer
+                
+                # Calculate repulsive forces from recent history
+                for i in range(self.simulation.num_agents):
+                    # Get valid history entries (non-zero times)
+                    valid_mask = hist['t'][i] > 0
+                    if not np.any(valid_mask):
+                        continue
+                    
+                    hist_x = hist['x'][i, valid_mask]
+                    hist_y = hist['y'][i, valid_mask]
+                    hist_t = hist['t'][i, valid_mask]
+                    
+                    # Time since visit
+                    t_since = t - hist_t
+                    
+                    # Apply time-dependent weight (same logic as raster mode)
+                    multiplier = np.where((t_since > 10) & (t_since < 7200), 
+                                         1 - (t_since - 5) / 7195, 0)
+                    
+                    # Calculate repulsive force from each historical position
+                    delta_x = self.simulation.X[i] - hist_x
+                    delta_y = self.simulation.Y[i] - hist_y
+                    magnitudes = np.sqrt(delta_x**2 + delta_y**2) + 1e-6
+                    
+                    # Unit vectors weighted by time and distance
+                    force_x = np.sum(weight * (delta_x / magnitudes**2) * multiplier)
+                    force_y = np.sum(weight * (delta_y / magnitudes**2) * multiplier)
+                    
+                    repulsive_forces[i, 0] = force_x
+                    repulsive_forces[i, 1] = force_y
+                
+                return repulsive_forces
+            
+            # Original raster-based HDF5 implementation
             # Step 1: Get the x, y position of the agents
             x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
         
@@ -5785,6 +5901,9 @@ class simulation():
         def find_nearest_refuge(self, weight):
             """
             Calculate the attractive force towards the nearest refuge cell for agents.
+            
+            In HECRAS mode: identifies low-velocity areas as refugia.
+            In raster mode: uses pre-computed refugia map.
         
             Parameters:
             - weight: float, the weight of the attraction force.
@@ -5792,6 +5911,54 @@ class simulation():
             Returns:
             - np.array: Array containing the x and y components of the attraction force for the agents.
             """
+            # HECRAS mode - find low velocity areas as refuge
+            if getattr(self.simulation, 'use_hecras', False):
+                attractive_forces = np.zeros((self.simulation.num_agents, 2), dtype=float)
+                
+                # Define low velocity threshold as fraction of agent's current velocity
+                vel_mag = np.sqrt(self.simulation.x_vel**2 + self.simulation.y_vel**2)
+                low_vel_threshold = 0.3 * np.mean(vel_mag)  # Areas with <30% mean velocity
+                
+                # For HECRAS, sample neighboring nodes to find direction of lowest velocity
+                if hasattr(self.simulation, 'hecras_map') and 'nodes' in self.simulation.hecras_map:
+                    hecras_nodes = self.simulation.hecras_map['nodes']
+                    hecras_x = hecras_nodes[:, 0]
+                    hecras_y = hecras_nodes[:, 1]
+                    # Get velocity magnitude from node fields
+                    vel_x_field = self.simulation.hecras_node_fields.get('vel_x', np.zeros(len(hecras_nodes)))
+                    vel_y_field = self.simulation.hecras_node_fields.get('vel_y', np.zeros(len(hecras_nodes)))
+                    hecras_vel_mag = np.sqrt(vel_x_field**2 + vel_y_field**2)
+                    
+                    # For each agent, find nearby low-velocity nodes
+                    search_radius = 50.0  # meters
+                    for i in range(self.simulation.num_agents):
+                        # Calculate distances to all HECRAS nodes
+                        dx = hecras_x - self.simulation.X[i]
+                        dy = hecras_y - self.simulation.Y[i]
+                        dist = np.sqrt(dx**2 + dy**2)
+                        
+                        # Find nodes within search radius with low velocity
+                        nearby = dist < search_radius
+                        low_vel = hecras_vel_mag < low_vel_threshold
+                        refuge_candidates = nearby & low_vel
+                        
+                        if np.any(refuge_candidates):
+                            # Find nearest refuge candidate
+                            refuge_dists = np.where(refuge_candidates, dist, np.inf)
+                            nearest_idx = np.argmin(refuge_dists)
+                            
+                            # Direction to refuge
+                            refuge_dx = hecras_x[nearest_idx] - self.simulation.X[i]
+                            refuge_dy = hecras_y[nearest_idx] - self.simulation.Y[i]
+                            refuge_dist = np.sqrt(refuge_dx**2 + refuge_dy**2)
+                            
+                            if refuge_dist > 0:
+                                attractive_forces[i, 0] = weight * refuge_dx / refuge_dist
+                                attractive_forces[i, 1] = weight * refuge_dy / refuge_dist
+                
+                return attractive_forces
+            
+            # Original raster-based implementation
             # Step 1: Get the x, y position of the agents
             x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
         
@@ -6006,6 +6173,10 @@ class simulation():
                                                                ['vel_x', 'vel_y'])
                 x_vel = vals['vel_x']
                 y_vel = vals['vel_y']
+            
+            # Ensure velocities are finite and non-NaN
+            x_vel = np.nan_to_num(x_vel, nan=0.0, posinf=0.0, neginf=0.0)
+            y_vel = np.nan_to_num(y_vel, nan=0.0, posinf=0.0, neginf=0.0)
                 
             if downstream == False:
                 x_vel = x_vel * -1
@@ -6014,8 +6185,8 @@ class simulation():
             # Calculate the unit vector in the upstream direction
             v = np.column_stack([x_vel, y_vel])  
             v_norm = np.linalg.norm(v, axis = -1)[:,np.newaxis]
-            # Avoid division by zero
-            v_norm = np.where(v_norm == 0, 1e-12, v_norm)
+            # Avoid division by zero - use larger epsilon for stability
+            v_norm = np.where(v_norm < 1e-6, 1e-6, v_norm)
             v_hat = v / v_norm
             
             # Calculate the rheotactic cue
@@ -6027,26 +6198,24 @@ class simulation():
             """
             Calculate the border cue for each agent based on the surrounding distance 
             from the boundary.
-        
-            This function determines the direction with the farthest distance from the 
-            boundary within a specified
-            buffer around each agent. The function then computes a border cue that 
-            points in the direction of the
-            farthest distance from the boundary within this buffer.
-        
-            Parameters:
-            - weight (float): A weighting factor applied to the border cue.
-        
-            Returns:
-            - border_max (ndarray): An array of border cues for each agent, where each 
-            cue is a vector pointing in the direction of the farthest distance from the 
-            boundary within the buffer. The magnitude of the cue is scaled by the 
-            given weight.
-        
-            Notes:
-            - The function assumes that the HDF5 dataset 'environment/dist_to_border' 
-            is accessible and supports numpy-style advanced indexing.
+            
+            Works in both raster mode (uses distance_to raster) and HECRAS mode (uses wetted area).
             """
+            
+        def border_cue(self, weight, t):
+            """
+            Calculate the border cue for each agent based on the surrounding distance 
+            from the boundary.
+            
+            Works in both raster mode (uses distance_to raster) and HECRAS mode (simplified).
+            """
+            
+            # HECRAS mode - simplified, rely on shallow_cue to keep fish in water
+            if getattr(self.simulation, 'use_hecras', False):
+                # No border cue in HECRAS mode - shallow_cue handles boundary avoidance
+                return np.zeros((2, self.simulation.num_agents), dtype=float)
+            
+            # Original raster-based implementation
             # Convert self.length to a NumPy array if it's a CuPy array
             length_numpy = self.simulation.length  # .get() if isinstance(self.length, cp.ndarray) else self.length
             
@@ -6148,10 +6317,7 @@ class simulation():
             Calculate the repulsive force vectors from shallow water areas within a 
             specified buffer around each agent using a vectorized approach.
         
-            This function identifies cells within a sensory buffer around each agent 
-            that are shallower than a threshold depth. It then calculates the inverse 
-            gravitational potential for these cells and sums up the forces to determine 
-            the total repulsive force vector exerted on each agent due to shallow water.
+            Works in both raster mode (reads from HDF5) and HECRAS mode (uses current depth values).
         
             Parameters:
             - weight (float): The weighting factor to scale the repulsive force.
@@ -6159,22 +6325,39 @@ class simulation():
             Returns:
             - np.ndarray: A 2D array where each row corresponds to an agent and 
             contains the sum of the repulsive forces in the X and Y directions.
-        
-            Notes:
-            - The function assumes that the depth data is accessible from an HDF5 
-            file with the key 'environment/depth'.
-            - The sensory buffer is set to 2 meters around each agent's position.
-            - The function uses the `geo_to_pixel` method to convert geographic 
-            coordinates to pixel indices.
-            - The repulsive force is calculated as a vector normalized by the 
-            magnitude of the distance to each shallow cell, scaled by the weight,
-            and summed across all shallow cells within the buffer.
-            - The function returns an array of the total repulsive force vectors 
-            for each agent.
-            - The vectorized approach is expected to improve performance by reducing 
-            the overhead of Python loops.
             """
-
+            
+            # Simple depth-based repulsion for HECRAS mode
+            # If agent is in shallow water, create repulsive force pointing away from shallow areas
+            if getattr(self.simulation, 'use_hecras', False):
+                repulsive_forces = np.zeros((self.simulation.num_agents, 2), dtype=float)
+                min_depth = self.simulation.too_shallow
+                
+                # For agents in shallow water, calculate repulsive force
+                shallow_mask = self.simulation.depth < min_depth
+                if np.any(shallow_mask):
+                    # Create force pointing in direction of deeper water
+                    # Use velocity gradient as proxy for depth gradient (water flows from high to low)
+                    # Perpendicular to flow is often toward shore (shallow)
+                    vel_x = getattr(self.simulation, 'x_vel', np.zeros_like(self.simulation.X))
+                    vel_y = getattr(self.simulation, 'y_vel', np.zeros_like(self.simulation.Y))
+                    vel_mag = np.sqrt(vel_x**2 + vel_y**2) + 1e-6
+                    
+                    # Normalized velocity direction (parallel to flow)
+                    flow_dir_x = vel_x / vel_mag
+                    flow_dir_y = vel_y / vel_mag
+                    
+                    # Force magnitude scaled by how shallow
+                    depth_deficit = np.maximum(0, min_depth - self.simulation.depth)
+                    force_mag = weight * depth_deficit / (min_depth + 1e-6)
+                    
+                    # Apply force in flow direction (toward deeper water) for shallow agents
+                    repulsive_forces[shallow_mask, 0] = force_mag[shallow_mask] * flow_dir_x[shallow_mask]
+                    repulsive_forces[shallow_mask, 1] = force_mag[shallow_mask] * flow_dir_y[shallow_mask]
+                
+                return repulsive_forces
+            
+            # Original raster-based implementation
             buff = 2 #* self.length / 1000.  # 2 meters
         
             # get the x, y position of the agent 
@@ -7433,14 +7616,17 @@ class simulation():
         fatigue = self.fatigue(t, dt, self)
 
         # Precompute pixel indices for this timestep to avoid repeated geo_to_pixel calls
-        try:
-            self.precompute_pixel_indices()
-        except Exception:
-            # If precompute fails, do not block timestep (fallback to on-demand geo_to_pixel)
-            pass
+        # Skip in HECRAS-only mode (no rasters loaded)
+        if not getattr(self, 'use_hecras', False) or not getattr(self, 'hecras_mapping_enabled', False):
+            try:
+                self.precompute_pixel_indices()
+            except Exception:
+                # If precompute fails, do not block timestep (fallback to on-demand geo_to_pixel)
+                pass
         
-        # update refugia map
-        self.update_refugia_map(self.vel_mag)
+        # Update refugia map - skip in HECRAS-only mode (requires HDF5 file I/O)
+        if not getattr(self, 'use_hecras', False) or not getattr(self, 'hecras_mapping_enabled', False):
+            self.update_refugia_map(self.vel_mag)
 
         # Optimize vertical position
         movement.find_z()
@@ -7489,6 +7675,49 @@ class simulation():
         self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
         self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
         
+        # Re-sample HECRAS environmental data at new positions
+        if getattr(self, 'use_hecras', False) and hasattr(self, 'hecras_node_fields'):
+            try:
+                # Fast update using cached KDTree (no rebuild)
+                self.update_hecras_mapping_for_current_positions()
+                
+                # Re-sample depth, velocities
+                if 'depth' in self.hecras_node_fields:
+                    self.depth = self.apply_hecras_mapping(self.hecras_node_fields['depth'])
+                    # Compute wetted status from depth (dry if depth <= too_shallow/2)
+                    self.wet = np.where(self.depth > self.too_shallow / 2.0, 1.0, 0.0)
+                if 'vel_x' in self.hecras_node_fields:
+                    self.x_vel = self.apply_hecras_mapping(self.hecras_node_fields['vel_x'])
+                if 'vel_y' in self.hecras_node_fields:
+                    self.y_vel = self.apply_hecras_mapping(self.hecras_node_fields['vel_y'])
+                    self.vel_mag = np.sqrt(self.x_vel**2 + self.y_vel**2)
+                
+                # Constrain agents to wetted areas - revert to previous position if now on land
+                on_land = self.wet < 0.5
+                if np.any(on_land):
+                    # Revert to old position (border cue will push them away next timestep)
+                    self.X = np.where(on_land, old_X, self.X)
+                    self.Y = np.where(on_land, old_Y, self.Y)
+                    
+                    # Re-sample for corrected positions
+                    self.update_hecras_mapping_for_current_positions()
+                    if 'depth' in self.hecras_node_fields:
+                        self.depth = self.apply_hecras_mapping(self.hecras_node_fields['depth'])
+                        self.wet = np.where(self.depth > self.too_shallow / 2.0, 1.0, 0.0)
+                    if 'vel_x' in self.hecras_node_fields:
+                        self.x_vel = self.apply_hecras_mapping(self.hecras_node_fields['vel_x'])
+                    if 'vel_y' in self.hecras_node_fields:
+                        self.y_vel = self.apply_hecras_mapping(self.hecras_node_fields['vel_y'])
+                        self.vel_mag = np.sqrt(self.x_vel**2 + self.y_vel**2)
+            except Exception as e:
+                # Log error - this shouldn't fail silently
+                print(f'ERROR resampling HECRAS data: {e}')
+                import traceback
+                traceback.print_exc()
+                # Revert to old positions on error
+                self.X = old_X
+                self.Y = old_Y
+        
         # Calculate sog from displacement
         self.sog = np.where(should_jump,
                             self.ideal_sog,
@@ -7508,8 +7737,9 @@ class simulation():
         # Calculate mileage
         self.odometer(t=t, dt = dt)  
         
-        # Log the timestep data
-        self.timestep_flush(t)
+        # Log the timestep data - skip if using HECRAS mode for performance
+        if not getattr(self, 'use_hecras', False):
+            self.timestep_flush(t)
         
         # accumulate time
         self.cumulative_time = self.cumulative_time + dt
