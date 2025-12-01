@@ -4981,7 +4981,9 @@ class simulation():
                                    )
                                   )
                           )
-            Hz = np.where(self.simulation.is_stuck,0,Hz)
+            # Set Hz to 0 for stuck fish if the attribute exists
+            if hasattr(self.simulation, 'is_stuck'):
+                Hz = np.where(self.simulation.is_stuck, 0, Hz)
             
             self.simulation.prev_Hz = self.simulation.Hz   
             self.simulation.Hz = np.where(self.simulation.Hz > 20, 20, Hz)
@@ -5395,7 +5397,7 @@ class simulation():
             surface_areas = 10 ** (a + b * np.log10(self.simulation.length / 1000. * 100.))
         
             # Drag coefficients for each fish
-            drag_coeffs = self.simulation.drag_coeff(reynolds_numbers)
+            drag_coeffs = self.drag_coeff(reynolds_numbers)
         
             # Calculate ideal drag forces
             relative_velocities = self.simulation.max_practical_sog - water_velocities
@@ -5541,6 +5543,16 @@ class simulation():
             except Exception:
                 dxdy = _swim_core_numba(fv0x, fv0y, accx, accy, pidx, pidy, tired_mask, dead_mask, mask, dt)
                 
+            # Debug at t=0
+            if t == 0:
+                print(f'SWIM RETURN DEBUG t=0: dxdy[:3] = {dxdy[:3]}')
+                print(f'SWIM RETURN DEBUG t=0: mask[:3] = {mask[:3]}, dead_mask[:3] = {dead_mask[:3]}, tired_mask[:3] = {tired_mask[:3]}')
+            elif t == 1:
+                print(f'SWIM RETURN DEBUG t=1: dxdy[:3] = {dxdy[:3]}')
+                print(f'SWIM RETURN DEBUG t=1: fish_vel_0[:3] = {fish_vel_0[:3]}')
+                print(f'SWIM RETURN DEBUG t=1: ideal_vel[:3] = {ideal_vel[:3]}')
+                print(f'SWIM RETURN DEBUG t=1: error[:3] = {error[:3]}')
+                
             # if np.any(np.linalg.norm(fish_vel_1,axis = -1) > 2* self.ideal_sog):
             #     print ('fuck - why')
             return dxdy
@@ -5586,10 +5598,16 @@ class simulation():
             # Calculate the new position for each fish
             # should we make this the water direction?  calculate unit vector, multiply by displacement, and add to current position
             
-            dx = displacement * np.cos(self.simulation.heading)
-            dy = displacement * np.sin(self.simulation.heading)
+            dx = np.where(mask, displacement * np.cos(self.simulation.heading), 0.0)
+            dy = np.where(mask, displacement * np.sin(self.simulation.heading), 0.0)
             
             dxdy = np.stack((dx,dy)).T
+            
+            # Debug at t=0
+            if t == 0:
+                print(f'JUMP DEBUG t=0: mask[:3]={mask[:3]}, displacement[:3]={displacement[:3]}')
+                print(f'JUMP DEBUG t=0: heading[:3]={self.simulation.heading[:3]}, dx[:3]={dx[:3]}, dy[:3]={dy[:3]}')
+                print(f'JUMP DEBUG t=0: dxdy[:3]={dxdy[:3]}')
             
             if np.any(dxdy > 3):
                 print ('check jump parameters')
@@ -7447,7 +7465,7 @@ class simulation():
         
         # For each fish that should swim
         movement.drag_fun(mask=~should_jump, t = t, dt = dt)
-        #self.frequency(mask=~should_jump, t = t, dt = dt)
+        movement.frequency(mask=~should_jump, t = t, dt = dt)
         movement.thrust_fun(mask=~should_jump, t = t, dt = dt)
         dxdy_swim = movement.swim(t, dt, pid_controller = pid_controller, mask=~should_jump)
         

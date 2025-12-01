@@ -312,7 +312,30 @@ def run_sim(out_png: str, agents: int = 200, timesteps: int = 10, hecras_plan: s
 
                     print('Enabling HECRAS node mapping on simulation (nearest neighbor k=1)')
                     sim.enable_hecras(pts, node_fields, k=1)
+                    
+                    # Perform initial sampling of HECRAS values at agent positions
+                    # The mapping is already built by enable_hecras, now apply it to each field
+                    if 'depth' in node_fields:
+                        sim.depth = sim.apply_hecras_mapping(node_fields['depth'])
+                    if 'vel_x' in node_fields:
+                        sim.x_vel = sim.apply_hecras_mapping(node_fields['vel_x'])
+                    if 'vel_y' in node_fields:
+                        sim.y_vel = sim.apply_hecras_mapping(node_fields['vel_y'])
+                        sim.vel_mag = np.sqrt(sim.x_vel**2 + sim.y_vel**2)
+                    
+                    # Re-initialize heading now that we have velocities from HECRAS
+                    # The __init__ tried to set heading but velocities weren't available yet
+                    # arctan2 gives flow direction; subtract π to point upstream (opposite direction)
+                    flow_direction = np.arctan2(sim.y_vel, sim.x_vel)  # radians
+                    sim.heading = flow_direction - np.pi  # Point upstream
+                    sim.max_practical_sog = np.array([sim.sog * np.cos(sim.heading), 
+                                                       sim.sog * np.sin(sim.heading)])
+                    
                     print('Node-based HECRAS mapping enabled; simulation will sample HECRAS per-agent directly.')
+                    print(f'Initial agent positions: X range [{sim.X.min():.1f}, {sim.X.max():.1f}], Y range [{sim.Y.min():.1f}, {sim.Y.max():.1f}]')
+                    print(f'Initial velocities: x_vel range [{sim.x_vel.min():.3f}, {sim.x_vel.max():.3f}], y_vel range [{sim.y_vel.min():.3f}, {sim.y_vel.max():.3f}]')
+                    print(f'Initial depth range: [{sim.depth.min():.3f}, {sim.depth.max():.3f}]')
+                    print(f'Initial heading range: [{np.degrees(sim.heading).min():.1f}°, {np.degrees(sim.heading).max():.1f}°]')
                 except Exception as exc:
                     print('Failed to enable node-based HECRAS mapping; raster fallback will be used. Error:', exc)
                     sim.use_hecras = False
