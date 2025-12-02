@@ -20,20 +20,64 @@ if REPO_ROOT not in sys.path:
 from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui
+# Optional OpenGL accelerated plotting
+try:
+    from pyqtgraph.opengl import GLViewWidget, GLScatterPlotItem
+    _has_gl = True
+except Exception:
+    GLViewWidget = None
+    GLScatterPlotItem = None
+    _has_gl = False
+import logging
+import sys
+
+# Ensure outputs directory exists for logs
+LOG_DIR = os.path.join(REPO_ROOT, 'outputs', 'rl_training')
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_PATH = os.path.join(LOG_DIR, 'qt_run.log')
+
+logger = logging.getLogger('rl_qt')
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    fh = logging.FileHandler(LOG_PATH)
+    fh.setLevel(logging.INFO)
+    fmt = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setLevel(logging.INFO)
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
+
+class StreamToLogger(object):
+    def __init__(self, logger, level=logging.INFO):
+        self.logger = logger
+        self.level = level
+    def write(self, buf):
+        if buf.rstrip():
+            for line in buf.rstrip().splitlines():
+                self.logger.log(self.level, line)
+    def flush(self):
+        pass
+
+# Redirect stdout/stderr so prints from simulation are captured
+sys.stdout = StreamToLogger(logger, logging.INFO)
+sys.stderr = StreamToLogger(logger, logging.ERROR)
 
 from src.emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation, RLTrainer, BehavioralWeights
 
 
 class RLTrainingViewer(QtWidgets.QMainWindow):
     """Qt-based RL training viewer matching ship_abm architecture."""
-    
-    def __init__(self, sim, trainer, timesteps, pid, hecras_plan):
+
+    def __init__(self, sim, trainer, timesteps, pid, hecras_plan, use_gl=False):
         super().__init__()
         self.sim = sim
         self.trainer = trainer
         self.timesteps = timesteps
         self.pid = pid
         self.hecras_plan = hecras_plan
+        self.use_gl = bool(use_gl) and _has_gl
         
         self.current_timestep = 0
         self.paused = True  # Start paused
@@ -54,11 +98,15 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         button_layout = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton('Start')
         self.pause_btn = QtWidgets.QPushButton('Pause')
+        self.rotate_btn = QtWidgets.QPushButton('Rotate')
         self.reset_btn = QtWidgets.QPushButton('Reset')
+        self.clear_best_btn = QtWidgets.QPushButton('Clear Best')
         
         self.start_btn.clicked.connect(self.on_start)
         self.pause_btn.clicked.connect(self.on_pause)
         self.reset_btn.clicked.connect(self.on_reset)
+        self.clear_best_btn.clicked.connect(self.on_clear_best)
+        self.rotate_btn.clicked.connect(self.on_rotate)
         
         # Style buttons
         self.start_btn.setStyleSheet('background-color: #4CAF50; color: white; font-weight: bold; padding: 8px;')
@@ -67,7 +115,9 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         
         button_layout.addWidget(self.start_btn)
         button_layout.addWidget(self.pause_btn)
+        button_layout.addWidget(self.rotate_btn)
         button_layout.addWidget(self.reset_btn)
+        button_layout.addWidget(self.clear_best_btn)
         button_layout.addStretch()
         
         # Status label
@@ -77,18 +127,40 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         
         layout.addLayout(button_layout)
         
-        # Graphics view
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setAspectLocked(True)
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        layout.addWidget(self.plot_widget)
+        # Graphics view (regular 2D or OpenGL accelerated)
+        if self.use_gl:
+            self.gl_widget = GLViewWidget()
+            # set an orthographic-ish view by placing camera far and using z=0
+            self.gl_widget.opts['distance'] = 1000
+            layout.addWidget(self.gl_widget)
+        else:
+            self.plot_widget = pg.PlotWidget()
+            self.plot_widget.setAspectLocked(True)
+            self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+            layout.addWidget(self.plot_widget)
         
         # Agent scatter plot
-        self.agent_scatter = pg.ScatterPlotItem(size=6, pen=pg.mkPen(None), brush=pg.mkBrush(0, 255, 255, 200))
-        self.plot_widget.addItem(self.agent_scatter)
+        if self.use_gl:
+            try:
+                self.gl_scatter = GLScatterPlotItem(pos=np.empty((0,3), dtype=float), size=0.2, color=(0.0,1.0,1.0,1.0))
+                self.gl_widget.addItem(self.gl_scatter)
+            except Exception:
+                self.use_gl = False
+                self.agent_scatter = pg.ScatterPlotItem(size=6, pen=pg.mkPen(None), brush=pg.mkBrush(0, 255, 255, 200))
+                self.plot_widget.addItem(self.agent_scatter)
+        else:
+            self.agent_scatter = pg.ScatterPlotItem(size=6, pen=pg.mkPen(None), brush=pg.mkBrush(0, 255, 255, 200))
+            self.plot_widget.addItem(self.agent_scatter)
         
         # Agent direction arrows
         self.arrow_lines = []
+
+        # Pre-create shaft and head plot items to avoid add/remove each frame (only for non-GL)
+        if not self.use_gl:
+            self.shaft_plot = pg.PlotDataItem([], [], pen=pg.mkPen(color=(0,200,200), width=2))
+            self.head_plot = pg.PlotDataItem([], [], pen=pg.mkPen(color=(0,255,255), width=2))
+            self.plot_widget.addItem(self.shaft_plot)
+            self.plot_widget.addItem(self.head_plot)
         
         # Set view to agent extent
         import h5py
@@ -119,7 +191,7 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         # Timer for animation
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_simulation)
-        self.timer.setInterval(50)  # 20 FPS
+        self.timer.setInterval(100)  # 10 FPS (lighter)
         
         self.update_agents()
 
@@ -192,10 +264,10 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
 
                 img_item = pg.ImageItem(img_rgba)
                 try:
-                    img_item.setOpts(interpolate=True)
+                    img_item.setOpts(interpolate=False)
                 except Exception:
                     try:
-                        img_item.setInterpolation(True)
+                        img_item.setInterpolation(False)
                     except Exception:
                         pass
 
@@ -218,6 +290,9 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
                     img_item.setTransform(qtf)
                     self.plot_widget.addItem(img_item)
                     self._background_item = img_item
+                    # rotation state (0,1,2,3) for 0/90/180/270 clockwise
+                    self._bg_rotation_k = 0
+                    self._bg_original_quadrant_transform = qtf
                     print('Background raster created from HECRAS plan (griddata, precise transform)')
                 except Exception:
                     # fallback: simple rect placement (works for axis-aligned non-rotated rasters)
@@ -266,38 +341,81 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
                 self.plot_widget.addItem(img_item)
                 self._background_item = img_item
                 print('Background raster created from HECRAS plan (histogram2d fallback)')
-        except Exception:
-            raise
-        
+
+        except Exception as e:
+            print(f'Warning: Could not create raster background: {e}')
+            import traceback
+            traceback.print_exc()
+            self._background_item = None
+            self._bg_rotation_k = 0
+
+        # end of _create_background
+
     def on_start(self):
-        # Ensure simulation spatial state is reset at the start of an episode
-        if self.current_timestep == 0:
+        """Start or resume the simulation timer."""
+        self.paused = False
+        try:
+            self.timer.start()
+        except Exception:
+            pass
+        try:
+            self.status_label.setText(f'Running - Episode {self.episode} | t={self.current_timestep}/{self.timesteps}')
+        except Exception:
+            pass
+        print('Started/Resumed')
+
+    def on_rotate(self):
+        """Rotate the background image 90 degrees clockwise each time the button is pressed."""
+        if not hasattr(self, '_background_item') or self._background_item is None:
+            print('No background to rotate')
+            return
+
+        # increment rotation state
+        self._bg_rotation_k = (getattr(self, '_bg_rotation_k', 0) + 1) % 4
+
+        try:
+            img = self._background_item.image
+        except Exception:
             try:
-                self.sim.reset_spatial_state()
-                print('Reset spatial state before starting episode')
+                img = self._background_item.getImage()
+            except Exception:
+                img = None
+
+        if img is None:
+            print('Background image data not available for rotation')
+            return
+
+        # rotate numpy array (np.rot90 rotates counter-clockwise; use -k for clockwise)
+        rotated = np.rot90(img, -self._bg_rotation_k)
+
+        # Update the ImageItem's image data
+        try:
+            self._background_item.setImage(rotated)
+        except Exception:
+            # fallback: replace the item
+            try:
+                self.plot_widget.removeItem(self._background_item)
             except Exception:
                 pass
+            self._background_item = pg.ImageItem(rotated)
+            self.plot_widget.addItem(self._background_item)
 
-            # Cluster agents into a tight group at the start so training begins from a school
+        # If we have a stored transform, rotate it by 90 degrees about image center
+        if hasattr(self, '_bg_original_quadrant_transform'):
             try:
-                n = getattr(self.sim, 'num_agents', getattr(self.sim, 'X').size)
-                cx = float(np.nanmean(self.sim.X))
-                cy = float(np.nanmean(self.sim.Y))
-                # Small Gaussian cluster: sigma = 1.5 meters
-                sigma = 1.5
-                self.sim.X = np.random.normal(loc=cx, scale=sigma, size=n)
-                self.sim.Y = np.random.normal(loc=cy, scale=sigma, size=n)
-                # Reset headings consistent with velocity if possible
-                if hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
-                    self.sim.heading = np.arctan2(self.sim.y_vel, self.sim.x_vel)
-                print('Clustered agents into starting school')
+                qtf = self._bg_original_quadrant_transform
+                # compute center in pixel coords
+                h, w = rotated.shape[0], rotated.shape[1]
+                cx, cy = w / 2.0, h / 2.0
+                # compose translate(-cx,-cy) -> rotate -> translate(cx,cy)
+                t1 = QtGui.QTransform(1, 0, 0, 1, -cx, -cy)
+                r = QtGui.QTransform()
+                r.rotate(90 * self._bg_rotation_k)
+                t2 = QtGui.QTransform(1, 0, 0, 1, cx, cy)
+                new_q = t2 * r * t1 * qtf
+                self._background_item.setTransform(new_q)
             except Exception as e:
-                print(f'Could not cluster agents at start: {e}')
-
-        self.paused = False
-        self.timer.start()
-        self.status_label.setText(f'Running - Episode {self.episode} | t={self.current_timestep}/{self.timesteps}')
-        print('Started/Resumed')
+                print('Could not rotate transform:', e)
         
     def on_pause(self):
         self.paused = True
@@ -312,12 +430,31 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         self.update_agents()
         self.status_label.setText(f'Reset - Episode {self.episode} | t=0/{self.timesteps}')
         print('Reset to timestep 0')
+
+    def on_clear_best(self):
+        """Delete the saved best weights file and reset in-memory best reward."""
+        save_path = os.path.join(REPO_ROOT, 'outputs', 'rl_training', 'best_weights.json')
+        try:
+            if os.path.exists(save_path):
+                os.remove(save_path)
+                print(f'Removed saved best weights at {save_path}')
+            else:
+                print('No saved best weights to remove')
+        except Exception as e:
+            print(f'Could not remove best weights file: {e}')
+
+        # reset in-memory best reward
+        try:
+            self.best_reward = -np.inf
+            print('In-memory best reward reset')
+        except Exception:
+            pass
         
     def update_agents(self):
         """Update agent positions and directions."""
         if not hasattr(self.sim, 'X') or not hasattr(self.sim, 'Y'):
             return
-            
+
         positions = np.column_stack([self.sim.X.flatten(), self.sim.Y.flatten()])
         headings = self.sim.heading.flatten()
         
@@ -330,10 +467,33 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         headings = headings[mask]
         
         if len(positions) == 0:
+            # clear GL scatter if present
+            if self.use_gl and hasattr(self, 'gl_scatter'):
+                try:
+                    self.gl_scatter.setData(pos=np.empty((0,3), dtype=float))
+                except Exception:
+                    pass
             return
-            
-        # Update scatter plot
-        self.agent_scatter.setData(positions[:, 0], positions[:, 1])
+
+        # Update scatter plot (GL or 2D)
+        if self.use_gl and hasattr(self, 'gl_scatter'):
+            # build Nx3 positions (x,y,0)
+            pos3 = np.zeros((positions.shape[0], 3), dtype=float)
+            pos3[:,0:2] = positions
+            try:
+                # color as RGBA floats 0..1
+                colors = np.tile(np.array([[0.0,1.0,1.0,1.0]], dtype=float), (pos3.shape[0],1))
+                self.gl_scatter.setData(pos=pos3, color=colors, size=5.0)
+            except Exception:
+                # if GL fails, fallback to 2D scatter
+                self.use_gl = False
+                try:
+                    self.agent_scatter.setData(positions[:, 0], positions[:, 1])
+                except Exception:
+                    pass
+        else:
+            # 2D plotting path
+            self.agent_scatter.setData(positions[:, 0], positions[:, 1])
         
         # Remove previous shaft/head plot items
         if hasattr(self, 'shaft_plot') and self.shaft_plot is not None:
@@ -356,32 +516,46 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         ys = positions[:, 1]
         hs = headings
 
-        # Shafts: from (x,y) to (x - shaft_length*cos(h), y - shaft_length*sin(h))
-        x_shaft = np.empty(len(xs) * 3)
-        y_shaft = np.empty(len(xs) * 3)
-        for i in range(len(xs)):
-            x_shaft[i*3 + 0] = xs[i]
-            y_shaft[i*3 + 0] = ys[i]
-            x_shaft[i*3 + 1] = xs[i] - shaft_length * np.cos(hs[i])
-            y_shaft[i*3 + 1] = ys[i] - shaft_length * np.sin(hs[i])
-            x_shaft[i*3 + 2] = np.nan
-            y_shaft[i*3 + 2] = np.nan
+        # Vectorized shaft/head generation
+        N = len(xs)
+        if N > 0:
+            # allocate arrays with pattern [point, endpoint, nan] per agent
+            x_shaft = np.empty(N * 3, dtype=float)
+            y_shaft = np.empty(N * 3, dtype=float)
+            x_shaft[0::3] = xs
+            y_shaft[0::3] = ys
+            x_shaft[1::3] = xs - shaft_length * np.cos(hs)
+            y_shaft[1::3] = ys - shaft_length * np.sin(hs)
+            x_shaft[2::3] = np.nan
+            y_shaft[2::3] = np.nan
 
-        # Heads: small line forward in heading direction
-        x_head = np.empty(len(xs) * 3)
-        y_head = np.empty(len(xs) * 3)
-        for i in range(len(xs)):
-            x_head[i*3 + 0] = xs[i]
-            y_head[i*3 + 0] = ys[i]
-            x_head[i*3 + 1] = xs[i] + head_len * np.cos(hs[i])
-            y_head[i*3 + 1] = ys[i] + head_len * np.sin(hs[i])
-            x_head[i*3 + 2] = np.nan
-            y_head[i*3 + 2] = np.nan
+            x_head = np.empty(N * 3, dtype=float)
+            y_head = np.empty(N * 3, dtype=float)
+            x_head[0::3] = xs
+            y_head[0::3] = ys
+            x_head[1::3] = xs + head_len * np.cos(hs)
+            y_head[1::3] = ys + head_len * np.sin(hs)
+            x_head[2::3] = np.nan
+            y_head[2::3] = np.nan
 
-        self.shaft_plot = pg.PlotDataItem(x_shaft, y_shaft, pen=pg.mkPen(color=(0,200,200), width=2))
-        self.head_plot = pg.PlotDataItem(x_head, y_head, pen=pg.mkPen(color=(0,255,255), width=2))
-        self.plot_widget.addItem(self.shaft_plot)
-        self.plot_widget.addItem(self.head_plot)
+            # update existing plot items (fast)
+            try:
+                self.shaft_plot.setData(x_shaft, y_shaft)
+                self.head_plot.setData(x_head, y_head)
+            except Exception:
+                # fallback: replace items
+                try:
+                    self.plot_widget.removeItem(self.shaft_plot)
+                except Exception:
+                    pass
+                try:
+                    self.plot_widget.removeItem(self.head_plot)
+                except Exception:
+                    pass
+                self.shaft_plot = pg.PlotDataItem(x_shaft, y_shaft, pen=pg.mkPen(color=(0,200,200), width=2))
+                self.head_plot = pg.PlotDataItem(x_head, y_head, pen=pg.mkPen(color=(0,255,255), width=2))
+                self.plot_widget.addItem(self.shaft_plot)
+                self.plot_widget.addItem(self.head_plot)
 
         # If grid overlay requested and not yet shown, add it
         if self._grid_shown and self._grid_item is None and self._hecras_pts is not None:
@@ -455,7 +629,11 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         # Reset simulation spatial state
         try:
             self.sim.reset_spatial_state()
-            print(f'Mutated weights for episode {self.episode}: cohesion={self.trainer.behavioral_weights.cohesion:.2f}, separation={self.trainer.behavioral_weights.separation:.2f}')
+            bw = self.trainer.behavioral_weights
+            try:
+                print(f'Mutated weights for episode {self.episode}: cohesion={bw.cohesion_weight:.2f}, separation={bw.separation_weight:.2f}, border={bw.border_cue_weight:.2f}')
+            except Exception:
+                print(f'Mutated weights for episode {self.episode} (values unavailable)')
         except Exception as e:
             print(f'Warning: Could not reset spatial state: {e}')
         
@@ -574,6 +752,7 @@ def main():
     parser.add_argument('--show-grid', action='store_true', help='Show HECRAS cell centers overlay for alignment debugging')
     parser.add_argument('--use-sog', action='store_true', help='Enable SOG-based alignment augmentation')
     parser.add_argument('--sog-weight', type=float, default=0.5, help='Blend weight (0..1) for SOG alignment vs heading alignment')
+    parser.add_argument('--use-gl', action='store_true', help='Use OpenGL accelerated scatter (if available)')
     
     args = parser.parse_args()
     
@@ -593,7 +772,7 @@ def main():
     
     # Launch Qt application
     app = QtWidgets.QApplication(sys.argv)
-    viewer = RLTrainingViewer(sim, trainer, args.timesteps, pid, hecras_plan)
+    viewer = RLTrainingViewer(sim, trainer, args.timesteps, pid, hecras_plan, use_gl=args.use_gl)
     # Apply show-grid preference
     if getattr(args, 'show_grid', False):
         viewer._grid_shown = True

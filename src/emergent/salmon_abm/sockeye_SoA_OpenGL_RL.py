@@ -3774,8 +3774,15 @@ class simulation():
             weights: BehavioralWeights object with learned parameters
         """
         self.behavioral_weights = weights
-        print(f"Applied behavioral weights: cohesion={weights.cohesion_weight:.2f}, "
-              f"separation={weights.separation_weight:.2f}, border={weights.border_cue_weight:.0f}")
+        try:
+            wdict = weights.to_dict()
+            keys = ', '.join(sorted(wdict.keys()))
+            print(f"Applied behavioral weights (keys): {keys}")
+        except Exception:
+            try:
+                print('Applied behavioral weights (some fields may be unavailable)')
+            except Exception:
+                pass
     
     def reset_spatial_state(self):
         """Reset all spatial/ephemeral state for a new simulation episode.
