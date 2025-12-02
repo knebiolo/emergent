@@ -104,6 +104,17 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
             self._create_background(hecras_plan, xmin, xmax, ymin, ymax)
         except Exception as e:
             print(f'Warning: could not create raster background: {e}')
+
+        # Grid overlay (HECRAS cell centers) - hidden by default
+        self._grid_shown = False
+        self._grid_item = None
+        try:
+            import h5py
+            with h5py.File(hecras_plan, 'r') as hdf:
+                pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
+            self._hecras_pts = pts
+        except Exception:
+            self._hecras_pts = None
         
         # Timer for animation
         self.timer = QtCore.QTimer()
@@ -188,11 +199,33 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
                     except Exception:
                         pass
 
-                rect = QtCore.QRectF(float(xmin), float(ymin), float(xmax - xmin), float(ymax - ymin))
-                img_item.setRect(rect)
-                self.plot_widget.addItem(img_item)
-                self._background_item = img_item
-                print('Background raster created from HECRAS plan (griddata, interpolated, transparent no-data)')
+                # Try to compute an accurate transform mapping pixel coordinates to world coords
+                try:
+                    from rasterio.transform import from_bounds
+                    # create affine that maps pixel indices to world coordinates
+                    affine = from_bounds(float(xmin), float(ymin), float(xmax), float(ymax), grid_vals.shape[1], grid_vals.shape[0])
+                    # affine maps (col, row) -> (x, y) via x = a*col + b*row + c ; y = d*col + e*row + f
+                    a = float(affine.a)
+                    b = float(affine.b)
+                    c = float(affine.c)
+                    d = float(affine.d)
+                    e = float(affine.e)
+                    f = float(affine.f)
+
+                    # QTransform(m11, m12, m21, m22, dx, dy) maps x' = m11*x + m12*y + dx; y' = m21*x + m22*y + dy
+                    # We want x_world = a*col + b*row + c; y_world = d*col + e*row + f
+                    qtf = QtGui.QTransform(a, b, d, e, c, f)
+                    img_item.setTransform(qtf)
+                    self.plot_widget.addItem(img_item)
+                    self._background_item = img_item
+                    print('Background raster created from HECRAS plan (griddata, precise transform)')
+                except Exception:
+                    # fallback: simple rect placement (works for axis-aligned non-rotated rasters)
+                    rect = QtCore.QRectF(float(xmin), float(ymin), float(xmax - xmin), float(ymax - ymin))
+                    img_item.setRect(rect)
+                    self.plot_widget.addItem(img_item)
+                    self._background_item = img_item
+                    print('Background raster created from HECRAS plan (griddata, fallback rect)')
 
             except Exception:
                 # If SciPy not available, fall back to histogram2d approach
@@ -349,6 +382,12 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         self.head_plot = pg.PlotDataItem(x_head, y_head, pen=pg.mkPen(color=(0,255,255), width=2))
         self.plot_widget.addItem(self.shaft_plot)
         self.plot_widget.addItem(self.head_plot)
+
+        # If grid overlay requested and not yet shown, add it
+        if self._grid_shown and self._grid_item is None and self._hecras_pts is not None:
+            pts = self._hecras_pts
+            self._grid_item = pg.ScatterPlotItem(x=pts[:,0], y=pts[:,1], pen=pg.mkPen(None), brush=pg.mkBrush(255,0,0,100), size=3)
+            self.plot_widget.addItem(self._grid_item)
         
     def update_simulation(self):
         """Run one simulation timestep."""
@@ -510,6 +549,12 @@ def setup_training_simulation(args):
     print('Setting up RL trainer...')
     trainer = RLTrainer(sim)
     # Apply trainer's behavioral weights to the simulation via simulation API
+    # Propagate CLI options for SOG-aware alignment
+    if hasattr(trainer.behavioral_weights, 'use_sog'):
+        trainer.behavioral_weights.use_sog = bool(getattr(args, 'use_sog', True))
+    if hasattr(trainer.behavioral_weights, 'sog_weight'):
+        trainer.behavioral_weights.sog_weight = float(getattr(args, 'sog_weight', 0.5))
+
     sim.apply_behavioral_weights(trainer.behavioral_weights)
     print('Applied behavioral weights to simulation')
     
@@ -526,6 +571,9 @@ def main():
     parser.add_argument('--timesteps', type=int, default=100, help='Timesteps per episode')
     parser.add_argument('--agents', type=int, default=500, help='Number of agents')
     parser.add_argument('--fish-length', type=int, default=450, help='Fish length (mm)')
+    parser.add_argument('--show-grid', action='store_true', help='Show HECRAS cell centers overlay for alignment debugging')
+    parser.add_argument('--use-sog', action='store_true', help='Enable SOG-based alignment augmentation')
+    parser.add_argument('--sog-weight', type=float, default=0.5, help='Blend weight (0..1) for SOG alignment vs heading alignment')
     
     args = parser.parse_args()
     
@@ -546,6 +594,9 @@ def main():
     # Launch Qt application
     app = QtWidgets.QApplication(sys.argv)
     viewer = RLTrainingViewer(sim, trainer, args.timesteps, pid, hecras_plan)
+    # Apply show-grid preference
+    if getattr(args, 'show_grid', False):
+        viewer._grid_shown = True
     viewer.show()
     
     print('\\nQt viewer launched!')

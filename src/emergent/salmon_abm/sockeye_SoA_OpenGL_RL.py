@@ -129,6 +129,9 @@ class BehavioralWeights:
         # Learning rates (for RL training)
         self.learning_rate = 0.001
         self.exploration_epsilon = 0.1
+        # Alignment SOG augmentation
+        self.use_sog = True            # Whether to consider neighbor SOG for alignment
+        self.sog_weight = 0.5          # Relative weight (0..1) blending heading vs SOG alignment
         
     def to_dict(self):
         """Export weights as dictionary for saving."""
@@ -155,6 +158,8 @@ class BehavioralWeights:
             'energy_efficiency_priority': self.energy_efficiency_priority,
             'learning_rate': self.learning_rate,
             'exploration_epsilon': self.exploration_epsilon
+            ,'use_sog': self.use_sog
+            ,'sog_weight': self.sog_weight
         }
     
     def from_dict(self, data):
@@ -7504,7 +7509,7 @@ class simulation():
     
             return np.nan_to_num(cohesion_array)
         
-        def alignment_cue(self, weight, consider_front_only=False):
+        def alignment_cue(self, weight, consider_front_only=False, use_sog=True, sog_weight=1.0):
             """
             Calculate the attractive force towards the average heading (alignment) of the school for each agent.
         
@@ -7562,23 +7567,50 @@ class simulation():
             # Calculate unit vectors for average headings
             avg_heading_x = np.cos(avg_heading)
             avg_heading_y = np.sin(avg_heading)
-        
-            # Calculate vectors to average headings
+
+            # Default alignment vector: point fish velocity toward average heading unit vector
             vectors_to_heading_x = avg_heading_x - self.simulation.x_vel
             vectors_to_heading_y = avg_heading_y - self.simulation.y_vel
-        
+
             # Calculate distances to average headings
             distances = np.sqrt(vectors_to_heading_x**2 + vectors_to_heading_y**2)
-        
+
             # Normalize vectors (add a small epsilon to distances to avoid division by zero)
             epsilon = 1e-10
             v_hat_align_x = np.divide(vectors_to_heading_x, distances + epsilon, out=np.zeros_like(self.simulation.x_vel), where=distances+epsilon != 0)
             v_hat_align_y = np.divide(vectors_to_heading_y, distances + epsilon, out=np.zeros_like(self.simulation.y_vel), where=distances+epsilon != 0)
-        
-            # Calculate attractive forces
+
+            # Base alignment force (heading alignment)
             alignment_array = np.zeros((num_agents, 2))
             alignment_array[:, 0] = weight * v_hat_align_x * no_school
             alignment_array[:, 1] = weight * v_hat_align_y * no_school
+
+            # Optional: augment alignment with SOG/velocity similarity
+            if use_sog:
+                try:
+                    # For each agent, compute mean neighbor SOG and desired velocity vector
+                    neighbor_sogs = np.array([np.mean(self.simulation.sog[neighbor_indices[np.where(agent_indices == agent)]]) if len(self.simulation.agents_within_buffers[agent])>0 else self.simulation.sog[agent] for agent in np.arange(num_agents)])
+                    # Ensure minima
+                    neighbor_sogs = np.where(neighbor_sogs < 0.5 * self.simulation.length / 1000,
+                                              0.5 * self.simulation.length / 1000,
+                                              neighbor_sogs)
+                    # Desired neighbor velocity vectors (unit directions times neighbor_sogs)
+                    desired_vx = neighbor_sogs * np.cos(avg_heading)
+                    desired_vy = neighbor_sogs * np.sin(avg_heading)
+
+                    # Velocity difference (desired - current water-relative velocity)
+                    vel_diff_x = desired_vx - self.simulation.x_vel
+                    vel_diff_y = desired_vy - self.simulation.y_vel
+                    vel_diff_norm = np.sqrt(vel_diff_x**2 + vel_diff_y**2)
+                    v_hat_vel_x = np.divide(vel_diff_x, vel_diff_norm + epsilon, out=np.zeros_like(vel_diff_x), where=vel_diff_norm+epsilon != 0)
+                    v_hat_vel_y = np.divide(vel_diff_y, vel_diff_norm + epsilon, out=np.zeros_like(vel_diff_y), where=vel_diff_norm+epsilon != 0)
+
+                    # Combine heading alignment and SOG alignment weighted by sog_weight
+                    alignment_array[:, 0] = (1.0 - sog_weight) * alignment_array[:, 0] + sog_weight * weight * v_hat_vel_x * no_school
+                    alignment_array[:, 1] = (1.0 - sog_weight) * alignment_array[:, 1] + sog_weight * weight * v_hat_vel_y * no_school
+                except Exception:
+                    # On any error, fall back to heading-only alignment
+                    pass
             
             # Calculate a new ideal speed based on the mean speed of those fish around
             sogs = np.array([np.mean(self.simulation.sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
@@ -7876,7 +7908,10 @@ class simulation():
                 
                 # calculate attractive forces (using learned weights)
                 rheotaxis = self.rheo_cue(bw.rheotaxis_weight * 10000)      # Default: 25000
-                alignment = self.alignment_cue(bw.alignment_weight * 20500) # Default: 20500
+                # Support SOG-aware alignment: BehavioralWeights may expose 'use_sog' and 'sog_weight'
+                use_sog = getattr(bw, 'use_sog', True)
+                sog_weight = getattr(bw, 'sog_weight', 0.5)
+                alignment = self.alignment_cue(bw.alignment_weight * 20500, use_sog=use_sog, sog_weight=sog_weight) # Default: 20500
                 cohesion = self.cohesion_cue(bw.cohesion_weight * 11000)    # Default: 11000
                 low_speed = self.vel_cue(1500)                               # 1500 (keep fixed)
                 wave_drag = self.wave_drag_cue(0)                            # 0 (keep fixed)
