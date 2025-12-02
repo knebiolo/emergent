@@ -58,6 +58,7 @@ from scipy.optimize import curve_fit
 from scipy.constants import g
 from scipy.spatial import cKDTree#, cdist
 from scipy.stats import beta
+import numba
 from scipy.ndimage import distance_transform_edt
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
@@ -222,6 +223,106 @@ class BehavioralWeights:
 # Schooling Metrics and Energy Efficiency Calculations
 # =============================================================================
 
+@numba.jit(nopython=True, parallel=True, fastmath=True, cache=True)
+def _compute_schooling_loop(positions, headings, neighbor_data, neighbor_offsets, ideal_dist, mean_BL,
+                           cohesion_scores, alignment_scores, N):
+    """Numba-compiled loop for schooling metrics computation.
+    
+    Args:
+        neighbor_data: Flattened array of all neighbor indices
+        neighbor_offsets: Array where offsets[i]:offsets[i+1] gives neighbors of agent i
+    """
+    for i in numba.prange(N):
+        start = neighbor_offsets[i]
+        end = neighbor_offsets[i + 1]
+        n_neighbors = 0
+        
+        # Count actual neighbors (excluding self)
+        for idx in range(start, end):
+            if neighbor_data[idx] != i:
+                n_neighbors += 1
+        
+        if n_neighbors > 0:
+            # COHESION: centroid and distance
+            centroid_x = 0.0
+            centroid_y = 0.0
+            for idx in range(start, end):
+                j = neighbor_data[idx]
+                if j != i:
+                    centroid_x += positions[j, 0]
+                    centroid_y += positions[j, 1]
+            centroid_x /= n_neighbors
+            centroid_y /= n_neighbors
+            
+            dx = positions[i, 0] - centroid_x
+            dy = positions[i, 1] - centroid_y
+            dist_to_centroid = np.sqrt(dx*dx + dy*dy)
+            
+            cohesion_scores[i] = np.exp(-0.5 * ((dist_to_centroid - ideal_dist) / (0.5 * mean_BL))**2)
+            
+            # ALIGNMENT: circular mean of headings
+            sin_sum = 0.0
+            cos_sum = 0.0
+            for idx in range(start, end):
+                j = neighbor_data[idx]
+                if j != i:
+                    sin_sum += np.sin(headings[j])
+                    cos_sum += np.cos(headings[j])
+            sin_mean = sin_sum / n_neighbors
+            cos_mean = cos_sum / n_neighbors
+            mean_heading = np.arctan2(sin_mean, cos_mean)
+            
+            heading_diff = np.arctan2(np.sin(headings[i] - mean_heading), 
+                                     np.cos(headings[i] - mean_heading))
+            alignment_scores[i] = np.cos(heading_diff)
+
+
+@numba.jit(nopython=True, parallel=True, fastmath=True, cache=True)
+def _compute_drafting_loop(positions, headings, neighbor_data, neighbor_offsets, angle_tol_rad,
+                          drag_reduction_single, drag_reduction_dual, drag_reductions, N):
+    """Numba-compiled loop for drafting benefit computation.
+    
+    Args:
+        neighbor_data: Flattened array of all neighbor indices
+        neighbor_offsets: Array where offsets[i]:offsets[i+1] gives neighbors of agent i
+    """
+    for i in numba.prange(N):
+        start = neighbor_offsets[i]
+        end = neighbor_offsets[i + 1]
+        
+        # Count agents ahead within cone
+        left_count = 0
+        right_count = 0
+        total_ahead = 0
+        
+        for idx in range(start, end):
+            j = neighbor_data[idx]
+            if j == i:
+                continue
+            
+            dx = positions[j, 0] - positions[i, 0]
+            dy = positions[j, 1] - positions[i, 1]
+            angle_to_neighbor = np.arctan2(dy, dx)
+            angle_diff = np.arctan2(np.sin(angle_to_neighbor - headings[i]),
+                                   np.cos(angle_to_neighbor - headings[i]))
+            
+            if np.abs(angle_diff) < angle_tol_rad:
+                total_ahead += 1
+                if angle_diff < 0:
+                    left_count += 1
+                else:
+                    right_count += 1
+        
+        # Determine drag reduction
+        if total_ahead == 1:
+            drag_reductions[i] = drag_reduction_single
+        elif total_ahead >= 2:
+            if left_count > 0 and right_count > 0:
+                drag_reductions[i] = drag_reduction_dual
+            else:
+                drag_reductions[i] = drag_reduction_single
+
+
 def compute_schooling_metrics_biological(positions, headings, body_lengths, behavioral_weights, alive_mask=None):
     """Compute biologically-grounded schooling quality metrics.
     
@@ -257,75 +358,49 @@ def compute_schooling_metrics_biological(positions, headings, body_lengths, beha
         behavioral_weights.cohesion_radius_threatened * threat
     )
     
-    cohesion_scores = []
-    alignment_scores = []
-    separation_penalties = []
-    
     # Build KDTree for efficient neighbor queries
     from scipy.spatial import cKDTree
     tree = cKDTree(positions)
     
-    for i in range(N):
-        BL_i = body_lengths[i]
-        search_radius = cohesion_radius_BL * BL_i  # Sensory perception range
+    # Fixed 1-meter radius for all agents (performance optimization)
+    search_radius = 1.0
+    
+    # Get all neighbors for all agents at once
+    neighbor_lists = tree.query_ball_point(positions, r=search_radius)
+    
+    # Preallocate arrays
+    cohesion_scores = np.zeros(N)
+    alignment_scores = np.full(N, -0.5)  # Default to isolation penalty
+    separation_penalties = np.zeros(N)
+    
+    # Vectorized separation: find nearest neighbor for all agents at once
+    nearest_dists, nearest_indices = tree.query(positions, k=2)  # k=2 includes self
+    if N > 1:
+        nearest_dists = nearest_dists[:, 1]  # Exclude self (index 0)
+        mean_BL = np.mean(body_lengths)
+        separation_mask = nearest_dists < mean_BL
+        separation_penalties[separation_mask] = -(mean_BL - nearest_dists[separation_mask]) / mean_BL
         
-        # Find neighbors within sensory range
-        neighbor_indices = tree.query_ball_point(positions[i], r=search_radius)
-        neighbor_indices = [j for j in neighbor_indices if j != i]
+        ideal_dist = 2.0 * mean_BL * (1 - 0.5 * threat)
         
-        if len(neighbor_indices) > 0:
-            # COHESION: Distance to local group centroid
-            neighbor_positions = positions[neighbor_indices]
-            centroid = np.mean(neighbor_positions, axis=0)
-            dist_to_centroid = np.linalg.norm(positions[i] - centroid)
-            
-            # Ideal: 2.0 body lengths from centroid (adjust with threat level)
-            ideal_dist = 2.0 * BL_i * (1 - 0.5 * threat)  # Closer when threatened
-            # Gaussian reward centered at ideal distance
-            cohesion_i = np.exp(-0.5 * ((dist_to_centroid - ideal_dist) / (0.5*BL_i))**2)
-            cohesion_scores.append(cohesion_i)
-            
-            # ALIGNMENT: Match heading with neighbors
-            neighbor_headings = headings[neighbor_indices]
-            # Circular mean of neighbor headings
-            mean_sin = np.mean(np.sin(neighbor_headings))
-            mean_cos = np.mean(np.cos(neighbor_headings))
-            mean_heading = np.arctan2(mean_sin, mean_cos)
-            
-            # Angular difference (wrapped to [-π, π])
-            heading_diff = np.arctan2(
-                np.sin(headings[i] - mean_heading),
-                np.cos(headings[i] - mean_heading)
-            )
-            
-            # Cosine similarity: 1.0 = perfect alignment, -1.0 = opposite
-            alignment_i = np.cos(heading_diff)
-            alignment_scores.append(alignment_i)
-        else:
-            # No neighbors within range: penalty for isolation
-            cohesion_scores.append(0.0)
-            alignment_scores.append(-0.5)  # Partial penalty
+        # Convert neighbor_lists to flattened arrays for numba
+        neighbor_data = []
+        neighbor_offsets = [0]
+        for neighbors in neighbor_lists:
+            neighbor_data.extend(neighbors)
+            neighbor_offsets.append(len(neighbor_data))
+        neighbor_data = np.array(neighbor_data, dtype=np.int32)
+        neighbor_offsets = np.array(neighbor_offsets, dtype=np.int32)
         
-        # SEPARATION: Penalty for being too close to any agent
-        all_dists, all_indices = tree.query(positions[i], k=min(2, N))
-        if len(all_dists) > 1:
-            nearest_dist = all_dists[1]  # Exclude self
-            
-            if nearest_dist < 1.0 * BL_i:  # Too close (< 1 body length)
-                separation_penalty = -(1.0*BL_i - nearest_dist) / BL_i
-                separation_penalties.append(separation_penalty)
-            else:
-                separation_penalties.append(0.0)
-        else:
-            separation_penalties.append(0.0)
+        # Numba-compiled parallel loop for cohesion and alignment
+        _compute_schooling_loop(positions, headings, neighbor_data, neighbor_offsets, ideal_dist, mean_BL, 
+                                cohesion_scores, alignment_scores, N)
     
     # Average across all agents
-    mean_cohesion = float(np.mean(cohesion_scores)) if N > 0 else 0.0
-    mean_alignment = float(np.mean(alignment_scores)) if N > 0 else 0.0
-    mean_separation = float(np.mean(separation_penalties)) if N > 0 else 0.0
+    mean_cohesion = float(np.mean(cohesion_scores))
+    mean_alignment = float(np.mean(alignment_scores))
+    mean_separation = float(np.mean(separation_penalties))
     
-    # Overall schooling score: cohesion (0-1) + alignment (-1 to 1) + separation (-1 to 0)
-    # Perfect schooling ≈ 1.0 + 1.0 + 0.0 = 2.0
     overall = mean_cohesion + mean_alignment + mean_separation
     
     return {
@@ -372,59 +447,27 @@ def compute_drafting_benefits(positions, headings, velocities, body_lengths, beh
     from scipy.spatial import cKDTree
     tree = cKDTree(positions)
     
-    drafting_dist_BL = behavioral_weights.drafting_distance
+    # Fixed 1-meter drafting radius (performance optimization)
+    drafting_radius = 1.0
     angle_tol_rad = np.radians(behavioral_weights.drafting_angle_tolerance)
     
-    for i in range(N):
-        BL_i = body_lengths[i]
-        search_radius = drafting_dist_BL * BL_i
-        
-        # Find agents within drafting range
-        neighbor_indices = tree.query_ball_point(positions[i], r=search_radius)
-        neighbor_indices = [j for j in neighbor_indices if j != i]
-        
-        if len(neighbor_indices) == 0:
-            continue
-        
-        # Check if neighbors are in front (within velocity cone)
-        my_heading = headings[i]
-        my_velocity_direction = np.arctan2(velocities[i, 1], velocities[i, 0])
-        
-        agents_behind_count = 0
-        flanking_agents = []
-        
-        for j in neighbor_indices:
-            # Vector from me to neighbor
-            dx = positions[j, 0] - positions[i, 0]
-            dy = positions[j, 1] - positions[i, 1]
-            angle_to_neighbor = np.arctan2(dy, dx)
-            
-            # Is neighbor in front of me (aligned with my heading)?
-            angle_diff = np.arctan2(
-                np.sin(angle_to_neighbor - my_heading),
-                np.cos(angle_to_neighbor - my_heading)
-            )
-            
-            if abs(angle_diff) < angle_tol_rad:
-                # Neighbor is ahead - I'm drafting behind them
-                agents_behind_count += 1
-                flanking_agents.append((j, angle_diff))
-        
-        # Compute drag reduction
-        if agents_behind_count == 1:
-            # Single agent ahead: 15% reduction
-            drag_reductions[i] = behavioral_weights.drag_reduction_single
-        elif agents_behind_count >= 2:
-            # Check for V-formation (agents on either side)
-            left_count = sum(1 for _, angle in flanking_agents if angle < 0)
-            right_count = sum(1 for _, angle in flanking_agents if angle > 0)
-            
-            if left_count > 0 and right_count > 0:
-                # V-formation or diamond: 25% reduction
-                drag_reductions[i] = behavioral_weights.drag_reduction_dual
-            else:
-                # Multiple agents on same side: 15% reduction
-                drag_reductions[i] = behavioral_weights.drag_reduction_single
+    # Vectorized: query all agents at once with fixed radius
+    neighbor_lists = tree.query_ball_point(positions, r=drafting_radius)
+    
+    # Convert neighbor_lists to flattened arrays for numba
+    neighbor_data = []
+    neighbor_offsets = [0]
+    for neighbors in neighbor_lists:
+        neighbor_data.extend(neighbors)
+        neighbor_offsets.append(len(neighbor_data))
+    neighbor_data = np.array(neighbor_data, dtype=np.int32)
+    neighbor_offsets = np.array(neighbor_offsets, dtype=np.int32)
+    
+    # Numba-compiled parallel loop for drafting calculations
+    drag_reduction_single = behavioral_weights.drag_reduction_single
+    drag_reduction_dual = behavioral_weights.drag_reduction_dual
+    _compute_drafting_loop(positions, headings, neighbor_data, neighbor_offsets, angle_tol_rad,
+                          drag_reduction_single, drag_reduction_dual, drag_reductions, N)
     
     return drag_reductions
 
@@ -514,33 +557,44 @@ class RLTrainer:
         # Get alive agents
         alive_mask = (self.sim.dead == 0) if hasattr(self.sim, 'dead') else np.ones(len(self.sim.X), dtype=bool)
         
+        # Cache expensive metrics (compute every N frames, not every frame)
+        # These Python loops are slow with many agents
+        current_time = getattr(self.sim, 'current_time', 0)
+        metrics_update_interval = getattr(self, 'metrics_update_interval', 10)
+        should_update_metrics = (int(current_time) % metrics_update_interval == 0)
+        
         # 1. SCHOOLING METRICS (Biological: cohesion + alignment + separation)
         if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y') and hasattr(self.sim, 'heading'):
-            positions = np.column_stack([self.sim.X, self.sim.Y])
-            headings = self.sim.heading
-            body_lengths = self.sim.length / 1000.0  # Convert mm to meters
-            
-            schooling_metrics = compute_schooling_metrics_biological(
-                positions, headings, body_lengths, 
-                self.behavioral_weights, alive_mask
-            )
-            metrics['schooling_metrics'] = schooling_metrics
+            if should_update_metrics or not hasattr(self, '_cached_schooling_metrics'):
+                positions = np.column_stack([self.sim.X, self.sim.Y])
+                headings = self.sim.heading
+                body_lengths = self.sim.length / 1000.0  # Convert mm to meters
+                
+                schooling_metrics = compute_schooling_metrics_biological(
+                    positions, headings, body_lengths, 
+                    self.behavioral_weights, alive_mask
+                )
+                self._cached_schooling_metrics = schooling_metrics
+            metrics['schooling_metrics'] = self._cached_schooling_metrics
         
         # 2. DRAFTING BENEFITS (Energy efficiency from swimming behind others)
         if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y') and hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
-            positions = np.column_stack([self.sim.X, self.sim.Y])
-            velocities = np.column_stack([self.sim.x_vel, self.sim.y_vel])
-            headings = self.sim.heading
-            body_lengths = self.sim.length / 1000.0
+            if should_update_metrics or not hasattr(self, '_cached_drag_reductions'):
+                positions = np.column_stack([self.sim.X, self.sim.Y])
+                velocities = np.column_stack([self.sim.x_vel, self.sim.y_vel])
+                headings = self.sim.heading
+                body_lengths = self.sim.length / 1000.0
+                
+                # Compute drafting once and cache for reuse below
+                drag_reductions = compute_drafting_benefits(
+                    positions, headings, velocities, body_lengths,
+                    self.behavioral_weights, alive_mask
+                )
+                self._cached_drag_reductions = drag_reductions
             
-            # Compute drafting once and cache for reuse below
-            drag_reductions = compute_drafting_benefits(
-                positions, headings, velocities, body_lengths,
-                self.behavioral_weights, alive_mask
-            )
-            metrics['mean_drafting_benefit'] = float(np.mean(drag_reductions))
+            metrics['mean_drafting_benefit'] = float(np.mean(self._cached_drag_reductions))
             # store in sim for reuse in energy_efficiency
-            self.sim._last_drag_reductions = drag_reductions
+            self.sim._last_drag_reductions = self._cached_drag_reductions
         
         # 3. UPSTREAM PROGRESS (Change in longitudinal position)
         if hasattr(self.sim, 'longitudes'):
@@ -613,6 +667,22 @@ class RLTrainer:
             
             # Reset simulation spatial state (keep behavioral weights)
             self.sim.reset_spatial_state()
+            # Force garbage collection and clear any cached metrics to avoid memory growth between episodes
+            try:
+                import gc
+                # Clear cached metrics if present
+                if hasattr(self, '_cached_schooling_metrics'):
+                    delattr(self, '_cached_schooling_metrics') if hasattr(self, '_cached_schooling_metrics') else None
+                if hasattr(self, '_cached_drag_reductions'):
+                    delattr(self, '_cached_drag_reductions') if hasattr(self, '_cached_drag_reductions') else None
+                if hasattr(self.sim, '_last_drag_reductions'):
+                    try:
+                        del self.sim._last_drag_reductions
+                    except Exception:
+                        pass
+                gc.collect()
+            except Exception:
+                pass
         
         # Load best weights
         if best_weights:
@@ -3785,6 +3855,27 @@ class simulation():
                 print('Applied behavioral weights (some fields may be unavailable)')
             except Exception:
                 pass
+        # Numba warm-up: call compiled loops with tiny inputs to trigger JIT at initialization
+        try:
+            if 'numba' in globals():
+                # create tiny dummy arrays
+                dummy_pos = np.zeros((2, 2), dtype=np.float64)
+                dummy_head = np.zeros(2, dtype=np.float64)
+                dummy_data = np.array([0, 1], dtype=np.int32)
+                dummy_offsets = np.array([0, 2], dtype=np.int32)
+                dummy_coh = np.zeros(2, dtype=np.float64)
+                dummy_align = np.zeros(2, dtype=np.float64)
+                try:
+                    _compute_schooling_loop(dummy_pos, dummy_head, dummy_data, dummy_offsets, 1.0, 1.0, dummy_coh, dummy_align, 2)
+                except Exception:
+                    pass
+                dummy_drag = np.zeros(2, dtype=np.float64)
+                try:
+                    _compute_drafting_loop(dummy_pos, dummy_head, dummy_data, dummy_offsets, 0.5, 0.1, 0.2, dummy_drag, 2)
+                except Exception:
+                    pass
+        except Exception:
+            pass
     
     def reset_spatial_state(self):
         """Reset all spatial/ephemeral state for a new simulation episode.
@@ -3857,6 +3948,37 @@ class simulation():
         
         # Clear pixel index cache (spatial)
         self._pixel_index_cache = {}
+        # Clear other caches that may hold large arrays or objects
+        try:
+            if hasattr(self, '_kdtree_cache'):
+                try:
+                    del self._kdtree_cache
+                except Exception:
+                    self._kdtree_cache = {}
+        except Exception:
+            pass
+        try:
+            if hasattr(self, '_hecras_map'):
+                try:
+                    del self._hecras_map
+                except Exception:
+                    self._hecras_map = None
+        except Exception:
+            pass
+        # Drop large historical buffers if present to reclaim memory
+        try:
+            if hasattr(self, 'swim_speeds'):
+                self.swim_speeds = np.full((self.num_agents, 1), np.nan)
+            if hasattr(self, 'past_longitudes'):
+                self.past_longitudes = np.full((self.num_agents, 1), np.nan)
+        except Exception:
+            pass
+        # Force garbage collection to free memory immediately
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
         
         # Re-sample environmental conditions at reset positions
         if self.use_hecras and hasattr(self, 'hecras_node_fields'):
@@ -8583,7 +8705,11 @@ class simulation():
         self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
         
         # Re-sample HECRAS environmental data at new positions
-        if getattr(self, 'use_hecras', False) and hasattr(self, 'hecras_node_fields'):
+        # Update every N frames for performance (hydraulics change slowly)
+        hecras_update_interval = getattr(self, 'hecras_update_interval', 5)
+        should_update_hecras = (int(t) % hecras_update_interval == 0)
+        
+        if getattr(self, 'use_hecras', False) and hasattr(self, 'hecras_node_fields') and should_update_hecras:
             try:
                 # Fast update using cached KDTree (no rebuild)
                 if getattr(self, 'profile', False):
