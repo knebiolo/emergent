@@ -40,61 +40,39 @@ import os
 import pandas as pd
 # from pysal.explore import esda
 # from pysal.lib import weights
-# from pysal.model import spreg
-from affine import Affine as AffineTransform
-import rasterio
-from rasterio.transform import Affine, from_origin
-from rasterio.mask import mask
-from rasterio.crs import CRS
-from rasterio.warp import reproject, calculate_default_transform
-from rasterio.features import rasterize
-from shapely import Point, Polygon, box
-from shapely import affinity
-from shapely.wkt import loads as loads
-from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline, RectBivariateSpline
-from scipy.optimize import curve_fit
-from scipy.constants import g
-from scipy.spatial import cKDTree#, cdist
-from scipy.stats import beta
-from scipy.ndimage import distance_transform_edt
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import dijkstra
-import matplotlib.animation as manimation
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib import rcParams
-from datetime import datetime
-import time
-import warnings
-import sys
-import random
-from collections import deque
-#from sksurv.nonparametric import kaplan_meier_estimator
-#from PyPDF2 import PdfReader, PdfWriter
+    tree = cKDTree(positions)
 
-warnings.filterwarnings("ignore")
+    # For each agent compute neighbors within its search radius
+    search_radii = cohesion_radius_BL * body_lengths
+    # Using query_ball_point for all points returns a list of arrays
+    neighbor_lists = tree.query_ball_point(positions, r=search_radii)
 
-np.set_printoptions(suppress=True)
+    # Preallocate arrays
+    cohesion_scores = np.zeros(N, dtype=float)
+    alignment_scores = np.full(N, -0.5, dtype=float)  # default penalty
+    separation_penalties = np.zeros(N, dtype=float)
 
-# =============================================================================
-# RL Infrastructure for Behavioral Weight Learning
-# =============================================================================
+    # Compute cohesion and alignment in vectorized manner where possible
+    for i, neighbors in enumerate(neighbor_lists):
+        # Exclude self
+        neighbors = [j for j in neighbors if j != i]
+        if len(neighbors) == 0:
+            continue
+        neigh_pos = positions[neighbors]
+        centroid = np.mean(neigh_pos, axis=0)
+        dist_to_centroid = np.linalg.norm(positions[i] - centroid)
+        BL_i = body_lengths[i]
+        ideal_dist = 2.0 * BL_i * (1 - 0.5 * threat)
+        cohesion_scores[i] = np.exp(-0.5 * ((dist_to_centroid - ideal_dist) / (0.5*BL_i))**2)
 
-class BehavioralWeights:
-    """Container for instinctual behavioral parameters that persist across simulations.
-    
-    These weights control emergent schooling and navigation behavior:
-    - Schooling dynamics (cohesion, alignment, separation)
-    - Environmental responses (rheotaxis, border avoidance)
-    - Collision avoidance
-    - Energy management strategies
-    
-    Once trained, these weights are frozen and reused across different geometries/scenarios.
-    Spatial knowledge (specific routes, obstacle memory) is reset each simulation.
-    """
-    
-    def __init__(self):
-        # Schooling dynamics (Boids-style)
+        # Circular mean of neighbor headings
+        neighbor_headings = headings[neighbors]
+        mean_sin = np.mean(np.sin(neighbor_headings))
+        mean_cos = np.mean(np.cos(neighbor_headings))
+        mean_heading = np.arctan2(mean_sin, mean_cos)
+        heading_diff = np.arctan2(np.sin(headings[i] - mean_heading), np.cos(headings[i] - mean_heading))
+        alignment_scores[i] = np.cos(heading_diff)
+
         self.cohesion_weight = 1.0        # Attraction to group center
         self.alignment_weight = 1.0       # Tendency to match neighbors' heading
         self.separation_weight = 2.0      # Short-range repulsion from neighbors
@@ -294,9 +272,9 @@ def compute_schooling_metrics_biological(positions, headings, body_lengths, beha
             separation_penalties.append(0.0)
     
     # Average across all agents
-    mean_cohesion = np.mean(cohesion_scores) if cohesion_scores else 0.0
-    mean_alignment = np.mean(alignment_scores) if alignment_scores else 0.0
-    mean_separation = np.mean(separation_penalties) if separation_penalties else 0.0
+    mean_cohesion = float(np.mean(cohesion_scores)) if N > 0 else 0.0
+    mean_alignment = float(np.mean(alignment_scores)) if N > 0 else 0.0
+    mean_separation = float(np.mean(separation_penalties)) if N > 0 else 0.0
     
     # Overall schooling score: cohesion (0-1) + alignment (-1 to 1) + separation (-1 to 0)
     # Perfect schooling ≈ 1.0 + 1.0 + 0.0 = 2.0
@@ -507,11 +485,14 @@ class RLTrainer:
             headings = self.sim.heading
             body_lengths = self.sim.length / 1000.0
             
+            # Compute drafting once and cache for reuse below
             drag_reductions = compute_drafting_benefits(
                 positions, headings, velocities, body_lengths,
                 self.behavioral_weights, alive_mask
             )
-            metrics['mean_drafting_benefit'] = np.mean(drag_reductions)
+            metrics['mean_drafting_benefit'] = float(np.mean(drag_reductions))
+            # store in sim for reuse in energy_efficiency
+            self.sim._last_drag_reductions = drag_reductions
         
         # 3. UPSTREAM PROGRESS (Change in longitudinal position)
         if hasattr(self.sim, 'longitudes'):
@@ -530,12 +511,14 @@ class RLTrainer:
             
             # Apply drafting reduction
             if 'mean_drafting_benefit' in metrics:
-                drag_reductions = compute_drafting_benefits(
-                    np.column_stack([self.sim.X, self.sim.Y]),
-                    self.sim.heading, velocities,
-                    self.sim.length / 1000.0,
-                    self.behavioral_weights, alive_mask
-                )
+                drag_reductions = getattr(self.sim, '_last_drag_reductions', None)
+                if drag_reductions is None:
+                    drag_reductions = compute_drafting_benefits(
+                        np.column_stack([self.sim.X, self.sim.Y]),
+                        self.sim.heading, velocities,
+                        self.sim.length / 1000.0,
+                        self.behavioral_weights, alive_mask
+                    )
                 adjusted_energy = base_energy * (1.0 - drag_reductions)
             else:
                 adjusted_energy = base_energy
@@ -550,46 +533,47 @@ class RLTrainer:
             threshold = 2.0  # meters
             metrics['agents_near_boundary'] = np.sum((self.sim.distance_to < threshold) & alive_mask)
         
-        # 6. DEAD COUNT
-        if hasattr(self.sim, 'dead'):
-            metrics['dead_count'] = np.sum(self.sim.dead)
-        
-        # 7. MEAN ACCELERATION (Smoothness metric)
-        if hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
-            velocity = np.sqrt(self.sim.x_vel**2 + self.sim.y_vel**2)
-            prev_velocity = getattr(self.sim, '_prev_velocity', velocity)
-            metrics['mean_acceleration'] = np.mean(np.abs(velocity[alive_mask] - prev_velocity[alive_mask])) if np.any(alive_mask) else 0.0
-            self.sim._prev_velocity = velocity.copy()
-        
-        return metrics
-    
-    def train_episode(self, timesteps=100):
-        """Run one training episode with current behavioral weights."""
-        self.sim.apply_behavioral_weights(self.behavioral_weights)
-        
-        episode_reward = 0.0
-        prev_metrics = self.extract_state_metrics()
-        
-        for t in range(timesteps):
-            # Run simulation timestep
-            self.sim.timestep(t, dt=1.0, gravity=9.81, pid_controller=None)
-            
-            # Compute reward
-            current_metrics = self.extract_state_metrics()
-            reward = self.compute_reward(prev_metrics, current_metrics)
-            episode_reward += reward
-            
-            prev_metrics = current_metrics
-        
-        return episode_reward
-    
-    def train(self, num_episodes=100, timesteps_per_episode=100, save_path=None):
-        """Train behavioral weights using policy gradient / evolutionary strategy.
-        
-        Args:
-            num_episodes: Number of training episodes
-            timesteps_per_episode: Timesteps per episode
-            save_path: Path to save best weights (optional)
+        if N < 2:
+            return drag_reductions
+
+        from scipy.spatial import cKDTree
+        tree = cKDTree(positions)
+
+        drafting_dist_BL = behavioral_weights.drafting_distance
+        angle_tol_rad = np.radians(behavioral_weights.drafting_angle_tolerance)
+
+        # For each agent, get neighbors within its drafting radius
+        search_radii = drafting_dist_BL * body_lengths
+        neighbor_lists = tree.query_ball_point(positions, r=search_radii)
+
+        headings_unit = np.column_stack([np.cos(headings), np.sin(headings)])
+
+        for i, neighbors in enumerate(neighbor_lists):
+            neighbors = [j for j in neighbors if j != i]
+            if len(neighbors) == 0:
+                continue
+            vecs = positions[neighbors] - positions[i]
+            dists = np.linalg.norm(vecs, axis=1)
+            # avoid zero distances
+            valid = dists > 1e-9
+            if not np.any(valid):
+                continue
+            vecs = vecs[valid]
+            dists = dists[valid]
+            # normalize
+            vecs_unit = vecs / dists[:, None]
+            # dot with heading vector
+            cosang = np.dot(vecs_unit, headings_unit[i])
+            # clip and get angle
+            cosang = np.clip(cosang, -1.0, 1.0)
+            angs = np.arccos(cosang)
+            count_ahead = np.sum(angs <= angle_tol_rad)
+            if count_ahead == 1:
+                drag_reductions[i] = behavioral_weights.drag_reduction_single
+            elif count_ahead >= 2:
+                drag_reductions[i] = behavioral_weights.drag_reduction_dual
+
+        return drag_reductions
         """
         best_reward = -np.inf
         best_weights = None
@@ -7596,7 +7580,14 @@ class simulation():
             if use_sog:
                 try:
                     # For each agent, compute mean neighbor SOG and desired velocity vector
-                    neighbor_sogs = np.array([np.mean(self.simulation.sog[neighbor_indices[np.where(agent_indices == agent)]]) if len(self.simulation.agents_within_buffers[agent])>0 else self.simulation.sog[agent] for agent in np.arange(num_agents)])
+                    # Build adjacency by reusing agents_within_buffers (list of neighbor index arrays)
+                    neighbor_sogs = np.empty(num_agents, dtype=float)
+                    for ag in range(num_agents):
+                        neigh = self.simulation.agents_within_buffers[ag]
+                        if len(neigh) > 0:
+                            neighbor_sogs[ag] = np.mean(self.simulation.sog[neigh])
+                        else:
+                            neighbor_sogs[ag] = self.simulation.sog[ag]
                     # Ensure minima
                     neighbor_sogs = np.where(neighbor_sogs < 0.5 * self.simulation.length / 1000,
                                               0.5 * self.simulation.length / 1000,
@@ -7620,7 +7611,13 @@ class simulation():
                     pass
             
             # Calculate a new ideal speed based on the mean speed of those fish around
-            sogs = np.array([np.mean(self.simulation.sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
+            sogs = np.empty(num_agents, dtype=float)
+            for ag in range(num_agents):
+                neigh = self.simulation.agents_within_buffers[ag]
+                if len(neigh) > 0:
+                    sogs[ag] = np.mean(self.simulation.sog[neigh])
+                else:
+                    sogs[ag] = self.simulation.sog[ag]
             #sogs = np.array([np.mean(self.simulation.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
             #sogs = np.array([np.min(self.simulation.opt_sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
 
@@ -8545,13 +8542,24 @@ class simulation():
         movement.drag_fun(mask=~should_jump, t = t, dt = dt)
         movement.frequency(mask=~should_jump, t = t, dt = dt)
         movement.thrust_fun(mask=~should_jump, t = t, dt = dt)
+        # optional profiling
+        if getattr(self, 'profile', False):
+            t_start = time.time()
+            stage_times = {}
+        if getattr(self, 'profile', False):
+            s = time.time()
         dxdy_swim = movement.swim(t, dt, pid_controller = pid_controller, mask=~should_jump)
+        if getattr(self, 'profile', False):
+            stage_times['movement_swim'] = time.time() - s
         
         # Arbitrate amongst behavioral cues
         tolerance = 0.1  # A small tolerance level to account for floating-point arithmetic issues
-        #if abs(self.cumulative_time % 1) < tolerance or abs(self.cumulative_time % 1 - 1) < tolerance:
+        if getattr(self, 'profile', False):
+            s = time.time()
         self.heading = behavior.arbitrate(t)
-            
+        if getattr(self, 'profile', False):
+            stage_times['behavior_arbitrate'] = time.time() - s
+
         # Store old positions for sog calculation
         old_X = self.X.copy()
         old_Y = self.Y.copy()
@@ -8564,7 +8572,11 @@ class simulation():
         if getattr(self, 'use_hecras', False) and hasattr(self, 'hecras_node_fields'):
             try:
                 # Fast update using cached KDTree (no rebuild)
+                if getattr(self, 'profile', False):
+                    s = time.time()
                 self.update_hecras_mapping_for_current_positions()
+                if getattr(self, 'profile', False):
+                    stage_times['hecras_update_kdtree'] = time.time() - s
                 
                 # Re-sample depth, velocities
                 if 'depth' in self.hecras_node_fields:
@@ -8606,6 +8618,26 @@ class simulation():
                 # Revert to old positions on error
                 self.X = old_X
                 self.Y = old_Y
+                # record hecras resample time if profiling and no exception
+        if getattr(self, 'profile', False):
+            # finalize timing and write a log line
+            try:
+                stage_times['total_timestep'] = time.time() - t_start
+            except Exception:
+                stage_times['total_timestep'] = 0.0
+            out_dir = os.path.join('outputs', 'rl_training')
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception:
+                pass
+            log_path = os.path.join(out_dir, 'sim_profile.log')
+            try:
+                with open(log_path, 'a') as f:
+                    f.write(f"t={t}, ")
+                    f.write(', '.join([f"{k}={v:.6f}" for k, v in stage_times.items()]))
+                    f.write('\n')
+            except Exception:
+                pass
         
         # Calculate sog from displacement
         self.sog = np.where(should_jump,

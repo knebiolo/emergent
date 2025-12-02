@@ -30,6 +30,8 @@ except Exception:
     _has_gl = False
 import logging
 import sys
+import time
+from collections import deque
 
 # Ensure outputs directory exists for logs
 LOG_DIR = os.path.join(REPO_ROOT, 'outputs', 'rl_training')
@@ -70,7 +72,7 @@ from src.emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation, RLTrainer,
 class RLTrainingViewer(QtWidgets.QMainWindow):
     """Qt-based RL training viewer matching ship_abm architecture."""
 
-    def __init__(self, sim, trainer, timesteps, pid, hecras_plan, use_gl=False):
+    def __init__(self, sim, trainer, timesteps, pid, hecras_plan, use_gl=False, show_raster=True):
         super().__init__()
         self.sim = sim
         self.trainer = trainer
@@ -78,6 +80,7 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         self.pid = pid
         self.hecras_plan = hecras_plan
         self.use_gl = bool(use_gl) and _has_gl
+        self.show_raster = bool(show_raster)
         
         self.current_timestep = 0
         self.paused = True  # Start paused
@@ -124,6 +127,16 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         self.status_label = QtWidgets.QLabel('Ready - Press Start')
         self.status_label.setStyleSheet('font-size: 14px; padding: 5px;')
         button_layout.addWidget(self.status_label)
+        # FPS label (always visible)
+        self.fps_label = QtWidgets.QLabel('FPS: 0')
+        self.fps_label.setStyleSheet('font-size: 12px; padding: 5px;')
+        button_layout.addWidget(self.fps_label)
+        # Fast mode toggle: when enabled, shafts and head ticks are not drawn
+        self.fast_mode_btn = QtWidgets.QPushButton('Fast Mode')
+        self.fast_mode_btn.setCheckable(True)
+        self.fast_mode_btn.setToolTip('Toggle to disable shafts/head ticks for maximum speed')
+        self.fast_mode_btn.clicked.connect(lambda: setattr(self, "fast_mode", self.fast_mode_btn.isChecked()))
+        button_layout.addWidget(self.fast_mode_btn)
         
         layout.addLayout(button_layout)
         
@@ -161,6 +174,8 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
             self.head_plot = pg.PlotDataItem([], [], pen=pg.mkPen(color=(0,255,255), width=2))
             self.plot_widget.addItem(self.shaft_plot)
             self.plot_widget.addItem(self.head_plot)
+        # fast_mode default off
+        self.fast_mode = False
         
         # Set view to agent extent
         import h5py
@@ -171,11 +186,28 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         
         self.plot_widget.setXRange(xmin, xmax)
         self.plot_widget.setYRange(ymin, ymax)
-        # Create background raster from HECRAS HDF (translucent)
-        try:
-            self._create_background(hecras_plan, xmin, xmax, ymin, ymax)
-        except Exception as e:
-            print(f'Warning: could not create raster background: {e}')
+        # Create background raster from HECRAS HDF (translucent) if requested
+        if self.show_raster:
+            try:
+                self._create_background(hecras_plan, xmin, xmax, ymin, ymax)
+            except Exception as e:
+                print(f'Warning: could not create raster background: {e}')
+        else:
+            # Lightweight boundary rectangle instead of full raster (fast)
+            try:
+                xs = [xmin, xmax, xmax, xmin, xmin]
+                ys = [ymin, ymin, ymax, ymax, ymin]
+                rect_item = pg.PlotDataItem(xs, ys, pen=pg.mkPen(color=(200,200,200), width=1))
+                if self.use_gl:
+                    # GL view: add a simple 2D rectangle as scatter of lines is non-trivial; skip for now
+                    pass
+                else:
+                    self.plot_widget.addItem(rect_item)
+                self._background_item = None
+                print('Background raster disabled: showing boundary rectangle only')
+            except Exception:
+                self._background_item = None
+                print('Background raster disabled and could not draw boundary')
 
         # Grid overlay (HECRAS cell centers) - hidden by default
         self._grid_shown = False
@@ -192,7 +224,11 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_simulation)
         self.timer.setInterval(100)  # 10 FPS (lighter)
-        
+
+        # FPS tracking (init before first update)
+        self._fps_times = deque(maxlen=30)
+        self._fps_last = None
+
         self.update_agents()
 
     def _create_background(self, hecras_plan, xmin, xmax, ymin, ymax):
@@ -220,13 +256,28 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
                 if depth_vals is None:
                     raise RuntimeError('No depth-related datasets found in HECRAS HDF')
 
-            # Prefer smooth scattered-data interpolation using scipy.griddata to avoid bin artifacts
-            nx, ny = 800, 600
+            # Raster resolution: target 1 meter per cell
+            cell_size = 1.0  # meters
+            width_m = float(xmax) - float(xmin)
+            height_m = float(ymax) - float(ymin)
+            nx = int(np.ceil(width_m / cell_size))
+            ny = int(np.ceil(height_m / cell_size))
+
+            # Safety cap: avoid creating absurdly large rasters (5e6 pixels ~= 5MP)
+            max_pixels = int(5_000_000)
+            if nx * ny > max_pixels:
+                # increase cell size to fit under cap while keeping aspect ratio
+                scale = np.sqrt((nx * ny) / max_pixels)
+                cell_size = cell_size * scale
+                nx = int(np.ceil(width_m / cell_size))
+                ny = int(np.ceil(height_m / cell_size))
+                print(f'Warning: requested 1m resolution too large; using {cell_size:.2f}m cell to limit memory (nx={nx}, ny={ny})')
             xs = pts[:, 0]
             ys = pts[:, 1]
 
             try:
                 from scipy.interpolate import griddata
+                # create grid coordinates (xi, yi) where xi varies in x, yi in y
                 # create grid coordinates (xi, yi) where xi varies in x, yi in y
                 xi = np.linspace(xmin, xmax, nx)
                 yi = np.linspace(ymin, ymax, ny)
@@ -303,8 +354,12 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
                     print('Background raster created from HECRAS plan (griddata, fallback rect)')
 
             except Exception:
-                # If SciPy not available, fall back to histogram2d approach
-                nx_fallback, ny_fallback = 600, 400
+                # If SciPy or precise transform steps fail, fall back to histogram2d approach
+                # Use the same target raster size if available
+                try:
+                    nx_fallback, ny_fallback = nx, ny
+                except Exception:
+                    nx_fallback, ny_fallback = 600, 400
                 H, xedges, yedges = np.histogram2d(xs, ys, bins=[nx_fallback, ny_fallback], range=[[xmin, xmax], [ymin, ymax]], weights=depth_vals)
                 C, _, _ = np.histogram2d(xs, ys, bins=[nx_fallback, ny_fallback], range=[[xmin, xmax], [ymin, ymax]])
                 with np.errstate(invalid='ignore', divide='ignore'):
@@ -452,6 +507,24 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         
     def update_agents(self):
         """Update agent positions and directions."""
+        # FPS measurement
+        now = time.time()
+        if self._fps_last is None:
+            self._fps_last = now
+        else:
+            dt = now - self._fps_last
+            self._fps_last = now
+            if dt > 0:
+                self._fps_times.append(dt)
+                try:
+                    avg_dt = sum(self._fps_times) / len(self._fps_times)
+                    fps = 1.0 / avg_dt if avg_dt > 0 else 0.0
+                    try:
+                        self.fps_label.setText(f'FPS: {fps:.1f}')
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
         if not hasattr(self.sim, 'X') or not hasattr(self.sim, 'Y'):
             return
 
@@ -518,7 +591,7 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
 
         # Vectorized shaft/head generation
         N = len(xs)
-        if N > 0:
+        if N > 0 and not getattr(self, 'fast_mode', False):
             # allocate arrays with pattern [point, endpoint, nan] per agent
             x_shaft = np.empty(N * 3, dtype=float)
             y_shaft = np.empty(N * 3, dtype=float)
@@ -721,6 +794,11 @@ def setup_training_simulation(args):
     
     # Create simulation
     sim = simulation(**config)
+    # When running the Qt viewer, enable visual_mode to skip expensive RL/heavy I/O work
+    try:
+        sim.visual_mode = True
+    except Exception:
+        pass
     print('Simulation initialized.')
     
     # Create RL trainer and apply weights to simulation
@@ -753,6 +831,7 @@ def main():
     parser.add_argument('--use-sog', action='store_true', help='Enable SOG-based alignment augmentation')
     parser.add_argument('--sog-weight', type=float, default=0.5, help='Blend weight (0..1) for SOG alignment vs heading alignment')
     parser.add_argument('--use-gl', action='store_true', help='Use OpenGL accelerated scatter (if available)')
+    parser.add_argument('--no-raster', action='store_true', help='Disable raster background and draw simple boundary')
     
     args = parser.parse_args()
     
@@ -772,7 +851,7 @@ def main():
     
     # Launch Qt application
     app = QtWidgets.QApplication(sys.argv)
-    viewer = RLTrainingViewer(sim, trainer, args.timesteps, pid, hecras_plan, use_gl=args.use_gl)
+    viewer = RLTrainingViewer(sim, trainer, args.timesteps, pid, hecras_plan, use_gl=args.use_gl, show_raster=(not args.no_raster))
     # Apply show-grid preference
     if getattr(args, 'show_grid', False):
         viewer._grid_shown = True
