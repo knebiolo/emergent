@@ -137,60 +137,102 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
                 if depth_vals is None:
                     raise RuntimeError('No depth-related datasets found in HECRAS HDF')
 
-            # Rasterize to grid using histogram2d for robust binning
-            nx, ny = 600, 400
+            # Prefer smooth scattered-data interpolation using scipy.griddata to avoid bin artifacts
+            nx, ny = 800, 600
             xs = pts[:, 0]
             ys = pts[:, 1]
 
-            # Use numpy histogram2d: returns shape (nx, ny) where x bins are first axis
-            H, xedges, yedges = np.histogram2d(xs, ys, bins=[nx, ny], range=[[xmin, xmax], [ymin, ymax]], weights=depth_vals)
-            C, _, _ = np.histogram2d(xs, ys, bins=[nx, ny], range=[[xmin, xmax], [ymin, ymax]])
-            with np.errstate(invalid='ignore', divide='ignore'):
-                mean_grid = H / C
-
-            # Prepare RGBA image where no-data bins (C==0) are transparent
-            valid_mask = (C > 0)
-
-            # Transpose & flip so grid rows correspond to Y increasing upward
-            grid = np.flipud(mean_grid.T)
-            valid_grid = np.flipud(valid_mask.T)
-
-            # Normalize only over valid data
-            if np.any(valid_grid):
-                vmin = np.nanmin(grid[valid_grid])
-                vmax = np.nanmax(grid[valid_grid])
-            else:
-                vmin, vmax = 0.0, 1.0
-
-            if vmax - vmin < 1e-9:
-                norm = np.zeros_like(grid, dtype=float)
-            else:
-                norm = (grid - vmin) / (vmax - vmin)
-                norm = np.clip(norm, 0.0, 1.0)
-
-            # Create RGBA image: grayscale where deeper->darker; alpha 0 for no-data, 153 for data
-            img_rgba = np.zeros((grid.shape[0], grid.shape[1], 4), dtype=np.uint8)
-            gray = (255 * (1.0 - norm)).astype(np.uint8)
-            img_rgba[..., 0] = gray
-            img_rgba[..., 1] = gray
-            img_rgba[..., 2] = gray
-            img_rgba[..., 3] = (valid_grid * 153).astype(np.uint8)  # 153 ~ 0.6 opacity
-
-            # Create ImageItem and set interpolation for bilinear smoothing
-            img_item = pg.ImageItem(img_rgba)
             try:
-                img_item.setOpts(interpolate=True)
-            except Exception:
-                try:
-                    img_item.setInterpolation(True)
-                except Exception:
-                    pass
+                from scipy.interpolate import griddata
+                # create grid coordinates (xi, yi) where xi varies in x, yi in y
+                xi = np.linspace(xmin, xmax, nx)
+                yi = np.linspace(ymin, ymax, ny)
+                XI, YI = np.meshgrid(xi, yi)
 
-            rect = QtCore.QRectF(float(xmin), float(ymin), float(xmax - xmin), float(ymax - ymin))
-            img_item.setRect(rect)
-            self.plot_widget.addItem(img_item)
-            self._background_item = img_item
-            print('Background raster created from HECRAS plan (histogram2d, interpolated, transparent no-data)')
+                # Interpolate depth values to grid (linear yields piecewise-linear, similar to bilinear when sampled)
+                grid_vals = griddata((xs, ys), depth_vals, (XI, YI), method='linear')
+
+                # grid_vals shape is (ny, nx) with NaNs outside convex hull -> treat as no-data
+                valid_grid = ~np.isnan(grid_vals)
+
+                # Replace NaNs only for display normalization (don't fill them; keep mask)
+                if np.any(valid_grid):
+                    vmin = np.nanmin(grid_vals[valid_grid])
+                    vmax = np.nanmax(grid_vals[valid_grid])
+                else:
+                    vmin, vmax = 0.0, 1.0
+
+                if vmax - vmin < 1e-9:
+                    norm = np.zeros_like(grid_vals, dtype=float)
+                else:
+                    norm = (grid_vals - vmin) / (vmax - vmin)
+                    norm = np.clip(norm, 0.0, 1.0)
+
+                # Create RGBA image: grayscale where deeper->darker; alpha 0 for no-data, 153 (~0.6) for data
+                img_rgba = np.zeros((grid_vals.shape[0], grid_vals.shape[1], 4), dtype=np.uint8)
+                gray = (255 * (1.0 - np.nan_to_num(norm, nan=0.0))).astype(np.uint8)
+                img_rgba[..., 0] = gray
+                img_rgba[..., 1] = gray
+                img_rgba[..., 2] = gray
+                img_rgba[..., 3] = (valid_grid * 153).astype(np.uint8)
+
+                # The grid (XI,YI) has yi increasing; ImageItem expects image rows from top to bottom, so flip vertically
+                img_rgba = np.flipud(img_rgba)
+
+                img_item = pg.ImageItem(img_rgba)
+                try:
+                    img_item.setOpts(interpolate=True)
+                except Exception:
+                    try:
+                        img_item.setInterpolation(True)
+                    except Exception:
+                        pass
+
+                rect = QtCore.QRectF(float(xmin), float(ymin), float(xmax - xmin), float(ymax - ymin))
+                img_item.setRect(rect)
+                self.plot_widget.addItem(img_item)
+                self._background_item = img_item
+                print('Background raster created from HECRAS plan (griddata, interpolated, transparent no-data)')
+
+            except Exception:
+                # If SciPy not available, fall back to histogram2d approach
+                nx_fallback, ny_fallback = 600, 400
+                H, xedges, yedges = np.histogram2d(xs, ys, bins=[nx_fallback, ny_fallback], range=[[xmin, xmax], [ymin, ymax]], weights=depth_vals)
+                C, _, _ = np.histogram2d(xs, ys, bins=[nx_fallback, ny_fallback], range=[[xmin, xmax], [ymin, ymax]])
+                with np.errstate(invalid='ignore', divide='ignore'):
+                    mean_grid = H / C
+                valid_mask = (C > 0)
+                grid = np.flipud(mean_grid.T)
+                valid_grid = np.flipud(valid_mask.T)
+                if np.any(valid_grid):
+                    vmin = np.nanmin(grid[valid_grid])
+                    vmax = np.nanmax(grid[valid_grid])
+                else:
+                    vmin, vmax = 0.0, 1.0
+                if vmax - vmin < 1e-9:
+                    norm = np.zeros_like(grid, dtype=float)
+                else:
+                    norm = (grid - vmin) / (vmax - vmin)
+                    norm = np.clip(norm, 0.0, 1.0)
+                img_rgba = np.zeros((grid.shape[0], grid.shape[1], 4), dtype=np.uint8)
+                gray = (255 * (1.0 - norm)).astype(np.uint8)
+                img_rgba[..., 0] = gray
+                img_rgba[..., 1] = gray
+                img_rgba[..., 2] = gray
+                img_rgba[..., 3] = (valid_grid * 153).astype(np.uint8)
+                img_item = pg.ImageItem(img_rgba)
+                try:
+                    img_item.setOpts(interpolate=True)
+                except Exception:
+                    try:
+                        img_item.setInterpolation(True)
+                    except Exception:
+                        pass
+                rect = QtCore.QRectF(float(xmin), float(ymin), float(xmax - xmin), float(ymax - ymin))
+                img_item.setRect(rect)
+                self.plot_widget.addItem(img_item)
+                self._background_item = img_item
+                print('Background raster created from HECRAS plan (histogram2d fallback)')
         except Exception:
             raise
         
