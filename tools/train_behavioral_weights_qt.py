@@ -137,49 +137,60 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
                 if depth_vals is None:
                     raise RuntimeError('No depth-related datasets found in HECRAS HDF')
 
-            # Rasterize to grid
-            nx, ny = 400, 300
+            # Rasterize to grid using histogram2d for robust binning
+            nx, ny = 600, 400
             xs = pts[:, 0]
             ys = pts[:, 1]
-            # grid indices
-            xi = np.clip(((xs - xmin) / (xmax - xmin) * (nx - 1)).astype(int), 0, nx-1)
-            yi = np.clip(((ys - ymin) / (ymax - ymin) * (ny - 1)).astype(int), 0, ny-1)
 
-            grid = np.full((ny, nx), np.nan, dtype=float)
-            counts = np.zeros((ny, nx), dtype=int)
-            for xind, yind, val in zip(xi, yi, depth_vals):
-                # y reversed to image coordinates (pyqtgraph uses increasing y up)
-                gy = ny - 1 - yind
-                grid[gy, xind] = grid[gy, xind] + val if counts[gy, xind] else val
-                counts[gy, xind] += 1
-            # average where multiple points mapped
-            mask = counts > 0
-            grid[mask] = grid[mask] / counts[mask]
-            # Fill NaNs with nearest simple approach: replace with global median
-            nan_mask = ~mask
-            if np.any(nan_mask):
-                med = np.nanmedian(grid)
-                if np.isnan(med):
-                    med = 0.0
-                grid[nan_mask] = med
+            # Use numpy histogram2d: returns shape (nx, ny) where x bins are first axis
+            H, xedges, yedges = np.histogram2d(xs, ys, bins=[nx, ny], range=[[xmin, xmax], [ymin, ymax]], weights=depth_vals)
+            C, _, _ = np.histogram2d(xs, ys, bins=[nx, ny], range=[[xmin, xmax], [ymin, ymax]])
+            with np.errstate(invalid='ignore', divide='ignore'):
+                mean_grid = H / C
 
-            # Normalize to 0..255 (depth: deeper -> darker)
-            vmin = np.nanmin(grid)
-            vmax = np.nanmax(grid)
-            if vmax - vmin < 1e-6:
-                img = np.full(grid.shape, 128, dtype=np.uint8)
+            # Prepare RGBA image where no-data bins (C==0) are transparent
+            valid_mask = (C > 0)
+
+            # Transpose & flip so grid rows correspond to Y increasing upward
+            grid = np.flipud(mean_grid.T)
+            valid_grid = np.flipud(valid_mask.T)
+
+            # Normalize only over valid data
+            if np.any(valid_grid):
+                vmin = np.nanmin(grid[valid_grid])
+                vmax = np.nanmax(grid[valid_grid])
+            else:
+                vmin, vmax = 0.0, 1.0
+
+            if vmax - vmin < 1e-9:
+                norm = np.zeros_like(grid, dtype=float)
             else:
                 norm = (grid - vmin) / (vmax - vmin)
-                img = (255 * (1.0 - norm)).astype(np.uint8)
+                norm = np.clip(norm, 0.0, 1.0)
 
-            # Create ImageItem and set geometry rect
-            img_item = pg.ImageItem(img)
+            # Create RGBA image: grayscale where deeper->darker; alpha 0 for no-data, 153 for data
+            img_rgba = np.zeros((grid.shape[0], grid.shape[1], 4), dtype=np.uint8)
+            gray = (255 * (1.0 - norm)).astype(np.uint8)
+            img_rgba[..., 0] = gray
+            img_rgba[..., 1] = gray
+            img_rgba[..., 2] = gray
+            img_rgba[..., 3] = (valid_grid * 153).astype(np.uint8)  # 153 ~ 0.6 opacity
+
+            # Create ImageItem and set interpolation for bilinear smoothing
+            img_item = pg.ImageItem(img_rgba)
+            try:
+                img_item.setOpts(interpolate=True)
+            except Exception:
+                try:
+                    img_item.setInterpolation(True)
+                except Exception:
+                    pass
+
             rect = QtCore.QRectF(float(xmin), float(ymin), float(xmax - xmin), float(ymax - ymin))
             img_item.setRect(rect)
-            img_item.setOpacity(0.6)
             self.plot_widget.addItem(img_item)
             self._background_item = img_item
-            print('Background raster created from HECRAS plan')
+            print('Background raster created from HECRAS plan (histogram2d, interpolated, transparent no-data)')
         except Exception:
             raise
         
