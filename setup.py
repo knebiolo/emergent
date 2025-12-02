@@ -59,6 +59,9 @@ setup(
         "moderngl-window>=2.4,<3.0",
         "pygame>=2.6,<3.0",
         "pillow>=11.0,<12.0",
+        # Qt GUI (for ship_abm and RL visualization)
+        "PyQt5>=5.15,<6.0",
+        "pyqtgraph>=0.13,<1.0",
         # Image processing
         "scikit-image>=0.19,<1.0",
         "matplotlib>=3.4,<4.0",

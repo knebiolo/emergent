@@ -29,6 +29,10 @@ dependencies:
   - pygame>=2.6
   - pillow>=11.0
 
+  # Qt GUI (for ship_abm and RL visualization)
+  - pyqt>=5.15
+  - pyqtgraph>=0.13
+
   # Image processing
   - scikit-image>=0.19
   - matplotlib>=3.4
