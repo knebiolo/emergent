@@ -40,39 +40,87 @@ import os
 import pandas as pd
 # from pysal.explore import esda
 # from pysal.lib import weights
-    tree = cKDTree(positions)
+# from pysal.model import spreg
+from affine import Affine as AffineTransform
+import rasterio
+from rasterio.transform import Affine, from_origin
+from rasterio.mask import mask
+from rasterio.crs import CRS
+from rasterio.warp import reproject, calculate_default_transform
+from rasterio.features import rasterize
+from shapely import Point, Polygon, box
+from shapely import affinity
+from shapely.wkt import loads as loads
+from shapely.geometry.base import BaseGeometry
+from shapely.geometry import LineString
+from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline, RectBivariateSpline
+from scipy.optimize import curve_fit
+from scipy.constants import g
+from scipy.spatial import cKDTree#, cdist
+from scipy.stats import beta
+from scipy.ndimage import distance_transform_edt
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra
+import matplotlib.animation as manimation
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib import rcParams
+from datetime import datetime
+import time
+import warnings
+import sys
+import random
+from collections import deque
+#from sksurv.nonparametric import kaplan_meier_estimator
+#from PyPDF2 import PdfReader, PdfWriter
 
-    # For each agent compute neighbors within its search radius
-    search_radii = cohesion_radius_BL * body_lengths
-    # Using query_ball_point for all points returns a list of arrays
-    neighbor_lists = tree.query_ball_point(positions, r=search_radii)
+warnings.filterwarnings("ignore")
 
-    # Preallocate arrays
-    cohesion_scores = np.zeros(N, dtype=float)
-    alignment_scores = np.full(N, -0.5, dtype=float)  # default penalty
-    separation_penalties = np.zeros(N, dtype=float)
+np.set_printoptions(suppress=True)
 
-    # Compute cohesion and alignment in vectorized manner where possible
-    for i, neighbors in enumerate(neighbor_lists):
-        # Exclude self
-        neighbors = [j for j in neighbors if j != i]
-        if len(neighbors) == 0:
-            continue
-        neigh_pos = positions[neighbors]
-        centroid = np.mean(neigh_pos, axis=0)
-        dist_to_centroid = np.linalg.norm(positions[i] - centroid)
-        BL_i = body_lengths[i]
-        ideal_dist = 2.0 * BL_i * (1 - 0.5 * threat)
-        cohesion_scores[i] = np.exp(-0.5 * ((dist_to_centroid - ideal_dist) / (0.5*BL_i))**2)
 
-        # Circular mean of neighbor headings
-        neighbor_headings = headings[neighbors]
-        mean_sin = np.mean(np.sin(neighbor_headings))
-        mean_cos = np.mean(np.cos(neighbor_headings))
-        mean_heading = np.arctan2(mean_sin, mean_cos)
-        heading_diff = np.arctan2(np.sin(headings[i] - mean_heading), np.cos(headings[i] - mean_heading))
-        alignment_scores[i] = np.cos(heading_diff)
+class BehavioralWeights:
+    """Container for instinctual behavioral parameters used by the RL trainer."""
 
+    def __init__(self):
+        # Schooling dynamics (Boids-style)
+        self.cohesion_weight = 1.0        # Attraction to group center
+        self.alignment_weight = 1.0       # Tendency to match neighbors' heading
+        self.separation_weight = 2.0      # Short-range repulsion from neighbors
+        self.separation_radius = 3.0      # Distance (body lengths) for separation
+
+        # Dynamic cohesion based on threat level
+        self.threat_level = 0.0           # 0.0 = relaxed, 1.0 = high threat (predators)
+        self.cohesion_radius_relaxed = 3.0   # Body lengths when relaxed
+        self.cohesion_radius_threatened = 1.5 # Body lengths when threatened (tight ball)
+
+        # Energy efficiency from drafting (swimming behind others)
+        self.drafting_enabled = True
+        self.drafting_distance = 2.0      # Body lengths behind to get benefit
+        self.drafting_angle_tolerance = 30.0  # Degrees off-axis for drafting
+        self.drag_reduction_single = 0.15  # 15% drag reduction behind one agent
+        self.drag_reduction_dual = 0.25    # 25% drag reduction between two agents (V-formation)
+
+        # Environmental responses
+        self.rheotaxis_weight = 3.0       # Swim against flow
+        self.border_cue_weight = 50000.0  # Avoid channel edges/banks
+        self.border_threshold_multiplier = 2.0  # Threshold = this × body_length (min 1m)
+        self.border_max_force = 5.0       # Cap border repulsion force
+
+        # Collision avoidance
+        self.collision_weight = 5.0       # Avoid other agents
+        self.collision_radius = 2.0       # Distance (body lengths) for collision avoidance
+
+        # Navigation priorities (higher = more important)
+        self.upstream_priority = 1.0      # Weight for upstream progress
+        self.energy_efficiency_priority = 0.5  # Prefer energy-efficient paths
+
+        # Learning rates (for RL training)
+        self.learning_rate = 0.001
+        self.exploration_epsilon = 0.1
+        # Alignment SOG augmentation
+        self.use_sog = True            # Whether to consider neighbor SOG for alignment
+        self.sog_weight = 0.5          # Relative weight (0..1) blending heading vs SOG alignment
         self.cohesion_weight = 1.0        # Attraction to group center
         self.alignment_weight = 1.0       # Tendency to match neighbors' heading
         self.separation_weight = 2.0      # Short-range repulsion from neighbors
@@ -533,48 +581,8 @@ class RLTrainer:
             threshold = 2.0  # meters
             metrics['agents_near_boundary'] = np.sum((self.sim.distance_to < threshold) & alive_mask)
         
-        if N < 2:
-            return drag_reductions
-
-        from scipy.spatial import cKDTree
-        tree = cKDTree(positions)
-
-        drafting_dist_BL = behavioral_weights.drafting_distance
-        angle_tol_rad = np.radians(behavioral_weights.drafting_angle_tolerance)
-
-        # For each agent, get neighbors within its drafting radius
-        search_radii = drafting_dist_BL * body_lengths
-        neighbor_lists = tree.query_ball_point(positions, r=search_radii)
-
-        headings_unit = np.column_stack([np.cos(headings), np.sin(headings)])
-
-        for i, neighbors in enumerate(neighbor_lists):
-            neighbors = [j for j in neighbors if j != i]
-            if len(neighbors) == 0:
-                continue
-            vecs = positions[neighbors] - positions[i]
-            dists = np.linalg.norm(vecs, axis=1)
-            # avoid zero distances
-            valid = dists > 1e-9
-            if not np.any(valid):
-                continue
-            vecs = vecs[valid]
-            dists = dists[valid]
-            # normalize
-            vecs_unit = vecs / dists[:, None]
-            # dot with heading vector
-            cosang = np.dot(vecs_unit, headings_unit[i])
-            # clip and get angle
-            cosang = np.clip(cosang, -1.0, 1.0)
-            angs = np.arccos(cosang)
-            count_ahead = np.sum(angs <= angle_tol_rad)
-            if count_ahead == 1:
-                drag_reductions[i] = behavioral_weights.drag_reduction_single
-            elif count_ahead >= 2:
-                drag_reductions[i] = behavioral_weights.drag_reduction_dual
-
-        return drag_reductions
-        """
+        return metrics
+        
         best_reward = -np.inf
         best_weights = None
         
@@ -1108,6 +1116,7 @@ def compute_affine_from_hecras(coords, target_cell_size=None):
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 font = {'family': 'serif','size': 6}
+from matplotlib import rcParams
 rcParams['font.size'] = 6
 rcParams['font.family'] = 'serif'
 rcParams['animation.ffmpeg_path'] = r'C:\FFmpeg\bin\ffmpeg.exe'
@@ -2005,25 +2014,27 @@ else:
 
 
 def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist'):
-    """
-    Compute an along-stream distance raster for the simulation and write it
-    into the HDF under `environment/{out_name}`.
+    """Compute along-stream distance raster and write to the HDF.
 
-    Strategy:
-    - Use the `wetted` mask (or depth>0) to define traversable cells.
-    - Build a graph connecting 8-neighbors among traversable cells with edge
-      weights equal to Euclidean distance between cell centers (using raster
-      transform pixel sizes).
-    - Run Dijkstra from the selected outlet cell(s) to compute distance-to-outlet
-      for every traversable cell.
+    This function computes distance-to-outlet for traversable raster cells
+    (defined by ``depth`` or ``wetted``) by building a sparse graph of
+    8-neighbor connections and running Dijkstra from the outlet cell(s).
 
-    Parameters:
-    - simulation: simulation instance with `hdf5` open and raster transforms.
-    - outlet_xy: (x,y) coordinate of outlet; if None a default downstream cell is chosen.
-    - depth_name, wetted_name: dataset names under `/environment`.
-    - out_name: dataset name to create under `/environment` for results.
+    Parameters
+    ----------
+    simulation : object
+        Simulation instance exposing ``hdf5`` and raster transforms.
+    outlet_xy : tuple or None
+        (x, y) outlet coordinate. If ``None``, a downstream cell is chosen.
+    depth_name, wetted_name : str
+        Names of datasets under ``/environment`` to determine traversable cells.
+    out_name : str
+        Name of the dataset to write under ``/environment`` for results.
 
-    Returns: the computed 2D numpy array (float32) of same shape as rasters.
+    Returns
+    -------
+    numpy.ndarray
+        2D array (dtype ``float32``) of distances to outlet, same shape as rasters.
     """
     hdf = getattr(simulation, 'hdf5', None)
     if hdf is None:
@@ -3640,6 +3651,7 @@ class simulation():
         self._buffer_pos = 0
         
         # import longitudinal shapefile (or derive from HECRAS if requested)
+        longitudinal_derived = False
         if self.use_hecras and self.hecras_plan_path:
             # If user didn't provide a longitudinal_profile file, derive a crude centerline
             if longitudinal_profile is None or not os.path.exists(longitudinal_profile):
@@ -3648,17 +3660,23 @@ class simulation():
                         pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
                         # create a crude centerline by sorting points along the primary axis
                         idx = np.argsort(pts[:, 0])
-                        from shapely.geometry import LineString
                         line = LineString(pts[idx, :2])
                         self.longitude = self.longitudinal_import(line)
                         print('Derived longitudinal profile from HECRAS plan')
+                        longitudinal_derived = True
                 except Exception as e:
                     print(f'Warning: could not derive longitudinal profile from HECRAS: {e}')
-                    # fall back to file-based import if provided
-                    self.longitude = self.longitudinal_import(longitudinal_profile)
+                    # fall back to file-based import only if a valid file was provided
+                    if longitudinal_profile is not None and os.path.exists(longitudinal_profile):
+                        self.longitude = self.longitudinal_import(longitudinal_profile)
+                        longitudinal_derived = True
+                    else:
+                        raise RuntimeError(f'Failed to derive centerline from HECRAS and no valid longitudinal_profile file provided: {e}')
             else:
                 self.longitude = self.longitudinal_import(longitudinal_profile)
-        else:
+                longitudinal_derived = True
+        
+        if not longitudinal_derived:
             self.longitude = self.longitudinal_import(longitudinal_profile)
 
         # boundary_surface
@@ -4333,13 +4351,9 @@ class simulation():
             return None
 
         # If a shapely geometry was passed in directly, use it
-        try:
-            from shapely.geometry import BaseGeometry
-            if isinstance(shapefile, BaseGeometry):
-                self.longitudinal = shapefile
-                return self.longitudinal
-        except Exception:
-            pass
+        if isinstance(shapefile, BaseGeometry):
+            self.longitudinal = shapefile
+            return self.longitudinal
 
         # Otherwise assume a filepath and read with geopandas
         line_gdf = gpd.read_file(shapefile)
