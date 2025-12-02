@@ -185,33 +185,29 @@ class FishSimViewer(mglw.WindowConfig):
             self.bg_vao = None
             
     def _setup_agents(self):
-        """Setup agent rendering with point sprites."""
-        # Vertex shader for agents
+        """Setup agent rendering with directional shafts."""
+        # Vertex shader for agents with color attribute
         vertex_shader = """
         #version 330
         in vec2 in_position;
+        in vec3 in_color;
+        out vec3 color;
         uniform mat4 projection;
-        uniform float point_size;
         
         void main() {
             gl_Position = projection * vec4(in_position, 0.0, 1.0);
-            gl_PointSize = point_size;
+            color = in_color;
         }
         """
         
-        # Fragment shader for agents (bright cyan dots)
+        # Fragment shader for colored lines and circles
         fragment_shader = """
         #version 330
+        in vec3 color;
         out vec4 fragColor;
         
         void main() {
-            vec2 coord = gl_PointCoord - vec2(0.5);
-            float dist = length(coord) * 2.0;
-            
-            if (dist > 1.0) discard;
-            
-            // Bright cyan fill
-            fragColor = vec4(0.0, 1.0, 1.0, 1.0);
+            fragColor = vec4(color, 1.0);
         }
         """
         
@@ -220,13 +216,15 @@ class FishSimViewer(mglw.WindowConfig):
             fragment_shader=fragment_shader
         )
         
-        # Create empty VBO (will be updated each frame)
+        # Create empty VBO for lines (shaft + head circle)
+        # Each agent: 2 verts for shaft line + 48 verts for head circle (16 triangles * 3 verts)
         max_agents = 10000
-        self.agent_vbo = self.ctx.buffer(reserve=max_agents * 8)  # 2 floats per agent
+        self.agent_vbo = self.ctx.buffer(reserve=max_agents * 50 * 5 * 4)  # 50 verts * 5 floats * 4 bytes
         self.agent_vao = self.ctx.vertex_array(
             self.agent_program,
-            [(self.agent_vbo, '2f', 'in_position')]
+            [(self.agent_vbo, '2f 3f', 'in_position', 'in_color')]
         )
+        self.num_agent_verts = 0
         
     def load_background_texture(self, raster_path):
         """Load background raster as OpenGL texture."""
@@ -264,26 +262,72 @@ class FishSimViewer(mglw.WindowConfig):
         return cmap
         
     def update_agents(self):
-        """Update agent positions from simulation."""
-        if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y'):
+        """Update agent positions and directional shafts from simulation."""
+        if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y') and hasattr(self.sim, 'heading'):
             positions = np.column_stack([self.sim.X.flatten(), self.sim.Y.flatten()])
+            headings = self.sim.heading.flatten()
             
             # Filter out NaN and dead agents
-            mask = np.isfinite(positions).all(axis=1)
+            mask = np.isfinite(positions).all(axis=1) & np.isfinite(headings)
             if hasattr(self.sim, 'dead'):
                 mask &= (self.sim.dead.flatten() == 0)
+            
             positions = positions[mask].astype('f4')
+            headings = headings[mask].astype('f4')
             
             if self.current_timestep <= 1:
                 print(f'update_agents: total={len(self.sim.X)}, valid={len(positions)}, first 3 positions: {positions[:3] if len(positions) > 0 else "none"}')
             
             if len(positions) > 0:
-                self.agent_vbo.write(positions.tobytes())
+                # Build vertex buffer with shaft lines and head circles
+                verts = []
+                shaft_length = 8.0  # meters behind the agent
+                head_radius = 2.0   # meters for the circle
+                circle_segments = 16
+                
+                for i in range(len(positions)):
+                    x, y = positions[i]
+                    heading = headings[i]
+                    
+                    # Direction vector (where agent is heading)
+                    dx = np.cos(heading)
+                    dy = np.sin(heading)
+                    
+                    # Shaft: from back to head (line dragged behind)
+                    # Back position (behind the agent)
+                    back_x = x - dx * shaft_length
+                    back_y = y - dy * shaft_length
+                    
+                    # Shaft color: darker cyan
+                    shaft_color = [0.0, 0.6, 0.6]
+                    
+                    # Shaft line (2 vertices)
+                    verts.append([back_x, back_y, *shaft_color])  # Back end
+                    verts.append([x, y, *shaft_color])             # Front end (head position)
+                    
+                    # Head circle (bright cyan)
+                    head_color = [0.0, 1.0, 1.0]
+                    for j in range(circle_segments):
+                        angle1 = 2 * np.pi * j / circle_segments
+                        angle2 = 2 * np.pi * (j + 1) / circle_segments
+                        
+                        # Triangle fan from center
+                        verts.append([x, y, *head_color])  # Center
+                        verts.append([x + head_radius * np.cos(angle1), 
+                                     y + head_radius * np.sin(angle1), *head_color])
+                        verts.append([x + head_radius * np.cos(angle2), 
+                                     y + head_radius * np.sin(angle2), *head_color])
+                
+                vert_array = np.array(verts, dtype='f4')
+                self.agent_vbo.write(vert_array.tobytes())
                 self.num_agents = len(positions)
+                self.num_agent_verts = len(vert_array)
             else:
                 self.num_agents = 0
+                self.num_agent_verts = 0
         else:
             self.num_agents = 0
+            self.num_agent_verts = 0
             
     def on_render(self, time, frametime):
         """Render frame (required by moderngl-window)."""
@@ -380,12 +424,19 @@ class FishSimViewer(mglw.WindowConfig):
                 print('PAUSING simulation due to error')
                 self.paused = True
                 
-        # Render agents
-        if self.num_agents > 0:
+        # Render agents (shafts as lines, heads as triangles)
+        if self.num_agent_verts > 0:
             try:
                 self.agent_program['projection'].write(self.projection.tobytes())
-                self.agent_program['point_size'].value = 3.0
-                self.agent_vao.render(moderngl.POINTS, vertices=self.num_agents)
+                self.ctx.line_width = 2.0
+                
+                # Render shafts (first 2 vertices per agent = lines)
+                shaft_verts = self.num_agents * 2
+                self.agent_vao.render(moderngl.LINES, vertices=shaft_verts)
+                
+                # Render head circles (remaining vertices = triangles)
+                circle_verts = self.num_agent_verts - shaft_verts
+                self.agent_vao.render(moderngl.TRIANGLES, vertices=circle_verts, first=shaft_verts)
             except Exception as e:
                 print(f'Agent render error: {e}')
                 import traceback

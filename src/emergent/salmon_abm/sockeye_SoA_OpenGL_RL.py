@@ -100,6 +100,18 @@ class BehavioralWeights:
         self.separation_weight = 2.0      # Short-range repulsion from neighbors
         self.separation_radius = 3.0      # Distance (body lengths) for separation
         
+        # Dynamic cohesion based on threat level
+        self.threat_level = 0.0           # 0.0 = relaxed, 1.0 = high threat (predators)
+        self.cohesion_radius_relaxed = 3.0   # Body lengths when relaxed
+        self.cohesion_radius_threatened = 1.5 # Body lengths when threatened (tight ball)
+        
+        # Energy efficiency from drafting (swimming behind others)
+        self.drafting_enabled = True
+        self.drafting_distance = 2.0      # Body lengths behind to get benefit
+        self.drafting_angle_tolerance = 30.0  # Degrees off-axis for drafting
+        self.drag_reduction_single = 0.15  # 15% drag reduction behind one agent
+        self.drag_reduction_dual = 0.25    # 25% drag reduction between two agents (V-formation)
+        
         # Environmental responses
         self.rheotaxis_weight = 3.0       # Swim against flow
         self.border_cue_weight = 50000.0  # Avoid channel edges/banks
@@ -125,6 +137,14 @@ class BehavioralWeights:
             'alignment_weight': self.alignment_weight,
             'separation_weight': self.separation_weight,
             'separation_radius': self.separation_radius,
+            'threat_level': self.threat_level,
+            'cohesion_radius_relaxed': self.cohesion_radius_relaxed,
+            'cohesion_radius_threatened': self.cohesion_radius_threatened,
+            'drafting_enabled': self.drafting_enabled,
+            'drafting_distance': self.drafting_distance,
+            'drafting_angle_tolerance': self.drafting_angle_tolerance,
+            'drag_reduction_single': self.drag_reduction_single,
+            'drag_reduction_dual': self.drag_reduction_dual,
             'rheotaxis_weight': self.rheotaxis_weight,
             'border_cue_weight': self.border_cue_weight,
             'border_threshold_multiplier': self.border_threshold_multiplier,
@@ -167,6 +187,217 @@ class BehavioralWeights:
             setattr(self, attr, max(0.01, current + noise))
 
 
+# =============================================================================
+# Schooling Metrics and Energy Efficiency Calculations
+# =============================================================================
+
+def compute_schooling_metrics_biological(positions, headings, body_lengths, behavioral_weights, alive_mask=None):
+    """Compute biologically-grounded schooling quality metrics.
+    
+    Based on Boids model with sensory-range constraints (2 body lengths).
+    
+    Args:
+        positions: (N, 2) array of agent positions
+        headings: (N,) array of agent headings (radians)
+        body_lengths: (N,) array of body lengths (meters)
+        behavioral_weights: BehavioralWeights object
+        alive_mask: (N,) boolean array (optional)
+    
+    Returns:
+        dict with:
+            'cohesion_score': 0-1 (proximity to ideal group spacing)
+            'alignment_score': -1 to 1 (heading similarity with neighbors)
+            'separation_penalty': -1 to 0 (crowding penalty)
+            'overall_schooling': combined score
+    """
+    if alive_mask is not None:
+        positions = positions[alive_mask]
+        headings = headings[alive_mask]
+        body_lengths = body_lengths[alive_mask]
+    
+    N = len(positions)
+    if N == 0:
+        return {'cohesion_score': 0, 'alignment_score': 0, 'separation_penalty': 0, 'overall_schooling': 0}
+    
+    # Dynamic cohesion radius based on threat level
+    threat = behavioral_weights.threat_level
+    cohesion_radius_BL = (
+        behavioral_weights.cohesion_radius_relaxed * (1 - threat) +
+        behavioral_weights.cohesion_radius_threatened * threat
+    )
+    
+    cohesion_scores = []
+    alignment_scores = []
+    separation_penalties = []
+    
+    # Build KDTree for efficient neighbor queries
+    from scipy.spatial import cKDTree
+    tree = cKDTree(positions)
+    
+    for i in range(N):
+        BL_i = body_lengths[i]
+        search_radius = cohesion_radius_BL * BL_i  # Sensory perception range
+        
+        # Find neighbors within sensory range
+        neighbor_indices = tree.query_ball_point(positions[i], r=search_radius)
+        neighbor_indices = [j for j in neighbor_indices if j != i]
+        
+        if len(neighbor_indices) > 0:
+            # COHESION: Distance to local group centroid
+            neighbor_positions = positions[neighbor_indices]
+            centroid = np.mean(neighbor_positions, axis=0)
+            dist_to_centroid = np.linalg.norm(positions[i] - centroid)
+            
+            # Ideal: 2.0 body lengths from centroid (adjust with threat level)
+            ideal_dist = 2.0 * BL_i * (1 - 0.5 * threat)  # Closer when threatened
+            # Gaussian reward centered at ideal distance
+            cohesion_i = np.exp(-0.5 * ((dist_to_centroid - ideal_dist) / (0.5*BL_i))**2)
+            cohesion_scores.append(cohesion_i)
+            
+            # ALIGNMENT: Match heading with neighbors
+            neighbor_headings = headings[neighbor_indices]
+            # Circular mean of neighbor headings
+            mean_sin = np.mean(np.sin(neighbor_headings))
+            mean_cos = np.mean(np.cos(neighbor_headings))
+            mean_heading = np.arctan2(mean_sin, mean_cos)
+            
+            # Angular difference (wrapped to [-π, π])
+            heading_diff = np.arctan2(
+                np.sin(headings[i] - mean_heading),
+                np.cos(headings[i] - mean_heading)
+            )
+            
+            # Cosine similarity: 1.0 = perfect alignment, -1.0 = opposite
+            alignment_i = np.cos(heading_diff)
+            alignment_scores.append(alignment_i)
+        else:
+            # No neighbors within range: penalty for isolation
+            cohesion_scores.append(0.0)
+            alignment_scores.append(-0.5)  # Partial penalty
+        
+        # SEPARATION: Penalty for being too close to any agent
+        all_dists, all_indices = tree.query(positions[i], k=min(2, N))
+        if len(all_dists) > 1:
+            nearest_dist = all_dists[1]  # Exclude self
+            
+            if nearest_dist < 1.0 * BL_i:  # Too close (< 1 body length)
+                separation_penalty = -(1.0*BL_i - nearest_dist) / BL_i
+                separation_penalties.append(separation_penalty)
+            else:
+                separation_penalties.append(0.0)
+        else:
+            separation_penalties.append(0.0)
+    
+    # Average across all agents
+    mean_cohesion = np.mean(cohesion_scores) if cohesion_scores else 0.0
+    mean_alignment = np.mean(alignment_scores) if alignment_scores else 0.0
+    mean_separation = np.mean(separation_penalties) if separation_penalties else 0.0
+    
+    # Overall schooling score: cohesion (0-1) + alignment (-1 to 1) + separation (-1 to 0)
+    # Perfect schooling ≈ 1.0 + 1.0 + 0.0 = 2.0
+    overall = mean_cohesion + mean_alignment + mean_separation
+    
+    return {
+        'cohesion_score': mean_cohesion,
+        'alignment_score': mean_alignment,
+        'separation_penalty': mean_separation,
+        'overall_schooling': overall
+    }
+
+
+def compute_drafting_benefits(positions, headings, velocities, body_lengths, behavioral_weights, alive_mask=None):
+    """Calculate energy savings from drafting (swimming behind other agents).
+    
+    Drafting reduces drag when swimming in wake of others:
+    - Single agent ahead: 15% drag reduction
+    - Two agents flanking (V-formation): 25% drag reduction
+    
+    Args:
+        positions: (N, 2) array
+        headings: (N,) array (radians)
+        velocities: (N, 2) array (velocity vectors)
+        body_lengths: (N,) array (meters)
+        behavioral_weights: BehavioralWeights object
+        alive_mask: (N,) boolean array
+    
+    Returns:
+        (N,) array of drag reduction factors (0.0 to 0.25)
+    """
+    if not behavioral_weights.drafting_enabled:
+        return np.zeros(len(positions))
+    
+    if alive_mask is not None:
+        positions = positions[alive_mask]
+        headings = headings[alive_mask]
+        velocities = velocities[alive_mask]
+        body_lengths = body_lengths[alive_mask]
+    
+    N = len(positions)
+    drag_reductions = np.zeros(N)
+    
+    if N < 2:
+        return drag_reductions
+    
+    from scipy.spatial import cKDTree
+    tree = cKDTree(positions)
+    
+    drafting_dist_BL = behavioral_weights.drafting_distance
+    angle_tol_rad = np.radians(behavioral_weights.drafting_angle_tolerance)
+    
+    for i in range(N):
+        BL_i = body_lengths[i]
+        search_radius = drafting_dist_BL * BL_i
+        
+        # Find agents within drafting range
+        neighbor_indices = tree.query_ball_point(positions[i], r=search_radius)
+        neighbor_indices = [j for j in neighbor_indices if j != i]
+        
+        if len(neighbor_indices) == 0:
+            continue
+        
+        # Check if neighbors are in front (within velocity cone)
+        my_heading = headings[i]
+        my_velocity_direction = np.arctan2(velocities[i, 1], velocities[i, 0])
+        
+        agents_behind_count = 0
+        flanking_agents = []
+        
+        for j in neighbor_indices:
+            # Vector from me to neighbor
+            dx = positions[j, 0] - positions[i, 0]
+            dy = positions[j, 1] - positions[i, 1]
+            angle_to_neighbor = np.arctan2(dy, dx)
+            
+            # Is neighbor in front of me (aligned with my heading)?
+            angle_diff = np.arctan2(
+                np.sin(angle_to_neighbor - my_heading),
+                np.cos(angle_to_neighbor - my_heading)
+            )
+            
+            if abs(angle_diff) < angle_tol_rad:
+                # Neighbor is ahead - I'm drafting behind them
+                agents_behind_count += 1
+                flanking_agents.append((j, angle_diff))
+        
+        # Compute drag reduction
+        if agents_behind_count == 1:
+            # Single agent ahead: 15% reduction
+            drag_reductions[i] = behavioral_weights.drag_reduction_single
+        elif agents_behind_count >= 2:
+            # Check for V-formation (agents on either side)
+            left_count = sum(1 for _, angle in flanking_agents if angle < 0)
+            right_count = sum(1 for _, angle in flanking_agents if angle > 0)
+            
+            if left_count > 0 and right_count > 0:
+                # V-formation or diamond: 25% reduction
+                drag_reductions[i] = behavioral_weights.drag_reduction_dual
+            else:
+                # Multiple agents on same side: 15% reduction
+                drag_reductions[i] = behavioral_weights.drag_reduction_single
+    
+    return drag_reductions
+
+
 class RLTrainer:
     """Reinforcement learning trainer for behavioral weight optimization.
     
@@ -185,7 +416,7 @@ class RLTrainer:
         self.training_history = []
         
     def compute_reward(self, prev_state, current_state):
-        """Compute reward for current timestep based on emergent behavior quality.
+        """Compute reward for current timestep based on biologically-grounded behavior quality.
         
         Args:
             prev_state: dict with previous timestep metrics
@@ -196,86 +427,133 @@ class RLTrainer:
         """
         reward = 0.0
         
-        # 1. Schooling cohesion: reward tight, coordinated groups
-        if 'mean_neighbor_distance' in current_state:
-            # Ideal distance: 2-5 body lengths
-            ideal_dist = 3.0 * (self.sim.length.mean() / 1000.0)  # meters
-            dist_error = abs(current_state['mean_neighbor_distance'] - ideal_dist)
-            cohesion_reward = -dist_error / ideal_dist  # Penalty grows with deviation
-            reward += cohesion_reward * 1.0
+        # 1. SCHOOLING QUALITY (Biological metrics: cohesion + alignment + separation)
+        if 'schooling_metrics' in current_state:
+            sm = current_state['schooling_metrics']
+            # Cohesion: 0-1 (proximity to ideal group spacing)
+            cohesion_reward = sm['cohesion_score'] * 10.0
+            # Alignment: -1 to 1 (heading similarity)
+            alignment_reward = (sm['alignment_score'] + 1.0) * 5.0  # Scale to 0-10
+            # Separation: -1 to 0 (crowding penalty)
+            separation_penalty = sm['separation_penalty'] * 5.0
+            
+            schooling_total = cohesion_reward + alignment_reward + separation_penalty
+            reward += schooling_total
         
-        # 2. Upstream progress: reward net forward movement
+        # 2. UPSTREAM PROGRESS: Reward net forward movement
         if 'mean_upstream_progress' in current_state:
-            # Positive progress upstream = good
-            upstream_reward = current_state['mean_upstream_progress']
-            reward += upstream_reward * 2.0
+            # Positive longitude change = good
+            upstream_reward = current_state['mean_upstream_progress'] * 0.5
+            reward += upstream_reward
         
-        # 3. Velocity alignment: reward agents swimming in similar directions
-        if 'heading_variance' in current_state:
-            alignment_reward = -current_state['heading_variance']  # Lower variance = better
-            reward += alignment_reward * 0.5
+        # 3. ENERGY EFFICIENCY: Reward distance traveled per unit energy
+        if 'energy_efficiency' in current_state:
+            # meters per kcal (higher = better)
+            efficiency_reward = current_state['energy_efficiency'] * 2.0
+            reward += efficiency_reward
         
-        # 4. Boundary violations: penalize agents getting too close to banks
+        # 4. DRAFTING UTILIZATION: Reward agents using energy-saving formations
+        if 'mean_drafting_benefit' in current_state:
+            # 0.0 - 0.25 (drag reduction)
+            drafting_reward = current_state['mean_drafting_benefit'] * 20.0  # Scale to 0-5
+            reward += drafting_reward
+        
+        # 5. BOUNDARY AVOIDANCE: Penalize agents near banks
         if 'agents_near_boundary' in current_state:
-            boundary_penalty = -current_state['agents_near_boundary'] * 10.0
+            boundary_penalty = -current_state['agents_near_boundary'] * 5.0
             reward += boundary_penalty
         
-        # 5. Collision rate: penalize excessive collisions
-        if 'collision_count' in current_state:
-            collision_penalty = -current_state['collision_count'] * 5.0
-            reward += collision_penalty
+        # 6. SURVIVAL: Strong penalty for mortality
+        if 'dead_count' in current_state:
+            mortality_penalty = -current_state['dead_count'] * 50.0
+            reward += mortality_penalty
         
-        # 6. Energy efficiency: penalize erratic movement
+        # 7. MOVEMENT SMOOTHNESS: Penalize erratic acceleration
         if 'mean_acceleration' in current_state and 'mean_acceleration' in prev_state:
             accel_change = abs(current_state['mean_acceleration'] - prev_state['mean_acceleration'])
-            smoothness_reward = -accel_change * 0.5
+            smoothness_reward = -accel_change * 0.2
             reward += smoothness_reward
-        
-        # 7. Survival: strong penalty for agents going out of water or dying
-        if 'dead_count' in current_state:
-            mortality_penalty = -current_state['dead_count'] * 100.0
-            reward += mortality_penalty
         
         return reward
     
     def extract_state_metrics(self):
-        """Extract current simulation state metrics for reward computation."""
+        """Extract current simulation state metrics for biologically-grounded reward computation."""
         metrics = {}
         
-        # Compute mean distance to nearest neighbor (schooling cohesion)
-        if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y'):
-            positions = np.column_stack([self.sim.X, self.sim.Y])
-            alive_mask = (self.sim.dead == 0) if hasattr(self.sim, 'dead') else np.ones(len(self.sim.X), dtype=bool)
-            alive_positions = positions[alive_mask]
-            
-            if len(alive_positions) > 1:
-                from scipy.spatial import cKDTree
-                tree = cKDTree(alive_positions)
-                dists, _ = tree.query(alive_positions, k=2)  # k=2 to get nearest neighbor (excluding self)
-                metrics['mean_neighbor_distance'] = np.mean(dists[:, 1])  # Second column is nearest neighbor
+        # Get alive agents
+        alive_mask = (self.sim.dead == 0) if hasattr(self.sim, 'dead') else np.ones(len(self.sim.X), dtype=bool)
         
-        # Upstream progress (change in longitudinal position)
+        # 1. SCHOOLING METRICS (Biological: cohesion + alignment + separation)
+        if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y') and hasattr(self.sim, 'heading'):
+            positions = np.column_stack([self.sim.X, self.sim.Y])
+            headings = self.sim.heading
+            body_lengths = self.sim.length / 1000.0  # Convert mm to meters
+            
+            schooling_metrics = compute_schooling_metrics_biological(
+                positions, headings, body_lengths, 
+                self.behavioral_weights, alive_mask
+            )
+            metrics['schooling_metrics'] = schooling_metrics
+        
+        # 2. DRAFTING BENEFITS (Energy efficiency from swimming behind others)
+        if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y') and hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
+            positions = np.column_stack([self.sim.X, self.sim.Y])
+            velocities = np.column_stack([self.sim.x_vel, self.sim.y_vel])
+            headings = self.sim.heading
+            body_lengths = self.sim.length / 1000.0
+            
+            drag_reductions = compute_drafting_benefits(
+                positions, headings, velocities, body_lengths,
+                self.behavioral_weights, alive_mask
+            )
+            metrics['mean_drafting_benefit'] = np.mean(drag_reductions)
+        
+        # 3. UPSTREAM PROGRESS (Change in longitudinal position)
         if hasattr(self.sim, 'longitudes'):
-            metrics['mean_upstream_progress'] = np.mean(self.sim.longitudes - getattr(self.sim, '_prev_longitudes', self.sim.longitudes))
+            prev_longs = getattr(self.sim, '_prev_longitudes', self.sim.longitudes)
+            upstream_deltas = self.sim.longitudes - prev_longs
+            metrics['mean_upstream_progress'] = np.mean(upstream_deltas[alive_mask]) if np.any(alive_mask) else 0.0
             self.sim._prev_longitudes = self.sim.longitudes.copy()
         
-        # Heading variance (alignment metric)
-        if hasattr(self.sim, 'heading'):
-            metrics['heading_variance'] = np.var(self.sim.heading)
+        # 4. ENERGY EFFICIENCY (Distance per kcal, accounting for drafting)
+        if hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
+            velocities = np.column_stack([self.sim.x_vel, self.sim.y_vel])
+            speeds = np.linalg.norm(velocities, axis=1)
+            
+            # Base energy: proportional to speed^2 (drag force)
+            base_energy = speeds ** 2
+            
+            # Apply drafting reduction
+            if 'mean_drafting_benefit' in metrics:
+                drag_reductions = compute_drafting_benefits(
+                    np.column_stack([self.sim.X, self.sim.Y]),
+                    self.sim.heading, velocities,
+                    self.sim.length / 1000.0,
+                    self.behavioral_weights, alive_mask
+                )
+                adjusted_energy = base_energy * (1.0 - drag_reductions)
+            else:
+                adjusted_energy = base_energy
+            
+            # Efficiency = distance per energy
+            total_distance = np.sum(speeds[alive_mask]) if np.any(alive_mask) else 0.0
+            total_energy = np.sum(adjusted_energy[alive_mask]) if np.any(alive_mask) else 1.0
+            metrics['energy_efficiency'] = total_distance / (total_energy + 1e-6)  # Avoid div by zero
         
-        # Boundary proximity
+        # 5. BOUNDARY PROXIMITY (Agents too close to banks)
         if hasattr(self.sim, 'distance_to'):
             threshold = 2.0  # meters
-            metrics['agents_near_boundary'] = np.sum(self.sim.distance_to < threshold)
+            metrics['agents_near_boundary'] = np.sum((self.sim.distance_to < threshold) & alive_mask)
         
-        # Dead count
+        # 6. DEAD COUNT
         if hasattr(self.sim, 'dead'):
             metrics['dead_count'] = np.sum(self.sim.dead)
         
-        # Mean acceleration (for energy efficiency)
+        # 7. MEAN ACCELERATION (Smoothness metric)
         if hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
             velocity = np.sqrt(self.sim.x_vel**2 + self.sim.y_vel**2)
-            metrics['mean_acceleration'] = np.mean(np.abs(velocity - getattr(self.sim, '_prev_velocity', velocity)))
+            prev_velocity = getattr(self.sim, '_prev_velocity', velocity)
+            metrics['mean_acceleration'] = np.mean(np.abs(velocity[alive_mask] - prev_velocity[alive_mask])) if np.any(alive_mask) else 0.0
             self.sim._prev_velocity = velocity.copy()
         
         return metrics
