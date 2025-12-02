@@ -3,7 +3,7 @@
 RL training with Qt/PyQtGraph visualization (matching ship_abm architecture).
 
 Usage:
-    python tools/train_behavioral_weights_qt.py --episodes 10 --timesteps 100 --agents 100
+    python tools/train_behavioral_weights_qt.py --episodes 10 --timesteps 100 --agents 500
 """
 import argparse
 import os
@@ -99,6 +99,11 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         
         self.plot_widget.setXRange(xmin, xmax)
         self.plot_widget.setYRange(ymin, ymax)
+        # Create background raster from HECRAS HDF (translucent)
+        try:
+            self._create_background(hecras_plan, xmin, xmax, ymin, ymax)
+        except Exception as e:
+            print(f'Warning: could not create raster background: {e}')
         
         # Timer for animation
         self.timer = QtCore.QTimer()
@@ -106,8 +111,103 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         self.timer.setInterval(50)  # 20 FPS
         
         self.update_agents()
+
+    def _create_background(self, hecras_plan, xmin, xmax, ymin, ymax):
+        """Rasterize HECRAS cell values (depth) to a regular grid and display as ImageItem."""
+        import h5py
+        try:
+            with h5py.File(hecras_plan, 'r') as hdf:
+                pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
+                # Try to read water surface and cell min elev to compute depth
+                wsurf = None
+                elev = None
+                if 'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface' in hdf:
+                    wsurf = np.array(hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'])
+                if 'Geometry/2D Flow Areas/2D area/Cells Minimum Elevation' in hdf:
+                    elev = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'])
+
+                depth_vals = None
+                if wsurf is not None and elev is not None:
+                    # use last timestep water surface
+                    depth_vals = wsurf[-1] - elev
+                else:
+                    # fallback: try common depth names
+                    if 'Geometry/2D Flow Areas/2D area/Cell Hydraulic Depth' in hdf:
+                        depth_vals = np.array(hdf['Geometry/2D Flow Areas/2D area/Cell Hydraulic Depth'])
+                if depth_vals is None:
+                    raise RuntimeError('No depth-related datasets found in HECRAS HDF')
+
+            # Rasterize to grid
+            nx, ny = 400, 300
+            xs = pts[:, 0]
+            ys = pts[:, 1]
+            # grid indices
+            xi = np.clip(((xs - xmin) / (xmax - xmin) * (nx - 1)).astype(int), 0, nx-1)
+            yi = np.clip(((ys - ymin) / (ymax - ymin) * (ny - 1)).astype(int), 0, ny-1)
+
+            grid = np.full((ny, nx), np.nan, dtype=float)
+            counts = np.zeros((ny, nx), dtype=int)
+            for xind, yind, val in zip(xi, yi, depth_vals):
+                # y reversed to image coordinates (pyqtgraph uses increasing y up)
+                gy = ny - 1 - yind
+                grid[gy, xind] = grid[gy, xind] + val if counts[gy, xind] else val
+                counts[gy, xind] += 1
+            # average where multiple points mapped
+            mask = counts > 0
+            grid[mask] = grid[mask] / counts[mask]
+            # Fill NaNs with nearest simple approach: replace with global median
+            nan_mask = ~mask
+            if np.any(nan_mask):
+                med = np.nanmedian(grid)
+                if np.isnan(med):
+                    med = 0.0
+                grid[nan_mask] = med
+
+            # Normalize to 0..255 (depth: deeper -> darker)
+            vmin = np.nanmin(grid)
+            vmax = np.nanmax(grid)
+            if vmax - vmin < 1e-6:
+                img = np.full(grid.shape, 128, dtype=np.uint8)
+            else:
+                norm = (grid - vmin) / (vmax - vmin)
+                img = (255 * (1.0 - norm)).astype(np.uint8)
+
+            # Create ImageItem and set geometry rect
+            img_item = pg.ImageItem(img)
+            rect = QtCore.QRectF(float(xmin), float(ymin), float(xmax - xmin), float(ymax - ymin))
+            img_item.setRect(rect)
+            img_item.setOpacity(0.6)
+            self.plot_widget.addItem(img_item)
+            self._background_item = img_item
+            print('Background raster created from HECRAS plan')
+        except Exception:
+            raise
         
     def on_start(self):
+        # Ensure simulation spatial state is reset at the start of an episode
+        if self.current_timestep == 0:
+            try:
+                self.sim.reset_spatial_state()
+                print('Reset spatial state before starting episode')
+            except Exception:
+                pass
+
+            # Cluster agents into a tight group at the start so training begins from a school
+            try:
+                n = getattr(self.sim, 'num_agents', getattr(self.sim, 'X').size)
+                cx = float(np.nanmean(self.sim.X))
+                cy = float(np.nanmean(self.sim.Y))
+                # Small Gaussian cluster: sigma = 1.5 meters
+                sigma = 1.5
+                self.sim.X = np.random.normal(loc=cx, scale=sigma, size=n)
+                self.sim.Y = np.random.normal(loc=cy, scale=sigma, size=n)
+                # Reset headings consistent with velocity if possible
+                if hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
+                    self.sim.heading = np.arctan2(self.sim.y_vel, self.sim.x_vel)
+                print('Clustered agents into starting school')
+            except Exception as e:
+                print(f'Could not cluster agents at start: {e}')
+
         self.paused = False
         self.timer.start()
         self.status_label.setText(f'Running - Episode {self.episode} | t={self.current_timestep}/{self.timesteps}')
@@ -149,27 +249,53 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         # Update scatter plot
         self.agent_scatter.setData(positions[:, 0], positions[:, 1])
         
-        # Update direction arrows
-        for item in self.arrow_lines:
-            self.plot_widget.removeItem(item)
-        self.arrow_lines = []
-        
-        shaft_length = 3.0  # meters
-        for i in range(len(positions)):
-            x, y = positions[i]
-            h = headings[i]
-            
-            # Shaft: line behind agent
-            dx_shaft = -shaft_length * np.cos(h)
-            dy_shaft = -shaft_length * np.sin(h)
-            
-            arrow = pg.ArrowItem(angle=np.degrees(h), tipAngle=30, headLen=20, 
-                                tailLen=shaft_length*10, tailWidth=2,
-                                pen=pg.mkPen(color=(0, 200, 200), width=2),
-                                brush=pg.mkBrush(0, 255, 255))
-            arrow.setPos(x, y)
-            self.plot_widget.addItem(arrow)
-            self.arrow_lines.append(arrow)
+        # Remove previous shaft/head plot items
+        if hasattr(self, 'shaft_plot') and self.shaft_plot is not None:
+            try:
+                self.plot_widget.removeItem(self.shaft_plot)
+            except Exception:
+                pass
+        if hasattr(self, 'head_plot') and self.head_plot is not None:
+            try:
+                self.plot_widget.removeItem(self.head_plot)
+            except Exception:
+                pass
+
+        # Build line segments for shafts (behind agents) and small forward ticks for heading
+        shaft_length = 3.0  # meters behind agent
+        head_len = 0.6      # small forward tick length
+
+        # Vectorized computations
+        xs = positions[:, 0]
+        ys = positions[:, 1]
+        hs = headings
+
+        # Shafts: from (x,y) to (x - shaft_length*cos(h), y - shaft_length*sin(h))
+        x_shaft = np.empty(len(xs) * 3)
+        y_shaft = np.empty(len(xs) * 3)
+        for i in range(len(xs)):
+            x_shaft[i*3 + 0] = xs[i]
+            y_shaft[i*3 + 0] = ys[i]
+            x_shaft[i*3 + 1] = xs[i] - shaft_length * np.cos(hs[i])
+            y_shaft[i*3 + 1] = ys[i] - shaft_length * np.sin(hs[i])
+            x_shaft[i*3 + 2] = np.nan
+            y_shaft[i*3 + 2] = np.nan
+
+        # Heads: small line forward in heading direction
+        x_head = np.empty(len(xs) * 3)
+        y_head = np.empty(len(xs) * 3)
+        for i in range(len(xs)):
+            x_head[i*3 + 0] = xs[i]
+            y_head[i*3 + 0] = ys[i]
+            x_head[i*3 + 1] = xs[i] + head_len * np.cos(hs[i])
+            y_head[i*3 + 1] = ys[i] + head_len * np.sin(hs[i])
+            x_head[i*3 + 2] = np.nan
+            y_head[i*3 + 2] = np.nan
+
+        self.shaft_plot = pg.PlotDataItem(x_shaft, y_shaft, pen=pg.mkPen(color=(0,200,200), width=2))
+        self.head_plot = pg.PlotDataItem(x_head, y_head, pen=pg.mkPen(color=(0,255,255), width=2))
+        self.plot_widget.addItem(self.shaft_plot)
+        self.plot_widget.addItem(self.head_plot)
         
     def update_simulation(self):
         """Run one simulation timestep."""
@@ -227,9 +353,12 @@ class RLTrainingViewer(QtWidgets.QMainWindow):
         self.episode_reward = 0.0
         self.prev_metrics = None
         
-        # Mutate weights
-        self.trainer.mutate_behavioral_weights()
-        self.trainer.apply_weights_to_simulation()
+        # Mutate weights using trainer API and apply to simulation
+        try:
+            self.trainer.behavioral_weights.mutate(scale=0.05)
+            self.sim.apply_behavioral_weights(self.trainer.behavioral_weights)
+        except Exception as e:
+            print(f'Warning: Could not mutate/apply behavioral weights: {e}')
         
         # Reset simulation spatial state
         try:
@@ -255,14 +384,60 @@ def setup_training_simulation(args):
     print(f'Initializing training simulation with {args.agents} agents...')
     
     # Simulation configuration
+    # Auto-detect start polygon file with prefix 'start_loc_river_right' in starting_location
+    start_dir = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'starting_location')
+    start_polygon_path = None
+    if os.path.exists(start_dir):
+        for fname in os.listdir(start_dir):
+            if fname.lower().startswith('start_loc_river_right') and fname.lower().endswith('.shp'):
+                start_polygon_path = os.path.join(start_dir, fname)
+                break
+    # Fallback to legacy river_right.shp name
+    if start_polygon_path is None:
+        legacy = os.path.join(start_dir, 'river_right.shp')
+        if os.path.exists(legacy):
+            start_polygon_path = legacy
+
+    if start_polygon_path is None:
+        raise FileNotFoundError(f"Start polygon not found in {start_dir}. Expected file starting with 'start_loc_river_right' or 'river_right.shp'.")
+
+    # Ensure longitudinal profile exists; synthesize if missing
+    longitudinal_path = os.path.join(REPO_ROOT, 'data', 'salmon_abm', '20240506', 'nuyakuk_centerline.shp')
+    if not os.path.exists(longitudinal_path):
+        try:
+            import h5py
+            import shapely.geometry as geom
+            import fiona
+            from fiona.crs import from_epsg
+
+            with h5py.File(hecras_plan, 'r') as hdf:
+                pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
+                # sort points by x then y to make a crude centerline
+                idx = np.argsort(pts[:, 0])
+                line = geom.LineString(pts[idx, :2])
+
+            synth_dir = os.path.join(REPO_ROOT, 'outputs', 'rl_training', 'synth')
+            os.makedirs(synth_dir, exist_ok=True)
+            synth_line_path = os.path.join(synth_dir, 'synth_centerline.shp')
+
+            schema = {'geometry': 'LineString', 'properties': {'id': 'int'}}
+            with fiona.open(synth_line_path, 'w', driver='ESRI Shapefile', crs=from_epsg(32605), schema=schema) as dst:
+                dst.write({'geometry': geom.mapping(line), 'properties': {'id': 1}})
+
+            longitudinal_path = synth_line_path
+            print(f'Warning: longitudinal profile missing; synthesized at {longitudinal_path}')
+        except Exception as e:
+            print(f'Error synthesizing longitudinal profile: {e}')
+            raise
+
     config = {
         'model_dir': os.path.join(REPO_ROOT, 'outputs', 'rl_training'),
         'model_name': 'rl_training_qt',
         'crs': 'EPSG:32605',
         'basin': os.path.join(REPO_ROOT, 'data', 'salmon_abm', '20240506', 'Nuyakuk_Bathymetry.shp'),
         'water_temp': 10.0,
-        'start_polygon': os.path.join(REPO_ROOT, 'data', 'salmon_abm', '20240506', 'Nuyakuk_Start_Polygon.shp'),
-        'longitudinal_profile': os.path.join(REPO_ROOT, 'data', 'salmon_abm', '20240506', 'nuyakuk_centerline.shp'),
+        'start_polygon': start_polygon_path,
+        'longitudinal_profile': longitudinal_path,
         'env_files': None,  # Using HECRAS instead
         'num_agents': args.agents,
         'fish_length': args.fish_length,
@@ -278,11 +453,12 @@ def setup_training_simulation(args):
     sim = simulation(**config)
     print('Simulation initialized.')
     
-    # Create RL trainer
+    # Create RL trainer and apply weights to simulation
     print('Setting up RL trainer...')
     trainer = RLTrainer(sim)
-    trainer.apply_weights_to_simulation()
-    print(f'Applied behavioral weights: cohesion={sim.cohesion_weight:.2f}, separation={sim.separation_weight:.2f}, border={sim.border_weight}')
+    # Apply trainer's behavioral weights to the simulation via simulation API
+    sim.apply_behavioral_weights(trainer.behavioral_weights)
+    print('Applied behavioral weights to simulation')
     
     # Setup PID controller
     from src.emergent.salmon_abm.sockeye_SoA_OpenGL_RL import PID_controller
@@ -295,7 +471,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train behavioral weights with Qt visualization')
     parser.add_argument('--episodes', type=int, default=10, help='Number of training episodes')
     parser.add_argument('--timesteps', type=int, default=100, help='Timesteps per episode')
-    parser.add_argument('--agents', type=int, default=100, help='Number of agents')
+    parser.add_argument('--agents', type=int, default=500, help='Number of agents')
     parser.add_argument('--fish-length', type=int, default=450, help='Fish length (mm)')
     
     args = parser.parse_args()

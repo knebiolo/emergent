@@ -3650,8 +3650,27 @@ class simulation():
             self._hdf5_buffers[name] = np.zeros(buffer_shape, dtype='float32')
         self._buffer_pos = 0
         
-        # import longitudinal shapefile
-        self.longitude = self.longitudinal_import(longitudinal_profile)
+        # import longitudinal shapefile (or derive from HECRAS if requested)
+        if self.use_hecras and self.hecras_plan_path:
+            # If user didn't provide a longitudinal_profile file, derive a crude centerline
+            if longitudinal_profile is None or not os.path.exists(longitudinal_profile):
+                try:
+                    with h5py.File(self.hecras_plan_path, 'r') as hdf:
+                        pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
+                        # create a crude centerline by sorting points along the primary axis
+                        idx = np.argsort(pts[:, 0])
+                        from shapely.geometry import LineString
+                        line = LineString(pts[idx, :2])
+                        self.longitude = self.longitudinal_import(line)
+                        print('Derived longitudinal profile from HECRAS plan')
+                except Exception as e:
+                    print(f'Warning: could not derive longitudinal profile from HECRAS: {e}')
+                    # fall back to file-based import if provided
+                    self.longitude = self.longitudinal_import(longitudinal_profile)
+            else:
+                self.longitude = self.longitudinal_import(longitudinal_profile)
+        else:
+            self.longitude = self.longitudinal_import(longitudinal_profile)
 
         # boundary_surface
         self.boundary_surface()
@@ -4312,12 +4331,27 @@ class simulation():
 
 
     def longitudinal_import(self, shapefile):
-        # Load the shapefile with the longitudinal line
+        # Load the shapefile with the longitudinal line, or accept a shapely geometry
         if shapefile is None:
             self.longitudinal = None
             return None
+
+        # If a shapely geometry was passed in directly, use it
+        try:
+            from shapely.geometry import BaseGeometry
+            if isinstance(shapefile, BaseGeometry):
+                self.longitudinal = shapefile
+                return self.longitudinal
+        except Exception:
+            pass
+
+        # Otherwise assume a filepath and read with geopandas
         line_gdf = gpd.read_file(shapefile)
-        self.longitudinal = line_gdf.geometry[0]  # Assuming there's only one line feature
+        if len(line_gdf) == 0:
+            self.longitudinal = None
+            return None
+        self.longitudinal = line_gdf.geometry.iloc[0]
+        return self.longitudinal
         
     def compute_linear_positions(self, line):
         # Vectorized projection of points onto a polyline (line can be a shapely LineString)
