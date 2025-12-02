@@ -51,10 +51,14 @@ class FishSimViewer(mglw.WindowConfig):
         self.timesteps = ctx.get('timesteps', 500)
         self.pid = ctx.get('pid')
         self.current_timestep = 0
-        self.paused = False
+        self.paused = ctx.get('start_paused', False)  # Start paused if requested
         self.background_extent = ctx.get('background_extent')
         self.num_agents = getattr(self.sim, 'num_agents', 0) if self.sim else 0
         self.depth_raster = ctx.get('depth_raster')
+        
+        # UI buttons
+        self.buttons = []
+        self._setup_ui()
         
         # Setup shaders and geometry
         self._setup_background()
@@ -79,6 +83,79 @@ class FishSimViewer(mglw.WindowConfig):
         self.fps_timer = 0
         self.last_timestep_time = 0
         self.hung_warning_shown = False
+        
+    def _setup_ui(self):
+        """Setup UI buttons using pygame."""
+        import pygame
+        self.ui_font = None
+        try:
+            pygame.font.init()
+            self.ui_font = pygame.font.SysFont('Arial', 16, bold=True)
+        except:
+            pass
+            
+        # Define buttons: [x, y, width, height, label, action]
+        button_y = 20
+        button_spacing = 90
+        self.buttons = [
+            {'rect': (20, button_y, 80, 35), 'label': 'Start', 'action': 'start', 'color': (0, 200, 0)},
+            {'rect': (20 + button_spacing, button_y, 80, 35), 'label': 'Pause', 'action': 'pause', 'color': (200, 150, 0)},
+            {'rect': (20 + button_spacing * 2, button_y, 80, 35), 'label': 'Reset', 'action': 'reset', 'color': (200, 0, 0)},
+        ]
+        
+    def _render_ui(self):
+        """Render UI buttons on top of OpenGL scene."""
+        if not self.ui_font:
+            return
+            
+        import pygame
+        # Get pygame surface from window
+        try:
+            pygame_surface = self.wnd.ctx._pygame_surface if hasattr(self.wnd, 'ctx') else None
+            if not pygame_surface:
+                # Access through moderngl_window's pygame backend
+                pygame_surface = pygame.display.get_surface()
+        except:
+            return
+            
+        if not pygame_surface:
+            return
+            
+        # Draw buttons
+        for btn in self.buttons:
+            x, y, w, h = btn['rect']
+            color = btn['color']
+            
+            # Button background (semi-transparent)
+            s = pygame.Surface((w, h), pygame.SRCALPHA)
+            s.fill((*color, 200))
+            pygame_surface.blit(s, (x, y))
+            
+            # Button border
+            pygame.draw.rect(pygame_surface, (255, 255, 255), (x, y, w, h), 2)
+            
+            # Button text
+            text_surf = self.ui_font.render(btn['label'], True, (255, 255, 255))
+            text_rect = text_surf.get_rect(center=(x + w//2, y + h//2))
+            pygame_surface.blit(text_surf, text_rect)
+        
+    def _handle_button_click(self, x, y):
+        """Handle mouse click on buttons."""
+        for btn in self.buttons:
+            bx, by, bw, bh = btn['rect']
+            if bx <= x <= bx + bw and by <= y <= by + bh:
+                action = btn['action']
+                if action == 'start':
+                    self.paused = False
+                    print('Started/Resumed')
+                elif action == 'pause':
+                    self.paused = True
+                    print('Paused')
+                elif action == 'reset':
+                    self.current_timestep = 0
+                    print('Reset to timestep 0')
+                return True
+        return False
         
     def _setup_camera(self):
         """Setup orthographic projection for 2D view."""
@@ -281,7 +358,6 @@ class FishSimViewer(mglw.WindowConfig):
             if len(positions) > 0:
                 # Build vertex buffer with shaft lines and head circles
                 verts = []
-                shaft_length = 8.0  # meters behind the agent
                 head_radius = 2.0   # meters for the circle
                 circle_segments = 16
                 
@@ -295,6 +371,7 @@ class FishSimViewer(mglw.WindowConfig):
                     
                     # Shaft: from back to head (line dragged behind)
                     # Back position (behind the agent)
+                    shaft_length = 3.0  # meters behind the agent
                     back_x = x - dx * shaft_length
                     back_y = y - dy * shaft_length
                     
@@ -451,14 +528,26 @@ class FishSimViewer(mglw.WindowConfig):
             self.fps_counter = 0
             self.fps_timer = 0
             
+        # Render UI buttons on top
+        self._render_ui()
+            
     def key_event(self, key, action, modifiers):
         """Handle keyboard events."""
         if action == self.wnd.keys.ACTION_PRESS:
             if key == self.wnd.keys.SPACE:
                 self.paused = not self.paused
+                print(f'{'Paused' if self.paused else 'Resumed'}')
+            elif key == self.wnd.keys.S:
+                self.paused = False
+                print('Started/Resumed')
+            elif key == self.wnd.keys.P:
+                self.paused = True
+                print('Paused')
             elif key == self.wnd.keys.R:
                 self.current_timestep = 0
+                print('Reset to timestep 0')
             elif key == self.wnd.keys.Q or key == self.wnd.keys.ESCAPE:
+                print('Closing...')
                 self.wnd.close()
                 
     def mouse_scroll_event(self, x_offset, y_offset):
@@ -467,6 +556,11 @@ class FishSimViewer(mglw.WindowConfig):
         self.zoom *= zoom_factor
         self.zoom = np.clip(self.zoom, 0.1, 10.0)
         self._update_projection()
+        
+    def mouse_press_event(self, x, y, button):
+        """Handle mouse press for button clicks."""
+        if button == 1:  # Left click
+            self._handle_button_click(x, y)
         
     def mouse_drag_event(self, x, y, dx, dy):
         """Handle mouse drag for panning."""
@@ -783,7 +877,14 @@ def main():
             background_extent = (bounds.left, bounds.right, bounds.bottom, bounds.top)
             
     print('Starting OpenGL viewer...')
-    print('Controls: SPACE=pause/resume, R=restart, Mouse wheel=zoom, Mouse drag=pan, ESC=quit')
+    print('Controls:')
+    print('  SPACE = toggle pause/resume')
+    print('  S = start/resume')
+    print('  P = pause')
+    print('  R = restart')
+    print('  Mouse wheel = zoom')
+    print('  Mouse drag = pan')
+    print('  ESC/Q = quit')
     
     # Store simulation context in class attributes for the viewer
     FishSimViewer.sim_context = {

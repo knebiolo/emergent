@@ -3260,8 +3260,8 @@ class simulation():
                  basin, 
                  water_temp, 
                  start_polygon,
-                 env_files,
                  longitudinal_profile,
+                 env_files=None,
                  fish_length = None,
                  num_timesteps = 100, 
                  num_agents = 100,
@@ -3601,6 +3601,8 @@ class simulation():
         
         # import environment only when file paths are present and exist (robust to missing files)
         def _maybe_import(key, surface_type):
+            if env_files is None:
+                return
             fp = env_files.get(key)
             if not fp:
                 return
@@ -3665,6 +3667,64 @@ class simulation():
         
         # initialize swim speed
         self.initial_swim_speed() 
+        
+        # Compute vel_mag from x_vel and y_vel (required by timestep)
+        if hasattr(self, 'x_vel') and hasattr(self, 'y_vel'):
+            self.vel_mag = np.sqrt(self.x_vel**2 + self.y_vel**2)
+        else:
+            self.vel_mag = np.zeros(self.num_agents)
+        
+        # If using HECRAS mode, initialize agent environment attributes
+        if self.use_hecras and self.hecras_plan_path:
+            try:
+                with h5py.File(self.hecras_plan_path, 'r') as hdf:
+                    pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
+                    
+                    # Set depth_rast_transform from HECRAS extent (required by vel_cue)
+                    if pts is not None:
+                        x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
+                        y_min, y_max = pts[:, 1].min(), pts[:, 1].max()
+                        cell_size = 10.0  # Approximate cell size
+                        self.depth_rast_transform = from_origin(x_min, y_max, cell_size, cell_size)
+                    
+                    node_fields = {}
+                    try:
+                        node_fields['depth'] = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1] - np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
+                    except Exception:
+                        pass
+                    try:
+                        node_fields['vel_x'] = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
+                        node_fields['vel_y'] = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
+                    except Exception:
+                        pass
+                
+                if pts is not None and node_fields:
+                    # Initialize agent arrays
+                    if not hasattr(self, 'depth'):
+                        self.depth = np.zeros(self.num_agents, dtype=float)
+                    if not hasattr(self, 'x_vel'):
+                        self.x_vel = np.zeros(self.num_agents, dtype=float)
+                    if not hasattr(self, 'y_vel'):
+                        self.y_vel = np.zeros(self.num_agents, dtype=float)
+                    if not hasattr(self, 'wet'):
+                        self.wet = np.ones(self.num_agents, dtype=float)
+                    if not hasattr(self, 'distance_to'):
+                        self.distance_to = np.zeros(self.num_agents, dtype=float)
+                    
+                    # Enable HECRAS mapping
+                    self.enable_hecras(pts, node_fields, k=self.hecras_k)
+                    
+                    # Sample initial values
+                    if 'depth' in node_fields:
+                        self.depth = self.apply_hecras_mapping(node_fields['depth'])
+                    if 'vel_x' in node_fields:
+                        self.x_vel = self.apply_hecras_mapping(node_fields['vel_x'])
+                    if 'vel_y' in node_fields:
+                        self.y_vel = self.apply_hecras_mapping(node_fields['vel_y'])
+                        self.vel_mag = np.sqrt(self.x_vel**2 + self.y_vel**2)
+                    
+            except Exception as e:
+                print(f"Warning: Failed to initialize HECRAS environment: {e}")
         
         # error array
         self.error_array = np.array([])
@@ -6716,6 +6776,10 @@ class simulation():
             - The velocity cue is calculated as a unit vector in the direction of the lowest velocity,
               scaled by the weight and normalized by the square of 5 body lengths in meters.
             """
+            # If using HECRAS, return zero cue (no spatial velocity map available)
+            if hasattr(self.simulation, 'hecras_mapping_enabled') and self.simulation.hecras_mapping_enabled:
+                return np.zeros((2, self.simulation.num_agents), dtype=float)
+            
             # Convert self.length to a NumPy array if it's a CuPy array
             length_numpy = self.simulation.length#.get() if isinstance(self.length, cp.ndarray) else self.length
             
@@ -7241,6 +7305,10 @@ class simulation():
             - If the agent is already at the optimal depth, the direction vector is set to zero, indicating no movement is necessary.
             - The function iterates over each agent to calculate their respective direction vectors.
             """
+            
+            # If using HECRAS, return zero cue (no spatial depth map available)
+            if hasattr(self.simulation, 'hecras_mapping_enabled') and self.simulation.hecras_mapping_enabled:
+                return np.zeros((2, self.simulation.num_agents), dtype=float)
         
             # identify buffer
             buff = 2.  # 2 meters

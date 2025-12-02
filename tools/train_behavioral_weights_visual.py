@@ -18,22 +18,26 @@ if REPO_ROOT not in sys.path:
 
 # Import must come after path setup
 import moderngl_window as mglw
-from tools.run_hecras_opengl import HECRASViewer
+from tools.run_hecras_opengl import FishSimViewer
 from src.emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation, RLTrainer, BehavioralWeights
 import numpy as np
 
 
-class RLTrainingViewer(HECRASViewer):
+class RLTrainingViewer(FishSimViewer):
     """Extended viewer with RL training overlay."""
     
-    def __init__(self, sim, trainer, timesteps, **kwargs):
-        super().__init__(sim=sim, timesteps=timesteps, **kwargs)
-        self.trainer = trainer
+    def __init__(self, **kwargs):
+        # Get training context from class attribute
+        ctx = self.__class__.training_context
+        self.trainer = ctx['trainer']
         self.current_episode = 0
         self.episode_reward = 0.0
         self.prev_metrics = None
         self.best_reward = -np.inf
         self.episode_complete = False
+        
+        # Call parent init (will set up sim from sim_context)
+        super().__init__(**kwargs)
         
     def on_render(self, time, frametime):
         """Override render to add RL training logic."""
@@ -108,20 +112,6 @@ def setup_training_simulation(args):
         
     print(f'Using HECRAS plan: {hecras_plan}')
     
-    # Use pre-generated rasters
-    out_dir = os.path.join(REPO_ROOT, 'outputs', 'hecras_run')
-    
-    env_files = {
-        'elev': os.path.join(out_dir, 'elev.tif'),
-        'depth': os.path.join(out_dir, 'depth.tif'),
-        'wetted': os.path.join(out_dir, 'wetted.tif'),
-        'distance_to': os.path.join(out_dir, 'distance_to.tif'),
-        'x_vel': os.path.join(out_dir, 'x_vel.tif'),
-        'y_vel': os.path.join(out_dir, 'y_vel.tif'),
-        'vel_dir': os.path.join(out_dir, 'vel_dir.tif'),
-        'vel_mag': os.path.join(out_dir, 'vel_mag.tif')
-    }
-    
     start_poly = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'starting_location', 'start_loc_river_right.shp')
     long_profile = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'Longitudinal', 'longitudinal.shp')
     
@@ -132,13 +122,15 @@ def setup_training_simulation(args):
         'basin': 'Nushagak River',
         'water_temp': 10.0,
         'start_polygon': start_poly,
-        'env_files': env_files,
         'longitudinal_profile': long_profile,
         'fish_length': args.fish_length,
         'num_timesteps': args.timesteps,
         'num_agents': args.agents,
         'use_gpu': False,
         'defer_hdf': True,
+        'hecras_plan_path': hecras_plan,
+        'use_hecras': True,
+        'hecras_k': 1,
     }
     
     os.makedirs(config['model_dir'], exist_ok=True)
@@ -147,11 +139,10 @@ def setup_training_simulation(args):
     sim = simulation(**config)
     
     print('Simulation initialized. Setting up RL trainer...')
-    initial_weights = BehavioralWeights()
-    trainer = RLTrainer(sim, initial_weights)
-    sim.apply_behavioral_weights(initial_weights)
+    trainer = RLTrainer(sim)
+    sim.apply_behavioral_weights(trainer.behavioral_weights)
     
-    return sim, trainer, env_files
+    return sim, trainer, hecras_plan
 
 
 def main():
@@ -174,31 +165,54 @@ def main():
     print(f'  Fish length: {args.fish_length} mm')
     print('='*80)
     
-    # Setup simulation and trainer
-    sim, trainer, env_files = setup_training_simulation(args)
-    
-    # Get background raster for visualization
-    depth_raster = env_files['depth']
-    
     # Parse window size
     width, height = map(int, args.window_size.split(','))
     
+    # Setup simulation and trainer
+    sim, trainer, hecras_plan = setup_training_simulation(args)
+    
+    # Skip background raster for now - just use bounds for visualization
+    import h5py
+    
+    with h5py.File(hecras_plan, 'r') as hdf:
+        pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
+        # bounds format: [left, right, bottom, top]
+        bounds = [pts[:, 0].min(), pts[:, 0].max(), pts[:, 1].min(), pts[:, 1].max()]
+    
+    background_extent = bounds
+    depth_raster = None  # No background texture
+    
+    # Setup PID controller with fixed parameters (no interpolation needed)
+    from src.emergent.salmon_abm.sockeye_SoA_OpenGL_RL import PID_controller
+    pid = PID_controller(sim.num_agents, k_p=1.0, k_i=0.0, k_d=0.0)
+    
+    # Store simulation context in class attributes (required by FishSimViewer)
+    RLTrainingViewer.sim_context = {
+        'sim': sim,
+        'timesteps': args.timesteps,
+        'pid': pid,
+        'background_extent': background_extent,
+        'depth_raster': depth_raster,
+        'start_paused': True  # Start paused for RL training
+    }
+    
+    # Store RL training context
+    RLTrainingViewer.training_context = {
+        'trainer': trainer
+    }
+    
     # Launch OpenGL viewer with RL training
     print('\nLaunching OpenGL viewer with RL training...')
-    print('Press SPACE to pause/resume | ESC to quit\n')
+    print('Controls:')
+    print('  S = start/resume | P = pause | SPACE = toggle pause')
+    print('  R = restart | Mouse wheel = zoom | ESC = quit\n')
     
     mglw.run_window_config(
         RLTrainingViewer,
-        args=(sim, trainer, args.timesteps),
-        kwargs={
-            'raster_path': depth_raster,
-            'pid': None
-        },
-        gl_version=(3, 3),
-        size=(width, height),
-        title="RL Training Viewer",
-        resizable=True,
-        samples=4
+        args=(
+            '--window', 'pygame2',
+            '--size', f'{width}x{height}',
+        )
     )
     
     print('\nTraining complete!')
