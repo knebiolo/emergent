@@ -1146,23 +1146,14 @@ def derive_centerline_from_distance_raster(distance_rast, transform=None, crs=No
     if distance_rast is None or distance_rast.size == 0:
         return None, []
 
-    # robust ridge detection: use maximum filter then tolerant comparison to avoid
-    # floating-point equality pitfalls on large distance values
+    # Find local maxima (ridge detection) - exact copy from visualization script
     local_max = maximum_filter(distance_rast, size=footprint_size)
-    # allow small numerical tolerance when comparing to local max
-    is_ridge = (np.isclose(distance_rast, local_max, rtol=1e-6, atol=1e-6)) & (distance_rast > 0.5)
-    # optional lightweight diagnostics when env var set
-    try:
-        import os
-        debug = os.getenv('EMERGENT_DEBUG_CENTERLINE', '0') == '1'
-    except Exception:
-        debug = False
-    if debug:
-        try:
-            print('derive_centerline: rast shape', getattr(distance_rast, 'shape', None), 'max', float(np.nanmax(distance_rast)), 'ridge pixels', int(np.count_nonzero(is_ridge)))
-        except Exception:
-            pass
+    is_ridge = (distance_rast == local_max) & (distance_rast > 0.5)
+
+    # Skeletonize
     skeleton = skeletonize(is_ridge)
+
+    # Convert skeleton to LineString(s)
     labeled = label(skeleton, connectivity=2)
 
     centerlines = []

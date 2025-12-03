@@ -87,10 +87,22 @@ try:
 
     print('Running centerline extraction helper...')
     main_centerline, all_lines = derive_centerline_from_distance_raster(distance, transform=getattr(sim, 'depth_rast_transform', None), footprint_size=5, min_length=10)
-    print('Extraction result: main_centerline=', bool(main_centerline))
-    if main_centerline is not None:
-        print('Main length:', main_centerline.length)
-    print('Num lines returned:', len(all_lines))
+    
+    # Print results matching visualization script format
+    print(f'Raster shape: {distance.shape}')
+    print(f'Distance range: {distance.min():.2f} to {distance.max():.2f} m')
+    from scipy.ndimage import maximum_filter
+    from skimage.morphology import skeletonize
+    local_max = maximum_filter(distance, size=5)
+    is_ridge = (distance == local_max) & (distance > 0.5)
+    print(f'Ridge pixels: {is_ridge.sum()}')
+    
+    for i, line in enumerate(all_lines, 1):
+        print(f'  Path {i}: {len(line.coords)} pts, {line.length:.1f}m')
+    
+    print(f'\nTotal centerlines: {len(all_lines)}')
+    if main_centerline:
+        print(f'Main centerline: {main_centerline.length:.1f}m')
 
 finally:
     sim.close()
