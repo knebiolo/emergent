@@ -38,87 +38,17 @@ import numpy as np
 import numpy.ma as ma
 import os
 import pandas as pd
+from scipy.spatial import cKDTree
 # from pysal.explore import esda
 # from pysal.lib import weights
-# from pysal.model import spreg
-from affine import Affine as AffineTransform
-import rasterio
-from rasterio.transform import Affine, from_origin
-from rasterio.mask import mask
-from rasterio.crs import CRS
-from rasterio.warp import reproject, calculate_default_transform
-from rasterio.features import rasterize
-from shapely import Point, Polygon, box
-from shapely import affinity
-from shapely.wkt import loads as loads
-from shapely.geometry.base import BaseGeometry
-from shapely.geometry import LineString
-from scipy.interpolate import LinearNDInterpolator, UnivariateSpline, interp1d, CubicSpline, RectBivariateSpline
-from scipy.optimize import curve_fit
-from scipy.constants import g
-from scipy.spatial import cKDTree#, cdist
-from scipy.stats import beta
-import numba
-from scipy.ndimage import distance_transform_edt
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import dijkstra
-import matplotlib.animation as manimation
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib import rcParams
-from datetime import datetime
-import time
-import warnings
-import sys
-import random
-from collections import deque
-#from sksurv.nonparametric import kaplan_meier_estimator
-#from PyPDF2 import PdfReader, PdfWriter
-
-warnings.filterwarnings("ignore")
-
-np.set_printoptions(suppress=True)
-
-
+try:
+    import numba
+    _HAS_NUMBA = True
+except Exception:
+    numba = None
+    _HAS_NUMBA = False
 class BehavioralWeights:
-    """Container for instinctual behavioral parameters used by the RL trainer."""
-
     def __init__(self):
-        # Schooling dynamics (Boids-style)
-        self.cohesion_weight = 1.0        # Attraction to group center
-        self.alignment_weight = 1.0       # Tendency to match neighbors' heading
-        self.separation_weight = 2.0      # Short-range repulsion from neighbors
-        self.separation_radius = 3.0      # Distance (body lengths) for separation
-
-        # Dynamic cohesion based on threat level
-        self.threat_level = 0.0           # 0.0 = relaxed, 1.0 = high threat (predators)
-        self.cohesion_radius_relaxed = 3.0   # Body lengths when relaxed
-        self.cohesion_radius_threatened = 1.5 # Body lengths when threatened (tight ball)
-
-        # Energy efficiency from drafting (swimming behind others)
-        self.drafting_enabled = True
-        self.drafting_distance = 2.0      # Body lengths behind to get benefit
-        self.drafting_angle_tolerance = 30.0  # Degrees off-axis for drafting
-        self.drag_reduction_single = 0.15  # 15% drag reduction behind one agent
-        self.drag_reduction_dual = 0.25    # 25% drag reduction between two agents (V-formation)
-
-        # Environmental responses
-        self.rheotaxis_weight = 3.0       # Swim against flow
-        self.border_cue_weight = 50000.0  # Avoid channel edges/banks
-        self.border_threshold_multiplier = 2.0  # Threshold = this × body_length (min 1m)
-        self.border_max_force = 5.0       # Cap border repulsion force
-
-        # Collision avoidance
-        self.collision_weight = 5.0       # Avoid other agents
-        self.collision_radius = 2.0       # Distance (body lengths) for collision avoidance
-
-        # Navigation priorities (higher = more important)
-        self.upstream_priority = 1.0      # Weight for upstream progress
-        self.energy_efficiency_priority = 0.5  # Prefer energy-efficient paths
-
-        # Learning rates (for RL training)
-        self.learning_rate = 0.001
-        self.exploration_epsilon = 0.1
         # Alignment SOG augmentation
         self.use_sog = True            # Whether to consider neighbor SOG for alignment
         self.sog_weight = 0.5          # Relative weight (0..1) blending heading vs SOG alignment
@@ -129,8 +59,8 @@ class BehavioralWeights:
         
         # Dynamic cohesion based on threat level
         self.threat_level = 0.0           # 0.0 = relaxed, 1.0 = high threat (predators)
-        self.cohesion_radius_relaxed = 3.0   # Body lengths when relaxed
-        self.cohesion_radius_threatened = 1.5 # Body lengths when threatened (tight ball)
+        self.cohesion_radius_relaxed = 2.0   # Body lengths when relaxed
+        self.cohesion_radius_threatened = 0.5 # Body lengths when threatened (tight ball)
         
         # Energy efficiency from drafting (swimming behind others)
         self.drafting_enabled = True
@@ -596,7 +526,7 @@ class RLTrainer:
             # store in sim for reuse in energy_efficiency
             self.sim._last_drag_reductions = self._cached_drag_reductions
         
-        # 3. UPSTREAM PROGRESS (Change in longitudinal position)
+        # 3. UPSTREAM PROGRESS (Change in centerline position)
         if hasattr(self.sim, 'longitudes'):
             prev_longs = getattr(self.sim, '_prev_longitudes', self.sim.longitudes)
             upstream_deltas = self.sim.longitudes - prev_longs
@@ -640,7 +570,7 @@ class RLTrainer:
         best_reward = -np.inf
         best_weights = None
         
-        print(f"Starting RL training: {num_episodes} episodes × {timesteps_per_episode} timesteps")
+        print(f"Starting RL training: {num_episodes} episodes {timesteps_per_episode} timesteps")
         
         for episode in range(num_episodes):
             # Run episode with current weights
@@ -938,7 +868,7 @@ def map_hecras_to_env_rasters(simulation, plan_path, field_names=None, k=8):
     if not hasattr(simulation, 'hdf5') or getattr(simulation, 'hdf5', None) is None:
         return False
     if field_names is None:
-        field_names = getattr(simulation, 'hecras_fields', None) or []
+        field_names = getattr(simulation, 'hecras_fields', None)
 
     # ensure x/y coords exist
     try:
@@ -986,7 +916,7 @@ def map_hecras_to_env_rasters(simulation, plan_path, field_names=None, k=8):
 
     # load HECRAS map and map all requested fields for the whole grid
     try:
-        m = load_hecras_plan_cached(simulation, plan_path, field_names=field_names or [])
+        m = load_hecras_plan_cached(simulation, plan_path, field_names=field_names if field_names else None)
     except Exception:
         m = None
 
@@ -1059,86 +989,86 @@ def map_hecras_to_env_rasters(simulation, plan_path, field_names=None, k=8):
     return True
 
 
-def map_hecras_to_env_rasters(simulation, plan_path, raster_names, k=8):
-    """Map HECRAS nodal fields onto the HDF5 `environment` rasters and write them.
+# def map_hecras_to_env_rasters(simulation, plan_path, raster_names, k=8):
+#     """Map HECRAS nodal fields onto the HDF5 `environment` rasters and write them.
 
-    This flattens the HDF `x_coords`/`y_coords` arrays to a list of points, runs
-    IDW mapping via the cached HECRASMap, reshapes back to grid, and writes into
-    `simulation.hdf5['environment'][name]` for each requested raster name.
-    """
-    hdf = getattr(simulation, 'hdf5', None)
-    if hdf is None:
-        return
-    if 'x_coords' not in hdf or 'y_coords' not in hdf:
-        # try to create coords
-        ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=(getattr(simulation,'height',None) or 0, getattr(simulation,'width',None) or 0), target_transform=getattr(simulation,'depth_rast_transform', None))
-    if 'x_coords' not in hdf or 'y_coords' not in hdf:
-        return
+#     This flattens the HDF `x_coords`/`y_coords` arrays to a list of points, runs
+#     IDW mapping via the cached HECRASMap, reshapes back to grid, and writes into
+#     `simulation.hdf5['environment'][name]` for each requested raster name.
+#     """
+#     hdf = getattr(simulation, 'hdf5', None)
+#     if hdf is None:
+#         return
+#     if 'x_coords' not in hdf or 'y_coords' not in hdf:
+#         # try to create coords
+#         ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=(getattr(simulation,'height',None) or 0, getattr(simulation,'width',None) or 0), target_transform=getattr(simulation,'depth_rast_transform', None))
+#     if 'x_coords' not in hdf or 'y_coords' not in hdf:
+#         return
 
-    xs = np.asarray(hdf['x_coords'][:], dtype=float)
-    ys = np.asarray(hdf['y_coords'][:], dtype=float)
-    # flatten
-    flat_x = xs.ravel()
-    flat_y = ys.ravel()
-    pts = np.column_stack((flat_x, flat_y))
+#     xs = np.asarray(hdf['x_coords'][:], dtype=float)
+#     ys = np.asarray(hdf['y_coords'][:], dtype=float)
+#     # flatten
+#     flat_x = xs.ravel()
+#     flat_y = ys.ravel()
+#     pts = np.column_stack((flat_x, flat_y))
 
-    # map each requested raster name to a candidate HECRAS field
-    candidate_map = {
-        'depth': 'Cell Hydraulic Depth',
-        'vel_x': 'Cell Velocity - Velocity X',
-        'vel_y': 'Cell Velocity - Velocity Y',
-        'vel_mag': 'Velocity Magnitude',
-        'vel_dir': 'Velocity Direction',
-        'wetted': 'Wetted'
-    }
+#     # map each requested raster name to a candidate HECRAS field
+#     candidate_map = {
+#         'depth': 'Cell Hydraulic Depth',
+#         'vel_x': 'Cell Velocity - Velocity X',
+#         'vel_y': 'Cell Velocity - Velocity Y',
+#         'vel_mag': 'Velocity Magnitude',
+#         'vel_dir': 'Velocity Direction',
+#         'wetted': 'Wetted'
+#     }
 
-    # ensure environment group exists
-    env = hdf.require_group('environment')
+#     # ensure environment group exists
+#     env = hdf.require_group('environment')
 
-    # perform IDW mapping for flat grid points
-    for rn in raster_names:
-        field = candidate_map.get(rn, None)
-        if field is None:
-            # create empty dataset if missing
-            if rn not in env:
-                env.create_dataset(rn, shape=xs.shape, dtype='f4', fillvalue=np.nan)
-            continue
-        try:
-            mapped = map_hecras_for_agents(simulation, pts, plan_path, field_names=[field], k=k)
-            mapped = np.asarray(mapped).reshape(xs.shape)
-        except Exception:
-            mapped = np.full(xs.shape, np.nan, dtype=float)
-        # write into environment dataset (create if missing)
-        if rn not in env:
-            env.create_dataset(rn, shape=xs.shape, dtype='f4', fillvalue=np.nan)
-        try:
-            env[rn][:] = mapped.astype('f4')
-        except Exception:
-            try:
-                # fallback slower write
-                env[rn][...] = mapped.astype('f4')
-            except Exception:
-                pass
-    try:
-        # if hdf is a file object, flush; if it's a group, try to get parent file
-        if hasattr(hdf, 'flush'):
-            hdf.flush()
-        else:
-            # try to get filename and open file to flush
-            fname = getattr(hdf, 'filename', None) or getattr(hdf, 'name', None)
-            if fname:
-                try:
-                    with h5py.File(fname, 'r+') as hw:
-                        try:
-                            hw.flush()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-    except Exception:
-        pass
+#     # perform IDW mapping for flat grid points
+#     for rn in raster_names:
+#         field = candidate_map.get(rn, None)
+#         if field is None:
+#             # create empty dataset if missing
+#             if rn not in env:
+#                 env.create_dataset(rn, shape=xs.shape, dtype='f4', fillvalue=np.nan)
+#             continue
+#         try:
+#             mapped = map_hecras_for_agents(simulation, pts, plan_path, field_names=[field], k=k)
+#             mapped = np.asarray(mapped).reshape(xs.shape)
+#         except Exception:
+#             mapped = np.full(xs.shape, np.nan, dtype=float)
+#         # write into environment dataset (create if missing)
+#         if rn not in env:
+#             env.create_dataset(rn, shape=xs.shape, dtype='f4', fillvalue=np.nan)
+#         try:
+#             env[rn][:] = mapped.astype('f4')
+#         except Exception:
+#             try:
+#                 # fallback slower write
+#                 env[rn][...] = mapped.astype('f4')
+#             except Exception:
+#                 pass
+#     try:
+#         # if hdf is a file object, flush; if it's a group, try to get parent file
+#         if hasattr(hdf, 'flush'):
+#             hdf.flush()
+#         else:
+#             # try to get filename and open file to flush
+#             fname = getattr(hdf, 'filename', None) or getattr(hdf, 'name', None)
+#             if fname:
+#                 try:
+#                     with h5py.File(fname, 'r+') as hw:
+#                         try:
+#                             hw.flush()
+#                         except Exception:
+#                             pass
+#                 except Exception:
+#                     pass
+#     except Exception:
+#         pass
 
-# End HECRAS helpers
+# # End HECRAS helpers
 
 
 def compute_affine_from_hecras(coords, target_cell_size=None):
@@ -1162,6 +1092,11 @@ def compute_affine_from_hecras(coords, target_cell_size=None):
     sample = coords[idx]
 
     # build KDTree and get 2nd NN distances (first is zero/self)
+    try:
+        from scipy.spatial import cKDTree
+    except Exception:
+        # fallback to slower scipy.spatial.KDTree if cKDTree not available
+        from scipy.spatial import KDTree as cKDTree
     tree = cKDTree(coords)
     dists, _ = tree.query(sample, k=2)
     # second column are nearest neighbor distances
@@ -1180,7 +1115,90 @@ def compute_affine_from_hecras(coords, target_cell_size=None):
     origin_x = minx - 0.5 * cell
     origin_y = maxy + 0.5 * cell
 
-    return Affine(cell, 0.0, origin_x, 0.0, -cell, origin_y)
+    try:
+        from rasterio.transform import Affine as _Affine
+        AffineLocal = _Affine
+    except Exception:
+        try:
+            from affine import Affine as _Affine
+            AffineLocal = _Affine
+        except Exception:
+            # last resort: build a simple stand-in
+            class AffineLocal:
+                def __init__(self, a, b, c, d, e, f):
+                    self.a = a; self.b = b; self.c = c; self.d = d; self.e = e; self.f = f
+                def __invert__(self):
+                    raise RuntimeError('Affine inverse not available')
+    return AffineLocal(cell, 0.0, origin_x, 0.0, -cell, origin_y)
+
+
+def derive_centerline_from_distance_raster(distance_rast, transform=None, crs=None, footprint_size=5, min_length=50):
+    """Derive centerline LineString(s) from a distance-to-edge raster.
+
+    Returns the main LineString (longest) or None, and a list of all LineStrings.
+    """
+    from scipy.ndimage import maximum_filter
+    from skimage.morphology import skeletonize
+    from skimage.measure import label
+    from shapely.geometry import LineString, MultiLineString
+    from shapely.ops import linemerge
+
+    if distance_rast is None or distance_rast.size == 0:
+        return None, []
+
+    # robust ridge detection: use maximum filter then tolerant comparison to avoid
+    # floating-point equality pitfalls on large distance values
+    local_max = maximum_filter(distance_rast, size=footprint_size)
+    # allow small numerical tolerance when comparing to local max
+    is_ridge = (np.isclose(distance_rast, local_max, rtol=1e-6, atol=1e-6)) & (distance_rast > 0.5)
+    # optional lightweight diagnostics when env var set
+    try:
+        import os
+        debug = os.getenv('EMERGENT_DEBUG_CENTERLINE', '0') == '1'
+    except Exception:
+        debug = False
+    if debug:
+        try:
+            print('derive_centerline: rast shape', getattr(distance_rast, 'shape', None), 'max', float(np.nanmax(distance_rast)), 'ridge pixels', int(np.count_nonzero(is_ridge)))
+        except Exception:
+            pass
+    skeleton = skeletonize(is_ridge)
+    labeled = label(skeleton, connectivity=2)
+
+    centerlines = []
+    for region_id in range(1, int(labeled.max()) + 1):
+        region_mask = (labeled == region_id)
+        ys, xs = np.where(region_mask)
+        if len(xs) < 5:
+            continue
+        world_coords = []
+        if transform is not None:
+            for i in range(len(xs)):
+                xw, yw = transform * (xs[i], ys[i])
+                world_coords.append((xw, yw))
+        else:
+            for i in range(len(xs)):
+                world_coords.append((float(xs[i]), float(ys[i])))
+        if len(world_coords) >= 2:
+            line = LineString(world_coords)
+            centerlines.append(line)
+
+    if not centerlines:
+        return None, []
+
+    merged = linemerge(centerlines)
+    if isinstance(merged, LineString):
+        main_centerline = merged
+        all_lines = [merged]
+    elif isinstance(merged, MultiLineString):
+        all_lines = list(merged.geoms)
+        main_centerline = max(all_lines, key=lambda g: g.length) if all_lines else None
+    else:
+        return None, centerlines
+
+    if main_centerline is not None and main_centerline.length >= min_length:
+        return main_centerline, all_lines
+    return None, all_lines
 
 # Get the directory of the current script
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1768,6 +1786,42 @@ else:
         np.clip(battery, 0.0, 1.0, out=battery)
         return battery
 
+# --- Fatigue helpers: bout distance and time-to-fatigue ---
+if _HAS_NUMBA:
+    @njit(parallel=True, cache=True)
+    def _bout_distance_numba(prev_X, X, prev_Y, Y):
+        n = prev_X.shape[0]
+        dist = np.empty(n, dtype=np.float64)
+        for i in prange(n):
+            dx = prev_X[i] - X[i]
+            dy = prev_Y[i] - Y[i]
+            dist[i] = math.sqrt(dx * dx + dy * dy)
+        return dist
+
+    @njit(parallel=True, cache=True)
+    def _time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s):
+        n = swim_speeds.shape[0]
+        ttf = np.empty(n, dtype=np.float64)
+        for i in prange(n):
+            ttf[i] = np.nan
+            s = swim_speeds[i]
+            if mask_prolonged[i]:
+                ttf[i] = math.exp(a_p + s * b_p)
+            if mask_sprint[i]:
+                ttf[i] = math.exp(a_s + s * b_s)
+        return ttf
+else:
+    def _bout_distance_numba(prev_X, X, prev_Y, Y):
+        dx = prev_X - X
+        dy = prev_Y - Y
+        return np.sqrt(dx * dx + dy * dy)
+
+    def _time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s):
+        ttf = np.full_like(swim_speeds, np.nan, dtype=float)
+        ttf = np.where(mask_prolonged, np.exp(a_p + swim_speeds * b_p), ttf)
+        ttf = np.where(mask_sprint, np.exp(a_s + swim_speeds * b_s), ttf)
+        return ttf
+
 # Precompile numba functions at import time to avoid first-call JIT overhead
 if _HAS_NUMBA:
     try:
@@ -1871,44 +1925,6 @@ else:
         vx = np.where((~mask) | dead_mask, 0.0, vx)
         vy = np.where((~mask) | dead_mask, 0.0, vy)
         return np.stack((vx * dt, vy * dt), axis=1)
-
-
-# --- Fatigue helpers: bout distance and time-to-fatigue ---
-if _HAS_NUMBA:
-    @njit(parallel=True, cache=True)
-    def _bout_distance_numba(prev_X, X, prev_Y, Y):
-        n = prev_X.shape[0]
-        dist = np.empty(n, dtype=np.float64)
-        for i in prange(n):
-            dx = prev_X[i] - X[i]
-            dy = prev_Y[i] - Y[i]
-            dist[i] = math.sqrt(dx * dx + dy * dy)
-        return dist
-
-    @njit(parallel=True, cache=True)
-    def _time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s):
-        n = swim_speeds.shape[0]
-        ttf = np.empty(n, dtype=np.float64)
-        for i in prange(n):
-            ttf[i] = np.nan
-            s = swim_speeds[i]
-            if mask_prolonged[i]:
-                ttf[i] = math.exp(a_p + s * b_p)
-            if mask_sprint[i]:
-                ttf[i] = math.exp(a_s + s * b_s)
-        return ttf
-else:
-    def _bout_distance_numba(prev_X, X, prev_Y, Y):
-        dx = prev_X - X
-        dy = prev_Y - Y
-        return np.sqrt(dx * dx + dy * dy)
-
-    def _time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s):
-        ttf = np.full_like(swim_speeds, np.nan, dtype=float)
-        ttf = np.where(mask_prolonged, np.exp(a_p + swim_speeds * b_p), ttf)
-        ttf = np.where(mask_sprint, np.exp(a_s + swim_speeds * b_s), ttf)
-        return ttf
-
 
 def pixel_to_geo(transform, rows, cols):
     """
@@ -3330,7 +3346,7 @@ class simulation():
                  basin, 
                  water_temp, 
                  start_polygon,
-                 longitudinal_profile,
+                 centerline,
                  env_files=None,
                  fish_length = None,
                  num_timesteps = 100, 
@@ -3720,35 +3736,126 @@ class simulation():
             self._hdf5_buffers[name] = np.zeros(buffer_shape, dtype='float32')
         self._buffer_pos = 0
         
-        # import longitudinal shapefile (or derive from HECRAS if requested)
-        longitudinal_derived = False
+        # import centerline shapefile (or derive from HECRAS if requested)
+        centerline_derived = False
         if self.use_hecras and self.hecras_plan_path:
             # If user didn't provide a longitudinal_profile file, derive a crude centerline
-            if longitudinal_profile is None or not os.path.exists(longitudinal_profile):
+            if centerline is None or not os.path.exists(centerline):
                 try:
-                    with h5py.File(self.hecras_plan_path, 'r') as hdf:
-                        pts = np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Center Coordinate'))
-                        # create a crude centerline by sorting points along the primary axis
-                        idx = np.argsort(pts[:, 0])
-                        line = LineString(pts[idx, :2])
-                        self.longitude = self.longitudinal_import(line)
-                        print('Derived longitudinal profile from HECRAS plan')
-                        longitudinal_derived = True
-                except Exception as e:
-                    print(f'Warning: could not derive longitudinal profile from HECRAS: {e}')
-                    # fall back to file-based import only if a valid file was provided
-                    if longitudinal_profile is not None and os.path.exists(longitudinal_profile):
-                        self.longitude = self.longitudinal_import(longitudinal_profile)
-                        longitudinal_derived = True
-                    else:
-                        raise RuntimeError(f'Failed to derive centerline from HECRAS and no valid longitudinal_profile file provided: {e}')
-            else:
-                self.longitude = self.longitudinal_import(longitudinal_profile)
-                longitudinal_derived = True
-        
-        if not longitudinal_derived:
-            self.longitude = self.longitudinal_import(longitudinal_profile)
+                    # Prefer extracting a centerline from rasters if available (wetted or distance_to)
+                    # Prefer rasters already present in the simulation HDF (`self.hdf5['environment']`)
+                    env = None
+                    try:
+                        env = self.hdf5.get('environment') if self.hdf5 is not None else None
+                    except Exception:
+                        env = None
 
+                    distance_to = None
+                    wetted = None
+                    x_coords = None
+                    y_coords = None
+                    if env is not None:
+                        try:
+                            if 'distance_to' in env:
+                                distance_to = np.array(env['distance_to'])
+                            if 'wetted' in env:
+                                wetted = np.array(env['wetted'])
+                            if 'x_coords' in env:
+                                x_coords = np.array(env['x_coords'])
+                            if 'y_coords' in env:
+                                y_coords = np.array(env['y_coords'])
+                        except Exception:
+                            distance_to = None
+                            wetted = None
+
+                    # If not present in sim HDF, try to open the HECRAS plan HDF as a fallback
+                    if distance_to is None and self.hecras_plan_path:
+                        try:
+                            with h5py.File(self.hecras_plan_path, 'r') as hdf:
+                                env2 = hdf.get('environment') if 'environment' in hdf else None
+                                if env2 is not None and 'distance_to' in env2:
+                                    distance_to = np.array(env2['distance_to'])
+                                if env2 is not None and 'wetted' in env2:
+                                    wetted = np.array(env2['wetted'])
+                                if env2 is not None and 'x_coords' in env2:
+                                    x_coords = x_coords if x_coords is not None else np.array(env2['x_coords'])
+                                if env2 is not None and 'y_coords' in env2:
+                                    y_coords = y_coords if y_coords is not None else np.array(env2['y_coords'])
+                        except Exception:
+                            pass
+
+                    # If distance_to not present, try to compute from wetted raster
+                    distance_to_rast = None
+                    if distance_to is not None and distance_to.size > 0:
+                        distance_to_rast = distance_to
+                    elif wetted is not None and wetted.size > 0:
+                        try:
+                            mask = (wetted != -9999) & (wetted > 0)
+                            pix = getattr(self, 'depth_rast_transform', None)
+                            pixel_width = pix.a if pix is not None else 1.0
+                            distance_to_rast = distance_transform_edt(mask) * pixel_width
+                        except Exception:
+                            distance_to_rast = None
+
+                    if distance_to_rast is None or distance_to_rast.size == 0:
+                        # cannot extract from rasters; fall back to file-based import if provided
+                        if centerline is not None and os.path.exists(centerline):
+                            self.centerline = self.centerline_import(centerline)
+                            centerline_derived = True
+                        else:
+                            raise RuntimeError('Could not derive centerline from HECRAS rasters and no centerline provided')
+                    else:
+                        # Use the standardized helper to extract centerlines and prefer a known Affine transform
+                        try:
+                            # prefer an existing raster transform stored on simulation
+                            target_affine = getattr(self, 'depth_rast_transform', None)
+
+                            # if that isn't available, try to derive an Affine from available x_coords/y_coords
+                            if target_affine is None:
+                                try:
+                                    # if we have full 2D x_coords/y_coords from the HDF environment use them
+                                    if x_coords is not None and y_coords is not None and getattr(x_coords, 'ndim', 0) == 2 and getattr(y_coords, 'ndim', 0) == 2:
+                                        coords = np.column_stack((x_coords.flatten(), y_coords.flatten()))
+                                        target_affine = compute_affine_from_hecras(coords)
+                                    else:
+                                        # try to read cell center coords directly from the HECRAS plan HDF
+                                        try:
+                                            with h5py.File(self.hecras_plan_path, 'r') as ph:
+                                                hecras_coords = ph['/Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:]
+                                            target_affine = compute_affine_from_hecras(hecras_coords)
+                                        except Exception:
+                                            target_affine = None
+                                except Exception:
+                                    target_affine = None
+
+                            main_centerline, all_lines = derive_centerline_from_distance_raster(distance_to_rast, transform=target_affine, footprint_size=5, min_length=50)
+                            if main_centerline is not None and main_centerline.length > 50:
+                                self.centerline = self.centerline_import(main_centerline)
+                                print('Derived centerline from HECRAS rasters (skeletonized)')
+                                centerline_derived = True
+                            else:
+                                # fallback to provided centerline file if available
+                                if centerline is not None and os.path.exists(centerline):
+                                    self.centerline = self.centerline_import(centerline)
+                                    centerline_derived = True
+                                else:
+                                    raise RuntimeError('Extracted centerline is invalid or too short')
+                        except Exception as e:
+                            raise
+                except Exception as e:
+                    print(f'Warning: could not derive centerline from HECRAS: {e}')
+                    # fall back to file-based import only if a valid file was provided
+                    if centerline is not None and os.path.exists(centerline):
+                        self.centerline = self.centerline_import(centerline)
+                        centerline_derived = True
+                    else:
+                        raise RuntimeError(f'Failed to derive centerline from HECRAS and no valid centerline file provided: {e}')
+            else:
+                self.centerline = self.centerline_import(centerline)
+                centerline_derived = True
+        
+        if not centerline_derived:
+            self.centerline = self.centerline_import(centerline)
         # boundary_surface
         self.boundary_surface()
 
@@ -4466,24 +4573,30 @@ class simulation():
         src.close()
 
 
-    def longitudinal_import(self, shapefile):
-        # Load the shapefile with the longitudinal line, or accept a shapely geometry
+    def centerline_import(self, shapefile):
+        # Load the shapefile with the centerline, or accept a shapely geometry
         if shapefile is None:
-            self.longitudinal = None
+            self.centerline = None
+            # Keep legacy attribute name in sync
+            # legacy attribute removed; use `centerline` only
             return None
 
         # If a shapely geometry was passed in directly, use it
         if isinstance(shapefile, BaseGeometry):
-            self.longitudinal = shapefile
-            return self.longitudinal
+            self.centerline = shapefile
+            # Also maintain legacy `longitudinal` attribute expected elsewhere
+            # legacy attribute removed; use `centerline` only
+            return self.centerline
 
         # Otherwise assume a filepath and read with geopandas
         line_gdf = gpd.read_file(shapefile)
         if len(line_gdf) == 0:
-            self.longitudinal = None
+            self.centerline = None
             return None
-        self.longitudinal = line_gdf.geometry.iloc[0]
-        return self.longitudinal
+        self.centerline = line_gdf.geometry.iloc[0]
+        # Also maintain legacy `longitudinal` attribute expected by other code
+        # do not set legacy `longitudinal` attribute; keep `centerline` only
+        return self.centerline
         
     def compute_linear_positions(self, line):
         # Vectorized projection of points onto a polyline (line can be a shapely LineString)
@@ -5373,7 +5486,7 @@ class simulation():
         self.vel_mag = sampled['vel_mag']
         self.wet = sampled['wetted']
         self.distance_to = sampled['distance_to']
-        self.current_longitudes = self.compute_linear_positions(self.longitudinal)
+        self.current_longitudes = self.compute_linear_positions(self.centerline)
 
         # Ensure neighbor lists and closest_agent are present — some code paths
         # assume these are set before behavior arbitration. Compute fallbacks
@@ -7900,11 +8013,11 @@ class simulation():
             """
             
             # Compute linear positions based on available data
-            if self.simulation.longitudinal is not None:
-                # Use longitudinal profile shapefile if available
-                linear_positions = self.simulation.compute_linear_positions(self.simulation.longitudinal)
+            if getattr(self.simulation, 'centerline', None) is not None:
+                # Use centerline profile shapefile if available
+                linear_positions = self.simulation.compute_linear_positions(self.simulation.centerline)
             else:
-                # For HECRAS mode without longitudinal profile, compute cumulative distance traveled
+                # For HECRAS mode without centerline profile, compute cumulative distance traveled
                 # along the migration path. For upstream migration, this is the integral of movement
                 # against the local flow direction. For downstream, it's movement with the flow.
                 
@@ -7974,7 +8087,7 @@ class simulation():
             dt = self.simulation.past_longitudes.shape[1]
             expected_displacement = avg_speeds * dt
             
-            # calculate chnge in longitudinal position
+            # calculate change in centerline position
             long_dir = self.simulation.past_longitudes[:,-2] - self.simulation.past_longitudes[:,-1]
 
             # Check if agents have moved less than expected, if they are moving backwards, and if they are sustained swimming mode
