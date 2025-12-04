@@ -74,7 +74,7 @@ def setup_training_simulation(args):
 def main():
     parser = argparse.ArgumentParser(description='Train behavioral weights with visualization')
     parser.add_argument('--episodes', type=int, default=10, help='Number of training episodes')
-    parser.add_argument('--timesteps', type=int, default=100, help='Timesteps per episode')
+    parser.add_argument('--timesteps', type=int, default=1800, help='Timesteps per episode')
     parser.add_argument('--agents', type=int, default=100, help='Number of agents')
     parser.add_argument('--fish-length', type=int, default=450, help='Fish length (mm)')
     parser.add_argument('--dt', type=float, default=0.1, help='Timestep duration (s)')

@@ -130,8 +130,47 @@ class SalmonViewer(QtWidgets.QWidget):
         self.setLayout(main_layout)
         
     def setup_background(self):
-        """Setup depth raster as background image."""
+        """Setup depth raster as background image or HECRAS wetted cells."""
         try:
+            # Try HECRAS mode first
+            if hasattr(self.sim, 'use_hecras') and self.sim.use_hecras and hasattr(self.sim, 'hecras_plan_path'):
+                import h5py
+                from scipy.interpolate import griddata
+                plan_path = self.sim.hecras_plan_path
+                with h5py.File(plan_path, 'r') as hdf:
+                    coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:])
+                    depth = np.array(hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'][0, :])
+                    
+                # Mask by wetted perimeter
+                wetted_mask = depth > 0.05
+                wetted_coords = coords[wetted_mask]
+                wetted_depth = depth[wetted_mask]
+                
+                # Create regular grid for ImageItem
+                x_min, x_max = wetted_coords[:, 0].min(), wetted_coords[:, 0].max()
+                y_min, y_max = wetted_coords[:, 1].min(), wetted_coords[:, 1].max()
+                grid_res = 200  # Resolution
+                xi = np.linspace(x_min, x_max, grid_res)
+                yi = np.linspace(y_min, y_max, grid_res)
+                xi_grid, yi_grid = np.meshgrid(xi, yi)
+                
+                # Interpolate depth onto grid
+                depth_grid = griddata(wetted_coords, wetted_depth, (xi_grid, yi_grid), method='nearest')
+                
+                # Create ImageItem with viridis colormap
+                img = pg.ImageItem(depth_grid, autoRange=False, autoLevels=True)
+                img.setRect(QtCore.QRectF(x_min, y_min, x_max - x_min, y_max - y_min))
+                img.setZValue(-10)
+                colormap = pg.colormap.get('viridis')
+                img.setColorMap(colormap)
+                self.plot_widget.addItem(img)
+                
+                # Set view bounds
+                self.plot_widget.setXRange(x_min, x_max)
+                self.plot_widget.setYRange(y_min, y_max)
+                return
+            
+            # Fallback: load from HDF5
             env = self.sim.hdf5.get('environment')
             if env is None or 'depth' not in env:
                 return
@@ -201,30 +240,30 @@ class SalmonViewer(QtWidgets.QWidget):
         speed_group.setLayout(speed_layout)
         layout.addWidget(speed_group)
         
-        # Agent count display
+        # Agent count display with display options in right column
         agent_group = QGroupBox("Agents")
-        agent_layout = QVBoxLayout()
+        agent_layout = QHBoxLayout()
+        
+        # Left column: counts
+        left_col = QVBoxLayout()
         self.agent_count_label = QLabel(f"Total: {self.sim.num_agents}")
         self.alive_count_label = QLabel(f"Alive: {self.sim.num_agents}")
-        agent_layout.addWidget(self.agent_count_label)
-        agent_layout.addWidget(self.alive_count_label)
+        left_col.addWidget(self.agent_count_label)
+        left_col.addWidget(self.alive_count_label)
+        
+        # Right column: display options
+        right_col = QVBoxLayout()
+        self.show_trajectories_cb = QCheckBox("Trajectories")
+        self.show_trajectories_cb.setChecked(False)
+        self.show_dead_cb = QCheckBox("Show Dead")
+        self.show_dead_cb.setChecked(True)
+        right_col.addWidget(self.show_trajectories_cb)
+        right_col.addWidget(self.show_dead_cb)
+        
+        agent_layout.addLayout(left_col)
+        agent_layout.addLayout(right_col)
         agent_group.setLayout(agent_layout)
         layout.addWidget(agent_group)
-        
-        # Display options
-        display_group = QGroupBox("Display")
-        display_layout = QVBoxLayout()
-        
-        self.show_trajectories_cb = QCheckBox("Show Trajectories")
-        self.show_trajectories_cb.setChecked(False)
-        display_layout.addWidget(self.show_trajectories_cb)
-        
-        self.show_dead_cb = QCheckBox("Show Dead Agents")
-        self.show_dead_cb.setChecked(True)
-        display_layout.addWidget(self.show_dead_cb)
-        
-        display_group.setLayout(display_layout)
-        layout.addWidget(display_group)
         
         # Behavioral weights panel
         weights_group = self.create_weights_panel()
@@ -246,9 +285,11 @@ class SalmonViewer(QtWidgets.QWidget):
     def create_rl_panel(self):
         """Create RL training metrics panel."""
         rl_group = QGroupBox("RL Training")
+        rl_group.setCheckable(True)
+        rl_group.setChecked(True)
         layout = QVBoxLayout()
         
-        self.episode_label = QLabel(f"Episode: {self.current_episode}")
+        self.episode_label = QLabel(f"Episode: {self.current_episode} | Timestep: 0")
         self.reward_label = QLabel(f"Reward: {self.episode_reward:.2f}")
         self.best_reward_label = QLabel(f"Best: {self.best_reward:.2f}")
         
@@ -267,46 +308,89 @@ class SalmonViewer(QtWidgets.QWidget):
         return rl_group
     
     def create_weights_panel(self):
-        """Create behavioral weights display panel."""
+        """Create behavioral weights display panel with sliders."""
         weights_group = QGroupBox("Behavioral Weights")
+        weights_group.setCheckable(True)
+        weights_group.setChecked(True)
         layout = QVBoxLayout()
         
         # Get weights from simulation
         if hasattr(self.sim, 'behavioral_weights'):
             weights = self.sim.behavioral_weights
             
-            # Display each weight with label
+            # Create sliders for each weight
             self.weight_labels = {}
-            for attr in ['rheotaxis', 'phototaxis', 'thigmotaxis', 'avoid_land', 
-                        'energy_conservation', 'exploration']:
+            self.weight_sliders = {}
+            weight_attrs = ['rheotaxis_weight', 'cohesion_weight', 'separation_weight', 
+                          'alignment_weight', 'sog_weight', 'border_cue_weight']
+            
+            for attr in weight_attrs:
                 if hasattr(weights, attr):
                     value = getattr(weights, attr)
+                    
+                    # Label
                     label = QLabel(f"{attr.replace('_', ' ').title()}: {value:.3f}")
                     label.setStyleSheet("font-size: 9pt;")
                     self.weight_labels[attr] = label
                     layout.addWidget(label)
+                    
+                    # Slider (0.0 to 2.0, resolution 0.01)
+                    slider = QSlider(Qt.Horizontal)
+                    slider.setMinimum(0)
+                    slider.setMaximum(200)
+                    slider.setValue(int(value * 100))
+                    slider.valueChanged.connect(lambda v, a=attr, l=label: self.update_weight(a, v, l))
+                    self.weight_sliders[attr] = slider
+                    layout.addWidget(slider)
         else:
             # No weights available
             no_weights_label = QLabel("No weights configured")
             no_weights_label.setStyleSheet("font-style: italic; color: gray;")
             layout.addWidget(no_weights_label)
             self.weight_labels = {}
+            self.weight_sliders = {}
         
         weights_group.setLayout(layout)
         return weights_group
     
+    def update_weight(self, attr, value, label):
+        """Update behavioral weight from slider."""
+        weight_value = value / 100.0
+        label.setText(f"{attr.replace('_', ' ').title()}: {weight_value:.3f}")
+        if hasattr(self.sim, 'behavioral_weights'):
+            setattr(self.sim.behavioral_weights, attr, weight_value)
+            self.sim.apply_behavioral_weights(self.sim.behavioral_weights)
+    
     def create_metrics_panel(self):
         """Create behavior metrics panel."""
         metrics_group = QGroupBox("Metrics")
+        metrics_group.setCheckable(True)
+        metrics_group.setChecked(True)
         layout = QVBoxLayout()
         
+        # Speed metrics
         self.mean_speed_label = QLabel("Mean Speed: --")
-        self.mean_energy_label = QLabel("Mean Energy: --")
-        self.upstream_progress_label = QLabel("Upstream Progress: --")
-        
+        self.max_speed_label = QLabel("Max Speed: --")
         layout.addWidget(self.mean_speed_label)
+        layout.addWidget(self.max_speed_label)
+        
+        # Energy metrics
+        self.mean_energy_label = QLabel("Mean Energy: --")
+        self.min_energy_label = QLabel("Min Energy: --")
         layout.addWidget(self.mean_energy_label)
+        layout.addWidget(self.min_energy_label)
+        
+        # Progress metrics
+        self.upstream_progress_label = QLabel("Upstream Progress: --")
+        self.mean_centerline_label = QLabel("Mean Centerline: --")
         layout.addWidget(self.upstream_progress_label)
+        layout.addWidget(self.mean_centerline_label)
+        
+        # Schooling metrics
+        self.mean_nn_dist_label = QLabel("Mean NN Dist: --")
+        self.polarization_label = QLabel("Polarization: --")
+        layout.addWidget(self.mean_nn_dist_label)
+        layout.addWidget(self.polarization_label)
         
         metrics_group.setLayout(layout)
         return metrics_group
@@ -411,8 +495,8 @@ class SalmonViewer(QtWidgets.QWidget):
             self.rl_trainer.behavioral_weights.mutate(scale=0.1)
             self.sim.apply_behavioral_weights(self.rl_trainer.behavioral_weights)
             
-            # Reset for next episode
-            self.sim.reset_spatial_state()
+            # Reset for next episode (including agent positions)
+            self.sim.reset_spatial_state(reset_positions=True)
             self.current_episode += 1
             self.current_timestep = 0
             self.episode_reward = 0.0
@@ -436,9 +520,9 @@ class SalmonViewer(QtWidgets.QWidget):
             x = self.sim.X
             y = self.sim.Y
             # Color by alive/dead
-            colors = np.where(alive_mask, 
-                            [[255, 100, 100, 200]] * len(x),  # Alive: red
-                            [[100, 100, 100, 100]] * len(x))  # Dead: gray
+            alive_color = np.array([255, 100, 100, 200])
+            dead_color = np.array([100, 100, 100, 100])
+            colors = np.where(alive_mask[:, np.newaxis], alive_color, dead_color)
         else:
             # Show only alive
             x = self.sim.X[alive_mask]
@@ -460,7 +544,7 @@ class SalmonViewer(QtWidgets.QWidget):
         
         # Update RL labels
         if self.rl_trainer:
-            self.episode_label.setText(f"Episode: {self.current_episode}")
+            self.episode_label.setText(f"Episode: {self.current_episode} | Timestep: {self.current_timestep}")
             self.reward_label.setText(f"Reward: {self.episode_reward:.2f}")
             self.best_reward_label.setText(f"Best: {self.best_reward:.2f}")
             
@@ -476,13 +560,37 @@ class SalmonViewer(QtWidgets.QWidget):
         
         # Update metrics
         try:
-            if hasattr(self.sim, 'swim_speeds'):
+            if hasattr(self.sim, 'swim_speeds') and alive_mask.sum() > 0:
                 mean_speed = np.nanmean(self.sim.swim_speeds[alive_mask, -1])
+                max_speed = np.nanmax(self.sim.swim_speeds[alive_mask, -1])
                 self.mean_speed_label.setText(f"Mean Speed: {mean_speed:.2f} m/s")
+                self.max_speed_label.setText(f"Max Speed: {max_speed:.2f} m/s")
             
-            if hasattr(self.sim, 'battery'):
+            if hasattr(self.sim, 'battery') and alive_mask.sum() > 0:
                 mean_energy = np.mean(self.sim.battery[alive_mask])
-                self.mean_energy_label.setText(f"Mean Energy: {mean_energy:.2f}")
+                min_energy = np.min(self.sim.battery[alive_mask])
+                self.mean_energy_label.setText(f"Mean Energy: {mean_energy:.1f}")
+                self.min_energy_label.setText(f"Min Energy: {min_energy:.1f}")
+            
+            if hasattr(self.sim, 'current_centerline_meas') and alive_mask.sum() > 0:
+                mean_cl = np.mean(self.sim.current_centerline_meas[alive_mask])
+                self.mean_centerline_label.setText(f"Mean Centerline: {mean_cl:.1f} m")
+                
+            # Schooling metrics (if available)
+            if alive_mask.sum() > 1:
+                from scipy.spatial import cKDTree
+                alive_pos = np.column_stack([self.sim.X[alive_mask], self.sim.Y[alive_mask]])
+                tree = cKDTree(alive_pos)
+                distances, _ = tree.query(alive_pos, k=2)
+                mean_nn_dist = np.mean(distances[:, 1])
+                self.mean_nn_dist_label.setText(f"Mean NN Dist: {mean_nn_dist:.1f} m")
+                
+                # Polarization (alignment of headings)
+                if hasattr(self.sim, 'heading'):
+                    alive_headings = self.sim.heading[alive_mask]
+                    mean_vec = np.array([np.mean(np.cos(alive_headings)), np.mean(np.sin(alive_headings))])
+                    polarization = np.linalg.norm(mean_vec)
+                    self.polarization_label.setText(f"Polarization: {polarization:.3f}")
         except Exception:
             pass
     

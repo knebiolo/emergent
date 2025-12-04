@@ -4074,6 +4074,9 @@ class simulation():
         # model directory and model name
         self.model_dir = model_dir
         self.model_name = model_name
+        
+        # Save start polygon path for episode resets
+        self.start_polygon_path = start_polygon
         self.db = os.path.join(self.model_dir,'%s.h5'%(self.model_name))
                 
         # coordinate reference system for the model
@@ -4653,31 +4656,61 @@ class simulation():
         except Exception:
             pass
     
-    def reset_spatial_state(self):
+    def reset_spatial_state(self, reset_positions=False):
         """Reset all spatial/ephemeral state for a new simulation episode.
         
         This preserves learned behavioral weights but resets:
-        - Agent positions (back to starting area)
+        - Agent positions (back to starting area or randomized)
         - Velocities and headings (randomized)
         - Energy/battery levels
         - Memory buffers (eddy escape, past positions)
         - Dead/alive status
         
+        Args:
+            reset_positions: If True, randomize positions within start polygon.
+                           If False, restore to saved initial positions.
+        
         Behavioral weights (cohesion, separation, rheotaxis, etc.) are NOT reset.
         """
         # Save initial positions if not already saved
-        if self._initial_positions is None:
+        if self._initial_positions is None or reset_positions:
+            if reset_positions and hasattr(self, 'start_polygon_path'):
+                # Re-randomize positions
+                import geopandas as gpd
+                from shapely.geometry import Point
+                start_poly = gpd.read_file(self.start_polygon_path)
+                geometry = start_poly.geometry.iloc[0]
+                minx, miny, maxx, maxy = geometry.bounds
+                
+                X, Y = [], []
+                attempts = 0
+                max_attempts = self.num_agents * 10
+                while len(X) < self.num_agents and attempts < max_attempts:
+                    x = np.random.uniform(minx, maxx)
+                    y = np.random.uniform(miny, maxy)
+                    pnt = Point(x, y)
+                    if geometry.contains(pnt):
+                        X.append(x)
+                        Y.append(y)
+                    attempts += 1
+                
+                if len(X) < self.num_agents:
+                    raise ValueError(f"Could only find {len(X)} valid positions in start polygon")
+                
+                self.X = np.array(X)[:self.num_agents]
+                self.Y = np.array(Y)[:self.num_agents]
+            
             self._initial_positions = {
                 'X': self.X.copy(),
                 'Y': self.Y.copy(),
                 'Z': self.Z.copy() if hasattr(self, 'Z') else None
             }
-        
-        # Reset positions to initial state
-        self.X = self._initial_positions['X'].copy()
-        self.Y = self._initial_positions['Y'].copy()
-        if self._initial_positions['Z'] is not None:
-            self.Z = self._initial_positions['Z'].copy()
+        else:
+            # Reset positions to saved initial state
+            self.X = self._initial_positions['X'].copy()
+            self.Y = self._initial_positions['Y'].copy()
+            if self._initial_positions['Z'] is not None:
+                self.Z = self._initial_positions['Z'].copy()
         
         self.prev_X = self.X.copy()
         self.prev_Y = self.Y.copy()
@@ -6616,11 +6649,12 @@ class simulation():
             thrust_N = thrust_Nm / (self.simulation.length / 1000.)
         
             # Convert thrust to vector
-            thrust = np.where(mask,[thrust_N * np.cos(self.simulation.heading),
-                                    thrust_N * np.sin(self.simulation.heading)],0)
+            thrust_x = np.where(mask, thrust_N * np.cos(self.simulation.heading), 0.0)
+            thrust_y = np.where(mask, thrust_N * np.sin(self.simulation.heading), 0.0)
+            thrust = np.stack((thrust_x, thrust_y), axis=1)
                 
-            self.simulation.thrust = thrust.T
-            
+            self.simulation.thrust = thrust
+        
         def frequency(self, mask, t, dt, fish_velocities = None):
             ''' Calculate tailbeat frequencies for a collection of agents in a vectorized manner.
             
@@ -8768,8 +8802,11 @@ class simulation():
             dt = self.simulation.past_centerline_meas.shape[1]
             expected_displacement = avg_speeds * dt
             
-            # calculate change in centerline position
-            centerline_dir = self.simulation.past_centerline_meas[:,-2] - self.simulation.past_centerline_meas[:,-1]
+            # calculate change in centerline position (only if we have at least 2 timesteps)
+            if self.simulation.past_centerline_meas.shape[1] >= 2:
+                centerline_dir = self.simulation.past_centerline_meas[:,-2] - self.simulation.past_centerline_meas[:,-1]
+            else:
+                centerline_dir = np.zeros(self.simulation.num_agents)
 
             # Check if agents have moved less than expected, if they are moving backwards, and if they are sustained swimming mode
             if delta.shape == total_displacement.shape and t >= 1800.:
