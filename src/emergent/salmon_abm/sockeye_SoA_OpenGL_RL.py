@@ -503,6 +503,23 @@ class RLTrainer:
             accel_change = abs(current_state['mean_acceleration'] - prev_state['mean_acceleration'])
             smoothness_reward = -accel_change * 0.2
             reward += smoothness_reward
+
+        # 8. COLLISIONS: heavy penalty per collision event (pairwise contact)
+        if 'collision_count' in current_state:
+            # Penalize collisions strongly to encourage separation behavior
+            collision_penalty = -float(current_state['collision_count']) * 100.0
+            reward += collision_penalty
+
+        # 9. SHALLOW / DRY PENALTIES: heavy penalties when agents are on very shallow water
+        # current_state may include 'dry_count' (depth <= 0) and 'shallow_count' (depth < 0.5*body_depth)
+        if 'dry_count' in current_state:
+            # Severe penalty for being on dry ground (out of water)
+            dry_penalty = -float(current_state['dry_count']) * 500.0
+            reward += dry_penalty
+        if 'shallow_count' in current_state:
+            # Heavy penalty for being in water shallower than half their body depth
+            shallow_penalty = -float(current_state['shallow_count']) * 200.0
+            reward += shallow_penalty
         
         return reward
     
@@ -532,6 +549,51 @@ class RLTrainer:
                 )
                 self._cached_schooling_metrics = schooling_metrics
             metrics['schooling_metrics'] = self._cached_schooling_metrics
+
+            # Count collision events (pairs closer than 0.25 * body length)
+            try:
+                from scipy.spatial import cKDTree
+                positions = np.column_stack([self.sim.X, self.sim.Y])
+                body_lengths = self.sim.length / 1000.0
+                # per-agent threshold = 0.25 * body_length
+                per_agent_thresh = 0.25 * body_lengths
+                max_thresh = np.nanmax(per_agent_thresh)
+                tree = cKDTree(positions)
+                pairs = tree.query_pairs(r=max_thresh)
+                collision_count = 0
+                if pairs:
+                    for i, j in pairs:
+                        dist = np.hypot(self.sim.X[i] - self.sim.X[j], self.sim.Y[i] - self.sim.Y[j])
+                        pair_thresh = 0.25 * (per_agent_thresh[i] + per_agent_thresh[j]) * 0.5
+                        if dist < pair_thresh:
+                            collision_count += 1
+                metrics['collision_count'] = collision_count
+            except Exception:
+                metrics['collision_count'] = 0
+
+            # Dry / shallow detection
+            try:
+                # self.sim.depth should be per-agent depth in meters
+                depths = np.asarray(self.sim.depth)
+                # body_depth stored in cm in sim; convert to meters
+                if hasattr(self.sim, 'body_depth'):
+                    body_depth_m = np.asarray(self.sim.body_depth) / 100.0
+                else:
+                    body_depth_m = np.full_like(depths, 0.1)
+
+                # dry: depth <= 0 (or very near zero)
+                dry_mask = depths <= 0.0
+                dry_count = int(np.sum(dry_mask & alive_mask))
+
+                # shallow: depth < 0.5 * body_depth
+                shallow_mask = depths < (0.5 * body_depth_m)
+                shallow_count = int(np.sum(shallow_mask & alive_mask))
+
+                metrics['dry_count'] = dry_count
+                metrics['shallow_count'] = shallow_count
+            except Exception:
+                metrics['dry_count'] = 0
+                metrics['shallow_count'] = 0
         
         # 2. DRAFTING BENEFITS (Energy efficiency from swimming behind others)
         if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y') and hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
@@ -4708,6 +4770,44 @@ class simulation():
         else:
             # Reset positions to saved initial state
             self.X = self._initial_positions['X'].copy()
+        # Randomize headings and small SOG variation so agents do not all point into flow
+        try:
+            # Add small random heading perturbation uniform [-pi, pi]
+            self.heading = np.random.uniform(-np.pi, np.pi, size=self.num_agents)
+        except Exception:
+            pass
+        try:
+            # Slightly randomize SOG around current ideal_sog (±10%)
+            if hasattr(self, 'ideal_sog'):
+                base = np.asarray(self.ideal_sog)
+                if base.size == 1:
+                    base = np.full(self.num_agents, float(base))
+                self.sog = base * np.random.uniform(0.9, 1.1, size=self.num_agents)
+                self.ideal_sog = self.sog.copy()
+        except Exception:
+            pass
+
+        # Optionally randomize behavioral weights per agent (small gaussian perturbation)
+        try:
+            if hasattr(self, 'behavioral_weights') and getattr(self, 'randomize_weights_on_reset', True):
+                bw = self.behavioral_weights
+                # Perturb numeric fields only
+                for k, v in bw.to_dict().items():
+                    if isinstance(v, (int, float)):
+                        # Add small gaussian noise (std = 5% of value or 0.05 absolute)
+                        std = max(abs(v) * 0.05, 0.05)
+                        try:
+                            newv = float(v) + np.random.normal(0, std)
+                            setattr(bw, k, newv)
+                        except Exception:
+                            pass
+                # apply mutated weights
+                try:
+                    self.apply_behavioral_weights(bw)
+                except Exception:
+                    pass
+        except Exception:
+            pass
             self.Y = self._initial_positions['Y'].copy()
             if self._initial_positions['Z'] is not None:
                 self.Z = self._initial_positions['Z'].copy()
@@ -9534,6 +9634,65 @@ class simulation():
         # Update positions
         self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
         self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
+
+        # Simple billiard-ball collision response: if two agents are closer than 0.25*body_length, push them apart
+        try:
+            # Convert lengths (stored in mm) to meters for threshold
+            if hasattr(self, 'length'):
+                # length may be scalar or per-agent
+                lengths_m = (np.asarray(self.length) / 1000.0)
+                if lengths_m.size == 1:
+                    lengths_m = np.full(self.num_agents, float(lengths_m))
+            else:
+                # fallback average length 0.45 m
+                lengths_m = np.full(self.num_agents, 0.45)
+
+            touch_thresh = 0.25 * lengths_m  # meters
+
+            # Build pairwise KDTree for alive agents only to be efficient
+            from scipy.spatial import cKDTree
+            positions = np.column_stack([self.X, self.Y])
+            tree = cKDTree(positions)
+            # query pairs within max threshold
+            max_thresh = np.max(touch_thresh)
+            pairs = tree.query_pairs(r=max_thresh)
+
+            if pairs:
+                # For each pair, compute required separation and apply half displacement to each agent
+                disp = np.zeros_like(positions)
+                for i, j in pairs:
+                    dx = self.X[j] - self.X[i]
+                    dy = self.Y[j] - self.Y[i]
+                    dist = np.hypot(dx, dy)
+                    if dist <= 1e-6:
+                        # If exactly overlapping, nudge randomly
+                        nx, ny = np.random.uniform(-1, 1), np.random.uniform(-1, 1)
+                        dist = np.hypot(nx, ny)
+                        nx /= dist
+                        ny /= dist
+                    else:
+                        nx, ny = dx / dist, dy / dist
+
+                    # threshold for this pair = 0.25 * average body length
+                    pair_thresh = 0.25 * (lengths_m[i] + lengths_m[j]) * 0.5
+                    if dist < pair_thresh:
+                        # separation amount required
+                        sep = pair_thresh - dist
+                        # apply half separation to each, opposite directions
+                        disp_i = -0.5 * sep * np.array([nx, ny])
+                        disp_j = 0.5 * sep * np.array([nx, ny])
+                        disp[i] += disp_i
+                        disp[j] += disp_j
+
+                # Apply the displacement to positions and small velocity impulse
+                if np.any(disp != 0):
+                    self.X += disp[:, 0]
+                    self.Y += disp[:, 1]
+                    # small velocity impulse away from collision
+                    self.x_vel += disp[:, 0] / max(1e-6, dt)
+                    self.y_vel += disp[:, 1] / max(1e-6, dt)
+        except Exception:
+            pass
         
         # Re-sample HECRAS environmental data at new positions
         # Update every N frames for performance (hydraulics change slowly)

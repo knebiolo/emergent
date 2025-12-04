@@ -363,6 +363,12 @@ class SalmonViewer(QtWidgets.QWidget):
                         pass
 
                     shaded_uint8 = np.clip(shaded * 255, 0, 255).astype('uint8')
+                    # transpose arrays so rows/cols match plotting coordinate orientation
+                    try:
+                        shaded_uint8 = shaded_uint8.T
+                        alpha_channel = alpha_channel.T
+                    except Exception:
+                        pass
                     rgba_uint8 = np.dstack([shaded_uint8, alpha_channel])
 
                     img_item = pg.ImageItem(rgba_uint8)
@@ -656,7 +662,12 @@ class SalmonViewer(QtWidgets.QWidget):
     def toggle_pause(self):
         """Toggle simulation pause state."""
         self.paused = not self.paused
-        self.play_pause_btn.setText("Play" if self.paused else "Pause")
+        # Update Play/Pause button labels
+        try:
+            self.play_btn.setText("Play" if self.paused else "Pause")
+            self.pause_btn.setText("Pause" if self.paused else "Play")
+        except Exception:
+            pass
         # Ensure play/pause also toggles the timer
         if hasattr(self, 'timer'):
             if self.paused:
@@ -727,7 +738,11 @@ class SalmonViewer(QtWidgets.QWidget):
             import traceback
             traceback.print_exc()
             self.paused = True
-            self.play_pause_btn.setText("Play")
+            try:
+                self.play_btn.setText("Play")
+                self.pause_btn.setText("Pause")
+            except Exception:
+                pass
     
     def update_rl_training(self):
         """Update RL training metrics and episode management."""
