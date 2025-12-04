@@ -1,2 +1,0 @@
-wind_speed_m_s,max_err_deg,mean_err_deg,max_raw_deg,max_rud_deg,sat_frac,zigzag_metrics
-5.0,40.72004221580636,20.27559836322237,7.199841627626064,7.200373051554587,0.0,"{'peak_overshoot_deg': 7.555249123036797, 'settling_time_s': 23.100000000000023, 'steady_state_error_deg': np.float64(-11.37431222661167), 'oscillation_period_s': np.float64(61.31666666666667)}"
