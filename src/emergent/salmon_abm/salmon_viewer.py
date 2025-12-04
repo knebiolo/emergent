@@ -173,16 +173,21 @@ class SalmonViewer(QtWidgets.QWidget):
         panel = QGroupBox("Controls & Weights")
         layout = QVBoxLayout()
         
-        # Play/Pause button
-        self.play_pause_btn = QPushButton("Pause")
-        self.play_pause_btn.clicked.connect(self.toggle_pause)
-        layout.addWidget(self.play_pause_btn)
-        layout.addWidget(self.play_pause_btn)
-        
-        # Reset button
-        reset_btn = QPushButton("Reset Simulation")
+        # Play / Pause / Reset buttons in a single row
+        btn_row = QHBoxLayout()
+        self.play_btn = QPushButton("Play")
+        self.play_btn.clicked.connect(self.toggle_pause)
+        btn_row.addWidget(self.play_btn)
+
+        self.pause_btn = QPushButton("Pause")
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        btn_row.addWidget(self.pause_btn)
+
+        reset_btn = QPushButton("Reset")
         reset_btn.clicked.connect(self.reset_simulation)
-        layout.addWidget(reset_btn)
+        btn_row.addWidget(reset_btn)
+
+        layout.addLayout(btn_row)
         
         # Speed control
         speed_group = QGroupBox("Simulation Speed")
@@ -245,71 +250,148 @@ class SalmonViewer(QtWidgets.QWidget):
                 with h5py.File(plan_path, 'r') as hdf:
                     coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:])
                     depth = np.array(hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'][0, :])
-                    face_points = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Face and Point Indexes'][:])
-                    points = np.array(hdf['Geometry/2D Flow Areas/2D area/FacePoints Coordinate'][:])
+                    # Use documented HECRAS dataset names
+                    face_info = None
+                    points = None
+                    if 'Geometry/2D Flow Areas/2D area/Cells Face and Orientation Info' in hdf:
+                        face_info = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Face and Orientation Info'][:])
+                    if 'Geometry/2D Flow Areas/2D area/FacePoints Coordinate' in hdf:
+                        points = np.array(hdf['Geometry/2D Flow Areas/2D area/FacePoints Coordinate'][:])
                     
                 # Mask by wetted perimeter
                 print("Masking by wetted perimeter...")
                 wetted_mask = depth > 0.05
                 wetted_coords = coords[wetted_mask]
                 wetted_depth = depth[wetted_mask]
-                wetted_face_points = face_points[wetted_mask]
+                # If face_info/points present, compute areas; otherwise skip adaptive sizing
+                wetted_face_points = None
+                if face_info is not None and points is not None:
+                    wetted_face_points = face_info[wetted_mask]
                 print(f"Wetted cells: {len(wetted_coords)}")
                 
-                # Calculate cell areas to determine appropriate dot sizes
-                print("Calculating cell areas...")
-                cell_areas = []
-                for fp in wetted_face_points:
-                    # Get face point indices
-                    face_idx = fp[fp >= 0]  # Filter out -1 padding
-                    if len(face_idx) >= 3:
-                        cell_points = points[face_idx]
-                        # Approximate area using bounding box
-                        x_range = cell_points[:, 0].max() - cell_points[:, 0].min()
-                        y_range = cell_points[:, 1].max() - cell_points[:, 1].min()
-                        area = x_range * y_range
-                        cell_areas.append(area)
+                # Calculate cell areas to determine appropriate dot sizes when geometry is available
+                cell_areas = None
+                if wetted_face_points is not None:
+                    print("Calculating cell areas...")
+                    cell_areas = []
+                    for fp in wetted_face_points:
+                        face_idx = fp[fp >= 0]  # Filter out -1 padding
+                        if len(face_idx) >= 3:
+                            cell_points = points[face_idx]
+                            # Approximate area using bounding box
+                            x_range = cell_points[:, 0].max() - cell_points[:, 0].min()
+                            y_range = cell_points[:, 1].max() - cell_points[:, 1].min()
+                            area = x_range * y_range
+                            cell_areas.append(area)
+                        else:
+                            cell_areas.append(1.0)
+                    cell_areas = np.array(cell_areas)
+                
+                # Fast IDW rasterization + optional hillshade for quick background
+                print("Rasterizing wetted depth via fast IDW and applying hillshade...")
+                try:
+                    from scipy.spatial import cKDTree
+                    import matplotlib.cm as cm
+                    import matplotlib.colors as mcolors
+                    from matplotlib.colors import LightSource
+
+                    pts = wetted_coords
+                    vals = wetted_depth
+
+                    # Sample points to reduce compute if necessary
+                    max_pts = 50000
+                    if len(pts) > max_pts:
+                        rng = np.random.default_rng(0)
+                        idx_sample = rng.choice(len(pts), size=max_pts, replace=False)
+                        pts_s = pts[idx_sample]
+                        vals_s = vals[idx_sample]
                     else:
-                        cell_areas.append(1.0)  # Fallback
-                cell_areas = np.array(cell_areas)
-                
-                # Plot wetted perimeter with depth coloring (viridis colormap)
-                print("Plotting wetted perimeter with depth colors...")
-                import matplotlib.cm as cm
-                import matplotlib.colors as mcolors
-                
-                # Normalize depth for colormap (clip extreme values)
-                depth_min, depth_max = np.percentile(wetted_depth, [1, 99])
-                norm = mcolors.Normalize(vmin=depth_min, vmax=depth_max)
-                cmap = cm.get_cmap('viridis')
-                
-                # Sample points if too many (plot every Nth point to avoid slowdown)
-                sample_step = max(1, len(wetted_coords) // 50000)  # Max ~50k points
-                sampled_coords = wetted_coords[::sample_step]
-                sampled_depth = wetted_depth[::sample_step]
-                sampled_areas = cell_areas[::sample_step]
-                
-                # Convert depths to colors
-                colors = [cmap(norm(d)) for d in sampled_depth]
-                colors_rgb = [(int(c[0]*255), int(c[1]*255), int(c[2]*255), 120) for c in colors]
-                
-                # Calculate adaptive dot sizes based on cell area (scale to sqrt of area)
-                # Target: small cells get size ~3, large cells get proportionally larger
-                median_area = np.median(sampled_areas)
-                dot_sizes = 3.0 * np.sqrt(sampled_areas / median_area)
-                dot_sizes = np.clip(dot_sizes, 2, 20)  # Clamp between 2 and 20
-                
-                # Plot as scatter with adaptive sizes
-                scatter = pg.ScatterPlotItem(
-                    pos=sampled_coords,
-                    size=dot_sizes,
-                    brush=[pg.mkBrush(color=c) for c in colors_rgb],
-                    pen=None
-                )
-                self.plot_widget.addItem(scatter)
-                print(f"Plotted {len(sampled_coords)} wetted cells with depth colors")
-                
-                # Plot centerline from simulation
+                        pts_s = pts
+                        vals_s = vals
+
+                    # Create grid size based on extent but limited resolution for speed
+                    minx, miny = pts_s[:, 0].min(), pts_s[:, 1].min()
+                    maxx, maxy = pts_s[:, 0].max(), pts_s[:, 1].max()
+                    nx = 600
+                    ny = max(200, int(nx * (maxy - miny) / (maxx - minx)))
+                    xi = np.linspace(minx, maxx, nx)
+                    yi = np.linspace(miny, maxy, ny)
+                    XI, YI = np.meshgrid(xi, yi)
+                    grid_coords = np.column_stack([XI.ravel(), YI.ravel()])
+
+                    # Fast IDW: k-NN weighting
+                    tree = cKDTree(pts_s)
+                    k = min(8, len(pts_s))
+                    dists, idxs = tree.query(grid_coords, k=k)
+                    # Ensure shapes are 2D when k==1
+                    if k == 1:
+                        dists = dists[:, np.newaxis]
+                        idxs = idxs[:, np.newaxis]
+                    # Avoid zero distances
+                    dists[dists == 0] = 1e-6
+                    weights = 1.0 / (dists ** 2)
+                    # vals_s indexed by idxs -> shape (npoints, k)
+                    neighbor_vals = vals_s[idxs]
+                    weighted_vals = np.sum(weights * neighbor_vals, axis=1) / np.sum(weights, axis=1)
+                    Z = weighted_vals.reshape((ny, nx))
+
+                    # Apply light low-pass (gaussian blur via convolution) to remove speckle
+                    try:
+                        from scipy.ndimage import gaussian_filter
+                        Z = gaussian_filter(Z, sigma=1.0)
+                    except Exception:
+                        pass
+
+                    # Apply hillshade once at initialization
+                    ls = LightSource(azdeg=315, altdeg=45)
+                    rgb = cm.get_cmap('viridis')(mcolors.Normalize(vmin=np.nanpercentile(Z, 1), vmax=np.nanpercentile(Z, 99))(Z))
+                    hill = ls.hillshade(Z, vert_exag=1.0, dx=(maxx - minx)/nx, dy=(maxy - miny)/ny)
+                    shaded = rgb[:, :, :3] * (0.6 + 0.4 * hill[:, :, None])
+
+                    # Prepare RGBA image
+                    alpha_channel = np.full((ny, nx), 255, dtype='uint8')
+
+                    # Build a wetted-area mask on the grid by measuring distance to nearest wetted cell center
+                    try:
+                        full_tree = cKDTree(pts)
+                        d_full, _ = full_tree.query(grid_coords, k=1)
+                        spacing = np.sqrt(((maxx - minx) * (maxy - miny)) / max(1, len(pts)))
+                        wetted_grid_mask = (d_full.reshape((ny, nx)) <= (spacing * 1.5))
+                        alpha_channel = (wetted_grid_mask * 255).astype('uint8')
+                    except Exception:
+                        # If building a full tree fails, keep alpha fully opaque
+                        pass
+
+                    shaded_uint8 = np.clip(shaded * 255, 0, 255).astype('uint8')
+                    rgba_uint8 = np.dstack([shaded_uint8, alpha_channel])
+
+                    img_item = pg.ImageItem(rgba_uint8)
+                    self.plot_widget.addItem(img_item)
+                    img_item.setZValue(-100)
+                    img_item.setOpacity(1.0)
+                    # position the image using setRect(minx, miny, width, height)
+                    width = (maxx - minx)
+                    height = (maxy - miny)
+                    try:
+                        img_item.setRect(minx, miny, width, height)
+                    except TypeError:
+                        try:
+                            # Some pyqtgraph versions expect QRectF
+                            rect = QtCore.QRectF(minx, miny, width, height)
+                            img_item.setRect(rect)
+                        except Exception:
+                            # Fallback to legacy setPos/scale
+                            img_item.setPos((minx, miny))
+                            try:
+                                img_item.scale(width / nx, height / ny)
+                            except Exception:
+                                pass
+
+                    print(f"Rendered IDW raster ({nx}x{ny})")
+                except Exception as e:
+                    print(f"IDW rasterization failed: {e}")
+
+                # Plot centerline from simulation (overlay)
                 print("Plotting centerline...")
                 if hasattr(self.sim, 'centerline') and self.sim.centerline is not None:
                     from shapely.geometry import LineString
@@ -318,6 +400,23 @@ class SalmonViewer(QtWidgets.QWidget):
                         self.plot_widget.plot(centerline_coords[:, 0], centerline_coords[:, 1],
                                             pen=pg.mkPen(color=(255, 100, 100), width=3, style=Qt.DashLine))
                         print(f"Plotted centerline with {len(centerline_coords)} points")
+
+                self.initial_zoom_done = False
+                return
+            # Fallback: try ABM rasterized depth if present
+            if hasattr(self.sim, 'hdf') and 'environment/depth' in self.sim.hdf:
+                try:
+                    depth_raster = np.array(self.sim.hdf['environment/depth'][:])
+                    x_coords = np.array(self.sim.hdf['x_coords'][:])
+                    y_coords = np.array(self.sim.hdf['y_coords'][:])
+                    img = pg.ImageItem(depth_raster)
+                    img.setOpacity(0.7)
+                    self.plot_widget.addItem(img)
+                    print("Plotted ABM raster depth fallback")
+                    self.initial_zoom_done = False
+                    return
+                except Exception as e:
+                    print(f"Fallback raster plotting failed: {e}")
                 
                 print("Background setup complete!")
                 # Zoom to agents extent (will be set in update_displays)
@@ -338,11 +437,11 @@ class SalmonViewer(QtWidgets.QWidget):
         layout.addWidget(self.reward_label)
         layout.addWidget(self.best_reward_label)
         
-        # Reward plot
+        # Reward plot (shrink to tighten layout)
         self.reward_plot = pg.PlotWidget(title="Episode Rewards")
         self.reward_plot.setLabel('bottom', 'Episode')
         self.reward_plot.setLabel('left', 'Total Reward')
-        self.reward_plot.setMaximumHeight(200)
+        self.reward_plot.setMaximumHeight(120)
         layout.addWidget(self.reward_plot)
         
         rl_group.setLayout(layout)
@@ -360,27 +459,76 @@ class SalmonViewer(QtWidgets.QWidget):
             # Create sliders for each weight
             self.weight_labels = {}
             self.weight_sliders = {}
-            weight_attrs = ['rheotaxis_weight', 'cohesion_weight', 'separation_weight', 
-                          'alignment_weight', 'sog_weight', 'border_cue_weight']
-            
+            # Complete set of BehavioralWeights attributes (from weights.to_dict())
+            weight_attrs = [
+                'cohesion_weight', 'alignment_weight', 'separation_weight', 'separation_radius',
+                'threat_level', 'cohesion_radius_relaxed', 'cohesion_radius_threatened',
+                'drafting_enabled', 'drafting_distance', 'drafting_angle_tolerance',
+                'drag_reduction_single', 'drag_reduction_dual',
+                'rheotaxis_weight', 'border_cue_weight', 'border_threshold_multiplier', 'border_max_force',
+                'collision_weight', 'collision_radius',
+                'upstream_priority', 'energy_efficiency_priority',
+                'learning_rate', 'exploration_epsilon',
+                'use_sog', 'sog_weight'
+            ]
+
             for attr in weight_attrs:
                 if hasattr(weights, attr):
                     value = getattr(weights, attr)
-                    
+
                     # Label
-                    label = QLabel(f"{attr.replace('_', ' ').title()}: {value:.3f}")
+                    # Booleans display as ON/OFF
+                    if isinstance(value, bool):
+                        label = QLabel(f"{attr.replace('_', ' ').title()}: {'ON' if value else 'OFF'}")
+                    else:
+                        label = QLabel(f"{attr.replace('_', ' ').title()}: {value:.3f}")
                     label.setStyleSheet("font-size: 9pt; color: black;")
                     self.weight_labels[attr] = label
                     layout.addWidget(label)
-                    
-                    # Slider (0.0 to 2.0, resolution 0.01)
-                    slider = QSlider(Qt.Horizontal)
-                    slider.setMinimum(0)
-                    slider.setMaximum(200)
-                    slider.setValue(int(value * 100))
-                    slider.valueChanged.connect(lambda v, a=attr, l=label: self.update_weight(a, v, l))
-                    self.weight_sliders[attr] = slider
-                    layout.addWidget(slider)
+
+                    # Configure slider ranges by parameter type
+                    if isinstance(value, bool):
+                        # Use a checkbox for booleans
+                        cb = QCheckBox()
+                        cb.setChecked(value)
+                        cb.stateChanged.connect(lambda s, a=attr, cb=cb: self.update_bool_weight(a, cb.isChecked()))
+                        layout.addWidget(cb)
+                        self.weight_sliders[attr] = cb
+                    else:
+                        slider = QSlider(Qt.Horizontal)
+                        # Default range 0.0 - 2.0
+                        slider_min = 0
+                        slider_max = 200
+                        slider_value = 0
+
+                        # Specific ranges for known params
+                        if attr in ('separation_radius', 'cohesion_radius_relaxed', 'cohesion_radius_threatened', 'collision_radius', 'drafting_distance'):
+                            slider_min, slider_max = 0, 500  # 0.00 - 5.00 (stored as centi-units)
+                            slider_value = int(value * 100)
+                        elif attr in ('border_threshold_multiplier', 'drafting_angle_tolerance'):
+                            slider_min, slider_max = 0, 360  # degrees or multiplier (0..360)
+                            slider_value = int(value)
+                        elif attr in ('border_max_force', 'collision_weight', 'drag_reduction_single', 'drag_reduction_dual', 'border_cue_weight'):
+                            slider_min, slider_max = 0, 2000
+                            slider_value = int(value * 10)
+                        elif attr in ('learning_rate',):
+                            slider_min, slider_max = 0, 1000  # 0.0 - 0.01 (as 1e-5 steps)
+                            slider_value = int(value * 100000)
+                        elif attr in ('exploration_epsilon', 'sog_weight', 'energy_efficiency_priority', 'upstream_priority', 'threat_level'):
+                            slider_min, slider_max = 0, 100
+                            slider_value = int(value * 100)
+                        else:
+                            slider_min, slider_max = 0, 200
+                            slider_value = int(value * 100)
+
+                        slider.setMinimum(slider_min)
+                        slider.setMaximum(slider_max)
+                        slider.setValue(max(slider_min, min(slider_max, slider_value)))
+
+                        # Connect handler with attribute name and label
+                        slider.valueChanged.connect(lambda v, a=attr, l=label: self.update_weight(a, v, l))
+                        self.weight_sliders[attr] = slider
+                        layout.addWidget(slider)
         else:
             # No weights available
             no_weights_label = QLabel("No weights configured")
@@ -394,12 +542,46 @@ class SalmonViewer(QtWidgets.QWidget):
     
     def update_weight(self, attr, value, label):
         """Update behavioral weight from slider."""
-        weight_value = value / 100.0
-        label.setText(f"{attr.replace('_', ' ').title()}: {weight_value:.3f}")
+        # Determine how to convert slider integer back to meaningful value
+        if attr in ('separation_radius', 'cohesion_radius_relaxed', 'cohesion_radius_threatened', 'collision_radius', 'drafting_distance'):
+            weight_value = value / 100.0
+            label.setText(f"{attr.replace('_', ' ').title()}: {weight_value:.2f}")
+        elif attr in ('border_threshold_multiplier', 'drafting_angle_tolerance'):
+            weight_value = float(value)
+            label.setText(f"{attr.replace('_', ' ').title()}: {weight_value:.0f}")
+        elif attr in ('border_max_force', 'collision_weight', 'drag_reduction_single', 'drag_reduction_dual', 'border_cue_weight'):
+            weight_value = value / 10.0
+            label.setText(f"{attr.replace('_', ' ').title()}: {weight_value:.2f}")
+        elif attr in ('learning_rate',):
+            weight_value = value / 100000.0
+            label.setText(f"{attr.replace('_', ' ').title()}: {weight_value:.6f}")
+        elif attr in ('exploration_epsilon', 'sog_weight', 'energy_efficiency_priority', 'upstream_priority', 'threat_level'):
+            weight_value = value / 100.0
+            label.setText(f"{attr.replace('_', ' ').title()}: {weight_value:.2f}")
+        else:
+            weight_value = value / 100.0
+            label.setText(f"{attr.replace('_', ' ').title()}: {weight_value:.3f}")
+
         label.setStyleSheet("font-size: 9pt; color: black;")
         if hasattr(self.sim, 'behavioral_weights'):
-            setattr(self.sim.behavioral_weights, attr, weight_value)
-            self.sim.apply_behavioral_weights(self.sim.behavioral_weights)
+            try:
+                setattr(self.sim.behavioral_weights, attr, weight_value)
+                self.sim.apply_behavioral_weights(self.sim.behavioral_weights)
+            except Exception:
+                # Some attributes may be displayed but not directly settable in runtime
+                pass
+
+    def update_bool_weight(self, attr, state):
+        """Update boolean weight from checkbox."""
+        if hasattr(self.sim, 'behavioral_weights'):
+            try:
+                setattr(self.sim.behavioral_weights, attr, bool(state))
+                self.sim.apply_behavioral_weights(self.sim.behavioral_weights)
+                # Update label
+                if attr in self.weight_labels:
+                    self.weight_labels[attr].setText(f"{attr.replace('_', ' ').title()}: {'ON' if state else 'OFF'}")
+            except Exception:
+                pass
     
     def create_metrics_panel(self):
         """Create behavior metrics panel."""
@@ -427,6 +609,9 @@ class SalmonViewer(QtWidgets.QWidget):
         # Passage delay metric
         self.mean_passage_delay_label = QLabel("Mean Passage Delay: --")
         layout.addWidget(self.mean_passage_delay_label)
+        # Passage completion / percentiles (placeholder)
+        self.passage_success_rate_label = QLabel("Passage Success: --")
+        layout.addWidget(self.passage_success_rate_label)
         
         # Schooling metrics
         self.mean_nn_dist_label = QLabel("Mean NN Dist: --")
@@ -443,16 +628,51 @@ class SalmonViewer(QtWidgets.QWidget):
         self.max_speed_label.setText(f"Max Speed: {metrics.get('max_speed', '--'):.2f}")
         self.mean_energy_label.setText(f"Mean Energy: {metrics.get('mean_energy', '--'):.2f}")
         self.min_energy_label.setText(f"Min Energy: {metrics.get('min_energy', '--'):.2f}")
-        self.upstream_progress_label.setText(f"Upstream Progress: {metrics.get('upstream_progress', '--'):.2f}")
+        # Upstream progress may be reported as 'upstream_progress' or 'mean_upstream_progress'
+        upstream_val = metrics.get('upstream_progress', metrics.get('mean_upstream_progress', '--'))
+        if isinstance(upstream_val, (int, float)):
+            self.upstream_progress_label.setText(f"Upstream Progress: {upstream_val:.2f}")
+        else:
+            self.upstream_progress_label.setText(f"Upstream Progress: --")
         self.mean_centerline_label.setText(f"Mean Centerline: {metrics.get('mean_centerline', '--'):.2f}")
         self.mean_passage_delay_label.setText(f"Mean Passage Delay: {metrics.get('mean_passage_delay', '--'):.2f}")
+        # Optional passage stats
+        if 'passage_success_rate' in metrics:
+            self.passage_success_rate_label.setText(f"Passage Success: {metrics['passage_success_rate']:.1%}")
+        elif 'success_rate' in metrics:
+            self.passage_success_rate_label.setText(f"Passage Success: {metrics['success_rate']:.1%}")
         self.mean_nn_dist_label.setText(f"Mean NN Dist: {metrics.get('mean_nn_dist', '--'):.2f}")
         self.polarization_label.setText(f"Polarization: {metrics.get('polarization', '--'):.2f}")
+
+    def refresh_rl_labels(self):
+        # Update episode and reward labels in RL panel
+        try:
+            self.episode_label.setText(f"Episode: {self.current_episode} | Timestep: {self.current_timestep}")
+            self.reward_label.setText(f"Reward: {self.episode_reward:.2f}")
+            self.best_reward_label.setText(f"Best: {self.best_reward:.2f}")
+        except Exception:
+            pass
     
     def toggle_pause(self):
         """Toggle simulation pause state."""
         self.paused = not self.paused
         self.play_pause_btn.setText("Play" if self.paused else "Pause")
+        # Ensure play/pause also toggles the timer
+        if hasattr(self, 'timer'):
+            if self.paused:
+                self.timer.stop()
+            else:
+                self.timer.start(int(self.dt * 1000))
+
+    def reset_simulation(self):
+        """Reset simulation to initial state for new episode."""
+        if hasattr(self.sim, 'reset_spatial_state'):
+            self.sim.reset_spatial_state(reset_positions=True)
+        self.current_timestep = 0
+        self.current_episode = 1
+        self.episode_reward = 0.0
+        # refresh display
+        self.update_displays()
         
     def update_speed(self, value):
         """Update simulation speed."""
@@ -640,6 +860,12 @@ class SalmonViewer(QtWidgets.QWidget):
             for line in self.trajectory_lines:
                 self.plot_widget.removeItem(line)
             self.trajectory_lines = []
+
+        # Refresh RL labels and metrics display
+        try:
+            self.refresh_rl_labels()
+        except Exception:
+            pass
             
             # Draw trajectories for each agent
             if len(self.trajectory_history) > 1:
