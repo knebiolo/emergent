@@ -201,6 +201,16 @@ class SalmonViewer(QtWidgets.QWidget):
         speed_group.setLayout(speed_layout)
         layout.addWidget(speed_group)
         
+        # Agent count display
+        agent_group = QGroupBox("Agents")
+        agent_layout = QVBoxLayout()
+        self.agent_count_label = QLabel(f"Total: {self.sim.num_agents}")
+        self.alive_count_label = QLabel(f"Alive: {self.sim.num_agents}")
+        agent_layout.addWidget(self.agent_count_label)
+        agent_layout.addWidget(self.alive_count_label)
+        agent_group.setLayout(agent_layout)
+        layout.addWidget(agent_group)
+        
         # Display options
         display_group = QGroupBox("Display")
         display_layout = QVBoxLayout()
@@ -215,6 +225,10 @@ class SalmonViewer(QtWidgets.QWidget):
         
         display_group.setLayout(display_layout)
         layout.addWidget(display_group)
+        
+        # Behavioral weights panel
+        weights_group = self.create_weights_panel()
+        layout.addWidget(weights_group)
         
         # RL Training metrics (if applicable)
         if self.rl_trainer:
@@ -251,6 +265,35 @@ class SalmonViewer(QtWidgets.QWidget):
         
         rl_group.setLayout(layout)
         return rl_group
+    
+    def create_weights_panel(self):
+        """Create behavioral weights display panel."""
+        weights_group = QGroupBox("Behavioral Weights")
+        layout = QVBoxLayout()
+        
+        # Get weights from simulation
+        if hasattr(self.sim, 'behavioral_weights'):
+            weights = self.sim.behavioral_weights
+            
+            # Display each weight with label
+            self.weight_labels = {}
+            for attr in ['rheotaxis', 'phototaxis', 'thigmotaxis', 'avoid_land', 
+                        'energy_conservation', 'exploration']:
+                if hasattr(weights, attr):
+                    value = getattr(weights, attr)
+                    label = QLabel(f"{attr.replace('_', ' ').title()}: {value:.3f}")
+                    label.setStyleSheet("font-size: 9pt;")
+                    self.weight_labels[attr] = label
+                    layout.addWidget(label)
+        else:
+            # No weights available
+            no_weights_label = QLabel("No weights configured")
+            no_weights_label.setStyleSheet("font-style: italic; color: gray;")
+            layout.addWidget(no_weights_label)
+            self.weight_labels = {}
+        
+        weights_group.setLayout(layout)
+        return weights_group
     
     def create_metrics_panel(self):
         """Create behavior metrics panel."""
@@ -410,11 +453,26 @@ class SalmonViewer(QtWidgets.QWidget):
         self.time_label.setText(f"Time: {current_time:.1f} / {self.T:.1f}s")
         self.alive_label.setText(f"Alive: {alive_mask.sum()} / {self.sim.num_agents}")
         
+        # Update agent count labels
+        if hasattr(self, 'agent_count_label'):
+            self.agent_count_label.setText(f"Total: {self.sim.num_agents}")
+            self.alive_count_label.setText(f"Alive: {alive_mask.sum()}")
+        
         # Update RL labels
         if self.rl_trainer:
             self.episode_label.setText(f"Episode: {self.current_episode}")
             self.reward_label.setText(f"Reward: {self.episode_reward:.2f}")
             self.best_reward_label.setText(f"Best: {self.best_reward:.2f}")
+            
+            # Update behavioral weights display during RL training
+            if hasattr(self.sim, 'behavioral_weights') and self.weight_labels:
+                weights = self.sim.behavioral_weights
+                for attr, label in self.weight_labels.items():
+                    if hasattr(weights, attr):
+                        value = getattr(weights, attr)
+                        label.setText(f"{attr.replace('_', ' ').title()}: {value:.3f}")
+                        # Highlight weights in green during RL mode
+                        label.setStyleSheet("font-size: 9pt; color: #00ff00;")
         
         # Update metrics
         try:

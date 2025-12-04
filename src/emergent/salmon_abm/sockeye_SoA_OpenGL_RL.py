@@ -446,7 +446,7 @@ class RLTrainer:
         
         # 2. UPSTREAM PROGRESS: Reward net forward movement
         if 'mean_upstream_progress' in current_state:
-            # Positive longitude change = good
+            # Positive centerline measure change = upstream progress = good
             upstream_reward = current_state['mean_upstream_progress'] * 0.5
             reward += upstream_reward
         
@@ -527,11 +527,11 @@ class RLTrainer:
             self.sim._last_drag_reductions = self._cached_drag_reductions
         
         # 3. UPSTREAM PROGRESS (Change in centerline position)
-        if hasattr(self.sim, 'longitudes'):
-            prev_longs = getattr(self.sim, '_prev_longitudes', self.sim.longitudes)
-            upstream_deltas = self.sim.longitudes - prev_longs
+        if hasattr(self.sim, 'centerline_meas'):
+            prev_meas = getattr(self.sim, '_prev_centerline_meas', self.sim.centerline_meas)
+            upstream_deltas = self.sim.centerline_meas - prev_meas
             metrics['mean_upstream_progress'] = np.mean(upstream_deltas[alive_mask]) if np.any(alive_mask) else 0.0
-            self.sim._prev_longitudes = self.sim.longitudes.copy()
+            self.sim._prev_centerline_meas = self.sim.centerline_meas.copy()
         
         # 4. ENERGY EFFICIENCY (Distance per kcal, accounting for drafting)
         if hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
@@ -4039,8 +4039,8 @@ class simulation():
         max_timesteps = 600  # Maximum number of timesteps to track
 
         self.swim_speeds = np.full((num_agents, max_timesteps), np.nan)
-        self.past_longitudes = np.full((num_agents, max_timesteps), np.nan)
-        self.current_longitudes = np.zeros_like(self.X)
+        self.past_centerline_meas = np.full((num_agents, max_timesteps), np.nan)
+        self.current_centerline_meas = np.zeros_like(self.X)
 
         self.in_eddy = np.zeros_like(self.X)
         self.time_since_eddy_escape = np.zeros_like(self.X)
@@ -4293,7 +4293,7 @@ class simulation():
         # import centerline shapefile (or derive from HECRAS if requested)
         centerline_derived = False
         if self.use_hecras and self.hecras_plan_path:
-            # If user didn't provide a longitudinal_profile file, derive a crude centerline
+            # If user didn't provide a centerline_path file, derive a crude centerline
             if centerline is None or not os.path.exists(centerline):
                 try:
                     # Prefer extracting a centerline from rasters if available (wetted or distance_to)
@@ -4586,8 +4586,8 @@ class simulation():
         # Reset memory buffers
         max_timesteps = getattr(self, 'swim_speeds', np.array([])).shape[1] if hasattr(self, 'swim_speeds') else 600
         self.swim_speeds = np.full((self.num_agents, max_timesteps), np.nan)
-        self.past_longitudes = np.full((self.num_agents, max_timesteps), np.nan)
-        self.current_longitudes = np.zeros_like(self.X)
+        self.past_centerline_meas = np.full((self.num_agents, max_timesteps), np.nan)
+        self.current_centerline_meas = np.zeros_like(self.X)
         self.in_eddy = np.zeros_like(self.X)
         self.time_since_eddy_escape = np.zeros_like(self.X)
         
@@ -4630,8 +4630,8 @@ class simulation():
         try:
             if hasattr(self, 'swim_speeds'):
                 self.swim_speeds = np.full((self.num_agents, 1), np.nan)
-            if hasattr(self, 'past_longitudes'):
-                self.past_longitudes = np.full((self.num_agents, 1), np.nan)
+            if hasattr(self, 'past_centerline_meas'):
+                self.past_centerline_meas = np.full((self.num_agents, 1), np.nan)
         except Exception:
             pass
         # Force garbage collection to free memory immediately
@@ -5138,7 +5138,7 @@ class simulation():
         # If a shapely geometry was passed in directly, use it
         if isinstance(shapefile, BaseGeometry):
             self.centerline = shapefile
-            # Also maintain legacy `longitudinal` attribute expected elsewhere
+            # Centerline attribute set by initialize_hecras_geometry or boundary_surface
             # legacy attribute removed; use `centerline` only
             return self.centerline
 
@@ -5148,8 +5148,7 @@ class simulation():
             self.centerline = None
             return None
         self.centerline = line_gdf.geometry.iloc[0]
-        # Also maintain legacy `longitudinal` attribute expected by other code
-        # do not set legacy `longitudinal` attribute; keep `centerline` only
+        # Centerline attribute used throughout for upstream progress tracking
         return self.centerline
         
     def compute_linear_positions(self, line):
@@ -6053,7 +6052,7 @@ class simulation():
         self.vel_mag = sampled['vel_mag']
         self.wet = sampled['wetted']
         self.distance_to = sampled['distance_to']
-        self.current_longitudes = self.compute_linear_positions(self.centerline)
+        self.current_centerline_meas = self.compute_linear_positions(self.centerline)
 
         # Ensure neighbor lists and closest_agent are present — some code paths
         # assume these are set before behavior arbitration. Compute fallbacks
@@ -8628,14 +8627,14 @@ class simulation():
                 
                 linear_positions = self.simulation.cumulative_migration_distance
             
-            self.current_longitudes = linear_positions
+            self.current_centerline_meas = linear_positions
             # Shift data to the left
-            self.simulation.past_longitudes[:, :-1] = self.simulation.past_longitudes[:, 1:]
+            self.simulation.past_centerline_meas[:, :-1] = self.simulation.past_centerline_meas[:, 1:]
             self.simulation.swim_speeds[:, :-1] = self.simulation.swim_speeds[:, 1:]
 
         
             # Insert new position data at the last column
-            self.simulation.past_longitudes[:, -1] = linear_positions
+            self.simulation.past_centerline_meas[:, -1] = linear_positions
             self.simulation.swim_speeds[:, -1] = self.simulation.sog
                       
             # Check for valid entries in both the first and last columns
@@ -8646,16 +8645,16 @@ class simulation():
             avg_speeds[valid_entries] = np.max(self.simulation.swim_speeds[valid_entries], axis = -1)
             
             # total displacements
-            total_displacement = np.full(self.simulation.past_longitudes.shape[0], np.nan)
-            total_displacement[valid_entries] = self.simulation.past_longitudes[valid_entries,-1] - self.simulation.past_longitudes[valid_entries,0]
+            total_displacement = np.full(self.simulation.past_centerline_meas.shape[0], np.nan)
+            total_displacement[valid_entries] = self.simulation.past_centerline_meas[valid_entries,-1] - self.simulation.past_centerline_meas[valid_entries,0]
             
-            # calculate the change in longitude, length of memory, and expected displacement given avg velocity
-            delta = self.simulation.past_longitudes[valid_entries,0] - self.simulation.past_longitudes[valid_entries,-1]
-            dt = self.simulation.past_longitudes.shape[1]
+            # calculate the change in centerline measure, length of memory, and expected displacement given avg velocity
+            delta = self.simulation.past_centerline_meas[valid_entries,0] - self.simulation.past_centerline_meas[valid_entries,-1]
+            dt = self.simulation.past_centerline_meas.shape[1]
             expected_displacement = avg_speeds * dt
             
             # calculate change in centerline position
-            long_dir = self.simulation.past_longitudes[:,-2] - self.simulation.past_longitudes[:,-1]
+            centerline_dir = self.simulation.past_centerline_meas[:,-2] - self.simulation.past_centerline_meas[:,-1]
 
             # Check if agents have moved less than expected, if they are moving backwards, and if they are sustained swimming mode
             if delta.shape == total_displacement.shape and t >= 1800.:
@@ -8670,7 +8669,7 @@ class simulation():
             not_in_eddy_anymore = self.simulation.time_since_eddy_escape >= self.simulation.max_eddy_escape_seconds
             # Set a specific value (9999) for past positions and swim speeds where not in eddy anymore
             self.simulation.swim_speeds[not_in_eddy_anymore, :] = np.nan
-            self.simulation.past_longitudes[not_in_eddy_anymore, :] = np.nan
+            self.simulation.past_centerline_meas[not_in_eddy_anymore, :] = np.nan
             self.simulation.time_since_eddy_escape[not_in_eddy_anymore] = 0.0
                                  
             # Update in_eddy status based on conditions

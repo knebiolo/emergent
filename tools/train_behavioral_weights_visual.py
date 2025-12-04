@@ -39,7 +39,7 @@ def setup_training_simulation(args):
     print(f'Using HECRAS plan: {hecras_plan}')
     
     start_poly = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'starting_location', 'start_loc_river_right.shp')
-    long_profile = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'Longitudinal', 'longitudinal.shp')
+    centerline_path = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'Longitudinal', 'longitudinal.shp')
     
     config = {
         'model_dir': os.path.join(REPO_ROOT, 'outputs', 'rl_training'),
@@ -48,7 +48,7 @@ def setup_training_simulation(args):
         'basin': 'Nushagak River',
         'water_temp': 10.0,
         'start_polygon': start_poly,
-        'longitudinal_profile': long_profile,
+        'centerline': centerline_path,
         'fish_length': args.fish_length,
         'num_timesteps': args.timesteps,
         'num_agents': args.agents,
