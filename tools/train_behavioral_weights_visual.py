@@ -93,25 +93,31 @@ def main():
     print('='*80)
     
     # Setup simulation and trainer
-    sim, trainer, hecras_plan = setup_training_simulation(args)
-    
-    print(f"\nDEBUG: Simulation setup complete. sim type: {type(sim)}, trainer type: {type(trainer)}")
-    print(f"DEBUG: About to launch viewer...")
-    
-    print("\n" + "="*80)
-    print("LAUNCHING VIEWER...")
-    print("="*80)
-    
-    # Launch viewer with RL trainer
-    total_time = args.timesteps * args.dt
-    launch_viewer(
-        simulation=sim,
-        dt=args.dt,
-        T=total_time,
-        rl_trainer=trainer,
-        show_velocity_field=False,  # Too expensive for large grids
-        show_depth=True
-    )
+    try:
+        sim, trainer, hecras_plan = setup_training_simulation(args)
+        
+        print(f"\nDEBUG: Simulation setup complete. sim type: {type(sim)}, trainer type: {type(trainer)}")
+        print(f"DEBUG: About to launch viewer...")
+        
+        print("\n" + "="*80)
+        print("LAUNCHING VIEWER...")
+        print("="*80)
+        
+        # Launch viewer with RL trainer
+        total_time = args.timesteps * args.dt
+        launch_viewer(
+            simulation=sim,
+            dt=args.dt,
+            T=total_time,
+            rl_trainer=trainer,
+            show_velocity_field=False,  # Too expensive for large grids
+            show_depth=True
+        )
+    except Exception as e:
+        print(f"\nERROR launching viewer: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 if __name__ == '__main__':

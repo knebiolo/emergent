@@ -136,20 +136,16 @@ class SalmonViewer(QtWidgets.QWidget):
         status_layout.addStretch()
         plot_layout.addLayout(status_layout)
         
-        main_layout.addLayout(plot_layout, stretch=3)
-        
-        # Right side: TWO PANELS - Left and Right
-        right_side_layout = QHBoxLayout()
-        
         # Left panel: RL Training and Metrics
         left_panel = self.create_left_panel()
-        right_side_layout.addWidget(left_panel, stretch=1)
+        main_layout.addWidget(left_panel, stretch=1)
+        
+        # Middle: Plot window
+        main_layout.addLayout(plot_layout, stretch=4)
         
         # Right panel: Controls and Weights
         right_panel = self.create_right_panel()
-        right_side_layout.addWidget(right_panel, stretch=1)
-        
-        main_layout.addLayout(right_side_layout, stretch=2)
+        main_layout.addWidget(right_panel, stretch=1)
         
         self.setLayout(main_layout)
         print("UI initialization complete!")
@@ -176,78 +172,11 @@ class SalmonViewer(QtWidgets.QWidget):
         """Create right control panel with controls and weights."""
         panel = QGroupBox("Controls & Weights")
         layout = QVBoxLayout()
-                    
-                # Mask by wetted perimeter
-                print("Masking by wetted perimeter...")
-                wetted_mask = depth > 0.05
-                wetted_coords = coords[wetted_mask]
-                wetted_depth = depth[wetted_mask]
-                print(f"Wetted cells: {len(wetted_coords)}")
-                
-                # Plot centerline from simulation
-                print("Plotting centerline...")
-                if hasattr(self.sim, 'centerline') and self.sim.centerline is not None:
-                    from shapely.geometry import LineString
-                    if isinstance(self.sim.centerline, LineString):
-                        centerline_coords = np.array(self.sim.centerline.coords)
-                        self.plot_widget.plot(centerline_coords[:, 0], centerline_coords[:, 1],
-                                            pen=pg.mkPen(color=(100, 200, 255), width=2, style=Qt.DashLine))
-                        print(f"Plotted centerline with {len(centerline_coords)} points")
-                
-                print("Background setup complete!")
-                # Zoom to agents extent (will be set in update_displays)
-                self.initial_zoom_done = False
-                return
-            
-            # Fallback: load from HDF5
-            env = self.sim.hdf5.get('environment')
-            if env is None or 'depth' not in env:
-                return
-                
-            depth_arr = env['depth'][:]
-            
-            # Get transform for georeferencing
-            if hasattr(self.sim, 'depth_rast_transform'):
-                transform = self.sim.depth_rast_transform
-                bounds = rasterio.transform.array_bounds(
-                    depth_arr.shape[0], depth_arr.shape[1], transform
-                )
-                
-                # Create ImageItem
-                img = pg.ImageItem(depth_arr, autoRange=False, autoLevels=True)
-                img.setRect(QtCore.QRectF(bounds[0], bounds[1], 
-                                         bounds[2] - bounds[0], 
-                                         bounds[3] - bounds[1]))
-                img.setZValue(-10)  # Behind agents
-                
-                # Set colormap
-                colormap = pg.colormap.get('viridis')
-                img.setColorMap(colormap)
-                
-                self.plot_widget.addItem(img)
-                
-                # Set initial view
-                self.plot_widget.setXRange(bounds[0], bounds[2])
-                self.plot_widget.setYRange(bounds[1], bounds[3])
-                
-        except Exception as e:
-            print(f"Warning: Could not load background: {e}")
-    
-    def setup_velocity_field(self):
-        """Setup velocity field arrows (downsampled for performance)."""
-        # TODO: Implement arrow field similar to ship_viewer.ArrowField
-        # For now, skip this expensive visualization
-        pass
-    
-    
-    def create_right_panel(self):
-        """Create right control panel with controls and weights."""
-        panel = QGroupBox("Controls & Weights")
-        layout = QVBoxLayout()
         
         # Play/Pause button
         self.play_pause_btn = QPushButton("Pause")
         self.play_pause_btn.clicked.connect(self.toggle_pause)
+        layout.addWidget(self.play_pause_btn)
         layout.addWidget(self.play_pause_btn)
         
         # Reset button
@@ -311,6 +240,92 @@ class SalmonViewer(QtWidgets.QWidget):
         try:
             # Try HECRAS mode first
             if hasattr(self.sim, 'use_hecras') and self.sim.use_hecras and hasattr(self.sim, 'hecras_plan_path'):
+                import h5py
+                plan_path = self.sim.hecras_plan_path
+                with h5py.File(plan_path, 'r') as hdf:
+                    coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:])
+                    depth = np.array(hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'][0, :])
+                    face_points = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Face and Point Indexes'][:])
+                    points = np.array(hdf['Geometry/2D Flow Areas/2D area/FacePoints Coordinate'][:])
+                    
+                # Mask by wetted perimeter
+                print("Masking by wetted perimeter...")
+                wetted_mask = depth > 0.05
+                wetted_coords = coords[wetted_mask]
+                wetted_depth = depth[wetted_mask]
+                wetted_face_points = face_points[wetted_mask]
+                print(f"Wetted cells: {len(wetted_coords)}")
+                
+                # Calculate cell areas to determine appropriate dot sizes
+                print("Calculating cell areas...")
+                cell_areas = []
+                for fp in wetted_face_points:
+                    # Get face point indices
+                    face_idx = fp[fp >= 0]  # Filter out -1 padding
+                    if len(face_idx) >= 3:
+                        cell_points = points[face_idx]
+                        # Approximate area using bounding box
+                        x_range = cell_points[:, 0].max() - cell_points[:, 0].min()
+                        y_range = cell_points[:, 1].max() - cell_points[:, 1].min()
+                        area = x_range * y_range
+                        cell_areas.append(area)
+                    else:
+                        cell_areas.append(1.0)  # Fallback
+                cell_areas = np.array(cell_areas)
+                
+                # Plot wetted perimeter with depth coloring (viridis colormap)
+                print("Plotting wetted perimeter with depth colors...")
+                import matplotlib.cm as cm
+                import matplotlib.colors as mcolors
+                
+                # Normalize depth for colormap (clip extreme values)
+                depth_min, depth_max = np.percentile(wetted_depth, [1, 99])
+                norm = mcolors.Normalize(vmin=depth_min, vmax=depth_max)
+                cmap = cm.get_cmap('viridis')
+                
+                # Sample points if too many (plot every Nth point to avoid slowdown)
+                sample_step = max(1, len(wetted_coords) // 50000)  # Max ~50k points
+                sampled_coords = wetted_coords[::sample_step]
+                sampled_depth = wetted_depth[::sample_step]
+                sampled_areas = cell_areas[::sample_step]
+                
+                # Convert depths to colors
+                colors = [cmap(norm(d)) for d in sampled_depth]
+                colors_rgb = [(int(c[0]*255), int(c[1]*255), int(c[2]*255), 120) for c in colors]
+                
+                # Calculate adaptive dot sizes based on cell area (scale to sqrt of area)
+                # Target: small cells get size ~3, large cells get proportionally larger
+                median_area = np.median(sampled_areas)
+                dot_sizes = 3.0 * np.sqrt(sampled_areas / median_area)
+                dot_sizes = np.clip(dot_sizes, 2, 20)  # Clamp between 2 and 20
+                
+                # Plot as scatter with adaptive sizes
+                scatter = pg.ScatterPlotItem(
+                    pos=sampled_coords,
+                    size=dot_sizes,
+                    brush=[pg.mkBrush(color=c) for c in colors_rgb],
+                    pen=None
+                )
+                self.plot_widget.addItem(scatter)
+                print(f"Plotted {len(sampled_coords)} wetted cells with depth colors")
+                
+                # Plot centerline from simulation
+                print("Plotting centerline...")
+                if hasattr(self.sim, 'centerline') and self.sim.centerline is not None:
+                    from shapely.geometry import LineString
+                    if isinstance(self.sim.centerline, LineString):
+                        centerline_coords = np.array(self.sim.centerline.coords)
+                        self.plot_widget.plot(centerline_coords[:, 0], centerline_coords[:, 1],
+                                            pen=pg.mkPen(color=(255, 100, 100), width=3, style=Qt.DashLine))
+                        print(f"Plotted centerline with {len(centerline_coords)} points")
+                
+                print("Background setup complete!")
+                # Zoom to agents extent (will be set in update_displays)
+                self.initial_zoom_done = False
+                return
+        except Exception as e:
+            print(f"Warning: Could not load background: {e}")
+    
     def create_rl_panel(self):
         """Create RL training metrics panel."""
         rl_group = QGroupBox("RL Training")
@@ -336,10 +351,10 @@ class SalmonViewer(QtWidgets.QWidget):
     def create_weights_panel(self):
         """Create behavioral weights display panel with sliders."""
         weights_group = QGroupBox("Behavioral Weights")
-    def create_weights_panel(self):
-        """Create behavioral weights display panel with sliders."""
-        weights_group = QGroupBox("Behavioral Weights")
-        layout = QVBoxLayout()behavioral_weights'):
+        layout = QVBoxLayout()
+        
+        # Get weights from simulation
+        if hasattr(self.sim, 'behavioral_weights'):
             weights = self.sim.behavioral_weights
             
             # Create sliders for each weight
@@ -389,11 +404,11 @@ class SalmonViewer(QtWidgets.QWidget):
     def create_metrics_panel(self):
         """Create behavior metrics panel."""
         metrics_group = QGroupBox("Metrics")
-        metrics_group.setCheckable(True)
-    def create_metrics_panel(self):
-        """Create behavior metrics panel."""
-        metrics_group = QGroupBox("Metrics")
-        layout = QVBoxLayout() QLabel("Max Speed: --")
+        layout = QVBoxLayout()
+        
+        # Speed metrics
+        self.mean_speed_label = QLabel("Mean Speed: --")
+        self.max_speed_label = QLabel("Max Speed: --")
         layout.addWidget(self.mean_speed_label)
         layout.addWidget(self.max_speed_label)
         
@@ -409,6 +424,10 @@ class SalmonViewer(QtWidgets.QWidget):
         layout.addWidget(self.upstream_progress_label)
         layout.addWidget(self.mean_centerline_label)
         
+        # Passage delay metric
+        self.mean_passage_delay_label = QLabel("Mean Passage Delay: --")
+        layout.addWidget(self.mean_passage_delay_label)
+        
         # Schooling metrics
         self.mean_nn_dist_label = QLabel("Mean NN Dist: --")
         self.polarization_label = QLabel("Polarization: --")
@@ -417,6 +436,18 @@ class SalmonViewer(QtWidgets.QWidget):
         
         metrics_group.setLayout(layout)
         return metrics_group
+    
+    def update_metrics_panel(self, metrics):
+        """Update metrics panel labels."""
+        self.mean_speed_label.setText(f"Mean Speed: {metrics.get('mean_speed', '--'):.2f}")
+        self.max_speed_label.setText(f"Max Speed: {metrics.get('max_speed', '--'):.2f}")
+        self.mean_energy_label.setText(f"Mean Energy: {metrics.get('mean_energy', '--'):.2f}")
+        self.min_energy_label.setText(f"Min Energy: {metrics.get('min_energy', '--'):.2f}")
+        self.upstream_progress_label.setText(f"Upstream Progress: {metrics.get('upstream_progress', '--'):.2f}")
+        self.mean_centerline_label.setText(f"Mean Centerline: {metrics.get('mean_centerline', '--'):.2f}")
+        self.mean_passage_delay_label.setText(f"Mean Passage Delay: {metrics.get('mean_passage_delay', '--'):.2f}")
+        self.mean_nn_dist_label.setText(f"Mean NN Dist: {metrics.get('mean_nn_dist', '--'):.2f}")
+        self.polarization_label.setText(f"Polarization: {metrics.get('polarization', '--'):.2f}")
     
     def toggle_pause(self):
         """Toggle simulation pause state."""
@@ -533,6 +564,13 @@ class SalmonViewer(QtWidgets.QWidget):
                     pen=mkPen('g', width=2),
                     clear=True
                 )
+            
+            # Update metrics panel with passage delay
+            if hasattr(self.sim, 'get_mean_passage_delay'):
+                mean_delay = self.sim.get_mean_passage_delay()
+                self.update_metrics_panel({'mean_passage_delay': mean_delay})
+                print(f"Mean Passage Delay: {mean_delay:.2f} timesteps")
+    
     def update_displays(self):
         """Update all display elements."""
         # Update agent positions
@@ -570,10 +608,10 @@ class SalmonViewer(QtWidgets.QWidget):
                 headings = self.sim.heading[alive_mask]
                 pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
             
-            # Calculate arrow endpoints (5m length)
+            # Calculate arrow endpoints (5m length trailing behind)
             arrow_length = 5.0
-            end_x = pos_x + arrow_length * np.cos(headings)
-            end_y = pos_y + arrow_length * np.sin(headings)
+            end_x = pos_x - arrow_length * np.cos(headings)
+            end_y = pos_y - arrow_length * np.sin(headings)
             
             # Draw lines from agent position trailing backward
             for i in range(len(pos_x)):
@@ -723,9 +761,13 @@ def launch_viewer(simulation, dt=0.1, T=600, rl_trainer=None, **kwargs):
     int
         Qt application exit code
     """
+    print("=== INSIDE launch_viewer ===")
+    print(f"Creating Qt Application...")
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
     
+    print(f"Creating SalmonViewer...")
     viewer = SalmonViewer(simulation, dt=dt, T=T, rl_trainer=rl_trainer, **kwargs)
+    print(f"Starting viewer.run()...")
     return viewer.run()
