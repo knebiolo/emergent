@@ -46,8 +46,10 @@ class SalmonViewer(QtWidgets.QWidget):
         show_depth : bool
             Whether to show depth raster as background
         """
+        print("Creating SalmonViewer...")
         super().__init__()
         
+        print(f"Initializing viewer for {simulation.num_agents} agents...")
         self.sim = simulation
         self.dt = dt
         self.T = T
@@ -60,6 +62,7 @@ class SalmonViewer(QtWidgets.QWidget):
         
         # RL training state
         if self.rl_trainer:
+            print("Setting up RL trainer...")
             self.current_episode = 0
             self.episode_reward = 0.0
             self.prev_metrics = None
@@ -67,15 +70,20 @@ class SalmonViewer(QtWidgets.QWidget):
             self.rewards_history = []
         
         # Initialize UI
+        print("About to initialize UI...")
         self.init_ui()
         
-        # Start simulation timer
+        # Start simulation timer (paused initially)
+        print("Starting timer (paused)...")
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_simulation)
+        self.paused = True  # Start paused
         self.timer.start(int(dt * 1000))  # Convert to milliseconds
+        print("SalmonViewer initialization complete!")
         
     def init_ui(self):
         """Initialize the user interface."""
+        print("Initializing UI...")
         self.setWindowTitle("Salmon ABM Viewer")
         self.setGeometry(100, 100, 1400, 900)
         
@@ -86,6 +94,7 @@ class SalmonViewer(QtWidgets.QWidget):
         plot_layout = QVBoxLayout()
         
         # Create plot widget
+        print("Creating plot widget...")
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('k')
         self.plot_widget.setAspectLocked(True)
@@ -97,6 +106,7 @@ class SalmonViewer(QtWidgets.QWidget):
         if self.show_depth:
             self.setup_background()
         
+        print("Creating agent scatter plot...")
         # Agent scatter plot
         self.agent_scatter = ScatterPlotItem(
             size=6,
@@ -106,10 +116,15 @@ class SalmonViewer(QtWidgets.QWidget):
         )
         self.plot_widget.addItem(self.agent_scatter)
         
+        # Trajectory lines (initially empty)
+        self.trajectory_lines = []
+        self.trajectory_history = []  # List of (timestep, positions) tuples
+        
         # Velocity field arrows (optional)
         if self.show_velocity_field:
             self.setup_velocity_field()
         
+        print("Creating status bar...")
         # Status bar
         status_layout = QHBoxLayout()
         self.timestep_label = QLabel(f"Timestep: 0 / {self.n_timesteps}")
@@ -124,10 +139,12 @@ class SalmonViewer(QtWidgets.QWidget):
         main_layout.addLayout(plot_layout, stretch=3)
         
         # Right panel: controls
+        print("Creating control panel...")
         control_panel = self.create_control_panel()
         main_layout.addWidget(control_panel, stretch=1)
         
         self.setLayout(main_layout)
+        print("UI initialization complete!")
         
     def setup_background(self):
         """Setup depth raster as background image or HECRAS wetted cells."""
@@ -136,38 +153,47 @@ class SalmonViewer(QtWidgets.QWidget):
             if hasattr(self.sim, 'use_hecras') and self.sim.use_hecras and hasattr(self.sim, 'hecras_plan_path'):
                 import h5py
                 from scipy.interpolate import griddata
+                from skimage import measure
                 plan_path = self.sim.hecras_plan_path
                 with h5py.File(plan_path, 'r') as hdf:
                     coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:])
                     depth = np.array(hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'][0, :])
                     
                 # Mask by wetted perimeter
+                print("Masking by wetted perimeter...")
                 wetted_mask = depth > 0.05
                 wetted_coords = coords[wetted_mask]
                 wetted_depth = depth[wetted_mask]
+                print(f"Wetted cells: {len(wetted_coords)}")
                 
-                # Create regular grid for ImageItem
-                x_min, x_max = wetted_coords[:, 0].min(), wetted_coords[:, 0].max()
-                y_min, y_max = wetted_coords[:, 1].min(), wetted_coords[:, 1].max()
-                grid_res = 200  # Resolution
-                xi = np.linspace(x_min, x_max, grid_res)
-                yi = np.linspace(y_min, y_max, grid_res)
-                xi_grid, yi_grid = np.meshgrid(xi, yi)
+                # Plot actual wetted perimeter from simulation
+                print("Plotting wetted perimeter polygon...")
+                if hasattr(self.sim, 'wetted_perimeter_polygon') and self.sim.wetted_perimeter_polygon is not None:
+                    # Get exterior coordinates from shapely polygon
+                    exterior_coords = np.array(self.sim.wetted_perimeter_polygon.exterior.coords)
+                    self.plot_widget.plot(exterior_coords[:, 0], exterior_coords[:, 1],
+                                        pen=pg.mkPen(color=(200, 200, 200), width=2))
+                    print(f"Plotted wetted perimeter with {len(exterior_coords)} points")
+                else:
+                    # Create wetted perimeter from wetted cells
+                    print("Creating wetted perimeter from wetted cells...")
+                    from shapely.geometry import MultiPoint
+                    from shapely.ops import unary_union
+                    
+                    # Create concave hull from wetted points
+                    points = MultiPoint(wetted_coords)
+                    hull = points.convex_hull
+                    
+                    # Plot the hull
+                    if hull.geom_type == 'Polygon':
+                        exterior_coords = np.array(hull.exterior.coords)
+                        self.plot_widget.plot(exterior_coords[:, 0], exterior_coords[:, 1],
+                                            pen=pg.mkPen(color=(200, 200, 200), width=2))
+                        print(f"Plotted convex hull with {len(exterior_coords)} points")
                 
-                # Interpolate depth onto grid
-                depth_grid = griddata(wetted_coords, wetted_depth, (xi_grid, yi_grid), method='nearest')
-                
-                # Create ImageItem with viridis colormap
-                img = pg.ImageItem(depth_grid, autoRange=False, autoLevels=True)
-                img.setRect(QtCore.QRectF(x_min, y_min, x_max - x_min, y_max - y_min))
-                img.setZValue(-10)
-                colormap = pg.colormap.get('viridis')
-                img.setColorMap(colormap)
-                self.plot_widget.addItem(img)
-                
-                # Set view bounds
-                self.plot_widget.setXRange(x_min, x_max)
-                self.plot_widget.setYRange(y_min, y_max)
+                print("Background setup complete!")
+                # Zoom to agents extent (will be set in update_displays)
+                self.initial_zoom_done = False
                 return
             
             # Fallback: load from HDF5
@@ -330,7 +356,7 @@ class SalmonViewer(QtWidgets.QWidget):
                     
                     # Label
                     label = QLabel(f"{attr.replace('_', ' ').title()}: {value:.3f}")
-                    label.setStyleSheet("font-size: 9pt;")
+                    label.setStyleSheet("font-size: 9pt; color: black;")
                     self.weight_labels[attr] = label
                     layout.addWidget(label)
                     
@@ -357,6 +383,7 @@ class SalmonViewer(QtWidgets.QWidget):
         """Update behavioral weight from slider."""
         weight_value = value / 100.0
         label.setText(f"{attr.replace('_', ' ').title()}: {weight_value:.3f}")
+        label.setStyleSheet("font-size: 9pt; color: black;")
         if hasattr(self.sim, 'behavioral_weights'):
             setattr(self.sim.behavioral_weights, attr, weight_value)
             self.sim.apply_behavioral_weights(self.sim.behavioral_weights)
@@ -510,7 +537,6 @@ class SalmonViewer(QtWidgets.QWidget):
                     pen=mkPen('g', width=2),
                     clear=True
                 )
-    
     def update_displays(self):
         """Update all display elements."""
         # Update agent positions
@@ -530,6 +556,52 @@ class SalmonViewer(QtWidgets.QWidget):
             colors = [[255, 100, 100, 200]] * len(x)
         
         self.agent_scatter.setData(x, y, brush=[pg.mkBrush(*c) for c in colors])
+        
+        # Update trajectories if enabled
+        if self.show_trajectories_cb.isChecked():
+            # Store current positions
+            self.trajectory_history.append((self.current_timestep, self.sim.X.copy(), self.sim.Y.copy()))
+            
+            # Limit history to last 100 timesteps to avoid slowdown
+            if len(self.trajectory_history) > 100:
+                self.trajectory_history.pop(0)
+            
+            # Clear old trajectory lines
+            for line in self.trajectory_lines:
+                self.plot_widget.removeItem(line)
+            self.trajectory_lines = []
+            
+            # Draw trajectories for each agent
+            if len(self.trajectory_history) > 1:
+                for agent_idx in range(self.sim.num_agents):
+                    # Extract this agent's path
+                    agent_x = [pos[1][agent_idx] for pos in self.trajectory_history]
+                    agent_y = [pos[2][agent_idx] for pos in self.trajectory_history]
+                    
+                    # Plot line
+                    line = self.plot_widget.plot(agent_x, agent_y,
+                                                pen=pg.mkPen(color=(255, 100, 100, 100), width=1))
+                    self.trajectory_lines.append(line)
+        else:
+            # Clear trajectories when disabled
+            if hasattr(self, 'trajectory_lines'):
+                for line in self.trajectory_lines:
+                    self.plot_widget.removeItem(line)
+                self.trajectory_lines = []
+                self.trajectory_history = []
+        
+        # Zoom to agents on first update
+        if not hasattr(self, 'initial_zoom_done') or not self.initial_zoom_done:
+            if len(x) > 0:
+                x_min, x_max = x.min(), x.max()
+                y_min, y_max = y.min(), y.max()
+                # Add 20% padding
+                x_range = x_max - x_min
+                y_range = y_max - y_min
+                padding = 0.2
+                self.plot_widget.setXRange(x_min - padding * x_range, x_max + padding * x_range)
+                self.plot_widget.setYRange(y_min - padding * y_range, y_max + padding * y_range)
+                self.initial_zoom_done = True
         
         # Update status labels
         current_time = self.current_timestep * self.dt
@@ -555,8 +627,7 @@ class SalmonViewer(QtWidgets.QWidget):
                     if hasattr(weights, attr):
                         value = getattr(weights, attr)
                         label.setText(f"{attr.replace('_', ' ').title()}: {value:.3f}")
-                        # Highlight weights in green during RL mode
-                        label.setStyleSheet("font-size: 9pt; color: #00ff00;")
+                        label.setStyleSheet("font-size: 9pt; color: black;")  # Keep black always
         
         # Update metrics
         try:
