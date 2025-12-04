@@ -342,7 +342,7 @@ class SalmonViewer(QtWidgets.QWidget):
         try:
             # Create dummy PID controller if needed
             if not hasattr(self, 'pid_controller'):
-                from sockeye_SoA_OpenGL_RL import PID_controller
+                from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import PID_controller
                 self.pid_controller = PID_controller(
                     self.sim.num_agents,
                     k_p=0.5, k_i=0.0, k_d=0.1

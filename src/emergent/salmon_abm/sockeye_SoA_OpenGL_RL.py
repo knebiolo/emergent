@@ -30,15 +30,41 @@ Therefore their tail beat per minute rate is dependent on the amount of drag
 and swimming mode.   
 """
 # import dependencies
-#import cupy as cp
 import h5py
 import dask.array as da
 import geopandas as gpd
+import matplotlib.animation as manimation
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import numpy.ma as ma
 import os
 import pandas as pd
+import random
+import rasterio
+from rasterio.crs import CRS
+from rasterio.transform import from_origin
+from rasterio.warp import calculate_default_transform, reproject
+import sys
+import time
+from datetime import datetime
+from affine import Affine
+from scipy.interpolate import CubicSpline, LinearNDInterpolator, UnivariateSpline
+from scipy.ndimage import distance_transform_edt, label, gaussian_filter1d, maximum_filter
+from scipy.optimize import curve_fit
 from scipy.spatial import cKDTree
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra, connected_components
+from scipy.stats import beta
+from shapely.geometry import Point, LineString, Polygon
+from shapely.geometry.base import BaseGeometry
+from sklearn.decomposition import PCA
+try:
+    from sksurv.nonparametric import kaplan_meier_estimator
+    _HAS_SKSURV = True
+except ImportError:
+    kaplan_meier_estimator = None
+    _HAS_SKSURV = False
 # from pysal.explore import esda
 # from pysal.lib import weights
 try:
@@ -839,54 +865,61 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
         
         print(f"Dry cells touching boundary: {touching_boundary_mask.sum():,}")
         
-        # Label connected components of dry cells
-        # Build adjacency graph for dry cells
-        dry_pairs = dry_tree.query_pairs(r=median_spacing * 1.5)
+        # OPTIMIZATION: Skip island removal for large meshes (> 500k dry cells)
+        # Island removal via connected components is O(N^2) and very slow
+        if n_dry > 500000:
+            print(f"   Skipping island removal (too many dry cells: {n_dry:,})")
+            print(f"   (Island removal disabled for meshes with >500k dry cells)")
+        else:
+            # Label connected components of dry cells
+            # Build adjacency graph for dry cells
+            print("   Building dry cell connectivity graph...")
+            dry_pairs = dry_tree.query_pairs(r=median_spacing * 1.5)
+            print(f"   Found {len(dry_pairs):,} dry cell connections")
         
-        # Use connected components to find islands
-        from scipy.sparse import csr_matrix
-        from scipy.sparse.csgraph import connected_components
-        
-        n_dry = len(dry_coords)
-        if len(dry_pairs) > 0:
-            pairs_arr = np.array(list(dry_pairs))
-            row = pairs_arr[:, 0]
-            col = pairs_arr[:, 1]
-            data = np.ones(len(row))
-            # Make symmetric
-            row_sym = np.concatenate([row, col])
-            col_sym = np.concatenate([col, row])
-            data_sym = np.concatenate([data, data])
-            adj_matrix = csr_matrix((data_sym, (row_sym, col_sym)), shape=(n_dry, n_dry))
+            # Use connected components to find islands
+            from scipy.sparse import csr_matrix
+            from scipy.sparse.csgraph import connected_components
             
-            # Find connected components
-            n_components, labels = connected_components(adj_matrix, directed=False)
-            
-            print(f"Dry regions (connected components): {n_components}")
-            
-            # Identify which components touch the boundary
-            components_touching_boundary = set()
-            for comp_id in range(n_components):
-                comp_mask = labels == comp_id
-                if np.any(touching_boundary_mask[comp_mask]):
-                    components_touching_boundary.add(comp_id)
-            
-            # Islands are components NOT touching boundary
-            island_mask = np.zeros(n_dry, dtype=bool)
-            for comp_id in range(n_components):
-                if comp_id not in components_touching_boundary:
-                    island_mask |= (labels == comp_id)
-            
-            print(f"Island cells (dry but surrounded): {island_mask.sum():,}")
-            
-            # Convert islands from dry to wetted
-            if island_mask.sum() > 0:
-                # Map back to original indices
-                dry_indices = np.where(dry_mask)[0]
-                island_indices_global = dry_indices[island_mask]
-                wetted_mask[island_indices_global] = True
-                dry_mask = ~wetted_mask
-                print(f"Updated wetted cells (after removing islands): {wetted_mask.sum():,}")
+            if len(dry_pairs) > 0:
+                pairs_arr = np.array(list(dry_pairs))
+                row = pairs_arr[:, 0]
+                col = pairs_arr[:, 1]
+                data = np.ones(len(row))
+                # Make symmetric
+                row_sym = np.concatenate([row, col])
+                col_sym = np.concatenate([col, row])
+                data_sym = np.concatenate([data, data])
+                adj_matrix = csr_matrix((data_sym, (row_sym, col_sym)), shape=(n_dry, n_dry))
+                
+                # Find connected components
+                n_components, labels = connected_components(adj_matrix, directed=False)
+                
+                print(f"Dry regions (connected components): {n_components}")
+                
+                # Identify which components touch the boundary
+                components_touching_boundary = set()
+                for comp_id in range(n_components):
+                    comp_mask = labels == comp_id
+                    if np.any(touching_boundary_mask[comp_mask]):
+                        components_touching_boundary.add(comp_id)
+                
+                # Islands are components NOT touching boundary
+                island_mask = np.zeros(n_dry, dtype=bool)
+                for comp_id in range(n_components):
+                    if comp_id not in components_touching_boundary:
+                        island_mask |= (labels == comp_id)
+                
+                print(f"Island cells (dry but surrounded): {island_mask.sum():,}")
+                
+                # Convert islands from dry to wetted
+                if island_mask.sum() > 0:
+                    # Map back to original indices
+                    dry_indices = np.where(dry_mask)[0]
+                    island_indices_global = dry_indices[island_mask]
+                    wetted_mask[island_indices_global] = True
+                    dry_mask = ~wetted_mask
+                    print(f"Updated wetted cells (after removing islands): {wetted_mask.sum():,}")
     
     # Step 3: Extract perimeter (boundary between wetted and dry)
     wetted_coords = coords[wetted_mask]
@@ -1138,16 +1171,129 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     return centerline
 
 
+def extract_centerline_fast_hecras(plan_path, depth_threshold=0.05, sample_fraction=0.1, min_length=50):
+    """Fast centerline extraction from HECRAS by sampling wetted cells.
+    
+    Instead of computing full distance-to-bank field, this:
+    1. Samples wetted cells (faster than all cells)
+    2. Finds the longitudinal axis via PCA
+    3. Orders points along that axis
+    4. Smooths to create centerline
+    
+    Much faster than distance-field approach for large meshes.
+    
+    Parameters
+    ----------
+    plan_path : str
+        Path to HECRAS plan HDF5
+    depth_threshold : float
+        Wetted threshold in meters
+    sample_fraction : float
+        Fraction of wetted cells to sample (0.05-0.2 recommended)
+    min_length : float
+        Minimum centerline length in meters
+    
+    Returns
+    -------
+    shapely.LineString or None
+    """
+    import h5py
+    from scipy.spatial import cKDTree
+    from scipy.ndimage import gaussian_filter1d
+    from sklearn.decomposition import PCA
+    
+    print("FAST CENTERLINE EXTRACTION")
+    
+    with h5py.File(plan_path, 'r') as hdf:
+        # Load geometry
+        coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:], dtype=np.float64)
+        
+        # Get depth at t=0
+        depth_path = 'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'
+        depth_data = hdf[depth_path]
+        depth = depth_data[0, :]  # First timestep
+    
+    # Find wetted cells
+    wetted_mask = depth > depth_threshold
+    wetted_coords = coords[wetted_mask]
+    
+    print(f"   Wetted cells: {len(wetted_coords):,} / {len(coords):,} ({100*len(wetted_coords)/len(coords):.1f}%)")
+    
+    if len(wetted_coords) < 100:
+        print("   ERROR: Too few wetted cells for centerline extraction")
+        return None
+    
+    # Sample wetted cells for speed
+    n_sample = max(500, int(len(wetted_coords) * sample_fraction))
+    n_sample = min(n_sample, len(wetted_coords))
+    sample_idx = np.random.choice(len(wetted_coords), size=n_sample, replace=False)
+    sample_coords = wetted_coords[sample_idx]
+    
+    print(f"   Using {n_sample:,} sampled points for centerline")
+    
+    # Use PCA to find principal flow direction
+    pca = PCA(n_components=2)
+    pca.fit(sample_coords)
+    
+    # First principal component = longitudinal axis
+    longitudinal_axis = pca.components_[0]
+    
+    # Project all sample points onto longitudinal axis
+    centered = sample_coords - pca.mean_
+    projections = centered @ longitudinal_axis
+    
+    # Sort points by projection (upstream to downstream)
+    sorted_idx = np.argsort(projections)
+    sorted_coords = sample_coords[sorted_idx]
+    
+    # Bin points along longitudinal axis and take median laterally
+    n_bins = min(200, len(sorted_coords) // 5)
+    bins = np.linspace(projections.min(), projections.max(), n_bins)
+    bin_idx = np.digitize(projections[sorted_idx], bins)
+    
+    centerline_points = []
+    for i in range(1, len(bins)):
+        mask = bin_idx == i
+        if mask.sum() > 0:
+            # Median position in this bin
+            bin_coords = sorted_coords[mask]
+            centerline_points.append(np.median(bin_coords, axis=0))
+    
+    centerline_points = np.array(centerline_points)
+    
+    print(f"   Centerline points after binning: {len(centerline_points)}")
+    
+    if len(centerline_points) < 2:
+        print("   ERROR: Not enough centerline points")
+        return None
+    
+    # Smooth the centerline
+    if len(centerline_points) > 5:
+        sigma = max(1, len(centerline_points) // 20)
+        smoothed_x = gaussian_filter1d(centerline_points[:, 0], sigma=sigma)
+        smoothed_y = gaussian_filter1d(centerline_points[:, 1], sigma=sigma)
+        centerline_points = np.column_stack((smoothed_x, smoothed_y))
+    
+    centerline = LineString(centerline_points)
+    
+    print(f"   Centerline length: {centerline.length:.2f}m")
+    
+    if centerline.length < min_length:
+        print(f"   WARNING: Centerline too short ({centerline.length:.2f}m < {min_length}m)")
+        return None
+    
+    return centerline
+
+
 def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=None, 
                                 target_cell_size=None, create_rasters=True):
     """Complete HECRAS geometry initialization workflow in correct order.
     
     This function orchestrates the proper initialization sequence for HECRAS mode:
     1. Load HECRAS plan geometry and build KDTree
-    2. Infer wetted perimeter from depth at t=0
-    3. Compute distance-to-bank on irregular mesh
-    4. Derive centerline from distance field
-    5. Optionally create regular grid (x_coords, y_coords) and rasterize fields
+    2. Extract centerline (FAST method using PCA on wetted cells)
+    3. Optionally compute distance-to-bank if needed
+    4. Optionally create regular grid rasters
     
     Parameters
     ----------
@@ -1168,8 +1314,6 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     -------
     dict with:
         'centerline': shapely LineString
-        'wetted_info': dict from infer_wetted_perimeter_from_hecras
-        'distance_to_bank': ndarray of distances
         'coords': HECRAS cell coordinates
         'transform': Affine transform (if rasters created)
     """
@@ -1185,37 +1329,32 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     with h5py.File(plan_path, 'r') as hdf:
         coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:], dtype=np.float64)
     
-    # Cache KDTree via load_hecras_plan_cached
+    # Create and cache HECRASMap
     fields = ['Cell Hydraulic Depth', 'Cell Velocity - Velocity X', 'Cell Velocity - Velocity Y', 'Water Surface']
-    hecras_map = load_hecras_plan_cached(simulation, plan_path, field_names=fields)
+    if not hasattr(simulation, '_hecras_maps'):
+        simulation._hecras_maps = {}
+    key = (str(plan_path), tuple(fields))
+    if key not in simulation._hecras_maps:
+        simulation._hecras_maps[key] = HECRASMap(str(plan_path), field_names=fields)
+    hecras_map = simulation._hecras_maps[key]
     print(f"   Loaded {len(coords):,} HECRAS cells")
     
-    # Step 2: Infer wetted perimeter
-    print("\n2. Inferring wetted perimeter from depth...")
-    wetted_info = infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=depth_threshold, timestep=0)
-    
-    # Step 3: Compute distance-to-bank
-    print("\n3. Computing distance-to-bank on irregular mesh...")
-    distance_to_bank = compute_distance_to_bank_hecras(wetted_info, coords, median_spacing=wetted_info.get('median_spacing'))
-    
-    # Step 4: Derive centerline
-    print("\n4. Deriving centerline from distance field...")
-    centerline = derive_centerline_from_hecras_distance(
-        coords, 
-        distance_to_bank, 
-        wetted_info['wetted_mask'],
-        crs=crs,
-        min_distance_threshold=None,  # Auto: 75th percentile
+    # Step 2: Fast centerline extraction
+    print("\n2. Extracting centerline...")
+    centerline = extract_centerline_fast_hecras(
+        plan_path,
+        depth_threshold=depth_threshold,
+        sample_fraction=0.1,  # Sample 10% of wetted cells
         min_length=50
     )
     
     if centerline is None:
-        print("   WARNING: Failed to derive centerline!")
+        print("   WARNING: Failed to extract centerline!")
     
-    # Step 5: Optionally create regular grid rasters
+    # Step 3: Optionally create regular grid rasters
     transform = None
     if create_rasters:
-        print("\n5. Creating regular grid rasters...")
+        print("\n3. Creating regular grid rasters...")
         
         # Compute affine transform from HECRAS cell spacing
         transform = compute_affine_from_hecras(coords, target_cell_size=target_cell_size)
@@ -1234,62 +1373,30 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
         ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=(height, width), target_transform=transform)
         
         # Map initial HECRAS fields to rasters
-        print("\n6. Mapping HECRAS fields to rasters...")
+        print("\n4. Mapping HECRAS fields to rasters...")
         map_hecras_to_env_rasters(simulation, plan_path, field_names=fields, k=1)  # k=1 for speed
-        
-        # Write distance-to-bank to environment group
-        try:
-            # Rasterize distance field using IDW
-            hecras_map_dist = HECRASMap.__new__(HECRASMap)
-            hecras_map_dist.coords = coords
-            hecras_map_dist.tree = cKDTree(coords)
-            hecras_map_dist.fields = {'distance_to_bank': distance_to_bank}
-            
-            # Build grid points
-            xc = simulation.hdf5['x_coords'][:]
-            yc = simulation.hdf5['y_coords'][:]
-            grid_xy = np.column_stack((xc.ravel(), yc.ravel()))
-            
-            # Map distance
-            mapped = hecras_map_dist.map_idw(grid_xy, k=3)
-            dist_raster = mapped['distance_to_bank'].reshape(height, width).astype(np.float32)
-            
-            # Write to HDF
-            env = simulation.hdf5.require_group('environment')
-            if 'distance_to_bank' in env:
-                del env['distance_to_bank']
-            env.create_dataset('distance_to_bank', data=dist_raster, dtype='float32')
-            
-            print(f"   Wrote distance_to_bank raster to HDF5")
-        except Exception as e:
-            print(f"   Warning: Could not write distance_to_bank raster: {e}")
-    
-    print("\n" + "="*80)
-    print("HECRAS GEOMETRY INITIALIZATION COMPLETE")
-    print("="*80 + "\n")
     
     return {
         'centerline': centerline,
-        'wetted_info': wetted_info,
-        'distance_to_bank': distance_to_bank,
         'coords': coords,
         'transform': transform
     }
 
 
-def load_hecras_plan_cached(simulation, plan_path, field_names=None):
-    """Load a HECRAS plan and cache HECRASMap on the simulation object.
+# # End HECRAS helpers
 
-    Stores in `simulation._hecras_maps` dict keyed by (plan_path, tuple(field_names)).
-    """
-    if not hasattr(simulation, '_hecras_maps'):
-        simulation._hecras_maps = {}
-    if field_names is None:
-        field_names = ['Cells Minimum Elevation']
-    key = (str(plan_path), tuple(field_names))
-    if key not in simulation._hecras_maps:
-        simulation._hecras_maps[key] = HECRASMap(str(plan_path), field_names=field_names)
-    return simulation._hecras_maps[key]
+
+def get_arr(use_gpu=False):
+    '''
+    Method to get the appropriate array module.
+    '''
+    if use_gpu:
+        try:
+            import cupy as cp
+            return cp
+        except ImportError:
+            return np
+    return np
 
 
 def map_hecras_for_agents(simulation, agent_xy, plan_path, field_names=None, k=8):
@@ -1299,7 +1406,15 @@ def map_hecras_for_agents(simulation, agent_xy, plan_path, field_names=None, k=8
       - If one field requested: (N,) array
       - If multiple fields: dict field_name -> (N,) array
     """
-    m = load_hecras_plan_cached(simulation, plan_path, field_names=field_names)
+    # Create and cache HECRASMap
+    if not hasattr(simulation, '_hecras_maps'):
+        simulation._hecras_maps = {}
+    if field_names is None:
+        field_names = ['Cells Minimum Elevation']
+    key = (str(plan_path), tuple(field_names))
+    if key not in simulation._hecras_maps:
+        simulation._hecras_maps[key] = HECRASMap(str(plan_path), field_names=field_names)
+    m = simulation._hecras_maps[key]
     out = m.map_idw(agent_xy, k=k)
     # if single field requested, return array directly
     if len(out) == 1:
@@ -9229,7 +9344,7 @@ class simulation():
                 sin_h = np.ascontiguousarray(np.sin(heading_a), dtype=np.float64)
                 # reuse an output drags array to avoid extra allocations
                 drags_out = np.zeros((self.simulation.num_agents, 2), dtype=np.float64)
-                swim_speeds, bl_s, prolonged, sprint, sustained = _merged_swim_drag_fatigue_numba_v2(sog_a, cos_h, sin_h, xv, yv, mask_arr, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf, dragc, wave, self.simulation.swim_behav, maxs, maxp, batt, swim_buf, drags_out)
+                swim_speeds, bl_s, prolonged, sprint, sustained = _merged_swim_drag_fatigue_numba(sog_a, cos_h, sin_h, xv, yv, mask_arr, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf, dragc, wave, self.simulation.swim_behav, maxs, maxp, batt, swim_buf)
                 mask_dict = {'prolonged': prolonged, 'sprint': sprint, 'sustained': sustained}
                 # set drag into simulation state using the preallocated buffer
                 try:
@@ -9484,16 +9599,16 @@ class simulation():
         # accumulate time
         self.cumulative_time = self.cumulative_time + dt
           
-    def run(self, model_name, n, dt, video=False, k_p=None, k_i=None, k_d=None, interactive=False):
+    def run(self, model_name, n, dt, video=False, k_p=None, k_i=None, k_d=None, interactive=False, g=9.81):
         """
         The simulation uses raster data for depth and agent positions to visualize the movement of agents in the environment.
         When `video` is True this writes an mp4 movie; when `interactive` is True this shows
         an on-screen real-time animation (no file output). If both are False the simulation
         runs headless and only prints progress.
         - model_name: A string representing the name of the model, used for titling the output movie.
-        if self.pid_tuning == False:
         - n: An integer representing the number of time steps to simulate.
-                else:
+        - dt: Timestep duration in seconds
+        - g: Gravitational acceleration (m/s^2), default 9.81
 
                 # interactive (real-time) mode: show on-screen animation without saving
                 if interactive:
