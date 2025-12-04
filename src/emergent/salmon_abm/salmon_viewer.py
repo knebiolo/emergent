@@ -138,26 +138,44 @@ class SalmonViewer(QtWidgets.QWidget):
         
         main_layout.addLayout(plot_layout, stretch=3)
         
-        # Right panel: controls
-        print("Creating control panel...")
-        control_panel = self.create_control_panel()
-        main_layout.addWidget(control_panel, stretch=1)
+        # Right side: TWO PANELS - Left and Right
+        right_side_layout = QHBoxLayout()
+        
+        # Left panel: RL Training and Metrics
+        left_panel = self.create_left_panel()
+        right_side_layout.addWidget(left_panel, stretch=1)
+        
+        # Right panel: Controls and Weights
+        right_panel = self.create_right_panel()
+        right_side_layout.addWidget(right_panel, stretch=1)
+        
+        main_layout.addLayout(right_side_layout, stretch=2)
         
         self.setLayout(main_layout)
         print("UI initialization complete!")
+    
+    def create_left_panel(self):
+        """Create left control panel with RL Training and Metrics."""
+        panel = QGroupBox("Training & Metrics")
+        layout = QVBoxLayout()
         
-    def setup_background(self):
-        """Setup depth raster as background image or HECRAS wetted cells."""
-        try:
-            # Try HECRAS mode first
-            if hasattr(self.sim, 'use_hecras') and self.sim.use_hecras and hasattr(self.sim, 'hecras_plan_path'):
-                import h5py
-                from scipy.interpolate import griddata
-                from skimage import measure
-                plan_path = self.sim.hecras_plan_path
-                with h5py.File(plan_path, 'r') as hdf:
-                    coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:])
-                    depth = np.array(hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'][0, :])
+        # RL Training metrics (if applicable)
+        if self.rl_trainer:
+            rl_group = self.create_rl_panel()
+            layout.addWidget(rl_group)
+        
+        # Behavior metrics
+        metrics_group = self.create_metrics_panel()
+        layout.addWidget(metrics_group)
+        
+        layout.addStretch()
+        panel.setLayout(layout)
+        return panel
+    
+    def create_right_panel(self):
+        """Create right control panel with controls and weights."""
+        panel = QGroupBox("Controls & Weights")
+        layout = QVBoxLayout()
                     
                 # Mask by wetted perimeter
                 print("Masking by wetted perimeter...")
@@ -166,30 +184,15 @@ class SalmonViewer(QtWidgets.QWidget):
                 wetted_depth = depth[wetted_mask]
                 print(f"Wetted cells: {len(wetted_coords)}")
                 
-                # Plot actual wetted perimeter from simulation
-                print("Plotting wetted perimeter polygon...")
-                if hasattr(self.sim, 'wetted_perimeter_polygon') and self.sim.wetted_perimeter_polygon is not None:
-                    # Get exterior coordinates from shapely polygon
-                    exterior_coords = np.array(self.sim.wetted_perimeter_polygon.exterior.coords)
-                    self.plot_widget.plot(exterior_coords[:, 0], exterior_coords[:, 1],
-                                        pen=pg.mkPen(color=(200, 200, 200), width=2))
-                    print(f"Plotted wetted perimeter with {len(exterior_coords)} points")
-                else:
-                    # Create wetted perimeter from wetted cells
-                    print("Creating wetted perimeter from wetted cells...")
-                    from shapely.geometry import MultiPoint
-                    from shapely.ops import unary_union
-                    
-                    # Create concave hull from wetted points
-                    points = MultiPoint(wetted_coords)
-                    hull = points.convex_hull
-                    
-                    # Plot the hull
-                    if hull.geom_type == 'Polygon':
-                        exterior_coords = np.array(hull.exterior.coords)
-                        self.plot_widget.plot(exterior_coords[:, 0], exterior_coords[:, 1],
-                                            pen=pg.mkPen(color=(200, 200, 200), width=2))
-                        print(f"Plotted convex hull with {len(exterior_coords)} points")
+                # Plot centerline from simulation
+                print("Plotting centerline...")
+                if hasattr(self.sim, 'centerline') and self.sim.centerline is not None:
+                    from shapely.geometry import LineString
+                    if isinstance(self.sim.centerline, LineString):
+                        centerline_coords = np.array(self.sim.centerline.coords)
+                        self.plot_widget.plot(centerline_coords[:, 0], centerline_coords[:, 1],
+                                            pen=pg.mkPen(color=(100, 200, 255), width=2, style=Qt.DashLine))
+                        print(f"Plotted centerline with {len(centerline_coords)} points")
                 
                 print("Background setup complete!")
                 # Zoom to agents extent (will be set in update_displays)
@@ -236,9 +239,10 @@ class SalmonViewer(QtWidgets.QWidget):
         # For now, skip this expensive visualization
         pass
     
-    def create_control_panel(self):
-        """Create right-side control panel."""
-        panel = QGroupBox("Controls")
+    
+    def create_right_panel(self):
+        """Create right control panel with controls and weights."""
+        panel = QGroupBox("Controls & Weights")
         layout = QVBoxLayout()
         
         # Play/Pause button
@@ -266,7 +270,7 @@ class SalmonViewer(QtWidgets.QWidget):
         speed_group.setLayout(speed_layout)
         layout.addWidget(speed_group)
         
-        # Agent count display with display options in right column
+        # Agent count display with display options
         agent_group = QGroupBox("Agents")
         agent_layout = QHBoxLayout()
         
@@ -283,8 +287,11 @@ class SalmonViewer(QtWidgets.QWidget):
         self.show_trajectories_cb.setChecked(False)
         self.show_dead_cb = QCheckBox("Show Dead")
         self.show_dead_cb.setChecked(True)
+        self.show_direction_cb = QCheckBox("Direction")
+        self.show_direction_cb.setChecked(True)
         right_col.addWidget(self.show_trajectories_cb)
         right_col.addWidget(self.show_dead_cb)
+        right_col.addWidget(self.show_direction_cb)
         
         agent_layout.addLayout(left_col)
         agent_layout.addLayout(right_col)
@@ -295,26 +302,19 @@ class SalmonViewer(QtWidgets.QWidget):
         weights_group = self.create_weights_panel()
         layout.addWidget(weights_group)
         
-        # RL Training metrics (if applicable)
-        if self.rl_trainer:
-            rl_group = self.create_rl_panel()
-            layout.addWidget(rl_group)
-        
-        # Behavior metrics
-        metrics_group = self.create_metrics_panel()
-        layout.addWidget(metrics_group)
-        
         layout.addStretch()
         panel.setLayout(layout)
         return panel
     
+    def setup_background(self):
+        """Setup depth raster as background image or HECRAS wetted cells."""
+        try:
+            # Try HECRAS mode first
+            if hasattr(self.sim, 'use_hecras') and self.sim.use_hecras and hasattr(self.sim, 'hecras_plan_path'):
     def create_rl_panel(self):
         """Create RL training metrics panel."""
         rl_group = QGroupBox("RL Training")
-        rl_group.setCheckable(True)
-        rl_group.setChecked(True)
         layout = QVBoxLayout()
-        
         self.episode_label = QLabel(f"Episode: {self.current_episode} | Timestep: 0")
         self.reward_label = QLabel(f"Reward: {self.episode_reward:.2f}")
         self.best_reward_label = QLabel(f"Best: {self.best_reward:.2f}")
@@ -336,12 +336,10 @@ class SalmonViewer(QtWidgets.QWidget):
     def create_weights_panel(self):
         """Create behavioral weights display panel with sliders."""
         weights_group = QGroupBox("Behavioral Weights")
-        weights_group.setCheckable(True)
-        weights_group.setChecked(True)
-        layout = QVBoxLayout()
-        
-        # Get weights from simulation
-        if hasattr(self.sim, 'behavioral_weights'):
+    def create_weights_panel(self):
+        """Create behavioral weights display panel with sliders."""
+        weights_group = QGroupBox("Behavioral Weights")
+        layout = QVBoxLayout()behavioral_weights'):
             weights = self.sim.behavioral_weights
             
             # Create sliders for each weight
@@ -392,12 +390,10 @@ class SalmonViewer(QtWidgets.QWidget):
         """Create behavior metrics panel."""
         metrics_group = QGroupBox("Metrics")
         metrics_group.setCheckable(True)
-        metrics_group.setChecked(True)
-        layout = QVBoxLayout()
-        
-        # Speed metrics
-        self.mean_speed_label = QLabel("Mean Speed: --")
-        self.max_speed_label = QLabel("Max Speed: --")
+    def create_metrics_panel(self):
+        """Create behavior metrics panel."""
+        metrics_group = QGroupBox("Metrics")
+        layout = QVBoxLayout() QLabel("Max Speed: --")
         layout.addWidget(self.mean_speed_label)
         layout.addWidget(self.max_speed_label)
         
@@ -556,6 +552,42 @@ class SalmonViewer(QtWidgets.QWidget):
             colors = [[255, 100, 100, 200]] * len(x)
         
         self.agent_scatter.setData(x, y, brush=[pg.mkBrush(*c) for c in colors])
+        
+        # Draw direction indicators (wind sock style)
+        if self.show_direction_cb.isChecked() and hasattr(self.sim, 'heading'):
+            # Clear old direction lines
+            if not hasattr(self, 'direction_lines'):
+                self.direction_lines = []
+            for line in self.direction_lines:
+                self.plot_widget.removeItem(line)
+            self.direction_lines = []
+            
+            # Draw direction line for each visible agent
+            if self.show_dead_cb.isChecked():
+                headings = self.sim.heading
+                pos_x, pos_y = self.sim.X, self.sim.Y
+            else:
+                headings = self.sim.heading[alive_mask]
+                pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
+            
+            # Calculate arrow endpoints (5m length)
+            arrow_length = 5.0
+            end_x = pos_x + arrow_length * np.cos(headings)
+            end_y = pos_y + arrow_length * np.sin(headings)
+            
+            # Draw lines from agent position trailing backward
+            for i in range(len(pos_x)):
+                line_x = [pos_x[i], end_x[i]]
+                line_y = [pos_y[i], end_y[i]]
+                line = self.plot_widget.plot(line_x, line_y,
+                                            pen=pg.mkPen(color=(255, 200, 100, 150), width=1.5))
+                self.direction_lines.append(line)
+        else:
+            # Clear direction lines when disabled
+            if hasattr(self, 'direction_lines'):
+                for line in self.direction_lines:
+                    self.plot_widget.removeItem(line)
+                self.direction_lines = []
         
         # Update trajectories if enabled
         if self.show_trajectories_cb.isChecked():

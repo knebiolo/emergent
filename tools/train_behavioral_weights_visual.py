@@ -103,23 +103,15 @@ def main():
     print("="*80)
     
     # Launch viewer with RL trainer
-    try:
-        total_time = args.timesteps * args.dt
-        launch_viewer(
-            simulation=sim,
-            dt=args.dt,
-            T=total_time,
-            rl_trainer=trainer,
-            show_velocity_field=False,  # Too expensive for large grids
-            show_depth=True
-        )
-    except Exception as e:
-        print(f"\n{'='*80}")
-        print(f"ERROR launching viewer: {e}")
-        print(f"{'='*80}")
-        import traceback
-        traceback.print_exc()
-        raise
+    total_time = args.timesteps * args.dt
+    launch_viewer(
+        simulation=sim,
+        dt=args.dt,
+        T=total_time,
+        rl_trainer=trainer,
+        show_velocity_field=False,  # Too expensive for large grids
+        show_depth=True
+    )
 
 
 if __name__ == '__main__':
