@@ -46,6 +46,10 @@ dependencies = [
     "aiobotocore>=2.0",
     "aiohttp>=3.7",
 
+    # OpenGL bindings
+    "PyOpenGL>=23.0",
+    "PyOpenGL_accelerate>=23.0",
+
     # misc utilities
     "networkx>=2.6",
     "requests>=2.25"

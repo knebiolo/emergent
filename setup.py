@@ -59,6 +59,9 @@ setup(
         "moderngl-window>=2.4,<3.0",
         "pygame>=2.6,<3.0",
         "pillow>=11.0,<12.0",
+        # PyOpenGL bindings (required for pyqtgraph.opengl)
+        "PyOpenGL>=23.0,<24.0",
+        "PyOpenGL_accelerate>=23.0,<24.0",
         # Qt GUI (for ship_abm and RL visualization)
         "PyQt5>=5.15,<6.0",
         "pyqtgraph>=0.13,<1.0",

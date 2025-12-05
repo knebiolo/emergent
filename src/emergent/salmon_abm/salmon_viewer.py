@@ -23,6 +23,86 @@ from pyqtgraph import PlotWidget, mkPen, ScatterPlotItem
 import rasterio
 from rasterio.transform import from_bounds
 
+# Import GL here (will require PyOpenGL installed)
+try:
+    import pyqtgraph.opengl as gl
+except Exception:
+    gl = None
+
+
+class _GLMeshBuilder(QtCore.QThread):
+    """Background thread to build GL mesh arrays from triangulation data.
+
+    Emits a single `mesh_ready` signal with a dict containing 'verts', 'faces', 'colors'.
+    """
+    mesh_ready = QtCore.pyqtSignal(object)
+
+    def __init__(self, tri_pts, tri_vals, kept_tris, vert_exag=1.0, parent=None):
+        super().__init__(parent=parent)
+        # copy arrays to avoid lifetime issues
+        self.tri_pts = np.asarray(tri_pts, dtype=float)
+        self.tri_vals = np.asarray(tri_vals, dtype=float)
+        self.kept_tris = np.asarray(kept_tris, dtype=np.int32)
+        self.vert_exag = float(vert_exag)
+
+    def run(self):
+        try:
+            # Build vertex array (x, y, z from depth * vert_exag)
+            z = (np.nan_to_num(self.tri_vals, nan=0.0) * self.vert_exag).astype(float)
+            verts = np.column_stack([self.tri_pts[:, 0], self.tri_pts[:, 1], z])
+            faces = np.array(self.kept_tris, dtype=np.int32)
+
+            # Per-vertex colors mapped from value
+            vmin = np.nanmin(self.tri_vals)
+            vmax = np.nanmax(self.tri_vals)
+            vrange = vmax - vmin if (vmax - vmin) != 0 else 1.0
+            norm_vals = (self.tri_vals - vmin) / vrange
+            # use a simple viridis-like palette via matplotlib if available, otherwise use grayscale
+            try:
+                import matplotlib.cm as cm
+
+                cmap = cm.get_cmap('viridis')
+                cmap_vals = (cmap(norm_vals)[:, :3]).astype(float)
+            except Exception:
+                cmap_vals = (np.vstack([norm_vals, norm_vals, norm_vals]).T).astype(float)
+
+            # Compute vertex normals from faces for simple lighting
+            try:
+                verts_f = verts
+                f = faces
+                # triangle face normals
+                v0 = verts_f[f[:, 0]]
+                v1 = verts_f[f[:, 1]]
+                v2 = verts_f[f[:, 2]]
+                fn = np.cross(v1 - v0, v2 - v0)
+                # normalize
+                fn_norm = np.linalg.norm(fn, axis=1, keepdims=True)
+                fn = fn / np.maximum(fn_norm, 1e-9)
+                # accumulate per-vertex normals
+                vn = np.zeros_like(verts_f)
+                for i in range(3):
+                    np.add.at(vn, f[:, i], fn)
+                vn_norm = np.linalg.norm(vn, axis=1, keepdims=True)
+                vn = vn / np.maximum(vn_norm, 1e-9)
+            except Exception:
+                vn = np.tile(np.array([0.0, 0.0, 1.0]), (len(verts), 1))
+
+            # Simulate simple directional lighting to modulate colors
+            light_dir = np.array([0.5, 0.5, 1.0])
+            light_dir = light_dir / np.linalg.norm(light_dir)
+            light_strength = np.clip(np.sum(vn * light_dir, axis=1), 0.0, 1.0)
+            shaded = np.clip(cmap_vals * (0.6 + 0.4 * light_strength[:, None]), 0.0, 1.0)
+            cmap_vals_uint8 = (shaded * 255).astype(np.uint8)
+
+            # add alpha channel
+            colors = np.hstack([cmap_vals_uint8, np.full((len(cmap_vals_uint8), 1), 255, dtype=np.uint8)])
+
+            self.mesh_ready.emit({'verts': verts, 'faces': faces, 'colors': colors})
+        except Exception as e:
+            # Emit error info so main thread can log/raise
+            self.mesh_ready.emit({'error': str(e)})
+
+
 
 class SalmonViewer(QtWidgets.QWidget):
     """Live visualization for salmon ABM simulations."""
@@ -598,163 +678,57 @@ class SalmonViewer(QtWidgets.QWidget):
 
                         # Plot filtered triangles on top of the background (ensures visual completeness)
                         kept_tris = tris[kept]
-                        for t in kept_tris:
-                            coords = tri_pts[t]
-                            poly = QtGui.QPolygonF([QtCore.QPointF(coords[0,0], coords[0,1]),
-                                                   QtCore.QPointF(coords[1,0], coords[1,1]),
-                                                   QtCore.QPointF(coords[2,0], coords[2,1])])
-                            mean_depth = np.mean(tri_vals[t])
-                            rgba = cmap(norm(mean_depth))
-                            color = QtGui.QColor(int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255), 200)
-                            item = QtWidgets.QGraphicsPolygonItem(poly)
-                            brush = QtGui.QBrush(color)
-                            pen = QtGui.QPen(QtCore.Qt.NoPen)
-                            item.setBrush(brush)
-                            item.setPen(pen)
-                            self.plot_widget.addItem(item)
-                        print(f"Plotted filtered TIN with {len(kept_tris)} triangles (from {len(tris)})")
+                        # OpenGL-only path: build mesh in background thread and swap into GL view
+                        if gl is None:
+                            raise RuntimeError('pyqtgraph.opengl (PyOpenGL) not available')
+
+                        # Create GL view if needed and replace the PlotWidget
+                        if not hasattr(self, 'gl_view'):
+                            self.gl_view = gl.GLViewWidget()
+                            # adjust viewpoint and axes
+                            try:
+                                self.gl_view.opts['distance'] = max(100.0, float(np.max(tri_pts[:,0]) - np.min(tri_pts[:,0]), ))
+                            except Exception:
+                                self.gl_view.opts['distance'] = 100.0
+                            parent = self.plot_widget.parent()
+                            layout = parent.layout()
+                            layout.removeWidget(self.plot_widget)
+                            self.plot_widget.hide()
+                            layout.addWidget(self.gl_view)
+
+                        # Launch background mesh builder to avoid blocking UI
+                        builder = _GLMeshBuilder(tri_pts, tri_vals, kept_tris, parent=self)
+
+                        def _on_mesh_ready(payload):
+                            if 'error' in payload:
+                                print('GL mesh builder error:', payload['error'])
+                                return
+                            verts = payload['verts']
+                            faces = payload['faces']
+                            colors = payload['colors']
+                            try:
+                                meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
+                                mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
+                                mesh.setGLOptions('opaque')
+                                # remove previous mesh if present
+                                try:
+                                    if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
+                                        self.gl_view.removeItem(self.tin_mesh)
+                                except Exception:
+                                    pass
+                                self.tin_mesh = mesh
+                                self.gl_view.addItem(mesh)
+                                print(f"Plotted GLMesh TIN with {len(faces)} triangles (from {len(tris)})")
+                            except Exception as e:
+                                print('Failed to add GL mesh to scene:', e)
+
+                        builder.mesh_ready.connect(_on_mesh_ready)
+                        builder.start()
                         self.initial_zoom_done = False
                         return
                 except Exception:
-                    # TIN rendering failed/too sparse — fall back to rasterized IDW below
-                    pass
-
-                print("Rasterizing wetted depth via fast IDW and applying hillshade...")
-                try:
-                    from scipy.spatial import cKDTree
-                    import matplotlib.cm as cm
-                    import matplotlib.colors as mcolors
-                    from matplotlib.colors import LightSource
-
-                    pts = wetted_coords
-                    vals = wetted_depth
-
-                    # Sample points to reduce compute if necessary
-                    max_pts = 50000
-                    if len(pts) > max_pts:
-                        rng = np.random.default_rng(0)
-                        idx_sample = rng.choice(len(pts), size=max_pts, replace=False)
-                        pts_s = pts[idx_sample]
-                        vals_s = vals[idx_sample]
-                    else:
-                        pts_s = pts
-                        vals_s = vals
-
-                    # Create grid size based on extent but limited resolution for speed
-                    minx, miny = pts_s[:, 0].min(), pts_s[:, 1].min()
-                    maxx, maxy = pts_s[:, 0].max(), pts_s[:, 1].max()
-                    nx = 600
-                    ny = max(200, int(nx * (maxy - miny) / (maxx - minx)))
-                    xi = np.linspace(minx, maxx, nx)
-                    yi = np.linspace(miny, maxy, ny)
-                    XI, YI = np.meshgrid(xi, yi)
-                    grid_coords = np.column_stack([XI.ravel(), YI.ravel()])
-
-                    # Fast IDW: k-NN weighting
-                    tree = cKDTree(pts_s)
-                    k = min(8, len(pts_s))
-                    dists, idxs = tree.query(grid_coords, k=k)
-                    # Ensure shapes are 2D when k==1
-                    if k == 1:
-                        dists = dists[:, np.newaxis]
-                        idxs = idxs[:, np.newaxis]
-                    # Avoid zero distances
-                    dists[dists == 0] = 1e-6
-                    weights = 1.0 / (dists ** 2)
-                    # vals_s indexed by idxs -> shape (npoints, k)
-                    neighbor_vals = vals_s[idxs]
-                    weighted_vals = np.sum(weights * neighbor_vals, axis=1) / np.sum(weights, axis=1)
-                    Z = weighted_vals.reshape((ny, nx))
-
-                    # Fill holes (cells with NaN or very large distance) using nearest neighbor fallback
-                    try:
-                        if np.isnan(Z).any():
-                            # Nearest-neighbor fill for NaNs (use full point set)
-                            full_tree = cKDTree(pts)
-                            d_nn, idx_nn = full_tree.query(grid_coords, k=1)
-                            nn_vals = vals[idx_nn].reshape((ny, nx))
-                            Z[np.isnan(Z)] = nn_vals[np.isnan(Z)]
-                    except Exception:
-                        pass
-
-                    # Apply stronger low-pass (gaussian blur) and median filter to reduce banding
-                    try:
-                        from scipy.ndimage import gaussian_filter, median_filter
-                        # stronger smoothing to reduce banding artifacts
-                        Z = gaussian_filter(Z, sigma=3.0)
-                        Z = median_filter(Z, size=5)
-                        # final NN-fill if any NaNs persist
-                        if np.isnan(Z).any():
-                            full_tree = cKDTree(pts)
-                            d_nn, idx_nn = full_tree.query(grid_coords, k=1)
-                            nn_vals = vals[idx_nn].reshape((ny, nx))
-                            Z[np.isnan(Z)] = nn_vals[np.isnan(Z)]
-                    except Exception:
-                        try:
-                            from scipy.ndimage import gaussian_filter
-                            Z = gaussian_filter(Z, sigma=1.5)
-                        except Exception:
-                            pass
-
-                    # Apply hillshade once at initialization
-                    ls = LightSource(azdeg=315, altdeg=45)
-                    rgb = cm.get_cmap('viridis')(mcolors.Normalize(vmin=np.nanpercentile(Z, 1), vmax=np.nanpercentile(Z, 99))(Z))
-                    hill = ls.hillshade(Z, vert_exag=1.0, dx=(maxx - minx)/nx, dy=(maxy - miny)/ny)
-                    shaded = rgb[:, :, :3] * (0.6 + 0.4 * hill[:, :, None])
-
-                    # Prepare RGBA image
-                    alpha_channel = np.full((ny, nx), 255, dtype='uint8')
-
-                    # Build a wetted-area mask on the grid by measuring distance to nearest wetted cell center
-                    try:
-                        full_tree = cKDTree(pts)
-                        d_full, _ = full_tree.query(grid_coords, k=1)
-                        spacing = np.sqrt(((maxx - minx) * (maxy - miny)) / max(1, len(pts)))
-                        wetted_grid_mask = (d_full.reshape((ny, nx)) <= (spacing * 1.5))
-                        alpha_channel = (wetted_grid_mask * 255).astype('uint8')
-                    except Exception:
-                        # If building a full tree fails, keep alpha fully opaque
-                        pass
-
-                    shaded_uint8 = np.clip(shaded * 255, 0, 255).astype('uint8')
-                    # transpose arrays so rows/cols match plotting coordinate orientation
-                    try:
-                        # transpose X/Y axes while preserving color channel order
-                        shaded_uint8 = np.transpose(shaded_uint8, (1, 0, 2))
-                        alpha_channel = np.transpose(alpha_channel, (1, 0))
-                    except Exception:
-                        try:
-                            shaded_uint8 = shaded_uint8.T
-                            alpha_channel = alpha_channel.T
-                        except Exception:
-                            pass
-                    rgba_uint8 = np.dstack([shaded_uint8, alpha_channel])
-
-                    img_item = pg.ImageItem(rgba_uint8)
-                    self.plot_widget.addItem(img_item)
-                    img_item.setZValue(-100)
-                    img_item.setOpacity(1.0)
-                    # position the image using setRect(minx, miny, width, height)
-                    width = (maxx - minx)
-                    height = (maxy - miny)
-                    try:
-                        img_item.setRect(minx, miny, width, height)
-                    except TypeError:
-                        try:
-                            # Some pyqtgraph versions expect QRectF
-                            rect = QtCore.QRectF(minx, miny, width, height)
-                            img_item.setRect(rect)
-                        except Exception:
-                            # Fallback to legacy setPos/scale
-                            img_item.setPos((minx, miny))
-                            try:
-                                img_item.scale(width / nx, height / ny)
-                            except Exception:
-                                pass
-
-                    print(f"Rendered IDW raster ({nx}x{ny})")
-                except Exception as e:
-                    print(f"IDW rasterization failed: {e}")
+                    # TIN rendering failed or was too sparse — TIN is required as the only background
+                    raise RuntimeError('TIN rendering failed: no valid triangular surface could be generated')
 
                 # Plot centerline from simulation (overlay)
                 print("Plotting centerline...")
@@ -789,6 +763,104 @@ class SalmonViewer(QtWidgets.QWidget):
                 return
         except Exception as e:
             print(f"Warning: Could not load background: {e}")
+
+    def render_tin_from_arrays(self, coords, vals, cap_nodes=5000, vert_exag=None):
+        """Render a TIN from provided 2D coords and scalar values using the OpenGL path.
+
+        This helper bypasses the HECRAS file parsing and runs the Delaunay->GL pipeline
+        used by `setup_background()`. It is intended for programmatic tests and
+        interactive use where arrays are already available.
+        """
+        try:
+            if len(coords) < 3:
+                print('Not enough points for TIN')
+                return
+            tri_pts = np.asarray(coords, dtype=float)
+            tri_vals = np.asarray(vals, dtype=float)
+            if len(tri_pts) > cap_nodes:
+                rng = np.random.default_rng(0)
+                idx_keep = rng.choice(len(tri_pts), size=cap_nodes, replace=False)
+                tri_pts = tri_pts[idx_keep]
+                tri_vals = tri_vals[idx_keep]
+                print(f'Capped input nodes: {len(coords)} -> {len(tri_pts)} (max={cap_nodes})')
+
+            from scipy.spatial import Delaunay
+            import time
+            t0 = time.perf_counter()
+            tri = Delaunay(tri_pts)
+            t1 = time.perf_counter()
+            print(f'Delaunay time: {t1-t0:.2f}s for {len(tri_pts)} nodes')
+            tris = tri.simplices
+
+            # perform perimeter clipping if available
+            kept = np.ones(len(tris), dtype=bool)
+            try:
+                perim_points = None
+                if hasattr(self.sim, '_hecras_geometry_info'):
+                    perim_points = self.sim._hecras_geometry_info.get('perimeter_points', None)
+                if perim_points is not None and len(perim_points) > 3:
+                    from shapely.geometry import Point as ShPoint, Polygon
+                    perimeter = Polygon([tuple(p) for p in perim_points])
+                    for i, t in enumerate(tris):
+                        coords_tri = tri_pts[t]
+                        centroid = np.mean(coords_tri, axis=0)
+                        try:
+                            if not perimeter.contains(ShPoint(centroid[0], centroid[1])):
+                                kept[i] = False
+                        except Exception:
+                            kept[i] = False
+            except Exception:
+                kept = np.ones(len(tris), dtype=bool)
+
+            kept_tris = tris[kept]
+
+            # Ensure GL is available
+            if gl is None:
+                raise RuntimeError('pyqtgraph.opengl (PyOpenGL) not available')
+
+            # create GL view if needed
+            if not hasattr(self, 'gl_view'):
+                self.gl_view = gl.GLViewWidget()
+                parent = self.plot_widget.parent()
+                layout = parent.layout()
+                layout.removeWidget(self.plot_widget)
+                self.plot_widget.hide()
+                layout.addWidget(self.gl_view)
+
+            # compute vertical exaggeration
+            if vert_exag is None:
+                vert_exag = getattr(self.sim, 'vert_exag', 1.0)
+
+            # launch mesh builder with vertical exaggeration
+            builder = _GLMeshBuilder(tri_pts, tri_vals, kept_tris, vert_exag=vert_exag, parent=self)
+
+            def _on_mesh_ready(payload):
+                if 'error' in payload:
+                    print('GL mesh builder error:', payload['error'])
+                    return
+                verts = payload['verts']
+                faces = payload['faces']
+                colors = payload['colors']
+                try:
+                    meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
+                    mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
+                    mesh.setGLOptions('opaque')
+                    try:
+                        if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
+                            self.gl_view.removeItem(self.tin_mesh)
+                    except Exception:
+                        pass
+                    self.tin_mesh = mesh
+                    self.gl_view.addItem(mesh)
+                    print(f'Plotted GLMesh TIN with {len(faces)} triangles')
+                except Exception as e:
+                    print('Failed to add GL mesh to scene:', e)
+
+            builder.mesh_ready.connect(_on_mesh_ready)
+            builder.start()
+
+        except Exception as e:
+            print('render_tin_from_arrays failed:', e)
     
     def create_rl_panel(self):
         """Create RL training metrics panel."""
