@@ -444,6 +444,15 @@ class RLTrainer:
         self.sim = simulation
         self.behavioral_weights = BehavioralWeights()
         self.training_history = []
+        # Configurable penalties (can be adjusted during training)
+        self.collision_penalty_per_event = 100.0
+        self.dry_penalty_per_agent = 500.0
+        self.shallow_penalty_per_agent = 200.0
+        # Initial SOG jitter controls (fraction of ideal SOG)
+        # If strong_initial_sog_jitter is True, use strong_initial_sog_jitter_fraction
+        self.initial_sog_jitter_fraction = 0.1
+        self.strong_initial_sog_jitter = False
+        self.strong_initial_sog_jitter_fraction = 0.3
         
     def compute_reward(self, prev_state, current_state):
         """Compute reward for current timestep based on biologically-grounded behavior quality.
@@ -507,18 +516,18 @@ class RLTrainer:
         # 8. COLLISIONS: heavy penalty per collision event (pairwise contact)
         if 'collision_count' in current_state:
             # Penalize collisions strongly to encourage separation behavior
-            collision_penalty = -float(current_state['collision_count']) * 100.0
+            collision_penalty = -float(current_state['collision_count']) * float(getattr(self, 'collision_penalty_per_event', 100.0))
             reward += collision_penalty
 
         # 9. SHALLOW / DRY PENALTIES: heavy penalties when agents are on very shallow water
         # current_state may include 'dry_count' (depth <= 0) and 'shallow_count' (depth < 0.5*body_depth)
         if 'dry_count' in current_state:
             # Severe penalty for being on dry ground (out of water)
-            dry_penalty = -float(current_state['dry_count']) * 500.0
+            dry_penalty = -float(current_state['dry_count']) * float(getattr(self, 'dry_penalty_per_agent', 500.0))
             reward += dry_penalty
         if 'shallow_count' in current_state:
             # Heavy penalty for being in water shallower than half their body depth
-            shallow_penalty = -float(current_state['shallow_count']) * 200.0
+            shallow_penalty = -float(current_state['shallow_count']) * float(getattr(self, 'shallow_penalty_per_agent', 200.0))
             reward += shallow_penalty
         
         return reward
@@ -618,7 +627,40 @@ class RLTrainer:
         if hasattr(self.sim, 'centerline_meas'):
             prev_meas = getattr(self.sim, '_prev_centerline_meas', self.sim.centerline_meas)
             upstream_deltas = self.sim.centerline_meas - prev_meas
-            metrics['mean_upstream_progress'] = np.mean(upstream_deltas[alive_mask]) if np.any(alive_mask) else 0.0
+            inst_upstream = float(np.mean(upstream_deltas[alive_mask]) if np.any(alive_mask) else 0.0)
+            # maintain a rolling buffer on sim for recent upstream progress (seconds)
+            window = int(getattr(self, 'upstream_metric_window', 30))
+            from collections import deque
+            if not hasattr(self.sim, '_upstream_progress_buf'):
+                self.sim._upstream_progress_buf = deque(maxlen=window)
+            self.sim._upstream_progress_buf.append(inst_upstream)
+            metrics['mean_upstream_progress'] = float(np.mean(self.sim._upstream_progress_buf))
+            # also expose instantaneous upstream velocity component (positive upstream only)
+            try:
+                # compute upstream unit vector from centerline direction if available
+                # fallback: use sim.flow_direction (radians) if present
+                if hasattr(self.sim, 'flow_direction'):
+                    flow_dir = float(self.sim.flow_direction)
+                    # upstream direction is opposite the flow
+                    ux, uy = -np.cos(flow_dir), -np.sin(flow_dir)
+                else:
+                    # fallback to unit x,y upstream
+                    ux, uy = 1.0, 0.0
+
+                # per-agent velocity vectors
+                if hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
+                    vel_proj = self.sim.x_vel * ux + self.sim.y_vel * uy
+                    # positive values mean moving upstream
+                    mean_upstream_vel_inst = float(np.mean(np.maximum(vel_proj[alive_mask], 0.0))) if np.any(alive_mask) else 0.0
+                else:
+                    mean_upstream_vel_inst = 0.0
+
+                if not hasattr(self.sim, '_upstream_vel_buf'):
+                    self.sim._upstream_vel_buf = deque(maxlen=window)
+                self.sim._upstream_vel_buf.append(mean_upstream_vel_inst)
+                metrics['mean_upstream_velocity'] = float(np.mean(self.sim._upstream_vel_buf))
+            except Exception:
+                metrics['mean_upstream_velocity'] = 0.0
             self.sim._prev_centerline_meas = self.sim.centerline_meas.copy()
         
         # 4. ENERGY EFFICIENCY (Distance per kcal, accounting for drafting)
@@ -4189,6 +4231,11 @@ class simulation():
         self.time_out_of_water = self.arr.repeat(0.0, num_agents)
         self.time_of_abandon = self.arr.repeat(0.0, num_agents)
         self.time_since_abandon = self.arr.repeat(0.0, num_agents)
+        # Death / drying configuration
+        # If True, agents on dry ground are marked dead immediately
+        self.death_on_dry_immediate = True
+        # Time (timesteps) allowed out of water before death if immediate flag is False
+        self.time_out_of_water_threshold = 5
         self.dead = np.zeros(num_agents)
         
         # create initial positions
@@ -4782,8 +4829,25 @@ class simulation():
                 base = np.asarray(self.ideal_sog)
                 if base.size == 1:
                     base = np.full(self.num_agents, float(base))
-                self.sog = base * np.random.uniform(0.9, 1.1, size=self.num_agents)
+                # choose jitter fraction depending on 'strong' flag
+                frac = self.strong_initial_sog_jitter_fraction if getattr(self, 'strong_initial_sog_jitter', False) else self.initial_sog_jitter_fraction
+                low = 1.0 - float(frac)
+                high = 1.0 + float(frac)
+                self.sog = base * np.random.uniform(low, high, size=self.num_agents)
                 self.ideal_sog = self.sog.copy()
+        except Exception:
+            pass
+
+        # Add a small random initial velocity jitter so agents don't all move identically
+        try:
+            jitter_scale = getattr(self, 'initial_velocity_jitter', 0.05)
+            vel_jitter = np.random.normal(scale=float(jitter_scale), size=(self.num_agents, 2))
+            if not hasattr(self, 'x_vel') or not hasattr(self, 'y_vel'):
+                # initialize velocity arrays if missing
+                self.x_vel = np.zeros(self.num_agents)
+                self.y_vel = np.zeros(self.num_agents)
+            self.x_vel = self.x_vel + vel_jitter[:, 0]
+            self.y_vel = self.y_vel + vel_jitter[:, 1]
         except Exception:
             pass
 
@@ -6437,12 +6501,19 @@ class simulation():
         # keep track of the amount of time a fish spends out of water
         self.time_out_of_water = np.where(self.depth < self.too_shallow, 
                                           self.time_out_of_water + 1, 
-                                          self.time_out_of_water)
+                                          0.0)
 
-        self.dead = np.where(np.logical_or(self.time_out_of_water > 30,
-                                            self.wet != 1.), 
-                              1,
-                              self.dead)
+        # Determine death due to drying:
+        if getattr(self, 'death_on_dry_immediate', False):
+            # Immediate death when fish are on dry ground (wet != 1)
+            self.dead = np.where(self.wet != 1., 1, self.dead)
+        else:
+            # Use a short timeout threshold (configurable)
+            thresh = int(getattr(self, 'time_out_of_water_threshold', 5))
+            self.dead = np.where(np.logical_or(self.time_out_of_water > thresh,
+                                                self.wet != 1.), 
+                                  1,
+                                  self.dead)
                 
         # self.dead = np.where(self.wet != 1., 
         #                      1,
@@ -6600,6 +6671,7 @@ class simulation():
         #             (self.arr.log(ar_o2_rate) - self.arr.log(sr_o2_rate)) / self.ucrit
         #         ) - sr_o2_rate)
         #     )
+        # (odometer logic continues)
         # # swim cost is expressed in mg O2 _kg _hr.  convert to mg O2 _ kg
         # hours = dt * (1./3600.)
         # per_capita_swim_cost = swim_cost * hours

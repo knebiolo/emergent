@@ -87,13 +87,16 @@ class SalmonViewer(QtWidgets.QWidget):
         self.setWindowTitle("Salmon ABM Viewer")
         self.setGeometry(100, 100, 1400, 900)
         
-        # Main layout
-        main_layout = QHBoxLayout()
-        
-        # Left panel: plot area
-        plot_layout = QVBoxLayout()
-        
-        # Create plot widget
+        # Main layout using QSplitter for resizable panels
+        main_splitter = QtWidgets.QSplitter(Qt.Horizontal)
+
+        # Left panel area (RL + Metrics)
+        left_panel = self.create_left_panel()
+        main_splitter.addWidget(left_panel)
+
+        # Create central plot widget container
+        plot_container = QtWidgets.QWidget()
+        plot_layout = QVBoxLayout(plot_container)
         print("Creating plot widget...")
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('k')
@@ -136,17 +139,19 @@ class SalmonViewer(QtWidgets.QWidget):
         status_layout.addStretch()
         plot_layout.addLayout(status_layout)
         
-        # Left panel: RL Training and Metrics
-        left_panel = self.create_left_panel()
-        main_layout.addWidget(left_panel, stretch=1)
-        
-        # Middle: Plot window
-        main_layout.addLayout(plot_layout, stretch=4)
-        
+        # Add plot container to splitter
+        main_splitter.addWidget(plot_container)
+
         # Right panel: Controls and Weights
         right_panel = self.create_right_panel()
-        main_layout.addWidget(right_panel, stretch=1)
-        
+        main_splitter.addWidget(right_panel)
+
+        # Set initial sizes (left, center, right)
+        main_splitter.setSizes([300, 900, 300])
+
+        # Set splitter as the main layout
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(main_splitter)
         self.setLayout(main_layout)
         print("UI initialization complete!")
     
@@ -335,6 +340,16 @@ class SalmonViewer(QtWidgets.QWidget):
                     weighted_vals = np.sum(weights * neighbor_vals, axis=1) / np.sum(weights, axis=1)
                     Z = weighted_vals.reshape((ny, nx))
 
+                    # Fill holes (cells with NaN or very large distance) using nearest neighbor fallback
+                    try:
+                        if np.isnan(Z).any():
+                            full_tree = cKDTree(pts_s)
+                            d_nn, idx_nn = full_tree.query(grid_coords, k=1)
+                            nn_vals = vals_s[idx_nn].reshape((ny, nx))
+                            Z[np.isnan(Z)] = nn_vals[np.isnan(Z)]
+                    except Exception:
+                        pass
+
                     # Apply light low-pass (gaussian blur via convolution) to remove speckle
                     try:
                         from scipy.ndimage import gaussian_filter
@@ -365,10 +380,15 @@ class SalmonViewer(QtWidgets.QWidget):
                     shaded_uint8 = np.clip(shaded * 255, 0, 255).astype('uint8')
                     # transpose arrays so rows/cols match plotting coordinate orientation
                     try:
-                        shaded_uint8 = shaded_uint8.T
-                        alpha_channel = alpha_channel.T
+                        # transpose X/Y axes while preserving color channel order
+                        shaded_uint8 = np.transpose(shaded_uint8, (1, 0, 2))
+                        alpha_channel = np.transpose(alpha_channel, (1, 0))
                     except Exception:
-                        pass
+                        try:
+                            shaded_uint8 = shaded_uint8.T
+                            alpha_channel = alpha_channel.T
+                        except Exception:
+                            pass
                     rgba_uint8 = np.dstack([shaded_uint8, alpha_channel])
 
                     img_item = pg.ImageItem(rgba_uint8)
@@ -435,6 +455,9 @@ class SalmonViewer(QtWidgets.QWidget):
         """Create RL training metrics panel."""
         rl_group = QGroupBox("RL Training")
         layout = QVBoxLayout()
+        # tighten spacing to be consistent with metrics panel
+        layout.setSpacing(4)
+        layout.setContentsMargins(6, 6, 6, 6)
         self.episode_label = QLabel(f"Episode: {self.current_episode} | Timestep: 0")
         self.reward_label = QLabel(f"Reward: {self.episode_reward:.2f}")
         self.best_reward_label = QLabel(f"Best: {self.best_reward:.2f}")
@@ -443,11 +466,11 @@ class SalmonViewer(QtWidgets.QWidget):
         layout.addWidget(self.reward_label)
         layout.addWidget(self.best_reward_label)
         
-        # Reward plot (shrink to tighten layout)
+        # Reward plot (increase size to better use left-panel space)
         self.reward_plot = pg.PlotWidget(title="Episode Rewards")
         self.reward_plot.setLabel('bottom', 'Episode')
         self.reward_plot.setLabel('left', 'Total Reward')
-        self.reward_plot.setMaximumHeight(120)
+        self.reward_plot.setMaximumHeight(220)
         layout.addWidget(self.reward_plot)
         
         rl_group.setLayout(layout)
@@ -624,6 +647,15 @@ class SalmonViewer(QtWidgets.QWidget):
         self.polarization_label = QLabel("Polarization: --")
         layout.addWidget(self.mean_nn_dist_label)
         layout.addWidget(self.polarization_label)
+
+        # Collision time-series plot
+        self.collision_plot = pg.PlotWidget(title="Collisions Over Time")
+        self.collision_plot.setLabel('bottom', 'Timestep')
+        self.collision_plot.setLabel('left', 'Collisions')
+        self.collision_plot.setMaximumHeight(140)
+        self.collision_curve = self.collision_plot.plot([], [], pen=mkPen('r', width=2))
+        self.collision_history = []
+        layout.addWidget(self.collision_plot)
         
         metrics_group.setLayout(layout)
         return metrics_group
@@ -649,6 +681,18 @@ class SalmonViewer(QtWidgets.QWidget):
             self.passage_success_rate_label.setText(f"Passage Success: {metrics['success_rate']:.1%}")
         self.mean_nn_dist_label.setText(f"Mean NN Dist: {metrics.get('mean_nn_dist', '--'):.2f}")
         self.polarization_label.setText(f"Polarization: {metrics.get('polarization', '--'):.2f}")
+        # Update collision time-series if provided
+        try:
+            if 'collision_count' in metrics:
+                self.collision_history.append(metrics['collision_count'])
+                x = list(range(len(self.collision_history)))
+                y = self.collision_history
+                self.collision_curve.setData(x, y)
+                # keep history length reasonable
+                if len(self.collision_history) > 500:
+                    self.collision_history.pop(0)
+        except Exception:
+            pass
 
     def refresh_rl_labels(self):
         # Update episode and reward labels in RL panel
@@ -748,6 +792,11 @@ class SalmonViewer(QtWidgets.QWidget):
         """Update RL training metrics and episode management."""
         # Extract current state
         current_metrics = self.rl_trainer.extract_state_metrics()
+        # Update metrics panel immediately so time-series (collisions) are plotted
+        try:
+            self.update_metrics_panel(current_metrics)
+        except Exception:
+            pass
         
         # Compute reward
         if self.prev_metrics is not None:
