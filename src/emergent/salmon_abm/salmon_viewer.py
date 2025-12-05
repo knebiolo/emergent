@@ -139,6 +139,18 @@ class SalmonViewer(QtWidgets.QWidget):
         self.rl_trainer = rl_trainer
         self.show_velocity_field = show_velocity_field
         self.show_depth = show_depth
+        # Visual tail parameters (purely visual, no physics)
+        self.tail_L1 = getattr(self.sim, 'tail_L1', 2.0)  # proximal rigid segment (m)
+        self.tail_L2 = getattr(self.sim, 'tail_L2', 1.5)  # distal oscillating segment (m)
+        self.tail_amp = getattr(self.sim, 'tail_amp', 0.6)  # oscillation amplitude (rad)
+        self.tail_freq = getattr(self.sim, 'tail_freq', 2.0)  # Hz
+        # per-agent random phase for visual variation (stable across viewer lifetime)
+        try:
+            self.tail_phases = np.asarray(getattr(self.sim, 'tail_phases', None))
+            if self.tail_phases is None or len(self.tail_phases) != self.sim.num_agents:
+                self.tail_phases = np.random.RandomState(42).rand(self.sim.num_agents) * 2.0 * np.pi
+        except Exception:
+            self.tail_phases = np.random.RandomState(42).rand(self.sim.num_agents) * 2.0 * np.pi
         
         # RL training state
         if self.rl_trainer:
@@ -319,9 +331,12 @@ class SalmonViewer(QtWidgets.QWidget):
         self.show_dead_cb.setChecked(True)
         self.show_direction_cb = QCheckBox("Direction")
         self.show_direction_cb.setChecked(True)
+        self.show_tail_cb = QCheckBox("Tail")
+        self.show_tail_cb.setChecked(True)
         right_col.addWidget(self.show_trajectories_cb)
         right_col.addWidget(self.show_dead_cb)
         right_col.addWidget(self.show_direction_cb)
+        right_col.addWidget(self.show_tail_cb)
         
         agent_layout.addLayout(left_col)
         agent_layout.addLayout(right_col)
@@ -331,6 +346,24 @@ class SalmonViewer(QtWidgets.QWidget):
         # Behavioral weights panel
         weights_group = self.create_weights_panel()
         layout.addWidget(weights_group)
+
+        # Vertical exaggeration control for GL mesh
+        ve_group = QGroupBox("Vertical Exaggeration")
+        ve_layout = QVBoxLayout()
+        self.ve_label = QLabel("Z Exag: 1.00x")
+        ve_layout.addWidget(self.ve_label)
+        self.ve_slider = QSlider(Qt.Horizontal)
+        self.ve_slider.setMinimum(1)
+        self.ve_slider.setMaximum(500)
+        self.ve_slider.setValue(int(getattr(self.sim, 'vert_exag', 1.0) * 100))
+        self.ve_slider.valueChanged.connect(self.update_vert_exag_label)
+        ve_layout.addWidget(self.ve_slider)
+
+        self.rebuild_btn = QPushButton("Rebuild TIN")
+        self.rebuild_btn.clicked.connect(self.rebuild_tin_action)
+        ve_layout.addWidget(self.rebuild_btn)
+        ve_group.setLayout(ve_layout)
+        layout.addWidget(ve_group)
         
         layout.addStretch()
         panel.setLayout(layout)
@@ -421,10 +454,15 @@ class SalmonViewer(QtWidgets.QWidget):
 
                         thinned_coords = wetted_coords[rep_idx]
                         thinned_depth = wetted_depth[rep_idx]
+                        # cache for rebuild actions
+                        self.last_thinned_coords = thinned_coords
+                        self.last_thinned_vals = thinned_depth
                         print(f"Thinned HECRAS nodes: {len(wetted_coords)} -> {len(thinned_coords)} (base_res={base_res}, final_res={current_res})")
                     else:
                         thinned_coords = wetted_coords
                         thinned_depth = wetted_depth
+                        self.last_thinned_coords = thinned_coords
+                        self.last_thinned_vals = thinned_depth
                 except Exception:
                     thinned_coords = wetted_coords
                     thinned_depth = wetted_depth
@@ -726,9 +764,20 @@ class SalmonViewer(QtWidgets.QWidget):
                         builder.start()
                         self.initial_zoom_done = False
                         return
-                except Exception:
-                    # TIN rendering failed or was too sparse — TIN is required as the only background
-                    raise RuntimeError('TIN rendering failed: no valid triangular surface could be generated')
+                except Exception as e:
+                    # TIN rendering failed or was too sparse — log and fall back to raster/centerline
+                    print(f"TIN rendering failed: {e} -- falling back to raster/centerline display if available")
+                    # attempt to plot centerline if available, otherwise continue to raster fallback below
+                    try:
+                        if hasattr(self.sim, 'centerline') and self.sim.centerline is not None:
+                            from shapely.geometry import LineString
+                            if isinstance(self.sim.centerline, LineString):
+                                centerline_coords = np.array(self.sim.centerline.coords)
+                                self.plot_widget.plot(centerline_coords[:, 0], centerline_coords[:, 1],
+                                                      pen=pg.mkPen(color=(255, 100, 100), width=3, style=Qt.DashLine))
+                                print(f"Plotted centerline with {len(centerline_coords)} points (after TIN failure)")
+                    except Exception:
+                        pass
 
                 # Plot centerline from simulation (overlay)
                 print("Plotting centerline...")
@@ -974,6 +1023,33 @@ class SalmonViewer(QtWidgets.QWidget):
             no_weights_label = QLabel("No weights configured")
             no_weights_label.setStyleSheet("font-style: italic; color: gray;")
             layout.addWidget(no_weights_label)
+            # Offer a button to create default weights in-place
+            try:
+                from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import BehavioralWeights
+                def _create_defaults():
+                    try:
+                        self.sim.behavioral_weights = BehavioralWeights()
+                        # rebuild the weights panel in-place: remove and re-add
+                        parent = weights_group.parent()
+                        # Replace the groupbox's layout widgets by re-creating the panel
+                        new_group = self.create_weights_panel()
+                        # find index of weights_group in parent layout and replace
+                        if parent is not None:
+                            pl = parent.layout()
+                            for i in range(pl.count()):
+                                w = pl.itemAt(i).widget()
+                                if w is weights_group:
+                                    pl.takeAt(i)
+                                    pl.insertWidget(i, new_group)
+                                    break
+                    except Exception as e:
+                        print('Failed to create default weights:', e)
+
+                create_btn = QPushButton('Create Default Weights')
+                create_btn.clicked.connect(_create_defaults)
+                layout.addWidget(create_btn)
+            except Exception:
+                pass
             self.weight_labels = {}
             self.weight_sliders = {}
         
@@ -1061,7 +1137,7 @@ class SalmonViewer(QtWidgets.QWidget):
 
         # (Removed time-series plots for collisions, upstream progress, and upstream velocity)
 
-        # Per-episode tracking toggles (inline next to metric labels)
+        # Per-episode tracking toggles placed inline next to their corresponding labels
         # Available metrics that can be tracked per-episode
         self._available_episode_metrics = [
             'collision_count', 'mean_upstream_progress', 'mean_upstream_velocity',
@@ -1069,12 +1145,10 @@ class SalmonViewer(QtWidgets.QWidget):
         ]
         self.track_metric_cbs = {}
 
-        # Helper to add a label+checkbox inline
-        def add_label_with_cb(label_widget, metric_key, default_checked=False):
+        def _inline_with_cb(label_widget, metric_key, default_checked=False):
             h = QHBoxLayout()
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(6)
-            # ensure label_widget is a widget
             h.addWidget(label_widget)
             cb = QCheckBox()
             cb.setChecked(default_checked)
@@ -1083,22 +1157,22 @@ class SalmonViewer(QtWidgets.QWidget):
             layout.addLayout(h)
             self.track_metric_cbs[metric_key] = cb
 
-        # collision_count (no real-time label previously) -> add new label
+        # collision_count (new label)
         self.collision_count_label = QLabel("Collision Count: --")
-        add_label_with_cb(self.collision_count_label, 'collision_count')
+        _inline_with_cb(self.collision_count_label, 'collision_count')
 
-        # mean_upstream_progress -> use existing upstream_progress_label
-        add_label_with_cb(self.upstream_progress_label, 'mean_upstream_progress')
+        # upstream progress - use existing label
+        _inline_with_cb(self.upstream_progress_label, 'mean_upstream_progress')
 
-        # mean_upstream_velocity (no label previously) -> add new label
+        # mean upstream velocity (new label)
         self.mean_upstream_velocity_label = QLabel("Mean Upstream Velocity: --")
-        add_label_with_cb(self.mean_upstream_velocity_label, 'mean_upstream_velocity')
+        _inline_with_cb(self.mean_upstream_velocity_label, 'mean_upstream_velocity')
 
-        # energy_efficiency -> map to mean_energy_label
-        add_label_with_cb(self.mean_energy_label, 'energy_efficiency')
+        # energy efficiency maps to mean energy label
+        _inline_with_cb(self.mean_energy_label, 'energy_efficiency')
 
-        # mean_passage_delay -> map to mean_passage_delay_label
-        add_label_with_cb(self.mean_passage_delay_label, 'mean_passage_delay')
+        # mean passage delay
+        _inline_with_cb(self.mean_passage_delay_label, 'mean_passage_delay')
 
         # Per-episode metrics plot (shows one point per episode per tracked metric)
         self.per_episode_plot = pg.PlotWidget(title="Per-Episode Metrics")
@@ -1182,16 +1256,6 @@ class SalmonViewer(QtWidgets.QWidget):
             else:
                 self.timer.start(int(self.dt * 1000))
 
-    def reset_simulation(self):
-        """Reset simulation to initial state for new episode."""
-        if hasattr(self.sim, 'reset_spatial_state'):
-            self.sim.reset_spatial_state(reset_positions=True)
-        self.current_timestep = 0
-        self.current_episode = 1
-        self.episode_reward = 0.0
-        # refresh display
-        self.update_displays()
-        
     def update_speed(self, value):
         """Update simulation speed."""
         # value ranges 1-100, map to 0.1x - 10x
@@ -1201,6 +1265,29 @@ class SalmonViewer(QtWidgets.QWidget):
         # Update timer interval
         interval = int(self.dt * 1000 / speed)
         self.timer.setInterval(max(1, interval))
+
+    def update_vert_exag_label(self, value):
+        """Update the vertical exaggeration label when the slider moves."""
+        ve = value / 100.0
+        try:
+            self.ve_label.setText(f"Z Exag: {ve:.2f}x")
+        except Exception:
+            pass
+
+    def rebuild_tin_action(self):
+        """Handler for 'Rebuild TIN' button: re-run TIN rendering with current VE."""
+        try:
+            ve = self.ve_slider.value() / 100.0
+            setattr(self.sim, 'vert_exag', ve)
+            # If HECRAS-based geometry is present, use thinned coords/vals if stored
+            # We attempt to reuse last thinned arrays if available (set by setup_background())
+            if hasattr(self, 'last_thinned_coords') and hasattr(self, 'last_thinned_vals'):
+                self.render_tin_from_arrays(self.last_thinned_coords, self.last_thinned_vals, cap_nodes=getattr(self.sim, 'tin_max_nodes', 5000), vert_exag=ve)
+            else:
+                # fallback: re-run full background setup which will compute thinned arrays and call render
+                self.setup_background()
+        except Exception as e:
+            print('Rebuild TIN failed:', e)
     
     def reset_simulation(self):
         """Reset simulation to initial state."""
@@ -1402,6 +1489,82 @@ class SalmonViewer(QtWidgets.QWidget):
                 for line in self.direction_lines:
                     self.plot_widget.removeItem(line)
                 self.direction_lines = []
+
+        # Draw purely-visual two-segment tails (proximal rigid + distal oscillating)
+        if self.show_tail_cb.isChecked() and hasattr(self.sim, 'heading'):
+            # clear old tail lines
+            if not hasattr(self, 'tail_lines'):
+                self.tail_lines = []
+            for line in getattr(self, 'tail_lines', []):
+                try:
+                    self.plot_widget.removeItem(line)
+                except Exception:
+                    pass
+            self.tail_lines = []
+
+            # Determine visible agents
+            if self.show_dead_cb.isChecked():
+                headings = self.sim.heading
+                pos_x, pos_y = self.sim.X, self.sim.Y
+            else:
+                alive_mask = (self.sim.dead == 0)
+                headings = self.sim.heading[alive_mask]
+                pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
+
+            # Compute current time (seconds)
+            current_time = getattr(self, 'current_timestep', 0) * float(getattr(self, 'dt', 1.0))
+
+            # For each agent, compute two segments
+            nvis = len(pos_x)
+            # ensure phases length
+            phases = self.tail_phases
+            if len(phases) != self.sim.num_agents:
+                phases = np.resize(phases, self.sim.num_agents)
+
+            for i in range(nvis):
+                # global agent index mapping when filtering dead agents
+                if self.show_dead_cb.isChecked():
+                    gidx = i
+                else:
+                    # find i-th True in alive_mask
+                    alive_idx = np.nonzero(alive_mask)[0]
+                    if i < len(alive_idx):
+                        gidx = int(alive_idx[i])
+                    else:
+                        gidx = i
+
+                h = float(headings[i])
+                x0 = float(pos_x[i])
+                y0 = float(pos_y[i])
+
+                # Proximal rigid segment (L1) aligned with heading (trailing behind fish)
+                x1 = x0 - self.tail_L1 * np.cos(h)
+                y1 = y0 - self.tail_L1 * np.sin(h)
+
+                # Distal oscillating segment (L2) pivoting about (x1,y1)
+                phase = float(phases[gidx]) if gidx < len(phases) else 0.0
+                theta = self.tail_amp * np.sin(2.0 * np.pi * self.tail_freq * current_time + phase)
+                # distal orientation = heading + theta (relative oscillation)
+                x2 = x1 - self.tail_L2 * np.cos(h + theta)
+                y2 = y1 - self.tail_L2 * np.sin(h + theta)
+
+                # Draw proximal (thicker) and distal (thinner, brighter)
+                try:
+                    seg1 = self.plot_widget.plot([x0, x1], [y0, y1], pen=pg.mkPen(color=(180, 180, 255, 200), width=2))
+                    seg2 = self.plot_widget.plot([x1, x2], [y1, y2], pen=pg.mkPen(color=(255, 220, 180, 220), width=1))
+                    self.tail_lines.append(seg1)
+                    self.tail_lines.append(seg2)
+                except Exception:
+                    pass
+        else:
+            # Clear tail lines when disabled
+            if hasattr(self, 'tail_lines'):
+                for line in self.tail_lines:
+                    try:
+                        self.plot_widget.removeItem(line)
+                    except Exception:
+                        pass
+                self.tail_lines = []
         
         # Update trajectories if enabled
         if self.show_trajectories_cb.isChecked():
