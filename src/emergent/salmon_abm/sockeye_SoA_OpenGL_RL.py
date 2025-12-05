@@ -1454,6 +1454,19 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     
     if centerline is None:
         print("   WARNING: Failed to extract centerline!")
+
+    # Step 2b: Infer wetted perimeter (vectorize raster boundary)
+    try:
+        print("\n2b. Inferring wetted perimeter (vectorizing)...")
+        wetted_info = infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=depth_threshold, timestep=0)
+        perimeter_points = wetted_info.get('perimeter_points', None)
+        perimeter_cells = wetted_info.get('perimeter_cells', None)
+        median_spacing = wetted_info.get('median_spacing', None)
+        print(f"   Perimeter points: {0 if perimeter_points is None else len(perimeter_points):,}")
+    except Exception:
+        perimeter_points = None
+        perimeter_cells = None
+        median_spacing = None
     
     # Step 3: Optionally create regular grid rasters
     transform = None
@@ -1483,7 +1496,10 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     return {
         'centerline': centerline,
         'coords': coords,
-        'transform': transform
+        'transform': transform,
+        'perimeter_points': perimeter_points,
+        'perimeter_cells': perimeter_cells,
+        'median_spacing': median_spacing
     }
 
 
@@ -6514,6 +6530,31 @@ class simulation():
                                                 self.wet != 1.), 
                                   1,
                                   self.dead)
+
+        # Force random headings after HECRAS mapping so agents don't all face upstream
+        try:
+            self.heading = np.random.uniform(-np.pi, np.pi, size=self.num_agents)
+            # small additional SOG perturbation
+            if hasattr(self, 'ideal_sog'):
+                base = np.asarray(self.ideal_sog)
+                if base.size == 1:
+                    base = np.full(self.num_agents, float(base))
+                frac = getattr(self, 'initial_sog_jitter_fraction', 0.1)
+                self.sog = base * np.random.uniform(1.0 - frac, 1.0 + frac, size=self.num_agents)
+                self.ideal_sog = self.sog.copy()
+            # small velocity jitter
+            try:
+                jitter_scale = getattr(self, 'initial_velocity_jitter', 0.05)
+                vel_jitter = np.random.normal(scale=float(jitter_scale), size=(self.num_agents, 2))
+                if not hasattr(self, 'x_vel') or not hasattr(self, 'y_vel'):
+                    self.x_vel = np.zeros(self.num_agents)
+                    self.y_vel = np.zeros(self.num_agents)
+                self.x_vel += vel_jitter[:, 0]
+                self.y_vel += vel_jitter[:, 1]
+            except Exception:
+                pass
+        except Exception:
+            pass
                 
         # self.dead = np.where(self.wet != 1., 
         #                      1,

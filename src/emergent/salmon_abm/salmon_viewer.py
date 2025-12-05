@@ -302,8 +302,323 @@ class SalmonViewer(QtWidgets.QWidget):
                         else:
                             cell_areas.append(1.0)
                     cell_areas = np.array(cell_areas)
-                
+
+                # Thin nodes in dense HECRAS outputs to avoid overly-dense triangulation
+                # Use a grid-based binning approach; user can set `self.sim.tin_thin_resolution` (meters)
+                try:
+                    base_res = getattr(self.sim, 'tin_thin_resolution', 10.0)
+                    if base_res is None or base_res <= 0:
+                        base_res = 10.0
+                    tin_max_nodes = getattr(self.sim, 'tin_max_nodes', 5000)
+                    if tin_max_nodes is None or tin_max_nodes <= 0:
+                        tin_max_nodes = 5000
+
+                    # Iteratively increase grid cell size until node count <= tin_max_nodes
+                    current_res = float(base_res)
+                    rep_idx = np.arange(len(wetted_coords))
+                    if len(wetted_coords) > 0:
+                        while True:
+                            gx = (wetted_coords[:, 0] / current_res).astype(int)
+                            gy = (wetted_coords[:, 1] / current_res).astype(int)
+                            grid = {}
+                            for i, (ix, iy) in enumerate(zip(gx, gy)):
+                                key = (int(ix), int(iy))
+                                grid.setdefault(key, []).append(i)
+                            rep = []
+                            for key, idxs in grid.items():
+                                if len(idxs) == 1:
+                                    rep.append(idxs[0])
+                                else:
+                                    sub = wetted_depth[idxs]
+                                    mid = np.argsort(sub)[len(sub) // 2]
+                                    rep.append(idxs[mid])
+                            rep = np.array(rep, dtype=int)
+                            if len(rep) <= tin_max_nodes or current_res > base_res * 64:
+                                rep_idx = rep
+                                break
+                            # increase resolution to thin more aggressively
+                            current_res *= 1.5
+
+                        thinned_coords = wetted_coords[rep_idx]
+                        thinned_depth = wetted_depth[rep_idx]
+                        print(f"Thinned HECRAS nodes: {len(wetted_coords)} -> {len(thinned_coords)} (base_res={base_res}, final_res={current_res})")
+                    else:
+                        thinned_coords = wetted_coords
+                        thinned_depth = wetted_depth
+                except Exception:
+                    thinned_coords = wetted_coords
+                    thinned_depth = wetted_depth
+
                 # Fast IDW rasterization + optional hillshade for quick background
+                # Try TIN (triangulated irregular network) rendering first — vector faces colored by depth
+                print("Attempting TIN rendering (vector faces) from HECRAS nodes...")
+                try:
+                    from scipy.spatial import Delaunay
+                    import matplotlib.cm as cm
+                    import matplotlib.colors as mcolors
+                    # Build Delaunay triangulation on wetted cell centers (thinned)
+                    if len(thinned_coords) >= 3:
+                        # Cap total nodes for triangulation to avoid excessive work
+                        tin_max_nodes = getattr(self.sim, 'tin_max_nodes', 5000)
+                        if tin_max_nodes is None:
+                            tin_max_nodes = 5000
+                        # ensure sim attribute exists for user inspection
+                        try:
+                            setattr(self.sim, 'tin_max_nodes', tin_max_nodes)
+                        except Exception:
+                            pass
+                        if len(thinned_coords) > tin_max_nodes:
+                            rng = np.random.default_rng(0)
+                            idx_keep = rng.choice(len(thinned_coords), size=tin_max_nodes, replace=False)
+                            tri_pts = thinned_coords[idx_keep]
+                            tri_vals = thinned_depth[idx_keep]
+                            print(f"Capped thinned nodes: {len(thinned_coords)} -> {len(tri_pts)} (max={tin_max_nodes})")
+                        else:
+                            tri_pts = thinned_coords
+                            tri_vals = thinned_depth
+
+                        import time
+                        t0 = time.perf_counter()
+                        tri = Delaunay(tri_pts)
+                        t1 = time.perf_counter()
+                        print(f"Delaunay time: {t1-t0:.2f}s for {len(tri_pts)} nodes")
+                        tris = tri.simplices
+                        norm = mcolors.Normalize(vmin=np.nanpercentile(tri_vals, 1), vmax=np.nanpercentile(tri_vals, 99))
+                        cmap = cm.get_cmap('viridis')
+
+                        # Compute triangle filtering parameters
+                        try:
+                            # compute edge lengths for triangles
+                            pts = tri_pts
+                            a = pts[tris[:, 0]]
+                            b = pts[tris[:, 1]]
+                            c = pts[tris[:, 2]]
+                            lab = np.linalg.norm(a - b, axis=1)
+                            lbc = np.linalg.norm(b - c, axis=1)
+                            lca = np.linalg.norm(c - a, axis=1)
+                            max_edge = np.maximum(np.maximum(lab, lbc), lca)
+                            mean_edge = np.mean(np.concatenate([lab, lbc, lca]))
+                        except Exception:
+                            max_edge = None
+                            mean_edge = None
+
+                        # Default alpha threshold based on mean edge length
+                        alpha_param = getattr(self.sim, 'tin_alpha', None)
+                        if alpha_param is None or alpha_param <= 0:
+                            if mean_edge is not None and mean_edge > 0:
+                                alpha_param = mean_edge * 1.5
+                            else:
+                                alpha_param = getattr(self.sim, 'tin_alpha_fallback', 50.0)
+
+                        kept = np.ones(len(tris), dtype=bool)
+
+                        # Prefer using a centerline-derived buffered perimeter if available
+                        kept = np.ones(len(tris), dtype=bool)
+                        try:
+                            from shapely.geometry import Polygon, Point, MultiPolygon
+                            # If a centerline exists on the simulation, build a buffer around it
+                            # Prefer vectorized wetted perimeter returned from HECRAS init if present
+                            perim_points = None
+                            if hasattr(self.sim, '_hecras_geometry_info'):
+                                perim_points = self.sim._hecras_geometry_info.get('perimeter_points', None)
+                            if perim_points is not None and len(perim_points) > 0:
+                                try:
+                                    from shapely.geometry import Polygon, Point as ShPoint
+                                    perimeter = Polygon([tuple(p) for p in perim_points])
+                                except Exception:
+                                    perimeter = None
+                            elif hasattr(self.sim, 'centerline') and self.sim.centerline is not None:
+                                cl = self.sim.centerline
+                                # Compute distances from a sample of tri points to centerline to estimate channel half-width
+                                sample_pts = tri_pts
+                                if len(tri_pts) > 5000:
+                                    idxs = np.linspace(0, len(tri_pts)-1, 5000).astype(int)
+                                    sample_pts = tri_pts[idxs]
+                                from shapely.geometry import Point as ShPoint
+                                dists = []
+                                for x, y in sample_pts:
+                                    try:
+                                        dists.append(cl.distance(ShPoint(x, y)))
+                                    except Exception:
+                                        dists.append(0.0)
+                                dists = np.array(dists)
+                                if dists.size > 0:
+                                    buf_w = max(2.0, np.percentile(dists, 95) * 1.2)
+                                else:
+                                    buf_w = alpha_param * 1.5
+                                perimeter = cl.buffer(buf_w)
+
+                                # Filter triangles by centroid inside perimeter
+                                for i, t in enumerate(tris):
+                                    if max_edge is not None and max_edge[i] > alpha_param * 4.0:
+                                        kept[i] = False
+                                        continue
+                                    coords = tri_pts[t]
+                                    centroid = np.mean(coords, axis=0)
+                                    try:
+                                        if not perimeter.contains(ShPoint(centroid[0], centroid[1])):
+                                            kept[i] = False
+                                    except Exception:
+                                        if not perimeter.intersects(ShPoint(centroid[0], centroid[1])):
+                                            kept[i] = False
+
+                                # Draw perimeter polygon on plot
+                                try:
+                                    if hasattr(perimeter, 'geoms'):
+                                        geoms = perimeter.geoms
+                                    else:
+                                        geoms = [perimeter]
+                                    for g in geoms:
+                                        ext = g.exterior.coords[:]
+                                        qpoly = QtGui.QPolygonF([QtCore.QPointF(x, y) for x, y in ext])
+                                        pen = QtGui.QPen(QtGui.QColor(200, 200, 200), 2)
+                                        pen.setStyle(Qt.DotLine)
+                                        perimeter_item = QtWidgets.QGraphicsPolygonItem(qpoly)
+                                        perimeter_item.setPen(pen)
+                                        perimeter_item.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
+                                        self.plot_widget.addItem(perimeter_item)
+                                except Exception:
+                                    pass
+                            else:
+                                # shapely available but no centerline; fall back to triangle-union perimeter
+                                from shapely.geometry import Polygon, Point as ShPoint, MultiPolygon
+                                from shapely.ops import unary_union
+                                polygons_to_union = []
+                                for i, t in enumerate(tris):
+                                    if max_edge is not None and max_edge[i] > alpha_param * 4.0:
+                                        kept[i] = False
+                                        continue
+                                    coords = tri_pts[t]
+                                    poly = Polygon([(coords[0,0], coords[0,1]), (coords[1,0], coords[1,1]), (coords[2,0], coords[2,1])])
+                                    polygons_to_union.append(poly)
+                                if len(polygons_to_union) > 0:
+                                    union = unary_union(polygons_to_union)
+                                    for i, t in enumerate(tris):
+                                        if not kept[i]:
+                                            continue
+                                        coords = tri_pts[t]
+                                        centroid = np.mean(coords, axis=0)
+                                        try:
+                                            if not union.contains(ShPoint(centroid[0], centroid[1])):
+                                                kept[i] = False
+                                        except Exception:
+                                            if not union.intersects(ShPoint(centroid[0], centroid[1])):
+                                                kept[i] = False
+                                    try:
+                                        if isinstance(union, MultiPolygon):
+                                            geoms = union.geoms
+                                        else:
+                                            geoms = [union]
+                                        for g in geoms:
+                                            ext = g.exterior.coords[:]
+                                            qpoly = QtGui.QPolygonF([QtCore.QPointF(x, y) for x, y in ext])
+                                            pen = QtGui.QPen(QtGui.QColor(200, 200, 200), 2)
+                                            pen.setStyle(Qt.DotLine)
+                                            perimeter_item = QtWidgets.QGraphicsPolygonItem(qpoly)
+                                            perimeter_item.setPen(pen)
+                                            perimeter_item.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
+                                            self.plot_widget.addItem(perimeter_item)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            # shapely not available; fall back to simple edge-length filtering
+                            if max_edge is not None:
+                                for i in range(len(tris)):
+                                    if max_edge[i] > alpha_param * 3.0:
+                                        kept[i] = False
+
+                        # Prepare a coarse IDW raster background to guarantee full coverage (no holes)
+                        try:
+                            # Build a coarse IDW covering raster from thinned points (fast, low-res)
+                            from scipy.spatial import cKDTree
+                            nx_bg = 300
+                            pts_bg = tri_pts
+                            vals_bg = tri_vals
+                            minx, miny = pts_bg[:, 0].min(), pts_bg[:, 1].min()
+                            maxx, maxy = pts_bg[:, 0].max(), pts_bg[:, 1].max()
+                            ny_bg = max(100, int(nx_bg * (maxy - miny) / max(1e-6, (maxx - minx))))
+                            xi = np.linspace(minx, maxx, nx_bg)
+                            yi = np.linspace(miny, maxy, ny_bg)
+                            XI, YI = np.meshgrid(xi, yi)
+                            grid_coords = np.column_stack([XI.ravel(), YI.ravel()])
+                            tree_bg = cKDTree(pts_bg)
+                            k_bg = min(8, len(pts_bg))
+                            dists_bg, idxs_bg = tree_bg.query(grid_coords, k=k_bg)
+                            if k_bg == 1:
+                                dists_bg = dists_bg[:, None]
+                                idxs_bg = idxs_bg[:, None]
+                            dists_bg[dists_bg == 0] = 1e-6
+                            weights_bg = 1.0 / (dists_bg ** 2)
+                            neighbor_vals_bg = vals_bg[idxs_bg]
+                            weighted_vals_bg = np.sum(weights_bg * neighbor_vals_bg, axis=1) / np.sum(weights_bg, axis=1)
+                            Z_bg = weighted_vals_bg.reshape((ny_bg, nx_bg))
+                            # simple gaussian smoothing for visual quality
+                            try:
+                                from scipy.ndimage import gaussian_filter
+                                Z_bg = gaussian_filter(Z_bg, sigma=1.0)
+                            except Exception:
+                                pass
+                            # build RGB shaded image
+                            import matplotlib.cm as cm
+                            import matplotlib.colors as mcolors
+                            ls = None
+                            try:
+                                from matplotlib.colors import LightSource
+                                ls = LightSource(azdeg=315, altdeg=45)
+                            except Exception:
+                                ls = None
+                            norm_bg = mcolors.Normalize(vmin=np.nanpercentile(Z_bg, 1), vmax=np.nanpercentile(Z_bg, 99))
+                            rgb_bg = cm.get_cmap('viridis')(norm_bg(Z_bg))[:, :, :3]
+                            if ls is not None:
+                                hill = ls.hillshade(Z_bg, vert_exag=1.0, dx=(maxx - minx)/nx_bg, dy=(maxy - miny)/ny_bg)
+                                shaded_bg = rgb_bg * (0.6 + 0.4 * hill[:, :, None])
+                            else:
+                                shaded_bg = rgb_bg
+                            shaded_uint8 = np.clip(shaded_bg * 255, 0, 255).astype('uint8')
+                            # alpha fully opaque for background
+                            alpha_bg = np.full((ny_bg, nx_bg), 255, dtype='uint8')
+                            # transpose to image orientation
+                            try:
+                                img_arr = np.dstack([np.transpose(shaded_uint8, (1,0,2)), np.transpose(alpha_bg, (1,0))])
+                            except Exception:
+                                img_arr = np.dstack([shaded_uint8, alpha_bg])
+                            bg_item = pg.ImageItem(img_arr)
+                            self.plot_widget.addItem(bg_item)
+                            bg_item.setZValue(-200)
+                            try:
+                                bg_item.setRect(minx, miny, (maxx - minx), (maxy - miny))
+                            except Exception:
+                                try:
+                                    bg_item.setPos((minx, miny))
+                                    bg_item.scale((maxx - minx) / nx_bg, (maxy - miny) / ny_bg)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        # Plot filtered triangles on top of the background (ensures visual completeness)
+                        kept_tris = tris[kept]
+                        for t in kept_tris:
+                            coords = tri_pts[t]
+                            poly = QtGui.QPolygonF([QtCore.QPointF(coords[0,0], coords[0,1]),
+                                                   QtCore.QPointF(coords[1,0], coords[1,1]),
+                                                   QtCore.QPointF(coords[2,0], coords[2,1])])
+                            mean_depth = np.mean(tri_vals[t])
+                            rgba = cmap(norm(mean_depth))
+                            color = QtGui.QColor(int(rgba[0]*255), int(rgba[1]*255), int(rgba[2]*255), 200)
+                            item = QtWidgets.QGraphicsPolygonItem(poly)
+                            brush = QtGui.QBrush(color)
+                            pen = QtGui.QPen(QtCore.Qt.NoPen)
+                            item.setBrush(brush)
+                            item.setPen(pen)
+                            self.plot_widget.addItem(item)
+                        print(f"Plotted filtered TIN with {len(kept_tris)} triangles (from {len(tris)})")
+                        self.initial_zoom_done = False
+                        return
+                except Exception:
+                    # TIN rendering failed/too sparse — fall back to rasterized IDW below
+                    pass
+
                 print("Rasterizing wetted depth via fast IDW and applying hillshade...")
                 try:
                     from scipy.spatial import cKDTree
@@ -354,9 +669,10 @@ class SalmonViewer(QtWidgets.QWidget):
                     # Fill holes (cells with NaN or very large distance) using nearest neighbor fallback
                     try:
                         if np.isnan(Z).any():
-                            full_tree = cKDTree(pts_s)
+                            # Nearest-neighbor fill for NaNs (use full point set)
+                            full_tree = cKDTree(pts)
                             d_nn, idx_nn = full_tree.query(grid_coords, k=1)
-                            nn_vals = vals_s[idx_nn].reshape((ny, nx))
+                            nn_vals = vals[idx_nn].reshape((ny, nx))
                             Z[np.isnan(Z)] = nn_vals[np.isnan(Z)]
                     except Exception:
                         pass
@@ -364,12 +680,19 @@ class SalmonViewer(QtWidgets.QWidget):
                     # Apply stronger low-pass (gaussian blur) and median filter to reduce banding
                     try:
                         from scipy.ndimage import gaussian_filter, median_filter
-                        Z = gaussian_filter(Z, sigma=2.0)
-                        Z = median_filter(Z, size=3)
+                        # stronger smoothing to reduce banding artifacts
+                        Z = gaussian_filter(Z, sigma=3.0)
+                        Z = median_filter(Z, size=5)
+                        # final NN-fill if any NaNs persist
+                        if np.isnan(Z).any():
+                            full_tree = cKDTree(pts)
+                            d_nn, idx_nn = full_tree.query(grid_coords, k=1)
+                            nn_vals = vals[idx_nn].reshape((ny, nx))
+                            Z[np.isnan(Z)] = nn_vals[np.isnan(Z)]
                     except Exception:
                         try:
                             from scipy.ndimage import gaussian_filter
-                            Z = gaussian_filter(Z, sigma=1.0)
+                            Z = gaussian_filter(Z, sigma=1.5)
                         except Exception:
                             pass
 
@@ -664,49 +987,46 @@ class SalmonViewer(QtWidgets.QWidget):
         layout.addWidget(self.mean_nn_dist_label)
         layout.addWidget(self.polarization_label)
 
-        # Collision time-series plot
-        self.collision_plot = pg.PlotWidget(title="Collisions Over Time")
-        self.collision_plot.setLabel('bottom', 'Timestep')
-        self.collision_plot.setLabel('left', 'Collisions')
-        self.collision_plot.setMaximumHeight(140)
-        self.collision_curve = self.collision_plot.plot([], [], pen=mkPen('r', width=2))
-        self.collision_history = []
-        layout.addWidget(self.collision_plot)
+        # (Removed time-series plots for collisions, upstream progress, and upstream velocity)
 
-        # Upstream progress time-series
-        self.upstream_plot = pg.PlotWidget(title="Upstream Progress (rolling)")
-        self.upstream_plot.setLabel('bottom', 'Timestep')
-        self.upstream_plot.setLabel('left', 'Mean Upstream Progress')
-        self.upstream_plot.setMaximumHeight(120)
-        self.upstream_curve = self.upstream_plot.plot([], [], pen=mkPen('c', width=2))
-        self.upstream_history = []
-        layout.addWidget(self.upstream_plot)
-
-        # Upstream velocity time-series
-        self.upstream_vel_plot = pg.PlotWidget(title="Upstream Velocity (rolling)")
-        self.upstream_vel_plot.setLabel('bottom', 'Timestep')
-        self.upstream_vel_plot.setLabel('left', 'Mean Upstream Velocity (m/s)')
-        self.upstream_vel_plot.setMaximumHeight(120)
-        self.upstream_vel_curve = self.upstream_vel_plot.plot([], [], pen=mkPen('b', width=2))
-        self.upstream_vel_history = []
-        layout.addWidget(self.upstream_vel_plot)
-
-        # Per-episode tracking toggles (user-requested: append per-episode means)
-        track_group = QGroupBox("Track Per-Episode Metrics")
-        track_layout = QVBoxLayout()
+        # Per-episode tracking toggles (inline next to metric labels)
         # Available metrics that can be tracked per-episode
         self._available_episode_metrics = [
             'collision_count', 'mean_upstream_progress', 'mean_upstream_velocity',
             'energy_efficiency', 'mean_passage_delay'
         ]
         self.track_metric_cbs = {}
-        for m in self._available_episode_metrics:
-            cb = QCheckBox(m.replace('_', ' ').title())
-            cb.setChecked(False)
-            track_layout.addWidget(cb)
-            self.track_metric_cbs[m] = cb
-        track_group.setLayout(track_layout)
-        layout.addWidget(track_group)
+
+        # Helper to add a label+checkbox inline
+        def add_label_with_cb(label_widget, metric_key, default_checked=False):
+            h = QHBoxLayout()
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            # ensure label_widget is a widget
+            h.addWidget(label_widget)
+            cb = QCheckBox()
+            cb.setChecked(default_checked)
+            cb.setFixedWidth(22)
+            h.addWidget(cb)
+            layout.addLayout(h)
+            self.track_metric_cbs[metric_key] = cb
+
+        # collision_count (no real-time label previously) -> add new label
+        self.collision_count_label = QLabel("Collision Count: --")
+        add_label_with_cb(self.collision_count_label, 'collision_count')
+
+        # mean_upstream_progress -> use existing upstream_progress_label
+        add_label_with_cb(self.upstream_progress_label, 'mean_upstream_progress')
+
+        # mean_upstream_velocity (no label previously) -> add new label
+        self.mean_upstream_velocity_label = QLabel("Mean Upstream Velocity: --")
+        add_label_with_cb(self.mean_upstream_velocity_label, 'mean_upstream_velocity')
+
+        # energy_efficiency -> map to mean_energy_label
+        add_label_with_cb(self.mean_energy_label, 'energy_efficiency')
+
+        # mean_passage_delay -> map to mean_passage_delay_label
+        add_label_with_cb(self.mean_passage_delay_label, 'mean_passage_delay')
 
         # Per-episode metrics plot (shows one point per episode per tracked metric)
         self.per_episode_plot = pg.PlotWidget(title="Per-Episode Metrics")
@@ -744,23 +1064,7 @@ class SalmonViewer(QtWidgets.QWidget):
         self.polarization_label.setText(f"Polarization: {metrics.get('polarization', '--'):.2f}")
         # Update collision time-series if provided
         try:
-            if 'collision_count' in metrics:
-                self.collision_history.append(metrics['collision_count'])
-                x = list(range(len(self.collision_history)))
-                y = self.collision_history
-                self.collision_curve.setData(x, y)
-                # keep history length reasonable
-                if len(self.collision_history) > 500:
-                    self.collision_history.pop(0)
-            # Upstream progress rolling history
-            if 'mean_upstream_progress' in metrics:
-                # Plot rolling per-timestep history as before
-                self.upstream_history.append(metrics['mean_upstream_progress'])
-                ux = list(range(len(self.upstream_history)))
-                uy = self.upstream_history
-                self.upstream_curve.setData(ux, uy)
-                if len(self.upstream_history) > 500:
-                    self.upstream_history.pop(0)
+            # (time-series plots removed; per-episode tracking still supported via checkboxes)
 
             # Accumulate values for per-episode reporting when toggled ON
             for m, cb in getattr(self, 'track_metric_cbs', {}).items():
@@ -776,12 +1080,8 @@ class SalmonViewer(QtWidgets.QWidget):
                     pass
 
             if 'mean_upstream_velocity' in metrics:
-                self.upstream_vel_history.append(metrics['mean_upstream_velocity'])
-                vx = list(range(len(self.upstream_vel_history)))
-                vy = self.upstream_vel_history
-                self.upstream_vel_curve.setData(vx, vy)
-                if len(self.upstream_vel_history) > 500:
-                    self.upstream_vel_history.pop(0)
+                # per-timestep upstream velocity not plotted; saved in accumulators if tracking enabled
+                pass
         except Exception:
             pass
 

@@ -31,6 +31,7 @@ MANIFEST
 venv/
 ENV/
 env/
+ .ai_journal/
 .venv
 
 # IDEs
@@ -86,3 +87,6 @@ docs/_templates/
 # Environment files (contain secrets)
 .env
 .env.local
+
+# Local AI journal (private, do not commit)
+.ai_journal/
