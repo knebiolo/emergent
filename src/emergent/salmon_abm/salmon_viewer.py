@@ -93,6 +93,12 @@ class SalmonViewer(QtWidgets.QWidget):
         # Left panel area (RL + Metrics)
         left_panel = self.create_left_panel()
         main_splitter.addWidget(left_panel)
+        # Make left panel resizable by ensuring a sensible minimum and expanding policy
+        try:
+            left_panel.setMinimumWidth(220)
+            left_panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        except Exception:
+            pass
 
         # Create central plot widget container
         plot_container = QtWidgets.QWidget()
@@ -145,6 +151,11 @@ class SalmonViewer(QtWidgets.QWidget):
         # Right panel: Controls and Weights
         right_panel = self.create_right_panel()
         main_splitter.addWidget(right_panel)
+        try:
+            right_panel.setMinimumWidth(220)
+            right_panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        except Exception:
+            pass
 
         # Set initial sizes (left, center, right)
         main_splitter.setSizes([300, 900, 300])
@@ -350,12 +361,17 @@ class SalmonViewer(QtWidgets.QWidget):
                     except Exception:
                         pass
 
-                    # Apply light low-pass (gaussian blur via convolution) to remove speckle
+                    # Apply stronger low-pass (gaussian blur) and median filter to reduce banding
                     try:
-                        from scipy.ndimage import gaussian_filter
-                        Z = gaussian_filter(Z, sigma=1.0)
+                        from scipy.ndimage import gaussian_filter, median_filter
+                        Z = gaussian_filter(Z, sigma=2.0)
+                        Z = median_filter(Z, size=3)
                     except Exception:
-                        pass
+                        try:
+                            from scipy.ndimage import gaussian_filter
+                            Z = gaussian_filter(Z, sigma=1.0)
+                        except Exception:
+                            pass
 
                     # Apply hillshade once at initialization
                     ls = LightSource(azdeg=315, altdeg=45)
@@ -656,6 +672,51 @@ class SalmonViewer(QtWidgets.QWidget):
         self.collision_curve = self.collision_plot.plot([], [], pen=mkPen('r', width=2))
         self.collision_history = []
         layout.addWidget(self.collision_plot)
+
+        # Upstream progress time-series
+        self.upstream_plot = pg.PlotWidget(title="Upstream Progress (rolling)")
+        self.upstream_plot.setLabel('bottom', 'Timestep')
+        self.upstream_plot.setLabel('left', 'Mean Upstream Progress')
+        self.upstream_plot.setMaximumHeight(120)
+        self.upstream_curve = self.upstream_plot.plot([], [], pen=mkPen('c', width=2))
+        self.upstream_history = []
+        layout.addWidget(self.upstream_plot)
+
+        # Upstream velocity time-series
+        self.upstream_vel_plot = pg.PlotWidget(title="Upstream Velocity (rolling)")
+        self.upstream_vel_plot.setLabel('bottom', 'Timestep')
+        self.upstream_vel_plot.setLabel('left', 'Mean Upstream Velocity (m/s)')
+        self.upstream_vel_plot.setMaximumHeight(120)
+        self.upstream_vel_curve = self.upstream_vel_plot.plot([], [], pen=mkPen('b', width=2))
+        self.upstream_vel_history = []
+        layout.addWidget(self.upstream_vel_plot)
+
+        # Per-episode tracking toggles (user-requested: append per-episode means)
+        track_group = QGroupBox("Track Per-Episode Metrics")
+        track_layout = QVBoxLayout()
+        # Available metrics that can be tracked per-episode
+        self._available_episode_metrics = [
+            'collision_count', 'mean_upstream_progress', 'mean_upstream_velocity',
+            'energy_efficiency', 'mean_passage_delay'
+        ]
+        self.track_metric_cbs = {}
+        for m in self._available_episode_metrics:
+            cb = QCheckBox(m.replace('_', ' ').title())
+            cb.setChecked(False)
+            track_layout.addWidget(cb)
+            self.track_metric_cbs[m] = cb
+        track_group.setLayout(track_layout)
+        layout.addWidget(track_group)
+
+        # Per-episode metrics plot (shows one point per episode per tracked metric)
+        self.per_episode_plot = pg.PlotWidget(title="Per-Episode Metrics")
+        self.per_episode_plot.setLabel('bottom', 'Episode')
+        self.per_episode_plot.setLabel('left', 'Metric Value')
+        self.per_episode_plot.setMaximumHeight(220)
+        layout.addWidget(self.per_episode_plot)
+        # storage for per-episode series and plot handles
+        self.per_episode_series = {m: [] for m in self._available_episode_metrics}
+        self.per_episode_handles = {}
         
         metrics_group.setLayout(layout)
         return metrics_group
@@ -691,6 +752,36 @@ class SalmonViewer(QtWidgets.QWidget):
                 # keep history length reasonable
                 if len(self.collision_history) > 500:
                     self.collision_history.pop(0)
+            # Upstream progress rolling history
+            if 'mean_upstream_progress' in metrics:
+                # Plot rolling per-timestep history as before
+                self.upstream_history.append(metrics['mean_upstream_progress'])
+                ux = list(range(len(self.upstream_history)))
+                uy = self.upstream_history
+                self.upstream_curve.setData(ux, uy)
+                if len(self.upstream_history) > 500:
+                    self.upstream_history.pop(0)
+
+            # Accumulate values for per-episode reporting when toggled ON
+            for m, cb in getattr(self, 'track_metric_cbs', {}).items():
+                try:
+                    if cb.isChecked() and m in metrics:
+                        if not hasattr(self, 'episode_metric_accumulators'):
+                            self.episode_metric_accumulators = {}
+                        if m not in self.episode_metric_accumulators:
+                            self.episode_metric_accumulators[m] = []
+                        # store numeric value for later per-episode averaging
+                        self.episode_metric_accumulators[m].append(float(metrics[m]))
+                except Exception:
+                    pass
+
+            if 'mean_upstream_velocity' in metrics:
+                self.upstream_vel_history.append(metrics['mean_upstream_velocity'])
+                vx = list(range(len(self.upstream_vel_history)))
+                vy = self.upstream_vel_history
+                self.upstream_vel_curve.setData(vx, vy)
+                if len(self.upstream_vel_history) > 500:
+                    self.upstream_vel_history.pop(0)
         except Exception:
             pass
 
@@ -854,6 +945,35 @@ class SalmonViewer(QtWidgets.QWidget):
                 mean_delay = self.sim.get_mean_passage_delay()
                 self.update_metrics_panel({'mean_passage_delay': mean_delay})
                 print(f"Mean Passage Delay: {mean_delay:.2f} timesteps")
+
+            # Compute and append per-episode means for any tracked metrics
+            try:
+                if hasattr(self, 'episode_metric_accumulators'):
+                    for m, vals in self.episode_metric_accumulators.items():
+                        if len(vals) == 0:
+                            continue
+                        mean_val = float(np.mean(vals))
+                        # append to per-episode series
+                        if m not in self.per_episode_series:
+                            self.per_episode_series[m] = []
+                        self.per_episode_series[m].append(mean_val)
+                        # plot/update handle
+                        if m not in self.per_episode_handles:
+                            pen = mkPen('y', width=2)
+                            self.per_episode_handles[m] = self.per_episode_plot.plot(
+                                list(range(len(self.per_episode_series[m]))),
+                                self.per_episode_series[m],
+                                pen=pen,
+                                name=m
+                            )
+                        else:
+                            # update existing handle
+                            handle = self.per_episode_handles[m]
+                            handle.setData(list(range(len(self.per_episode_series[m]))), self.per_episode_series[m])
+                    # clear accumulators for next episode
+                    self.episode_metric_accumulators = {}
+            except Exception:
+                pass
     
     def update_displays(self):
         """Update all display elements."""
