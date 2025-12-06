@@ -361,7 +361,7 @@ class SalmonViewer(QtWidgets.QWidget):
     
     def setup_background(self):
         """Setup depth raster as background image or HECRAS wetted cells."""
-        print("[RENDER DEBUG] setup_background called")
+        print("[RENDER] setup_background")
         import traceback
         try:
             # Try HECRAS mode first
@@ -371,11 +371,11 @@ class SalmonViewer(QtWidgets.QWidget):
                 with h5py.File(plan_path, 'r') as hdf:
                     coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:])
                     depth = np.array(hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'][0, :])
-                    print(f"[TIN DEBUG] Loaded coords shape: {coords.shape}, depth shape: {depth.shape}")
+                    print(f"[TIN] loaded {coords.shape[0]} cells, depth len={depth.shape[0]}")
                 wetted_mask = depth > 0.05
                 pts = coords[wetted_mask]
                 vals = depth[wetted_mask]
-                print(f"[TIN DEBUG] Loaded {len(pts)} wetted cells from HECRAS")
+                print(f"[TIN] wetted cells: {len(pts)}")
                 # Thinning
                 max_nodes = getattr(self.sim, 'tin_max_nodes', 5000)
                 if len(pts) > max_nodes:
@@ -383,7 +383,7 @@ class SalmonViewer(QtWidgets.QWidget):
                     idx = rng.choice(len(pts), size=max_nodes, replace=False)
                     pts = pts[idx]
                     vals = vals[idx]
-                    print(f"[TIN DEBUG] Thinned to {len(pts)} nodes")
+                    print(f"[TIN] thinned to {len(pts)} nodes")
                 # Delaunay
                 if len(pts) < 3:
                     print("[TIN DEBUG] Not enough points for TIN")
@@ -391,7 +391,7 @@ class SalmonViewer(QtWidgets.QWidget):
                 from scipy.spatial import Delaunay
                 tri = Delaunay(pts)
                 tris = tri.simplices
-                print(f"[TIN DEBUG] Delaunay: {tris.shape[0]} triangles")
+                print(f"[TIN] Delaunay produced {tris.shape[0]} triangles")
                 import pyqtgraph.opengl as gl
                 if gl is None:
                     print("[TIN DEBUG] pyqtgraph.opengl not available")
@@ -401,9 +401,20 @@ class SalmonViewer(QtWidgets.QWidget):
                     self.gl_view = gl.GLViewWidget()
                 else:
                     print("[TIN DEBUG] gl_view already exists")
+                # Attempt to infer a more accurate wetted perimeter from HECRAS geometry
+                try:
+                    from emergent.salmon_abm.hecras_helpers import infer_wetted_perimeter_from_hecras
+                    perimeter_points = infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, max_nodes=max_nodes)
+                    if not hasattr(self.sim, '_hecras_geometry_info'):
+                        self.sim._hecras_geometry_info = {}
+                    self.sim._hecras_geometry_info['perimeter_points'] = perimeter_points
+                except Exception:
+                    # If inference fails, proceed without perimeter_points (tri clipping will be skipped)
+                    perimeter_points = None
+
                 builder = _GLMeshBuilder(pts, vals, tris, parent=self)
                 def _on_mesh_ready(payload):
-                    print(f"[TIN DEBUG] mesh_ready signal received: keys={list(payload.keys())}")
+                    print("[TIN] mesh_ready received")
                     if 'error' in payload:
                         print('[TIN DEBUG] GL mesh builder error:', payload['error'])
                         traceback.print_exc()
@@ -411,7 +422,7 @@ class SalmonViewer(QtWidgets.QWidget):
                     verts = payload['verts']
                     faces = payload['faces']
                     colors = payload['colors']
-                    print(f"[TIN DEBUG] Adding GLMeshItem to gl_view: verts={verts.shape}, faces={faces.shape}, colors={colors.shape}")
+                    print("[TIN] adding GLMeshItem to view")
                     meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
                     mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
                     mesh.setGLOptions('opaque')
@@ -426,9 +437,20 @@ class SalmonViewer(QtWidgets.QWidget):
                     size = np.max(max_xyz - min_xyz)
                     self.gl_view.setCameraPosition(pos=QtGui.QVector3D(*center), distance=size*1.2)
                 builder.mesh_ready.connect(_on_mesh_ready)
-                builder.start()
+                try:
+                    builder.start()
+                    print("[TIN] GLMeshBuilder started")
+                except Exception as e:
+                    print("[TIN DEBUG] GLMeshBuilder.start() raised:", e)
+                    import traceback
+                    traceback.print_exc()
+                    print("[TIN DEBUG] Running _GLMeshBuilder.run() synchronously as fallback")
+                    try:
+                        builder.run()
+                    except Exception as e2:
+                        print("[TIN DEBUG] Synchronous GLMeshBuilder.run() failed:", e2)
+                        traceback.print_exc()
                 self.initial_zoom_done = False
-                print("[TIN DEBUG] GLMeshBuilder started")
                 return
             tri_pts = np.asarray(coords, dtype=float)
             tri_vals = np.asarray(vals, dtype=float)
@@ -453,9 +475,21 @@ class SalmonViewer(QtWidgets.QWidget):
                 perim_points = None
                 if hasattr(self.sim, '_hecras_geometry_info'):
                     perim_points = self.sim._hecras_geometry_info.get('perimeter_points', None)
-                if perim_points is not None and len(perim_points) > 3:
+                if perim_points is not None:
                     from shapely.geometry import Point as ShPoint, Polygon
-                    perimeter = Polygon([tuple(p) for p in perim_points])
+                    from shapely.ops import unary_union
+                    # helper may return list of polygons (list of coord lists)
+                    if isinstance(perim_points, list) and len(perim_points) > 0 and isinstance(perim_points[0], (list, tuple)) and len(perim_points[0]) > 0 and isinstance(perim_points[0][0], (list, tuple)):
+                        polys = [Polygon([tuple(p) for p in poly]) for poly in perim_points if len(poly) > 2]
+                        if not polys:
+                            raise RuntimeError('No valid polygons returned by perimeter helper')
+                        perimeter = unary_union(polys)
+                    else:
+                        # assume a single polygon coordinate list
+                        if len(perim_points) > 3:
+                            perimeter = Polygon([tuple(p) for p in perim_points])
+                        else:
+                            raise RuntimeError('Perimeter points insufficient')
                     for i, t in enumerate(tris):
                         coords_tri = tri_pts[t]
                         centroid = np.mean(coords_tri, axis=0)
@@ -493,6 +527,7 @@ class SalmonViewer(QtWidgets.QWidget):
             builder = _GLMeshBuilder(tri_pts, tri_vals, kept_tris, vert_exag=vert_exag, parent=self)
 
             def _on_mesh_ready(payload):
+                print("[Viewer] mesh_ready callback reached.")
                 if 'error' in payload:
                     print('GL mesh builder error:', payload['error'])
                     return
@@ -502,13 +537,11 @@ class SalmonViewer(QtWidgets.QWidget):
                 meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
                 mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
                 mesh.setGLOptions('opaque')
-                try:
-                    if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
-                        self.gl_view.removeItem(self.tin_mesh)
-                except Exception:
-                    pass
+                if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
+                    self.gl_view.removeItem(self.tin_mesh)
                 self.tin_mesh = mesh
                 self.gl_view.addItem(mesh)
+                print("[Viewer] mesh added to gl_view.")
                 # Camera auto-fit
                 min_xyz = np.nanmin(verts, axis=0)
                 max_xyz = np.nanmax(verts, axis=0)
@@ -517,7 +550,18 @@ class SalmonViewer(QtWidgets.QWidget):
                 self.gl_view.setCameraPosition(pos=QtGui.QVector3D(*center), distance=size*1.2)
 
             builder.mesh_ready.connect(_on_mesh_ready)
-            builder.start()
+            try:
+                builder.start()
+            except Exception as e:
+                print('render_tin_from_arrays: builder.start() raised:', e)
+                import traceback
+                traceback.print_exc()
+                print('render_tin_from_arrays: running builder.run() synchronously as fallback')
+                try:
+                    builder.run()
+                except Exception as e2:
+                    print('render_tin_from_arrays: synchronous builder.run() failed:', e2)
+                    traceback.print_exc()
 
         except Exception as e:
             print('render_tin_from_arrays failed:', e)
@@ -836,40 +880,7 @@ class SalmonViewer(QtWidgets.QWidget):
         except Exception:
             pass
 
-    def setup_background(self):
-        print("[TIN DEBUG] Connecting mesh_ready signal...")
-        def _on_mesh_ready(payload):
-            if 'error' in payload:
-                print('GL mesh builder error:', payload['error'])
-                return
-            verts = payload['verts']
-            faces = payload['faces']
-            colors = payload['colors']
-            meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
-            mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
-            mesh.setGLOptions('opaque')
-            if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
-                self.gl_view.removeItem(self.tin_mesh)
-            self.tin_mesh = mesh
-            self.gl_view.addItem(mesh)
-            # Camera auto-fit
-            min_xyz = np.nanmin(verts, axis=0)
-            max_xyz = np.nanmax(verts, axis=0)
-            center = (min_xyz + max_xyz) / 2.0
-            size = np.max(max_xyz - min_xyz)
-            self.gl_view.setCameraPosition(pos=QtGui.QVector3D(*center), distance=size*1.2)
-        print("[TIN DEBUG] mesh_ready signal connected.")
-        builder.mesh_ready.connect(_on_mesh_ready)
-        print("[TIN DEBUG] mesh_ready signal connection complete.")
-        builder.start()
-        self.initial_zoom_done = False
-        print("[TIN DEBUG] GLMeshBuilder started")
-        """Reset simulation to initial state."""
-        if self.rl_trainer:
-            self.sim.reset_spatial_state()
-        self.current_timestep = 0
-        self.update_displays()
-        print("[SalmonViewer] Simulation reset.")
+    
     
     def update_simulation(self):
         """Main simulation update loop (called by timer)."""
@@ -1011,26 +1022,11 @@ class SalmonViewer(QtWidgets.QWidget):
     
     def update_displays(self):
         """Update all display elements."""
-        print("[RENDER DEBUG] update_displays called")
-        # Check mesh
-        if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
-            print(f"[RENDER DEBUG] tin_mesh exists: {self.tin_mesh}")
-        else:
-            print("[RENDER DEBUG] tin_mesh missing or None!")
-        # Check agent data
-        if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y'):
-            print(f"[RENDER DEBUG] Agent positions: X shape={np.shape(self.sim.X)}, Y shape={np.shape(self.sim.Y)}")
-        else:
-            print("[RENDER DEBUG] Agent position data missing!")
-        # Check overlays
-        if hasattr(self, 'gl_agent_scatter') and self.gl_agent_scatter is not None:
-            print(f"[RENDER DEBUG] gl_agent_scatter exists: {self.gl_agent_scatter}")
-        else:
-            print("[RENDER DEBUG] gl_agent_scatter missing or None!")
-        if hasattr(self, 'gl_direction_lines'):
-            print(f"[RENDER DEBUG] gl_direction_lines count: {len(self.gl_direction_lines)}")
-        if hasattr(self, 'gl_tail_lines'):
-            print(f"[RENDER DEBUG] gl_tail_lines count: {len(self.gl_tail_lines)}")
+        # Minimal runtime checks (avoid noisy prints)
+        if not hasattr(self, 'tin_mesh') or self.tin_mesh is None:
+            print("[RENDER] tin_mesh not ready")
+        if not (hasattr(self.sim, 'X') and hasattr(self.sim, 'Y')):
+            print("[RENDER] Agent position data missing")
         alive_mask = (self.sim.dead == 0)
         import pyqtgraph.opengl as gl
         # Agents
@@ -1196,8 +1192,8 @@ class SalmonViewer(QtWidgets.QWidget):
                         self.plot_widget.removeItem(line)
                     except Exception:
                         pass
+                # reset tail lines container
                 self.tail_lines = []
-                # ...existing code for 2D tails...
             else:
                 # Clear tail lines when disabled
                 if hasattr(self, 'tail_lines'):
