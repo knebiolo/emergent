@@ -66,7 +66,15 @@ def setup_training_simulation(args):
     
     print('Simulation initialized. Setting up RL trainer...')
     trainer = RLTrainer(sim)
-    sim.apply_behavioral_weights(trainer.behavioral_weights)
+    try:
+        print('Applying behavioral weights to simulation...')
+        sim.apply_behavioral_weights(trainer.behavioral_weights)
+        print('Behavioral weights applied successfully.')
+    except Exception as e:
+        print(f'ERROR applying behavioral weights: {e}')
+        import traceback
+        traceback.print_exc()
+        raise
     
     return sim, trainer, hecras_plan
 
@@ -121,4 +129,11 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    print("[train_behavioral_weights_visual] __main__ entry reached.")
+    try:
+        main()
+        print("[train_behavioral_weights_visual] main() completed.")
+    except Exception as e:
+        print(f"[train_behavioral_weights_visual] Exception in main: {e}")
+        import traceback
+        traceback.print_exc()

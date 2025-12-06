@@ -939,91 +939,96 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
     # Step 1: Apply depth threshold
     wetted_mask = depth > depth_threshold
     dry_mask = ~wetted_mask
-    
     print(f"Initial wetted cells: {wetted_mask.sum():,} ({wetted_mask.sum()/len(wetted_mask)*100:.1f}%)")
     print(f"Initial dry cells: {dry_mask.sum():,} ({dry_mask.sum()/len(dry_mask)*100:.1f}%)")
-    
+
     # Step 2: Remove islands (dry regions not touching boundary)
     # Build KDTree for dry cells
     dry_coords = coords[dry_mask]
-    if len(dry_coords) > 0 and perimeter is not None:
-        # Create spatial graph of dry cells using connectivity
-        dry_tree = cKDTree(dry_coords)
-        
-        # Find which dry cells are near the domain perimeter (boundary)
-        # Use median cell spacing to determine connectivity
-        sample_size = min(1000, len(coords))
-        sample_idx = np.random.choice(len(coords), size=sample_size, replace=False)
-        sample_coords = coords[sample_idx]
-        sample_tree = cKDTree(sample_coords)
-        dists, _ = sample_tree.query(sample_coords, k=2)
-        median_spacing = np.median(dists[:, 1])
-        
-        # Find dry cells within 2x median spacing of perimeter
-        boundary_search_dist = median_spacing * 3.0
-        touching_boundary_mask = np.zeros(len(dry_coords), dtype=bool)
-        
-        for perim_pt in perimeter:
-            dists = np.sqrt((dry_coords[:, 0] - perim_pt[0])**2 + (dry_coords[:, 1] - perim_pt[1])**2)
-            touching_boundary_mask |= (dists < boundary_search_dist)
-        
-        print(f"Dry cells touching boundary: {touching_boundary_mask.sum():,}")
-        
-        # OPTIMIZATION: Skip island removal for large meshes (> 500k dry cells)
-        # Island removal via connected components is O(N^2) and very slow
-        if n_dry > 500000:
-            print(f"   Skipping island removal (too many dry cells: {n_dry:,})")
-            print(f"   (Island removal disabled for meshes with >500k dry cells)")
-        else:
-            # Label connected components of dry cells
-            # Build adjacency graph for dry cells
-            print("   Building dry cell connectivity graph...")
-            dry_pairs = dry_tree.query_pairs(r=median_spacing * 1.5)
-            print(f"   Found {len(dry_pairs):,} dry cell connections")
-        
-            # Use connected components to find islands
-            from scipy.sparse import csr_matrix
-            from scipy.sparse.csgraph import connected_components
-            
-            if len(dry_pairs) > 0:
-                pairs_arr = np.array(list(dry_pairs))
-                row = pairs_arr[:, 0]
-                col = pairs_arr[:, 1]
-                data = np.ones(len(row))
-                # Make symmetric
-                row_sym = np.concatenate([row, col])
-                col_sym = np.concatenate([col, row])
-                data_sym = np.concatenate([data, data])
-                adj_matrix = csr_matrix((data_sym, (row_sym, col_sym)), shape=(n_dry, n_dry))
-                
-                # Find connected components
-                n_components, labels = connected_components(adj_matrix, directed=False)
-                
-                print(f"Dry regions (connected components): {n_components}")
-                
-                # Identify which components touch the boundary
-                components_touching_boundary = set()
-                for comp_id in range(n_components):
-                    comp_mask = labels == comp_id
-                    if np.any(touching_boundary_mask[comp_mask]):
-                        components_touching_boundary.add(comp_id)
-                
-                # Islands are components NOT touching boundary
-                island_mask = np.zeros(n_dry, dtype=bool)
-                for comp_id in range(n_components):
-                    if comp_id not in components_touching_boundary:
-                        island_mask |= (labels == comp_id)
-                
-                print(f"Island cells (dry but surrounded): {island_mask.sum():,}")
-                
-                # Convert islands from dry to wetted
-                if island_mask.sum() > 0:
-                    # Map back to original indices
-                    dry_indices = np.where(dry_mask)[0]
-                    island_indices_global = dry_indices[island_mask]
-                    wetted_mask[island_indices_global] = True
-                    dry_mask = ~wetted_mask
-                    print(f"Updated wetted cells (after removing islands): {wetted_mask.sum():,}")
+    n_dry = len(dry_coords)
+    try:
+        if n_dry > 0 and perimeter is not None:
+            # Create spatial graph of dry cells using connectivity
+            dry_tree = cKDTree(dry_coords)
+
+            # Find which dry cells are near the domain perimeter (boundary)
+            # Use median cell spacing to determine connectivity
+            sample_size = min(1000, len(coords))
+            sample_idx = np.random.choice(len(coords), size=sample_size, replace=False)
+            sample_coords = coords[sample_idx]
+            sample_tree = cKDTree(sample_coords)
+            dists, _ = sample_tree.query(sample_coords, k=2)
+            median_spacing = np.median(dists[:, 1])
+
+            # Find dry cells within 2x median spacing of perimeter
+            boundary_search_dist = median_spacing * 3.0
+            touching_boundary_mask = np.zeros(n_dry, dtype=bool)
+
+            for perim_pt in perimeter:
+                dists = np.sqrt((dry_coords[:, 0] - perim_pt[0])**2 + (dry_coords[:, 1] - perim_pt[1])**2)
+                touching_boundary_mask |= (dists < boundary_search_dist)
+
+            print(f"Dry cells touching boundary: {touching_boundary_mask.sum():,}")
+
+            # OPTIMIZATION: Skip island removal for large meshes (> 500k dry cells)
+            # Island removal via connected components is O(N^2) and very slow
+            if n_dry > 500000:
+                print(f"   Skipping island removal (too many dry cells: {n_dry:,})")
+                print(f"   (Island removal disabled for meshes with >500k dry cells)")
+            else:
+                # Label connected components of dry cells
+                # Build adjacency graph for dry cells
+                print("   Building dry cell connectivity graph...")
+                dry_pairs = dry_tree.query_pairs(r=median_spacing * 1.5)
+                print(f"   Found {len(dry_pairs):,} dry cell connections")
+
+                # Use connected components to find islands
+                from scipy.sparse import csr_matrix
+                from scipy.sparse.csgraph import connected_components
+
+                if len(dry_pairs) > 0:
+                    pairs_arr = np.array(list(dry_pairs))
+                    row = pairs_arr[:, 0]
+                    col = pairs_arr[:, 1]
+                    data = np.ones(len(row))
+                    # Make symmetric
+                    row_sym = np.concatenate([row, col])
+                    col_sym = np.concatenate([col, row])
+                    data_sym = np.concatenate([data, data])
+                    adj_matrix = csr_matrix((data_sym, (row_sym, col_sym)), shape=(n_dry, n_dry))
+
+                    # Find connected components
+                    n_components, labels = connected_components(adj_matrix, directed=False)
+
+                    print(f"Dry regions (connected components): {n_components}")
+
+                    # Identify which components touch the boundary
+                    components_touching_boundary = set()
+                    for comp_id in range(n_components):
+                        comp_mask = labels == comp_id
+                        if np.any(touching_boundary_mask[comp_mask]):
+                            components_touching_boundary.add(comp_id)
+
+                    # Islands are components NOT touching boundary
+                    island_mask = np.zeros(n_dry, dtype=bool)
+                    for comp_id in range(n_components):
+                        if comp_id not in components_touching_boundary:
+                            island_mask |= (labels == comp_id)
+
+                    print(f"Island cells (dry but surrounded): {island_mask.sum():,}")
+
+                    # Convert islands from dry to wetted
+                    if island_mask.sum() > 0:
+                        # Map back to original indices
+                        dry_indices = np.where(dry_mask)[0]
+                        island_indices_global = dry_indices[island_mask]
+                        wetted_mask[island_indices_global] = True
+                        dry_mask = ~wetted_mask
+                        print(f"Updated wetted cells (after removing islands): {wetted_mask.sum():,}")
+    except Exception as e:
+        print(f"Exception during island removal: {e}")
+        import traceback
+        traceback.print_exc()
     
     # Step 3: Extract perimeter (boundary between wetted and dry)
     wetted_coords = coords[wetted_mask]
@@ -9771,39 +9776,45 @@ class simulation():
             pairs = tree.query_pairs(r=max_thresh)
 
             if pairs:
-                # For each pair, compute required separation and apply half displacement to each agent
-                disp = np.zeros_like(positions)
+                # Soft repulsive collision response (acceleration-based)
+                # Instead of instantly moving agents apart (billiard-ball), compute
+                # pairwise repulsive forces and apply them as velocity changes
+                # over the timestep. This produces smoother, fish-like avoidance.
+                impulse = np.zeros_like(positions)
+                # configurable stiffness (tunable via attribute)
+                stiffness = getattr(self, 'collision_stiffness', 5.0)
+                # small safeguard for timestep
+                dt_safe = max(1e-6, dt)
                 for i, j in pairs:
                     dx = self.X[j] - self.X[i]
                     dy = self.Y[j] - self.Y[i]
                     dist = np.hypot(dx, dy)
                     if dist <= 1e-6:
-                        # If exactly overlapping, nudge randomly
+                        # If exactly overlapping, pick a unit random direction
                         nx, ny = np.random.uniform(-1, 1), np.random.uniform(-1, 1)
-                        dist = np.hypot(nx, ny)
-                        nx /= dist
-                        ny /= dist
+                        nd = np.hypot(nx, ny) or 1.0
+                        nx /= nd
+                        ny /= nd
                     else:
                         nx, ny = dx / dist, dy / dist
 
                     # threshold for this pair = 0.25 * average body length
                     pair_thresh = 0.25 * (lengths_m[i] + lengths_m[j]) * 0.5
                     if dist < pair_thresh:
-                        # separation amount required
+                        # separation amount required (penetration depth)
                         sep = pair_thresh - dist
-                        # apply half separation to each, opposite directions
-                        disp_i = -0.5 * sep * np.array([nx, ny])
-                        disp_j = 0.5 * sep * np.array([nx, ny])
-                        disp[i] += disp_i
-                        disp[j] += disp_j
+                        # force magnitude proportional to penetration (Hooke-like)
+                        force_mag = stiffness * sep
+                        # distribute half to each agent (opposite directions)
+                        force_vec = np.array([nx, ny]) * force_mag
+                        impulse[i] -= 0.5 * force_vec
+                        impulse[j] += 0.5 * force_vec
 
-                # Apply the displacement to positions and small velocity impulse
-                if np.any(disp != 0):
-                    self.X += disp[:, 0]
-                    self.Y += disp[:, 1]
-                    # small velocity impulse away from collision
-                    self.x_vel += disp[:, 0] / max(1e-6, dt)
-                    self.y_vel += disp[:, 1] / max(1e-6, dt)
+                # Apply the accumulated impulse as a velocity change (soft response)
+                if np.any(impulse != 0):
+                    # scale impulse by timestep to convert to velocity-like change
+                    self.x_vel += impulse[:, 0] * dt_safe
+                    self.y_vel += impulse[:, 1] * dt_safe
         except Exception:
             pass
         

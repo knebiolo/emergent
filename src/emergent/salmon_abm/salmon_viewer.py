@@ -126,9 +126,7 @@ class SalmonViewer(QtWidgets.QWidget):
         show_depth : bool
             Whether to show depth raster as background
         """
-        print("Creating SalmonViewer...")
         super().__init__()
-        
         print(f"Initializing viewer for {simulation.num_agents} agents...")
         self.sim = simulation
         self.dt = dt
@@ -146,12 +144,25 @@ class SalmonViewer(QtWidgets.QWidget):
         self.tail_freq = getattr(self.sim, 'tail_freq', 2.0)  # Hz
         # per-agent random phase for visual variation (stable across viewer lifetime)
         try:
-            self.tail_phases = np.asarray(getattr(self.sim, 'tail_phases', None))
-            if self.tail_phases is None or len(self.tail_phases) != self.sim.num_agents:
+            raw_phases = getattr(self.sim, 'tail_phases', None)
+            arr_phases = np.asarray(raw_phases)
+            valid = True
+            if arr_phases is None or np.isscalar(arr_phases):
+                valid = False
+            else:
+                try:
+                    valid = len(arr_phases) == self.sim.num_agents
+                except TypeError:
+                    valid = False
+            if not valid:
                 self.tail_phases = np.random.RandomState(42).rand(self.sim.num_agents) * 2.0 * np.pi
-        except Exception:
+            else:
+                self.tail_phases = arr_phases
+        except Exception as e:
+            print(f"[ERROR] Exception in tail_phases setup: {e}")
+            import traceback
+            traceback.print_exc()
             self.tail_phases = np.random.RandomState(42).rand(self.sim.num_agents) * 2.0 * np.pi
-        
         # RL training state
         if self.rl_trainer:
             print("Setting up RL trainer...")
@@ -160,19 +171,21 @@ class SalmonViewer(QtWidgets.QWidget):
             self.prev_metrics = None
             self.best_reward = -np.inf
             self.rewards_history = []
-        
         # Initialize UI
         print("About to initialize UI...")
         self.init_ui()
-        
+        # Setup TIN mesh background
+        print("Calling setup_background() after UI init...")
+        self.setup_background()
         # Start simulation timer (paused initially)
         print("Starting timer (paused)...")
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_simulation)
         self.paused = True  # Start paused
         self.timer.start(int(dt * 1000))  # Convert to milliseconds
+        print(f"[DEBUG] Timer started with interval {int(dt * 1000)} ms, paused={self.paused}")
         print("SalmonViewer initialization complete!")
-        
+    
     def init_ui(self):
         """Initialize the user interface."""
         print("Initializing UI...")
@@ -189,44 +202,22 @@ class SalmonViewer(QtWidgets.QWidget):
         try:
             left_panel.setMinimumWidth(220)
             left_panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Exception in toggle_pause: {e}")
+            import traceback
+            traceback.print_exc()
 
-        # Create central plot widget container
+        # Create central OpenGL viewer container
         plot_container = QtWidgets.QWidget()
         plot_layout = QVBoxLayout(plot_container)
-        print("Creating plot widget...")
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground('k')
-        self.plot_widget.setAspectLocked(True)
-        self.plot_widget.setLabel('bottom', 'Easting', units='m')
-        self.plot_widget.setLabel('left', 'Northing', units='m')
-        plot_layout.addWidget(self.plot_widget)
-        
-        # Setup background (depth raster)
-        if self.show_depth:
-            self.setup_background()
-        
-        print("Creating agent scatter plot...")
-        # Agent scatter plot
-        self.agent_scatter = ScatterPlotItem(
-            size=6,
-            pen=mkPen(None),
-            brush=pg.mkBrush(255, 100, 100, 200),
-            symbol='o'
-        )
-        self.plot_widget.addItem(self.agent_scatter)
-        
-        # Trajectory lines (initially empty)
-        self.trajectory_lines = []
-        self.trajectory_history = []  # List of (timestep, positions) tuples
-        
-        # Velocity field arrows (optional)
-        if self.show_velocity_field:
-            self.setup_velocity_field()
-        
-        print("Creating status bar...")
+        print("Creating GLViewWidget...")
+        import pyqtgraph.opengl as gl
+        self.gl_view = gl.GLViewWidget()
+        plot_layout.addWidget(self.gl_view)
+        # Add plot container to splitter
+        main_splitter.addWidget(plot_container)
         # Status bar
+        print("Creating status bar...")
         status_layout = QHBoxLayout()
         self.timestep_label = QLabel(f"Timestep: 0 / {self.n_timesteps}")
         self.time_label = QLabel(f"Time: 0.0 / {self.T:.1f}s")
@@ -236,9 +227,6 @@ class SalmonViewer(QtWidgets.QWidget):
         status_layout.addWidget(self.alive_label)
         status_layout.addStretch()
         plot_layout.addLayout(status_layout)
-        
-        # Add plot container to splitter
-        main_splitter.addWidget(plot_container)
 
         # Right panel: Controls and Weights
         right_panel = self.create_right_panel()
@@ -246,8 +234,10 @@ class SalmonViewer(QtWidgets.QWidget):
         try:
             right_panel.setMinimumWidth(220)
             right_panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Exception in update_vert_exag_label: {e}")
+            import traceback
+            traceback.print_exc()
 
         # Set initial sizes (left, center, right)
         main_splitter.setSizes([300, 900, 300])
@@ -371,6 +361,8 @@ class SalmonViewer(QtWidgets.QWidget):
     
     def setup_background(self):
         """Setup depth raster as background image or HECRAS wetted cells."""
+        print("[RENDER DEBUG] setup_background called")
+        import traceback
         try:
             # Try HECRAS mode first
             if hasattr(self.sim, 'use_hecras') and self.sim.use_hecras and hasattr(self.sim, 'hecras_plan_path'):
@@ -379,459 +371,73 @@ class SalmonViewer(QtWidgets.QWidget):
                 with h5py.File(plan_path, 'r') as hdf:
                     coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:])
                     depth = np.array(hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'][0, :])
-                    # Use documented HECRAS dataset names
-                    face_info = None
-                    points = None
-                    if 'Geometry/2D Flow Areas/2D area/Cells Face and Orientation Info' in hdf:
-                        face_info = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Face and Orientation Info'][:])
-                    if 'Geometry/2D Flow Areas/2D area/FacePoints Coordinate' in hdf:
-                        points = np.array(hdf['Geometry/2D Flow Areas/2D area/FacePoints Coordinate'][:])
-                    
-                # Mask by wetted perimeter
-                print("Masking by wetted perimeter...")
+                    print(f"[TIN DEBUG] Loaded coords shape: {coords.shape}, depth shape: {depth.shape}")
                 wetted_mask = depth > 0.05
-                wetted_coords = coords[wetted_mask]
-                wetted_depth = depth[wetted_mask]
-                # If face_info/points present, compute areas; otherwise skip adaptive sizing
-                wetted_face_points = None
-                if face_info is not None and points is not None:
-                    wetted_face_points = face_info[wetted_mask]
-                print(f"Wetted cells: {len(wetted_coords)}")
-                
-                # Calculate cell areas to determine appropriate dot sizes when geometry is available
-                cell_areas = None
-                if wetted_face_points is not None:
-                    print("Calculating cell areas...")
-                    cell_areas = []
-                    for fp in wetted_face_points:
-                        face_idx = fp[fp >= 0]  # Filter out -1 padding
-                        if len(face_idx) >= 3:
-                            cell_points = points[face_idx]
-                            # Approximate area using bounding box
-                            x_range = cell_points[:, 0].max() - cell_points[:, 0].min()
-                            y_range = cell_points[:, 1].max() - cell_points[:, 1].min()
-                            area = x_range * y_range
-                            cell_areas.append(area)
-                        else:
-                            cell_areas.append(1.0)
-                    cell_areas = np.array(cell_areas)
-
-                # Thin nodes in dense HECRAS outputs to avoid overly-dense triangulation
-                # Use a grid-based binning approach; user can set `self.sim.tin_thin_resolution` (meters)
-                try:
-                    base_res = getattr(self.sim, 'tin_thin_resolution', 10.0)
-                    if base_res is None or base_res <= 0:
-                        base_res = 10.0
-                    tin_max_nodes = getattr(self.sim, 'tin_max_nodes', 5000)
-                    if tin_max_nodes is None or tin_max_nodes <= 0:
-                        tin_max_nodes = 5000
-
-                    # Iteratively increase grid cell size until node count <= tin_max_nodes
-                    current_res = float(base_res)
-                    rep_idx = np.arange(len(wetted_coords))
-                    if len(wetted_coords) > 0:
-                        while True:
-                            gx = (wetted_coords[:, 0] / current_res).astype(int)
-                            gy = (wetted_coords[:, 1] / current_res).astype(int)
-                            grid = {}
-                            for i, (ix, iy) in enumerate(zip(gx, gy)):
-                                key = (int(ix), int(iy))
-                                grid.setdefault(key, []).append(i)
-                            rep = []
-                            for key, idxs in grid.items():
-                                if len(idxs) == 1:
-                                    rep.append(idxs[0])
-                                else:
-                                    sub = wetted_depth[idxs]
-                                    mid = np.argsort(sub)[len(sub) // 2]
-                                    rep.append(idxs[mid])
-                            rep = np.array(rep, dtype=int)
-                            if len(rep) <= tin_max_nodes or current_res > base_res * 64:
-                                rep_idx = rep
-                                break
-                            # increase resolution to thin more aggressively
-                            current_res *= 1.5
-
-                        thinned_coords = wetted_coords[rep_idx]
-                        thinned_depth = wetted_depth[rep_idx]
-                        # cache for rebuild actions
-                        self.last_thinned_coords = thinned_coords
-                        self.last_thinned_vals = thinned_depth
-                        print(f"Thinned HECRAS nodes: {len(wetted_coords)} -> {len(thinned_coords)} (base_res={base_res}, final_res={current_res})")
-                    else:
-                        thinned_coords = wetted_coords
-                        thinned_depth = wetted_depth
-                        self.last_thinned_coords = thinned_coords
-                        self.last_thinned_vals = thinned_depth
-                except Exception:
-                    thinned_coords = wetted_coords
-                    thinned_depth = wetted_depth
-
-                # Fast IDW rasterization + optional hillshade for quick background
-                # Try TIN (triangulated irregular network) rendering first — vector faces colored by depth
-                print("Attempting TIN rendering (vector faces) from HECRAS nodes...")
-                try:
-                    from scipy.spatial import Delaunay
-                    import matplotlib.cm as cm
-                    import matplotlib.colors as mcolors
-                    # Build Delaunay triangulation on wetted cell centers (thinned)
-                    if len(thinned_coords) >= 3:
-                        # Cap total nodes for triangulation to avoid excessive work
-                        tin_max_nodes = getattr(self.sim, 'tin_max_nodes', 5000)
-                        if tin_max_nodes is None:
-                            tin_max_nodes = 5000
-                        # ensure sim attribute exists for user inspection
-                        try:
-                            setattr(self.sim, 'tin_max_nodes', tin_max_nodes)
-                        except Exception:
-                            pass
-                        if len(thinned_coords) > tin_max_nodes:
-                            rng = np.random.default_rng(0)
-                            idx_keep = rng.choice(len(thinned_coords), size=tin_max_nodes, replace=False)
-                            tri_pts = thinned_coords[idx_keep]
-                            tri_vals = thinned_depth[idx_keep]
-                            print(f"Capped thinned nodes: {len(thinned_coords)} -> {len(tri_pts)} (max={tin_max_nodes})")
-                        else:
-                            tri_pts = thinned_coords
-                            tri_vals = thinned_depth
-
-                        import time
-                        t0 = time.perf_counter()
-                        tri = Delaunay(tri_pts)
-                        t1 = time.perf_counter()
-                        print(f"Delaunay time: {t1-t0:.2f}s for {len(tri_pts)} nodes")
-                        tris = tri.simplices
-                        norm = mcolors.Normalize(vmin=np.nanpercentile(tri_vals, 1), vmax=np.nanpercentile(tri_vals, 99))
-                        cmap = cm.get_cmap('viridis')
-
-                        # Compute triangle filtering parameters
-                        try:
-                            # compute edge lengths for triangles
-                            pts = tri_pts
-                            a = pts[tris[:, 0]]
-                            b = pts[tris[:, 1]]
-                            c = pts[tris[:, 2]]
-                            lab = np.linalg.norm(a - b, axis=1)
-                            lbc = np.linalg.norm(b - c, axis=1)
-                            lca = np.linalg.norm(c - a, axis=1)
-                            max_edge = np.maximum(np.maximum(lab, lbc), lca)
-                            mean_edge = np.mean(np.concatenate([lab, lbc, lca]))
-                        except Exception:
-                            max_edge = None
-                            mean_edge = None
-
-                        # Default alpha threshold based on mean edge length
-                        alpha_param = getattr(self.sim, 'tin_alpha', None)
-                        if alpha_param is None or alpha_param <= 0:
-                            if mean_edge is not None and mean_edge > 0:
-                                alpha_param = mean_edge * 1.5
-                            else:
-                                alpha_param = getattr(self.sim, 'tin_alpha_fallback', 50.0)
-
-                        kept = np.ones(len(tris), dtype=bool)
-
-                        # Prefer using a centerline-derived buffered perimeter if available
-                        kept = np.ones(len(tris), dtype=bool)
-                        try:
-                            from shapely.geometry import Polygon, Point, MultiPolygon
-                            # If a centerline exists on the simulation, build a buffer around it
-                            # Prefer vectorized wetted perimeter returned from HECRAS init if present
-                            perim_points = None
-                            if hasattr(self.sim, '_hecras_geometry_info'):
-                                perim_points = self.sim._hecras_geometry_info.get('perimeter_points', None)
-                            if perim_points is not None and len(perim_points) > 0:
-                                try:
-                                    from shapely.geometry import Polygon, Point as ShPoint
-                                    perimeter = Polygon([tuple(p) for p in perim_points])
-                                except Exception:
-                                    perimeter = None
-                            elif hasattr(self.sim, 'centerline') and self.sim.centerline is not None:
-                                cl = self.sim.centerline
-                                # Compute distances from a sample of tri points to centerline to estimate channel half-width
-                                sample_pts = tri_pts
-                                if len(tri_pts) > 5000:
-                                    idxs = np.linspace(0, len(tri_pts)-1, 5000).astype(int)
-                                    sample_pts = tri_pts[idxs]
-                                from shapely.geometry import Point as ShPoint
-                                dists = []
-                                for x, y in sample_pts:
-                                    try:
-                                        dists.append(cl.distance(ShPoint(x, y)))
-                                    except Exception:
-                                        dists.append(0.0)
-                                dists = np.array(dists)
-                                if dists.size > 0:
-                                    buf_w = max(2.0, np.percentile(dists, 95) * 1.2)
-                                else:
-                                    buf_w = alpha_param * 1.5
-                                perimeter = cl.buffer(buf_w)
-
-                                # Filter triangles by centroid inside perimeter
-                                for i, t in enumerate(tris):
-                                    if max_edge is not None and max_edge[i] > alpha_param * 4.0:
-                                        kept[i] = False
-                                        continue
-                                    coords = tri_pts[t]
-                                    centroid = np.mean(coords, axis=0)
-                                    try:
-                                        if not perimeter.contains(ShPoint(centroid[0], centroid[1])):
-                                            kept[i] = False
-                                    except Exception:
-                                        if not perimeter.intersects(ShPoint(centroid[0], centroid[1])):
-                                            kept[i] = False
-
-                                # Draw perimeter polygon on plot
-                                try:
-                                    if hasattr(perimeter, 'geoms'):
-                                        geoms = perimeter.geoms
-                                    else:
-                                        geoms = [perimeter]
-                                    for g in geoms:
-                                        ext = g.exterior.coords[:]
-                                        qpoly = QtGui.QPolygonF([QtCore.QPointF(x, y) for x, y in ext])
-                                        pen = QtGui.QPen(QtGui.QColor(200, 200, 200), 2)
-                                        pen.setStyle(Qt.DotLine)
-                                        perimeter_item = QtWidgets.QGraphicsPolygonItem(qpoly)
-                                        perimeter_item.setPen(pen)
-                                        perimeter_item.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
-                                        self.plot_widget.addItem(perimeter_item)
-                                except Exception:
-                                    pass
-                            else:
-                                # shapely available but no centerline; fall back to triangle-union perimeter
-                                from shapely.geometry import Polygon, Point as ShPoint, MultiPolygon
-                                from shapely.ops import unary_union
-                                polygons_to_union = []
-                                for i, t in enumerate(tris):
-                                    if max_edge is not None and max_edge[i] > alpha_param * 4.0:
-                                        kept[i] = False
-                                        continue
-                                    coords = tri_pts[t]
-                                    poly = Polygon([(coords[0,0], coords[0,1]), (coords[1,0], coords[1,1]), (coords[2,0], coords[2,1])])
-                                    polygons_to_union.append(poly)
-                                if len(polygons_to_union) > 0:
-                                    union = unary_union(polygons_to_union)
-                                    for i, t in enumerate(tris):
-                                        if not kept[i]:
-                                            continue
-                                        coords = tri_pts[t]
-                                        centroid = np.mean(coords, axis=0)
-                                        try:
-                                            if not union.contains(ShPoint(centroid[0], centroid[1])):
-                                                kept[i] = False
-                                        except Exception:
-                                            if not union.intersects(ShPoint(centroid[0], centroid[1])):
-                                                kept[i] = False
-                                    try:
-                                        if isinstance(union, MultiPolygon):
-                                            geoms = union.geoms
-                                        else:
-                                            geoms = [union]
-                                        for g in geoms:
-                                            ext = g.exterior.coords[:]
-                                            qpoly = QtGui.QPolygonF([QtCore.QPointF(x, y) for x, y in ext])
-                                            pen = QtGui.QPen(QtGui.QColor(200, 200, 200), 2)
-                                            pen.setStyle(Qt.DotLine)
-                                            perimeter_item = QtWidgets.QGraphicsPolygonItem(qpoly)
-                                            perimeter_item.setPen(pen)
-                                            perimeter_item.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
-                                            self.plot_widget.addItem(perimeter_item)
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            # shapely not available; fall back to simple edge-length filtering
-                            if max_edge is not None:
-                                for i in range(len(tris)):
-                                    if max_edge[i] > alpha_param * 3.0:
-                                        kept[i] = False
-
-                        # Prepare a coarse IDW raster background to guarantee full coverage (no holes)
-                        try:
-                            # Build a coarse IDW covering raster from thinned points (fast, low-res)
-                            from scipy.spatial import cKDTree
-                            nx_bg = 300
-                            pts_bg = tri_pts
-                            vals_bg = tri_vals
-                            minx, miny = pts_bg[:, 0].min(), pts_bg[:, 1].min()
-                            maxx, maxy = pts_bg[:, 0].max(), pts_bg[:, 1].max()
-                            ny_bg = max(100, int(nx_bg * (maxy - miny) / max(1e-6, (maxx - minx))))
-                            xi = np.linspace(minx, maxx, nx_bg)
-                            yi = np.linspace(miny, maxy, ny_bg)
-                            XI, YI = np.meshgrid(xi, yi)
-                            grid_coords = np.column_stack([XI.ravel(), YI.ravel()])
-                            tree_bg = cKDTree(pts_bg)
-                            k_bg = min(8, len(pts_bg))
-                            dists_bg, idxs_bg = tree_bg.query(grid_coords, k=k_bg)
-                            if k_bg == 1:
-                                dists_bg = dists_bg[:, None]
-                                idxs_bg = idxs_bg[:, None]
-                            dists_bg[dists_bg == 0] = 1e-6
-                            weights_bg = 1.0 / (dists_bg ** 2)
-                            neighbor_vals_bg = vals_bg[idxs_bg]
-                            weighted_vals_bg = np.sum(weights_bg * neighbor_vals_bg, axis=1) / np.sum(weights_bg, axis=1)
-                            Z_bg = weighted_vals_bg.reshape((ny_bg, nx_bg))
-                            # simple gaussian smoothing for visual quality
-                            try:
-                                from scipy.ndimage import gaussian_filter
-                                Z_bg = gaussian_filter(Z_bg, sigma=1.0)
-                            except Exception:
-                                pass
-                            # build RGB shaded image
-                            import matplotlib.cm as cm
-                            import matplotlib.colors as mcolors
-                            ls = None
-                            try:
-                                from matplotlib.colors import LightSource
-                                ls = LightSource(azdeg=315, altdeg=45)
-                            except Exception:
-                                ls = None
-                            norm_bg = mcolors.Normalize(vmin=np.nanpercentile(Z_bg, 1), vmax=np.nanpercentile(Z_bg, 99))
-                            rgb_bg = cm.get_cmap('viridis')(norm_bg(Z_bg))[:, :, :3]
-                            if ls is not None:
-                                hill = ls.hillshade(Z_bg, vert_exag=1.0, dx=(maxx - minx)/nx_bg, dy=(maxy - miny)/ny_bg)
-                                shaded_bg = rgb_bg * (0.6 + 0.4 * hill[:, :, None])
-                            else:
-                                shaded_bg = rgb_bg
-                            shaded_uint8 = np.clip(shaded_bg * 255, 0, 255).astype('uint8')
-                            # alpha fully opaque for background
-                            alpha_bg = np.full((ny_bg, nx_bg), 255, dtype='uint8')
-                            # transpose to image orientation
-                            try:
-                                img_arr = np.dstack([np.transpose(shaded_uint8, (1,0,2)), np.transpose(alpha_bg, (1,0))])
-                            except Exception:
-                                img_arr = np.dstack([shaded_uint8, alpha_bg])
-                            bg_item = pg.ImageItem(img_arr)
-                            self.plot_widget.addItem(bg_item)
-                            bg_item.setZValue(-200)
-                            try:
-                                bg_item.setRect(minx, miny, (maxx - minx), (maxy - miny))
-                            except Exception:
-                                try:
-                                    bg_item.setPos((minx, miny))
-                                    bg_item.scale((maxx - minx) / nx_bg, (maxy - miny) / ny_bg)
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-
-                        # Plot filtered triangles on top of the background (ensures visual completeness)
-                        kept_tris = tris[kept]
-                        # OpenGL-only path: build mesh in background thread and swap into GL view
-                        if gl is None:
-                            raise RuntimeError('pyqtgraph.opengl (PyOpenGL) not available')
-
-                        # Create GL view if needed and replace the PlotWidget
-                        if not hasattr(self, 'gl_view'):
-                            self.gl_view = gl.GLViewWidget()
-                            # adjust viewpoint and axes
-                            try:
-                                self.gl_view.opts['distance'] = max(100.0, float(np.max(tri_pts[:,0]) - np.min(tri_pts[:,0]), ))
-                            except Exception:
-                                self.gl_view.opts['distance'] = 100.0
-                            parent = self.plot_widget.parent()
-                            layout = parent.layout()
-                            layout.removeWidget(self.plot_widget)
-                            self.plot_widget.hide()
-                            layout.addWidget(self.gl_view)
-
-                        # Launch background mesh builder to avoid blocking UI
-                        builder = _GLMeshBuilder(tri_pts, tri_vals, kept_tris, parent=self)
-
-                        def _on_mesh_ready(payload):
-                            if 'error' in payload:
-                                print('GL mesh builder error:', payload['error'])
-                                return
-                            verts = payload['verts']
-                            faces = payload['faces']
-                            colors = payload['colors']
-                            try:
-                                meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
-                                mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
-                                mesh.setGLOptions('opaque')
-                                # remove previous mesh if present
-                                try:
-                                    if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
-                                        self.gl_view.removeItem(self.tin_mesh)
-                                except Exception:
-                                    pass
-                                self.tin_mesh = mesh
-                                self.gl_view.addItem(mesh)
-                                print(f"Plotted GLMesh TIN with {len(faces)} triangles (from {len(tris)})")
-                            except Exception as e:
-                                print('Failed to add GL mesh to scene:', e)
-
-                        builder.mesh_ready.connect(_on_mesh_ready)
-                        builder.start()
-                        self.initial_zoom_done = False
-                        return
-                except Exception as e:
-                    # TIN rendering failed or was too sparse — log and fall back to raster/centerline
-                    print(f"TIN rendering failed: {e} -- falling back to raster/centerline display if available")
-                    # attempt to plot centerline if available, otherwise continue to raster fallback below
-                    try:
-                        if hasattr(self.sim, 'centerline') and self.sim.centerline is not None:
-                            from shapely.geometry import LineString
-                            if isinstance(self.sim.centerline, LineString):
-                                centerline_coords = np.array(self.sim.centerline.coords)
-                                self.plot_widget.plot(centerline_coords[:, 0], centerline_coords[:, 1],
-                                                      pen=pg.mkPen(color=(255, 100, 100), width=3, style=Qt.DashLine))
-                                print(f"Plotted centerline with {len(centerline_coords)} points (after TIN failure)")
-                    except Exception:
-                        pass
-
-                # Plot centerline from simulation (overlay)
-                print("Plotting centerline...")
-                if hasattr(self.sim, 'centerline') and self.sim.centerline is not None:
-                    from shapely.geometry import LineString
-                    if isinstance(self.sim.centerline, LineString):
-                        centerline_coords = np.array(self.sim.centerline.coords)
-                        self.plot_widget.plot(centerline_coords[:, 0], centerline_coords[:, 1],
-                                            pen=pg.mkPen(color=(255, 100, 100), width=3, style=Qt.DashLine))
-                        print(f"Plotted centerline with {len(centerline_coords)} points")
-
-                self.initial_zoom_done = False
-                return
-            # Fallback: try ABM rasterized depth if present
-            if hasattr(self.sim, 'hdf') and 'environment/depth' in self.sim.hdf:
-                try:
-                    depth_raster = np.array(self.sim.hdf['environment/depth'][:])
-                    x_coords = np.array(self.sim.hdf['x_coords'][:])
-                    y_coords = np.array(self.sim.hdf['y_coords'][:])
-                    img = pg.ImageItem(depth_raster)
-                    img.setOpacity(0.7)
-                    self.plot_widget.addItem(img)
-                    print("Plotted ABM raster depth fallback")
-                    self.initial_zoom_done = False
+                pts = coords[wetted_mask]
+                vals = depth[wetted_mask]
+                print(f"[TIN DEBUG] Loaded {len(pts)} wetted cells from HECRAS")
+                # Thinning
+                max_nodes = getattr(self.sim, 'tin_max_nodes', 5000)
+                if len(pts) > max_nodes:
+                    rng = np.random.default_rng(0)
+                    idx = rng.choice(len(pts), size=max_nodes, replace=False)
+                    pts = pts[idx]
+                    vals = vals[idx]
+                    print(f"[TIN DEBUG] Thinned to {len(pts)} nodes")
+                # Delaunay
+                if len(pts) < 3:
+                    print("[TIN DEBUG] Not enough points for TIN")
                     return
-                except Exception as e:
-                    print(f"Fallback raster plotting failed: {e}")
-                
-                print("Background setup complete!")
-                # Zoom to agents extent (will be set in update_displays)
+                from scipy.spatial import Delaunay
+                tri = Delaunay(pts)
+                tris = tri.simplices
+                print(f"[TIN DEBUG] Delaunay: {tris.shape[0]} triangles")
+                import pyqtgraph.opengl as gl
+                if gl is None:
+                    print("[TIN DEBUG] pyqtgraph.opengl not available")
+                    return
+                if not hasattr(self, 'gl_view'):
+                    print("[TIN DEBUG] gl_view does not exist, creating GLViewWidget")
+                    self.gl_view = gl.GLViewWidget()
+                else:
+                    print("[TIN DEBUG] gl_view already exists")
+                builder = _GLMeshBuilder(pts, vals, tris, parent=self)
+                def _on_mesh_ready(payload):
+                    print(f"[TIN DEBUG] mesh_ready signal received: keys={list(payload.keys())}")
+                    if 'error' in payload:
+                        print('[TIN DEBUG] GL mesh builder error:', payload['error'])
+                        traceback.print_exc()
+                        return
+                    verts = payload['verts']
+                    faces = payload['faces']
+                    colors = payload['colors']
+                    print(f"[TIN DEBUG] Adding GLMeshItem to gl_view: verts={verts.shape}, faces={faces.shape}, colors={colors.shape}")
+                    meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
+                    mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
+                    mesh.setGLOptions('opaque')
+                    if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
+                        self.gl_view.removeItem(self.tin_mesh)
+                    self.tin_mesh = mesh
+                    self.gl_view.addItem(mesh)
+                    # Camera auto-fit
+                    min_xyz = np.nanmin(verts, axis=0)
+                    max_xyz = np.nanmax(verts, axis=0)
+                    center = (min_xyz + max_xyz) / 2.0
+                    size = np.max(max_xyz - min_xyz)
+                    self.gl_view.setCameraPosition(pos=QtGui.QVector3D(*center), distance=size*1.2)
+                builder.mesh_ready.connect(_on_mesh_ready)
+                builder.start()
                 self.initial_zoom_done = False
-                return
-        except Exception as e:
-            print(f"Warning: Could not load background: {e}")
-
-    def render_tin_from_arrays(self, coords, vals, cap_nodes=5000, vert_exag=None):
-        """Render a TIN from provided 2D coords and scalar values using the OpenGL path.
-
-        This helper bypasses the HECRAS file parsing and runs the Delaunay->GL pipeline
-        used by `setup_background()`. It is intended for programmatic tests and
-        interactive use where arrays are already available.
-        """
-        try:
-            if len(coords) < 3:
-                print('Not enough points for TIN')
+                print("[TIN DEBUG] GLMeshBuilder started")
                 return
             tri_pts = np.asarray(coords, dtype=float)
             tri_vals = np.asarray(vals, dtype=float)
-            if len(tri_pts) > cap_nodes:
+            if len(tri_pts) > max_nodes:
                 rng = np.random.default_rng(0)
-                idx_keep = rng.choice(len(tri_pts), size=cap_nodes, replace=False)
+                idx_keep = rng.choice(len(tri_pts), size=max_nodes, replace=False)
                 tri_pts = tri_pts[idx_keep]
                 tri_vals = tri_vals[idx_keep]
-                print(f'Capped input nodes: {len(coords)} -> {len(tri_pts)} (max={cap_nodes})')
+                print(f'Capped input nodes: {len(coords)} -> {len(tri_pts)} (max={max_nodes})')
 
             from scipy.spatial import Delaunay
             import time
@@ -869,12 +475,15 @@ class SalmonViewer(QtWidgets.QWidget):
 
             # create GL view if needed
             if not hasattr(self, 'gl_view'):
+                print("[RENDER DEBUG] gl_view does not exist, creating GLViewWidget")
                 self.gl_view = gl.GLViewWidget()
                 parent = self.plot_widget.parent()
                 layout = parent.layout()
                 layout.removeWidget(self.plot_widget)
                 self.plot_widget.hide()
                 layout.addWidget(self.gl_view)
+            else:
+                print("[RENDER DEBUG] gl_view already exists")
 
             # compute vertical exaggeration
             if vert_exag is None:
@@ -890,20 +499,22 @@ class SalmonViewer(QtWidgets.QWidget):
                 verts = payload['verts']
                 faces = payload['faces']
                 colors = payload['colors']
+                meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
+                mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
+                mesh.setGLOptions('opaque')
                 try:
-                    meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
-                    mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
-                    mesh.setGLOptions('opaque')
-                    try:
-                        if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
-                            self.gl_view.removeItem(self.tin_mesh)
-                    except Exception:
-                        pass
-                    self.tin_mesh = mesh
-                    self.gl_view.addItem(mesh)
-                    print(f'Plotted GLMesh TIN with {len(faces)} triangles')
-                except Exception as e:
-                    print('Failed to add GL mesh to scene:', e)
+                    if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
+                        self.gl_view.removeItem(self.tin_mesh)
+                except Exception:
+                    pass
+                self.tin_mesh = mesh
+                self.gl_view.addItem(mesh)
+                # Camera auto-fit
+                min_xyz = np.nanmin(verts, axis=0)
+                max_xyz = np.nanmax(verts, axis=0)
+                center = (min_xyz + max_xyz) / 2.0
+                size = np.max(max_xyz - min_xyz)
+                self.gl_view.setCameraPosition(pos=QtGui.QVector3D(*center), distance=size*1.2)
 
             builder.mesh_ready.connect(_on_mesh_ready)
             builder.start()
@@ -1023,33 +634,6 @@ class SalmonViewer(QtWidgets.QWidget):
             no_weights_label = QLabel("No weights configured")
             no_weights_label.setStyleSheet("font-style: italic; color: gray;")
             layout.addWidget(no_weights_label)
-            # Offer a button to create default weights in-place
-            try:
-                from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import BehavioralWeights
-                def _create_defaults():
-                    try:
-                        self.sim.behavioral_weights = BehavioralWeights()
-                        # rebuild the weights panel in-place: remove and re-add
-                        parent = weights_group.parent()
-                        # Replace the groupbox's layout widgets by re-creating the panel
-                        new_group = self.create_weights_panel()
-                        # find index of weights_group in parent layout and replace
-                        if parent is not None:
-                            pl = parent.layout()
-                            for i in range(pl.count()):
-                                w = pl.itemAt(i).widget()
-                                if w is weights_group:
-                                    pl.takeAt(i)
-                                    pl.insertWidget(i, new_group)
-                                    break
-                    except Exception as e:
-                        print('Failed to create default weights:', e)
-
-                create_btn = QPushButton('Create Default Weights')
-                create_btn.clicked.connect(_create_defaults)
-                layout.addWidget(create_btn)
-            except Exception:
-                pass
             self.weight_labels = {}
             self.weight_sliders = {}
         
@@ -1137,7 +721,7 @@ class SalmonViewer(QtWidgets.QWidget):
 
         # (Removed time-series plots for collisions, upstream progress, and upstream velocity)
 
-        # Per-episode tracking toggles placed inline next to their corresponding labels
+        # Per-episode tracking toggles (inline next to metric labels)
         # Available metrics that can be tracked per-episode
         self._available_episode_metrics = [
             'collision_count', 'mean_upstream_progress', 'mean_upstream_velocity',
@@ -1145,10 +729,12 @@ class SalmonViewer(QtWidgets.QWidget):
         ]
         self.track_metric_cbs = {}
 
-        def _inline_with_cb(label_widget, metric_key, default_checked=False):
+        # Helper to add a label+checkbox inline
+        def add_label_with_cb(label_widget, metric_key, default_checked=False):
             h = QHBoxLayout()
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(6)
+            # ensure label_widget is a widget
             h.addWidget(label_widget)
             cb = QCheckBox()
             cb.setChecked(default_checked)
@@ -1157,22 +743,22 @@ class SalmonViewer(QtWidgets.QWidget):
             layout.addLayout(h)
             self.track_metric_cbs[metric_key] = cb
 
-        # collision_count (new label)
+        # collision_count (no real-time label previously) -> add new label
         self.collision_count_label = QLabel("Collision Count: --")
-        _inline_with_cb(self.collision_count_label, 'collision_count')
+        add_label_with_cb(self.collision_count_label, 'collision_count')
 
-        # upstream progress - use existing label
-        _inline_with_cb(self.upstream_progress_label, 'mean_upstream_progress')
+        # mean_upstream_progress -> use existing upstream_progress_label
+        add_label_with_cb(self.upstream_progress_label, 'mean_upstream_progress')
 
-        # mean upstream velocity (new label)
+        # mean_upstream_velocity (no label previously) -> add new label
         self.mean_upstream_velocity_label = QLabel("Mean Upstream Velocity: --")
-        _inline_with_cb(self.mean_upstream_velocity_label, 'mean_upstream_velocity')
+        add_label_with_cb(self.mean_upstream_velocity_label, 'mean_upstream_velocity')
 
-        # energy efficiency maps to mean energy label
-        _inline_with_cb(self.mean_energy_label, 'energy_efficiency')
+        # energy_efficiency -> map to mean_energy_label
+        add_label_with_cb(self.mean_energy_label, 'energy_efficiency')
 
-        # mean passage delay
-        _inline_with_cb(self.mean_passage_delay_label, 'mean_passage_delay')
+        # mean_passage_delay -> map to mean_passage_delay_label
+        add_label_with_cb(self.mean_passage_delay_label, 'mean_passage_delay')
 
         # Per-episode metrics plot (shows one point per episode per tracked metric)
         self.per_episode_plot = pg.PlotWidget(title="Per-Episode Metrics")
@@ -1189,25 +775,35 @@ class SalmonViewer(QtWidgets.QWidget):
     
     def update_metrics_panel(self, metrics):
         """Update metrics panel labels."""
-        self.mean_speed_label.setText(f"Mean Speed: {metrics.get('mean_speed', '--'):.2f}")
-        self.max_speed_label.setText(f"Max Speed: {metrics.get('max_speed', '--'):.2f}")
-        self.mean_energy_label.setText(f"Mean Energy: {metrics.get('mean_energy', '--'):.2f}")
-        self.min_energy_label.setText(f"Min Energy: {metrics.get('min_energy', '--'):.2f}")
+        def fmt_metric(val):
+            try:
+                return f"{float(val):.2f}"
+            except Exception:
+                return str(val) if val is not None else "--"
+        self.mean_speed_label.setText(f"Mean Speed: {fmt_metric(metrics.get('mean_speed', None))}")
+        self.max_speed_label.setText(f"Max Speed: {fmt_metric(metrics.get('max_speed', None))}")
+        self.mean_energy_label.setText(f"Mean Energy: {fmt_metric(metrics.get('mean_energy', None))}")
+        self.min_energy_label.setText(f"Min Energy: {fmt_metric(metrics.get('min_energy', None))}")
         # Upstream progress may be reported as 'upstream_progress' or 'mean_upstream_progress'
         upstream_val = metrics.get('upstream_progress', metrics.get('mean_upstream_progress', '--'))
         if isinstance(upstream_val, (int, float)):
             self.upstream_progress_label.setText(f"Upstream Progress: {upstream_val:.2f}")
         else:
             self.upstream_progress_label.setText(f"Upstream Progress: --")
-        self.mean_centerline_label.setText(f"Mean Centerline: {metrics.get('mean_centerline', '--'):.2f}")
-        self.mean_passage_delay_label.setText(f"Mean Passage Delay: {metrics.get('mean_passage_delay', '--'):.2f}")
+        def fmt_metric(val):
+            try:
+                return f"{float(val):.2f}"
+            except Exception:
+                return str(val) if val is not None else "--"
+        self.mean_centerline_label.setText(f"Mean Centerline: {fmt_metric(metrics.get('mean_centerline', None))}")
+        self.mean_passage_delay_label.setText(f"Mean Passage Delay: {fmt_metric(metrics.get('mean_passage_delay', None))}")
         # Optional passage stats
         if 'passage_success_rate' in metrics:
             self.passage_success_rate_label.setText(f"Passage Success: {metrics['passage_success_rate']:.1%}")
         elif 'success_rate' in metrics:
             self.passage_success_rate_label.setText(f"Passage Success: {metrics['success_rate']:.1%}")
-        self.mean_nn_dist_label.setText(f"Mean NN Dist: {metrics.get('mean_nn_dist', '--'):.2f}")
-        self.polarization_label.setText(f"Polarization: {metrics.get('polarization', '--'):.2f}")
+        self.mean_nn_dist_label.setText(f"Mean NN Dist: {fmt_metric(metrics.get('mean_nn_dist', None))}")
+        self.polarization_label.setText(f"Polarization: {fmt_metric(metrics.get('polarization', None))}")
         # Update collision time-series if provided
         try:
             # (time-series plots removed; per-episode tracking still supported via checkboxes)
@@ -1239,68 +835,46 @@ class SalmonViewer(QtWidgets.QWidget):
             self.best_reward_label.setText(f"Best: {self.best_reward:.2f}")
         except Exception:
             pass
-    
-    def toggle_pause(self):
-        """Toggle simulation pause state."""
-        self.paused = not self.paused
-        # Update Play/Pause button labels
-        try:
-            self.play_btn.setText("Play" if self.paused else "Pause")
-            self.pause_btn.setText("Pause" if self.paused else "Play")
-        except Exception:
-            pass
-        # Ensure play/pause also toggles the timer
-        if hasattr(self, 'timer'):
-            if self.paused:
-                self.timer.stop()
-            else:
-                self.timer.start(int(self.dt * 1000))
 
-    def update_speed(self, value):
-        """Update simulation speed."""
-        # value ranges 1-100, map to 0.1x - 10x
-        speed = value / 10.0
-        self.speed_label.setText(f"Speed: {speed:.1f}x")
-        
-        # Update timer interval
-        interval = int(self.dt * 1000 / speed)
-        self.timer.setInterval(max(1, interval))
-
-    def update_vert_exag_label(self, value):
-        """Update the vertical exaggeration label when the slider moves."""
-        ve = value / 100.0
-        try:
-            self.ve_label.setText(f"Z Exag: {ve:.2f}x")
-        except Exception:
-            pass
-
-    def rebuild_tin_action(self):
-        """Handler for 'Rebuild TIN' button: re-run TIN rendering with current VE."""
-        try:
-            ve = self.ve_slider.value() / 100.0
-            setattr(self.sim, 'vert_exag', ve)
-            # If HECRAS-based geometry is present, use thinned coords/vals if stored
-            # We attempt to reuse last thinned arrays if available (set by setup_background())
-            if hasattr(self, 'last_thinned_coords') and hasattr(self, 'last_thinned_vals'):
-                self.render_tin_from_arrays(self.last_thinned_coords, self.last_thinned_vals, cap_nodes=getattr(self.sim, 'tin_max_nodes', 5000), vert_exag=ve)
-            else:
-                # fallback: re-run full background setup which will compute thinned arrays and call render
-                self.setup_background()
-        except Exception as e:
-            print('Rebuild TIN failed:', e)
-    
-    def reset_simulation(self):
+    def setup_background(self):
+        print("[TIN DEBUG] Connecting mesh_ready signal...")
+        def _on_mesh_ready(payload):
+            if 'error' in payload:
+                print('GL mesh builder error:', payload['error'])
+                return
+            verts = payload['verts']
+            faces = payload['faces']
+            colors = payload['colors']
+            meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
+            mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
+            mesh.setGLOptions('opaque')
+            if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
+                self.gl_view.removeItem(self.tin_mesh)
+            self.tin_mesh = mesh
+            self.gl_view.addItem(mesh)
+            # Camera auto-fit
+            min_xyz = np.nanmin(verts, axis=0)
+            max_xyz = np.nanmax(verts, axis=0)
+            center = (min_xyz + max_xyz) / 2.0
+            size = np.max(max_xyz - min_xyz)
+            self.gl_view.setCameraPosition(pos=QtGui.QVector3D(*center), distance=size*1.2)
+        print("[TIN DEBUG] mesh_ready signal connected.")
+        builder.mesh_ready.connect(_on_mesh_ready)
+        print("[TIN DEBUG] mesh_ready signal connection complete.")
+        builder.start()
+        self.initial_zoom_done = False
+        print("[TIN DEBUG] GLMeshBuilder started")
         """Reset simulation to initial state."""
         if self.rl_trainer:
             self.sim.reset_spatial_state()
         self.current_timestep = 0
         self.update_displays()
+        print("[SalmonViewer] Simulation reset.")
     
     def update_simulation(self):
         """Main simulation update loop (called by timer)."""
         if self.paused or self.current_timestep >= self.n_timesteps:
             return
-        
         # Run one simulation timestep
         try:
             # Create dummy PID controller if needed
@@ -1310,33 +884,30 @@ class SalmonViewer(QtWidgets.QWidget):
                     self.sim.num_agents,
                     k_p=0.5, k_i=0.0, k_d=0.1
                 )
-            
             self.sim.timestep(
                 self.current_timestep,
                 self.dt,
                 9.81,  # gravity
                 self.pid_controller
             )
-            
             self.current_timestep += 1
-            
             # RL training logic
             if self.rl_trainer:
                 self.update_rl_training()
-            
             # Update displays
             self.update_displays()
-            
         except Exception as e:
-            print(f"Error in simulation update: {e}")
+            print(f"[ERROR] Error in simulation update: {e}")
             import traceback
             traceback.print_exc()
             self.paused = True
             try:
                 self.play_btn.setText("Play")
                 self.pause_btn.setText("Pause")
-            except Exception:
-                pass
+            except Exception as e2:
+                print(f"[ERROR] Exception updating play/pause buttons: {e2}")
+                import traceback
+                traceback.print_exc()
     
     def update_rl_training(self):
         """Update RL training metrics and episode management."""
@@ -1345,8 +916,10 @@ class SalmonViewer(QtWidgets.QWidget):
         # Update metrics panel immediately so time-series (collisions) are plotted
         try:
             self.update_metrics_panel(current_metrics)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] Exception in update_metrics_panel: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Compute reward
         if self.prev_metrics is not None:
@@ -1431,140 +1004,209 @@ class SalmonViewer(QtWidgets.QWidget):
                             handle.setData(list(range(len(self.per_episode_series[m]))), self.per_episode_series[m])
                     # clear accumulators for next episode
                     self.episode_metric_accumulators = {}
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ERROR] Exception in per-episode metrics update: {e}")
+                import traceback
+                traceback.print_exc()
     
     def update_displays(self):
         """Update all display elements."""
-        # Update agent positions
+        print("[RENDER DEBUG] update_displays called")
+        # Check mesh
+        if hasattr(self, 'tin_mesh') and self.tin_mesh is not None:
+            print(f"[RENDER DEBUG] tin_mesh exists: {self.tin_mesh}")
+        else:
+            print("[RENDER DEBUG] tin_mesh missing or None!")
+        # Check agent data
+        if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y'):
+            print(f"[RENDER DEBUG] Agent positions: X shape={np.shape(self.sim.X)}, Y shape={np.shape(self.sim.Y)}")
+        else:
+            print("[RENDER DEBUG] Agent position data missing!")
+        # Check overlays
+        if hasattr(self, 'gl_agent_scatter') and self.gl_agent_scatter is not None:
+            print(f"[RENDER DEBUG] gl_agent_scatter exists: {self.gl_agent_scatter}")
+        else:
+            print("[RENDER DEBUG] gl_agent_scatter missing or None!")
+        if hasattr(self, 'gl_direction_lines'):
+            print(f"[RENDER DEBUG] gl_direction_lines count: {len(self.gl_direction_lines)}")
+        if hasattr(self, 'gl_tail_lines'):
+            print(f"[RENDER DEBUG] gl_tail_lines count: {len(self.gl_tail_lines)}")
         alive_mask = (self.sim.dead == 0)
+        import pyqtgraph.opengl as gl
+        # Agents
         if self.show_dead_cb.isChecked():
-            # Show all agents
             x = self.sim.X
             y = self.sim.Y
-            # Color by alive/dead
-            alive_color = np.array([255, 100, 100, 200])
-            dead_color = np.array([100, 100, 100, 100])
-            colors = np.where(alive_mask[:, np.newaxis], alive_color, dead_color)
+            colors = np.where(alive_mask[:, np.newaxis], [1, 0.4, 0.4, 0.8], [0.4, 0.4, 0.4, 0.4])
         else:
-            # Show only alive
             x = self.sim.X[alive_mask]
             y = self.sim.Y[alive_mask]
-            colors = [[255, 100, 100, 200]] * len(x)
-        
-        self.agent_scatter.setData(x, y, brush=[pg.mkBrush(*c) for c in colors])
-        
-        # Draw direction indicators (wind sock style)
+            colors = np.tile([1, 0.4, 0.4, 0.8], (len(x), 1))
+        if hasattr(self, 'gl_agent_scatter') and self.gl_agent_scatter is not None:
+            self.gl_view.removeItem(self.gl_agent_scatter)
+        pts = np.column_stack([x, y, np.zeros_like(x)])
+        self.gl_agent_scatter = gl.GLScatterPlotItem(pos=pts, color=colors, size=6)
+        self.gl_view.addItem(self.gl_agent_scatter)
+        print(f"[RENDER DEBUG] GLScatterPlotItem added, n_agents={len(x)}")
+
+        # Direction indicators
+        if hasattr(self, 'gl_direction_lines'):
+            for item in self.gl_direction_lines:
+                self.gl_view.removeItem(item)
+        self.gl_direction_lines = []
         if self.show_direction_cb.isChecked() and hasattr(self.sim, 'heading'):
-            # Clear old direction lines
-            if not hasattr(self, 'direction_lines'):
-                self.direction_lines = []
-            for line in self.direction_lines:
-                self.plot_widget.removeItem(line)
-            self.direction_lines = []
-            
-            # Draw direction line for each visible agent
             if self.show_dead_cb.isChecked():
                 headings = self.sim.heading
                 pos_x, pos_y = self.sim.X, self.sim.Y
             else:
                 headings = self.sim.heading[alive_mask]
                 pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
-            
-            # Calculate arrow endpoints (5m length trailing behind)
             arrow_length = 5.0
             end_x = pos_x - arrow_length * np.cos(headings)
             end_y = pos_y - arrow_length * np.sin(headings)
-            
-            # Draw lines from agent position trailing backward
             for i in range(len(pos_x)):
-                line_x = [pos_x[i], end_x[i]]
-                line_y = [pos_y[i], end_y[i]]
-                line = self.plot_widget.plot(line_x, line_y,
-                                            pen=pg.mkPen(color=(255, 200, 100, 150), width=1.5))
-                self.direction_lines.append(line)
-        else:
-            # Clear direction lines when disabled
-            if hasattr(self, 'direction_lines'):
-                for line in self.direction_lines:
-                    self.plot_widget.removeItem(line)
-                self.direction_lines = []
+                seg_pts = np.array([[pos_x[i], pos_y[i], 0], [end_x[i], end_y[i], 0]])
+                seg = gl.GLLinePlotItem(pos=seg_pts, color=(1.0, 0.78, 0.39, 0.6), width=1.5, antialias=True, mode='lines')
+                self.gl_view.addItem(seg)
+                self.gl_direction_lines.append(seg)
 
-        # Draw purely-visual two-segment tails (proximal rigid + distal oscillating)
+        # Flapping tails
+        if hasattr(self, 'gl_tail_lines'):
+            for item in self.gl_tail_lines:
+                self.gl_view.removeItem(item)
+        self.gl_tail_lines = []
         if self.show_tail_cb.isChecked() and hasattr(self.sim, 'heading'):
-            # clear old tail lines
-            if not hasattr(self, 'tail_lines'):
-                self.tail_lines = []
-            for line in getattr(self, 'tail_lines', []):
-                try:
-                    self.plot_widget.removeItem(line)
-                except Exception:
-                    pass
-            self.tail_lines = []
-
-            # Determine visible agents
             if self.show_dead_cb.isChecked():
                 headings = self.sim.heading
                 pos_x, pos_y = self.sim.X, self.sim.Y
             else:
-                alive_mask = (self.sim.dead == 0)
                 headings = self.sim.heading[alive_mask]
                 pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
-
-            # Compute current time (seconds)
             current_time = getattr(self, 'current_timestep', 0) * float(getattr(self, 'dt', 1.0))
-
-            # For each agent, compute two segments
             nvis = len(pos_x)
-            # ensure phases length
             phases = self.tail_phases
             if len(phases) != self.sim.num_agents:
                 phases = np.resize(phases, self.sim.num_agents)
-
             for i in range(nvis):
-                # global agent index mapping when filtering dead agents
                 if self.show_dead_cb.isChecked():
                     gidx = i
                 else:
-                    # find i-th True in alive_mask
                     alive_idx = np.nonzero(alive_mask)[0]
                     if i < len(alive_idx):
                         gidx = int(alive_idx[i])
                     else:
                         gidx = i
-
                 h = float(headings[i])
                 x0 = float(pos_x[i])
                 y0 = float(pos_y[i])
-
-                # Proximal rigid segment (L1) aligned with heading (trailing behind fish)
                 x1 = x0 - self.tail_L1 * np.cos(h)
                 y1 = y0 - self.tail_L1 * np.sin(h)
-
-                # Distal oscillating segment (L2) pivoting about (x1,y1)
                 phase = float(phases[gidx]) if gidx < len(phases) else 0.0
                 theta = self.tail_amp * np.sin(2.0 * np.pi * self.tail_freq * current_time + phase)
-                # distal orientation = heading + theta (relative oscillation)
                 x2 = x1 - self.tail_L2 * np.cos(h + theta)
                 y2 = y1 - self.tail_L2 * np.sin(h + theta)
+                seg1_pts = np.array([[x0, y0, 0], [x1, y1, 0]])
+                seg1 = gl.GLLinePlotItem(pos=seg1_pts, color=(0.7, 0.7, 1.0, 0.8), width=2, antialias=True, mode='lines')
+                self.gl_view.addItem(seg1)
+                self.gl_tail_lines.append(seg1)
+                seg2_pts = np.array([[x1, y1, 0], [x2, y2, 0]])
+                seg2 = gl.GLLinePlotItem(pos=seg2_pts, color=(1.0, 0.86, 0.7, 0.86), width=1, antialias=True, mode='lines')
+                self.gl_view.addItem(seg2)
+                self.gl_tail_lines.append(seg2)
 
-                # Draw proximal (thicker) and distal (thinner, brighter)
-                try:
-                    seg1 = self.plot_widget.plot([x0, x1], [y0, y1], pen=pg.mkPen(color=(180, 180, 255, 200), width=2))
-                    seg2 = self.plot_widget.plot([x1, x2], [y1, y2], pen=pg.mkPen(color=(255, 220, 180, 220), width=1))
-                    self.tail_lines.append(seg1)
-                    self.tail_lines.append(seg2)
-                except Exception:
-                    pass
+        # Draw direction indicators (OpenGL only)
+        import pyqtgraph.opengl as gl
+        if hasattr(self, 'gl_direction_lines'):
+            for item in self.gl_direction_lines:
+                self.gl_view.removeItem(item)
+        self.gl_direction_lines = []
+        if self.show_direction_cb.isChecked() and hasattr(self.sim, 'heading'):
+            if self.show_dead_cb.isChecked():
+                headings = self.sim.heading
+                pos_x, pos_y = self.sim.X, self.sim.Y
+            else:
+                headings = self.sim.heading[alive_mask]
+                pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
+            arrow_length = 5.0
+            end_x = pos_x - arrow_length * np.cos(headings)
+            end_y = pos_y - arrow_length * np.sin(headings)
+            for i in range(len(pos_x)):
+                seg_pts = np.array([[pos_x[i], pos_y[i], 0], [end_x[i], end_y[i], 0]])
+                seg = gl.GLLinePlotItem(pos=seg_pts, color=(1.0, 0.78, 0.39, 0.6), width=1.5, antialias=True, mode='lines')
+                self.gl_view.addItem(seg)
+                self.gl_direction_lines.append(seg)
+
+        # Draw purely-visual two-segment tails (proximal rigid + distal oscillating)
+        import pyqtgraph.opengl as gl
+        if hasattr(self, 'gl_view') and self.gl_view.isVisible():
+            # OpenGL mode
+            if hasattr(self, 'gl_tail_lines'):
+                for item in self.gl_tail_lines:
+                    self.gl_view.removeItem(item)
+            self.gl_tail_lines = []
+            if self.show_tail_cb.isChecked() and hasattr(self.sim, 'heading'):
+                if self.show_dead_cb.isChecked():
+                    headings = self.sim.heading
+                    pos_x, pos_y = self.sim.X, self.sim.Y
+                else:
+                    alive_mask = (self.sim.dead == 0)
+                    headings = self.sim.heading[alive_mask]
+                    pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
+                current_time = getattr(self, 'current_timestep', 0) * float(getattr(self, 'dt', 1.0))
+                nvis = len(pos_x)
+                phases = self.tail_phases
+                if len(phases) != self.sim.num_agents:
+                    phases = np.resize(phases, self.sim.num_agents)
+                for i in range(nvis):
+                    if self.show_dead_cb.isChecked():
+                        gidx = i
+                    else:
+                        alive_idx = np.nonzero(alive_mask)[0]
+                        if i < len(alive_idx):
+                            gidx = int(alive_idx[i])
+                        else:
+                            gidx = i
+                    h = float(headings[i])
+                    x0 = float(pos_x[i])
+                    y0 = float(pos_y[i])
+                    x1 = x0 - self.tail_L1 * np.cos(h)
+                    y1 = y0 - self.tail_L1 * np.sin(h)
+                    phase = float(phases[gidx]) if gidx < len(phases) else 0.0
+                    theta = self.tail_amp * np.sin(2.0 * np.pi * self.tail_freq * current_time + phase)
+                    x2 = x1 - self.tail_L2 * np.cos(h + theta)
+                    y2 = y1 - self.tail_L2 * np.sin(h + theta)
+                    # Proximal segment
+                    seg1_pts = np.array([[x0, y0, 0], [x1, y1, 0]])
+                    seg1 = gl.GLLinePlotItem(pos=seg1_pts, color=(0.7, 0.7, 1.0, 0.8), width=2, antialias=True, mode='lines')
+                    self.gl_view.addItem(seg1)
+                    self.gl_tail_lines.append(seg1)
+                    # Distal segment
+                    seg2_pts = np.array([[x1, y1, 0], [x2, y2, 0]])
+                    seg2 = gl.GLLinePlotItem(pos=seg2_pts, color=(1.0, 0.86, 0.7, 0.86), width=1, antialias=True, mode='lines')
+                    self.gl_view.addItem(seg2)
+                    self.gl_tail_lines.append(seg2)
         else:
-            # Clear tail lines when disabled
-            if hasattr(self, 'tail_lines'):
-                for line in self.tail_lines:
+            # 2D mode
+            if self.show_tail_cb.isChecked() and hasattr(self.sim, 'heading'):
+                # clear old tail lines
+                if not hasattr(self, 'tail_lines'):
+                    self.tail_lines = []
+                for line in getattr(self, 'tail_lines', []):
                     try:
                         self.plot_widget.removeItem(line)
                     except Exception:
                         pass
                 self.tail_lines = []
+                # ...existing code for 2D tails...
+            else:
+                # Clear tail lines when disabled
+                if hasattr(self, 'tail_lines'):
+                    for line in self.tail_lines:
+                        try:
+                            self.plot_widget.removeItem(line)
+                        except Exception:
+                            pass
+                    self.tail_lines = []
         
         # Update trajectories if enabled
         if self.show_trajectories_cb.isChecked():
@@ -1586,37 +1228,35 @@ class SalmonViewer(QtWidgets.QWidget):
         except Exception:
             pass
             
-            # Draw trajectories for each agent
-            if len(self.trajectory_history) > 1:
-                for agent_idx in range(self.sim.num_agents):
-                    # Extract this agent's path
-                    agent_x = [pos[1][agent_idx] for pos in self.trajectory_history]
-                    agent_y = [pos[2][agent_idx] for pos in self.trajectory_history]
-                    
-                    # Plot line
-                    line = self.plot_widget.plot(agent_x, agent_y,
-                                                pen=pg.mkPen(color=(255, 100, 100, 100), width=1))
-                    self.trajectory_lines.append(line)
-        else:
-            # Clear trajectories when disabled
-            if hasattr(self, 'trajectory_lines'):
-                for line in self.trajectory_lines:
-                    self.plot_widget.removeItem(line)
-                self.trajectory_lines = []
-                self.trajectory_history = []
-        
-        # Zoom to agents on first update
-        if not hasattr(self, 'initial_zoom_done') or not self.initial_zoom_done:
-            if len(x) > 0:
-                x_min, x_max = x.min(), x.max()
-                y_min, y_max = y.min(), y.max()
-                # Add 20% padding
-                x_range = x_max - x_min
-                y_range = y_max - y_min
-                padding = 0.2
-                self.plot_widget.setXRange(x_min - padding * x_range, x_max + padding * x_range)
-                self.plot_widget.setYRange(y_min - padding * y_range, y_max + padding * y_range)
-                self.initial_zoom_done = True
+            # Trajectories and zoom (OpenGL only)
+            import pyqtgraph.opengl as gl
+            if hasattr(self, 'gl_trajectory_lines'):
+                for item in self.gl_trajectory_lines:
+                    self.gl_view.removeItem(item)
+            self.gl_trajectory_lines = []
+            if self.show_trajectories_cb.isChecked():
+                self.trajectory_history.append((self.current_timestep, self.sim.X.copy(), self.sim.Y.copy()))
+                if len(self.trajectory_history) > 100:
+                    self.trajectory_history.pop(0)
+                if len(self.trajectory_history) > 1:
+                    for agent_idx in range(self.sim.num_agents):
+                        agent_x = [pos[1][agent_idx] for pos in self.trajectory_history]
+                        agent_y = [pos[2][agent_idx] for pos in self.trajectory_history]
+                        pts = np.column_stack([agent_x, agent_y, np.zeros_like(agent_x)])
+                        line = gl.GLLinePlotItem(pos=pts, color=(1.0, 0.39, 0.39, 0.4), width=1, antialias=True, mode='line_strip')
+                        self.gl_view.addItem(line)
+                        self.gl_trajectory_lines.append(line)
+            # Zoom to agents on first update
+            if not hasattr(self, 'initial_zoom_done') or not self.initial_zoom_done:
+                if len(x) > 0:
+                    x_min, x_max = x.min(), x.max()
+                    y_min, y_max = y.min(), y.max()
+                    x_center = (x_min + x_max) / 2.0
+                    y_center = (y_min + y_max) / 2.0
+                    z_center = 0.0
+                    # Set camera position and field of view
+                    self.gl_view.setCameraPosition(pos=(x_center, y_center, 100), distance=max(x_max-x_min, y_max-y_min)*1.2)
+                    self.initial_zoom_done = True
         
         # Update status labels
         current_time = self.current_timestep * self.dt
@@ -1680,6 +1320,11 @@ class SalmonViewer(QtWidgets.QWidget):
         except Exception:
             pass
     
+    def toggle_pause(self):
+        """Toggle simulation pause state from play/pause button."""
+        self.paused = not self.paused
+        print(f"[SalmonViewer] Paused set to {self.paused}")
+    
     def run(self):
         """Start the viewer (blocking call)."""
         self.show()
@@ -1711,7 +1356,6 @@ def launch_viewer(simulation, dt=0.1, T=600, rl_trainer=None, **kwargs):
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
-    
     print(f"Creating SalmonViewer...")
     viewer = SalmonViewer(simulation, dt=dt, T=T, rl_trainer=rl_trainer, **kwargs)
     print(f"Starting viewer.run()...")
