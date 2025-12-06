@@ -17,7 +17,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 # Import visualization and simulation
-from src.emergent.salmon_abm.salmon_viewer import launch_viewer
+from src.emergent.salmon_abm.salmon_viewer_v2 import launch_viewer
 from src.emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation, RLTrainer, BehavioralWeights
 import numpy as np
 
@@ -127,6 +127,7 @@ def main():
                 show_depth=True
             )
             print(f"launch_viewer returned: {rc}")
+            print('Check outputs/rl_training/launch_viewer_debug.log for GUI lifecycle logs')
             sys.stdout.flush()
         except Exception as e:
             print(f"launch_viewer raised exception: {e}")
