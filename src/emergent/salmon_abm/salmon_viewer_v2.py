@@ -185,7 +185,12 @@ class SalmonViewer(QtWidgets.QWidget):
         if self.paused:
             return
         try:
-            self.sim.timestep(self.current_timestep, self.dt, 9.81, None)
+            # Require the simulation to provide a PID controller. No fallback.
+            pid = getattr(self.sim, 'pid_controller', None)
+            if pid is None:
+                raise RuntimeError('Simulation has no pid_controller; ensure the sim creates it before visualization (no fallback allowed)')
+
+            self.sim.timestep(self.current_timestep, self.dt, 9.81, pid)
             self.current_timestep += 1
             self.update_displays()
         except Exception as e:

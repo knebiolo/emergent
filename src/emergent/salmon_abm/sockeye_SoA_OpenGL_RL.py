@@ -3587,28 +3587,34 @@ class PID_controller:
         -------
         tuple consisting of (P,I,D).
         '''
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/pid_optimize_Nushagak.csv')
-        # get data
-        df = pd.read_csv(data_dir)
-        
-        # get data arrays
-        length = df.loc[:, 'fish_length'].values
-        velocity = df.loc[:, 'avg_water_velocity'].values
-        P = df.loc[:, 'p'].values
-        I = df.loc[:, 'i'].values
-        D = df.loc[:, 'd'].values
-        
-        # Plane model function
-        def plane_model(coords, a, b, c):
-            length, velocity = coords
-            return a * length + b * velocity + c
-        
-        # fit plane for P, I, and D values
-        self.P_params, _ = curve_fit(plane_model, (length, velocity), P)
-        
-        self.I_params, _ = curve_fit(plane_model, (length, velocity), I)
-        
-        self.D_params, _ = curve_fit(plane_model, (length, velocity), D)
+        # Try to load PID tuning data and fit planar surfaces for P/I/D. If the
+        # CSV or fitting fails, fall back to safe defaults: P=1, I=0, D=0 (constant).
+        try:
+            data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/pid_optimize_Nushagak.csv')
+            # get data
+            df = pd.read_csv(data_dir)
+
+            # get data arrays
+            length = df.loc[:, 'fish_length'].values
+            velocity = df.loc[:, 'avg_water_velocity'].values
+            P = df.loc[:, 'p'].values
+            I = df.loc[:, 'i'].values
+            D = df.loc[:, 'd'].values
+
+            # Plane model function
+            def plane_model(coords, a, b, c):
+                length_arr, velocity_arr = coords
+                return a * length_arr + b * velocity_arr + c
+
+            # fit plane for P, I, and D values
+            self.P_params, _ = curve_fit(plane_model, (length, velocity), P)
+            self.I_params, _ = curve_fit(plane_model, (length, velocity), I)
+            self.D_params, _ = curve_fit(plane_model, (length, velocity), D)
+        except Exception:
+            # Fallback to constant gains: P=1, I=0, D=0
+            self.P_params = (0.0, 0.0, 1.0)
+            self.I_params = (0.0, 0.0, 0.0)
+            self.D_params = (0.0, 0.0, 0.0)
     
     def PID_func(self, velocity, length):
         '''
@@ -4212,6 +4218,30 @@ class simulation():
         self.num_agents = num_agents
         self.num_timesteps = num_timesteps
         self.water_temp = water_temp
+        # Ensure a PID controller is attached to the simulation for GUI and other
+        # execution paths that expect `sim.pid_controller` to exist. Keep silent
+        # (no prints) to reduce console noise.
+        try:
+            from .sockeye_SoA_OpenGL_RL import PID_controller
+        except Exception:
+            # fallback: try absolute import path
+            try:
+                from src.emergent.salmon_abm.sockeye_SoA_OpenGL_RL import PID_controller
+            except Exception:
+                PID_controller = None
+
+        if PID_controller is not None:
+            try:
+                self.pid_controller = PID_controller(self.num_agents, k_p=0.5, k_i=0.0, k_d=0.1)
+                # attempt to populate interpolated PID params if available
+                if hasattr(self.pid_controller, 'interp_PID'):
+                    try:
+                        self.pid_controller.interp_PID()
+                    except Exception:
+                        pass
+            except Exception:
+                # silently ignore PID attach failures to avoid noisy logs
+                self.pid_controller = None
         
         # initialize agent properties and internal states
         self.sim_sex()

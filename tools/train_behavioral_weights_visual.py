@@ -36,7 +36,7 @@ def setup_training_simulation(args):
     if not hecras_plan or not os.path.exists(hecras_plan):
         raise FileNotFoundError('HECRAS plan not found')
         
-    print(f'Using HECRAS plan: {hecras_plan}')
+    # quiet: do not print HECRAS plan path to reduce console noise
     
     start_poly = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'starting_location', 'start_loc_river_right.shp')
     centerline_path = os.path.join(REPO_ROOT, 'data', 'salmon_abm', 'Longitudinal', 'longitudinal.shp')
@@ -61,20 +61,19 @@ def setup_training_simulation(args):
     
     os.makedirs(config['model_dir'], exist_ok=True)
     
-    print(f'Initializing training simulation with {args.agents} agents...')
     sim = simulation(**config)
-    
-    print('Simulation initialized. Setting up RL trainer...')
     trainer = RLTrainer(sim)
     try:
-        print('Applying behavioral weights to simulation...')
-        sim.apply_behavioral_weights(trainer.behavioral_weights)
-        print('Behavioral weights applied successfully.')
+            sim.apply_behavioral_weights(trainer.behavioral_weights)
     except Exception as e:
         print(f'ERROR applying behavioral weights: {e}')
         import traceback
         traceback.print_exc()
         raise
+
+    # Enforce simulation-owned PID: the simulation must attach `sim.pid_controller`.
+    if not hasattr(sim, 'pid_controller') or getattr(sim, 'pid_controller', None) is None:
+        raise RuntimeError('Simulation did not attach a pid_controller; ensure the sim creates it during init')
     
     return sim, trainer, hecras_plan
 
@@ -89,64 +88,22 @@ def main():
     
     args = parser.parse_args()
     
-    print('='*80)
-    print('RL BEHAVIORAL WEIGHT TRAINING (Visual Mode)')
-    print('='*80)
-    print(f'Configuration:')
-    print(f'  Episodes: {args.episodes}')
-    print(f'  Timesteps per episode: {args.timesteps}')
-    print(f'  Agents: {args.agents}')
-    print(f'  Fish length: {args.fish_length} mm')
-    print(f'  Timestep: {args.dt} s')
-    print('='*80)
+    # Minimal startup logging to avoid hanging/log spam
     
-    # Setup simulation and trainer
-    try:
-        sim, trainer, hecras_plan = setup_training_simulation(args)
-        
-        print(f"\nDEBUG: Simulation setup complete. sim type: {type(sim)}, trainer type: {type(trainer)}")
-        print(f"DEBUG: About to launch viewer...")
-        sys.stdout.flush()
-        
-        print("\n" + "="*80)
-        print("LAUNCHING VIEWER...")
-        print("="*80)
-        sys.stdout.flush()
+    # Setup simulation and trainer, then hand control to the simulation run loop
+    sim, trainer, hecras_plan = setup_training_simulation(args)
 
-        # Launch viewer with RL trainer
-        total_time = args.timesteps * args.dt
-        print("CALLING launch_viewer now...")
-        sys.stdout.flush()
-        try:
-            rc = launch_viewer(
-                simulation=sim,
-                dt=args.dt,
-                T=total_time,
-                rl_trainer=trainer,
-                show_velocity_field=False,  # Too expensive for large grids
-                show_depth=True
-            )
-            print(f"launch_viewer returned: {rc}")
-            print('Check outputs/rl_training/launch_viewer_debug.log for GUI lifecycle logs')
-            sys.stdout.flush()
-        except Exception as e:
-            print(f"launch_viewer raised exception: {e}")
-            import traceback
-            traceback.print_exc()
-            sys.stdout.flush()
-    except Exception as e:
-        print(f"\nERROR launching viewer: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+    model_name = 'behavioral_training_visual'
+    n = args.timesteps
+    dt = args.dt
+
+    # Run the simulation directly. This keeps the script minimal and delegates
+    # execution to the `simulation` class (which owns PID and the run loop).
+    sim.run(model_name, n, dt, video=False, interactive=False)
 
 
 if __name__ == '__main__':
-    print("[train_behavioral_weights_visual] __main__ entry reached.")
     try:
         main()
-        print("[train_behavioral_weights_visual] main() completed.")
-    except Exception as e:
-        print(f"[train_behavioral_weights_visual] Exception in main: {e}")
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        raise
