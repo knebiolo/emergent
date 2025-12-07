@@ -64,7 +64,7 @@ python tools/train_behavioral_weights.py --episodes 50 --timesteps 100 --agents 
 ### 2. Use Trained Weights in Simulations
 
 ```python
-from src.emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation
+from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation
 
 # Initialize simulation
 sim = simulation(**config)

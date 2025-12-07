@@ -6,7 +6,7 @@ if REPO_ROOT not in sys.path:
 import h5py
 import numpy as np
 from scipy.spatial import Delaunay
-from src.emergent.salmon_abm.tin_helpers import sample_evenly
+from emergent.salmon_abm.tin_helpers import sample_evenly
 import matplotlib.pyplot as plt
 
 # try to auto-discover HECRAS plan in data folder

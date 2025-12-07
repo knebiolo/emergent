@@ -47,8 +47,8 @@ dependencies = [
     "aiohttp>=3.7",
 
     # OpenGL bindings
-    "PyOpenGL>=23.0",
-    "PyOpenGL_accelerate>=23.0",
+    "PyOpenGL>=3.1.0,<4.0",
+    "PyOpenGL_accelerate>=3.1.0,<4.0",
 
     # misc utilities
     "networkx>=2.6",

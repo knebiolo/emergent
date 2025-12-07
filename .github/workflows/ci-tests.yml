@@ -1,0 +1,28 @@
+name: CI tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up micromamba
+        uses: micromamba/micromamba-action@v2
+        with:
+          use-mamba: true
+          update-conda: false
+      - name: Create environment
+        run: |
+          micromamba create -y -n emergent python=3.10 -c conda-forge numpy pandas scipy pytest pyqt pyqtgraph h5py pyopengl -c defaults
+          micromamba activate -n emergent
+      - name: Install package
+        run: |
+          micromamba run -n emergent python -m pip install -e .
+      - name: Run tests
+        run: micromamba run -n emergent python -m pytest -q

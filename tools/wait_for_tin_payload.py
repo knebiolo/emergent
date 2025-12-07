@@ -4,7 +4,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from tools.train_behavioral_weights_visual import setup_training_simulation
-from src.emergent.salmon_abm.salmon_viewer_v2 import SalmonViewer
+from emergent.salmon_abm.salmon_viewer_v2 import SalmonViewer
 from PyQt5 import QtWidgets
 from types import SimpleNamespace
 

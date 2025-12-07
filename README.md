@@ -278,3 +278,44 @@ MIT License - see [LICENSE](LICENSE) file
 
 ---
 
+## Developer Setup
+
+Follow these steps to create a reproducible development environment on Windows (conda recommended):
+
+1. Create and activate the conda environment from the provided `environment.yml`:
+
+```powershell
+conda env create -f environment.yml
+conda activate emergent
+```
+
+2. Install binary dependencies from conda-forge where possible (recommended):
+
+```powershell
+conda install -c conda-forge h5py pyopengl pyqt pyqtgraph numpy scipy scikit-image matplotlib
+```
+
+3. Install the package in editable mode so local edits are importable as `emergent.*`:
+
+```powershell
+pip install -e .
+```
+
+4. Run the tests:
+
+```powershell
+pytest -q
+```
+
+Notes:
+- If you see `ImportError`/`DLL load failed` for `h5py` or `OpenGL`, reinstall those packages from `conda-forge`.
+- Avoid mixing user-site `pip` installs with conda environments; prefer `pip` only for pure-Python packages and use `conda` for binary wheels where available.
+
+### Running Tests Remotely (GitHub Actions)
+
+If local `pytest` is blocked by corporate policy, push your branch or open a PR — CI will run the full test suite using GitHub Actions.
+You can also trigger the `CI tests` workflow manually from the Actions tab.
+
+
+---
+

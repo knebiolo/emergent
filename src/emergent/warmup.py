@@ -13,7 +13,7 @@ from typing import Optional
 
 def _get_sockeye_module() -> Optional[types.ModuleType]:
     try:
-        return importlib.import_module('src.emergent.salmon_abm.sockeye_SoA')
+        return importlib.import_module('emergent.salmon_abm.sockeye_SoA')
     except Exception:
         try:
             return importlib.import_module('emergent.salmon_abm.sockeye_SoA')

@@ -3634,7 +3634,7 @@ class simulation():
         except Exception:
             # fallback: try absolute import path
             try:
-                from src.emergent.salmon_abm.sockeye_SoA_OpenGL_RL import PID_controller
+                from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import PID_controller
             except Exception:
                 PID_controller = None
 
