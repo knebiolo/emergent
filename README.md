@@ -316,6 +316,8 @@ Notes:
 If local `pytest` is blocked by corporate policy, push your branch or open a PR — CI will run the full test suite using GitHub Actions.
 You can also trigger the `CI tests` workflow manually from the Actions tab.
 
+Note: If CI failed previously due to `micromamba/micromamba-action` not being available in your org, we've switched to `conda-incubator/setup-miniconda`. If your previous run failed, re-run the workflow after pulling the latest changes.
+
 
 ---
 

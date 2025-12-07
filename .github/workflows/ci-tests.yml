@@ -12,17 +12,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up micromamba
-        uses: micromamba/micromamba-action@v2
+      - name: Setup Miniconda
+        uses: conda-incubator/setup-miniconda@v2
         with:
+          python-version: '3.10'
+          auto-update-conda: true
+          activate-environment: emergent
+          environment-file: environment.yml
           use-mamba: true
-          update-conda: false
-      - name: Create environment
+      - name: Activate env & install package
+        shell: bash -l {0}
         run: |
-          micromamba create -y -n emergent python=3.10 -c conda-forge numpy pandas scipy pytest pyqt pyqtgraph h5py pyopengl -c defaults
-          micromamba activate -n emergent
-      - name: Install package
-        run: |
-          micromamba run -n emergent python -m pip install -e .
+          # ensure conda is initialized
+          source "$HOME/.bashrc" || true
+          source "${CONDA_PREFIX:-$HOME/micromamba}/etc/profile.d/conda.sh" || true
+          conda activate emergent
+          python -m pip install --upgrade pip
+          python -m pip install -e .
       - name: Run tests
-        run: micromamba run -n emergent python -m pytest -q
+        shell: bash -l {0}
+        run: |
+          source "$HOME/.bashrc" || true
+          source "${CONDA_PREFIX:-$HOME/micromamba}/etc/profile.d/conda.sh" || true
+          conda activate emergent
+          python -m pytest -q
