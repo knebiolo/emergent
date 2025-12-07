@@ -98,6 +98,36 @@ class SalmonViewer(QtWidgets.QWidget):
 
         QTimer.singleShot(10, self.setup_background)
 
+    def load_tin_payload(self, payload_or_path):
+        """Headless-friendly loader: accept a payload dict (as emitted by _GLMeshBuilder)
+        or a `.npz`/`.npy` file path and return (verts, faces, colors).
+
+        This function does not require OpenGL and can be used in headless tests.
+        """
+        # payload dict path
+        if isinstance(payload_or_path, dict):
+            payload = payload_or_path
+            if 'error' in payload:
+                raise RuntimeError(f"payload contains error: {payload['error']}")
+            verts = payload.get('verts')
+            faces = payload.get('faces')
+            colors = payload.get('colors')
+            return np.asarray(verts), np.asarray(faces), np.asarray(colors)
+
+        # file path path
+        path = str(payload_or_path)
+        if os.path.exists(path):
+            if path.endswith('.npz'):
+                data = np.load(path)
+                verts = data.get('verts')
+                faces = data.get('faces')
+                colors = data.get('colors')
+                return np.asarray(verts), np.asarray(faces), np.asarray(colors)
+            elif path.endswith('.npy'):
+                verts = np.load(path)
+                return np.asarray(verts), np.zeros((0, 3), dtype=int), np.zeros((len(verts), 4))
+        raise FileNotFoundError(path)
+
     def _build_ui(self):
         self.setWindowTitle('SalmonViewer v2')
         main = QHBoxLayout(self)
