@@ -40,8 +40,21 @@ jobs:
           source "$HOME/.bashrc" || true
           source "${CONDA_PREFIX:-$HOME/micromamba}/etc/profile.d/conda.sh" || true
           conda activate emergent || true
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools wheel
           python -m pip install -e .
+      - name: Capture pip & try verbose pip install
+        shell: bash -l {0}
+        run: |
+          source "$HOME/.bashrc" || true
+          source "${CONDA_PREFIX:-$HOME/micromamba}/etc/profile.d/conda.sh" || true
+          conda activate emergent || true
+          python -m pip --version > pip_version.txt || true
+          # Try installing requirements verbosely to capture pip failure details
+          if [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt -v 2>&1 | tee pip_install.log || true
+          else
+            python -m pip install -e . -v 2>&1 | tee pip_install.log || true
+          fi
       - name: Run tests
         shell: bash -l {0}
         run: |
@@ -59,3 +72,5 @@ jobs:
             pytest-junit.xml
             conda_list.txt
             env_create.log
+            pip_install.log
+            pip_version.txt
