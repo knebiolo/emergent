@@ -20,13 +20,26 @@ jobs:
           activate-environment: emergent
           environment-file: environment.yml
           use-mamba: true
+      - name: Create environment with mamba
+        shell: bash -l {0}
+        run: |
+          set -e
+          source "$HOME/.bashrc" || true
+          source "${CONDA_PREFIX:-$HOME/micromamba}/etc/profile.d/conda.sh" || true
+          # Try using mamba to create the env for faster, more reliable solves
+          if command -v mamba >/dev/null 2>&1; then
+            mamba env create -f environment.yml -n emergent 2>&1 | tee env_create.log || true
+          else
+            conda env create -f environment.yml -n emergent 2>&1 | tee env_create.log || true
+          fi
+          conda activate emergent || true
       - name: Activate env & install package
         shell: bash -l {0}
         run: |
           # ensure conda is initialized
           source "$HOME/.bashrc" || true
           source "${CONDA_PREFIX:-$HOME/micromamba}/etc/profile.d/conda.sh" || true
-          conda activate emergent
+          conda activate emergent || true
           python -m pip install --upgrade pip
           python -m pip install -e .
       - name: Run tests
@@ -45,3 +58,4 @@ jobs:
             pytest.log
             pytest-junit.xml
             conda_list.txt
+            env_create.log
