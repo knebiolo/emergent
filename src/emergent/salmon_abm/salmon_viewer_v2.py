@@ -21,6 +21,14 @@ try:
 except Exception:
     gl = None
 
+try:
+    from .tin_helpers import sample_evenly
+except Exception:
+    try:
+        from emergent.salmon_abm.tin_helpers import sample_evenly
+    except Exception:
+        sample_evenly = None
+
 
 class _GLMeshBuilder(QtCore.QThread):
     mesh_ready = QtCore.pyqtSignal(object)
@@ -76,7 +84,8 @@ class SalmonViewer(QtWidgets.QWidget):
         self.rl_trainer = rl_trainer
 
         self.current_timestep = 0
-        self.paused = True
+        # Start running immediately so agents swim over the TIN
+        self.paused = False
 
         self.tin_mesh = None
         self.gl_view = None
@@ -106,6 +115,9 @@ class SalmonViewer(QtWidgets.QWidget):
         btn_reset = QPushButton('Reset')
         btn_reset.clicked.connect(self.reset_simulation)
         rlay.addWidget(btn_play)
+        btn_perim = QPushButton('Toggle Perimeter')
+        btn_perim.clicked.connect(self.toggle_perimeter)
+        rlay.addWidget(btn_perim)
         rlay.addWidget(btn_pause)
         rlay.addWidget(btn_reset)
 
@@ -128,6 +140,27 @@ class SalmonViewer(QtWidgets.QWidget):
     def _on_play(self):
         self.paused = False
 
+    def toggle_perimeter(self):
+        try:
+            if not hasattr(self, 'perim_visible'):
+                self.perim_visible = True
+            # toggle
+            self.perim_visible = not self.perim_visible
+            if getattr(self, 'perim_scatter', None) is None:
+                return
+            if self.perim_visible:
+                try:
+                    self.gl_view.addItem(self.perim_scatter)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.gl_view.removeItem(self.perim_scatter)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def setup_background(self):
         try:
             if not (hasattr(self.sim, 'use_hecras') and self.sim.use_hecras and hasattr(self.sim, 'hecras_plan_path')):
@@ -138,17 +171,51 @@ class SalmonViewer(QtWidgets.QWidget):
             with h5py.File(plan, 'r') as hdf:
                 coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:])
                 depth = np.array(hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'][0, :])
-            mask = depth > 0.05
+            # determine sampling parameters
+            max_nodes = getattr(self.sim, 'tin_max_nodes', 5000)
+            depth_thresh = getattr(self.sim, 'tin_depth_thresh', 0.05)
+
+            mask = depth > depth_thresh
             pts = coords[mask]
             vals = depth[mask]
-            max_nodes = getattr(self.sim, 'tin_max_nodes', 5000)
-            if len(pts) > max_nodes:
+
+            # improved spatial sampling (if helper available)
+            if sample_evenly is not None and len(pts) > max_nodes:
+                pts, vals = sample_evenly(pts, vals, max_nodes=max_nodes, grid_dim=120)
+            elif len(pts) > max_nodes:
                 idx = np.random.default_rng(0).choice(len(pts), size=max_nodes, replace=False)
                 pts = pts[idx]; vals = vals[idx]
+
             if len(pts) < 3:
                 print('[RENDER] Not enough points for TIN')
                 return
+
             # Triangulation will be computed in the background builder thread
+            # compute perimeter points (wetted cells that touch dry neighbors)
+            try:
+                from scipy.spatial import cKDTree
+                all_coords = coords
+                all_depth = depth
+                wetted_idx = np.where(all_depth > depth_thresh)[0]
+                if len(wetted_idx) == 0:
+                    self.perimeter_pts = None
+                else:
+                    tree = cKDTree(all_coords)
+                    # query 8 nearest neighbors (including self)
+                    k = 8
+                    neigh_dists, neigh_idx = tree.query(all_coords[wetted_idx], k=k)
+                    # check if any neighbor is dry
+                    is_perim = []
+                    for nbrs in neigh_idx:
+                        nbrs = np.array(nbrs)
+                        if np.any(all_depth[nbrs] <= depth_thresh):
+                            is_perim.append(True)
+                        else:
+                            is_perim.append(False)
+                    perim_mask = np.array(is_perim, dtype=bool)
+                    self.perimeter_pts = all_coords[wetted_idx][perim_mask]
+            except Exception:
+                self.perimeter_pts = None
 
             if gl is None:
                 print('[RENDER] GL not available')
@@ -184,6 +251,37 @@ class SalmonViewer(QtWidgets.QWidget):
                         pass
                 self.tin_mesh = mesh
                 self.gl_view.addItem(mesh)
+                # fit camera to mesh extents
+                try:
+                    verts_min = np.min(verts[:, :2], axis=0)
+                    verts_max = np.max(verts[:, :2], axis=0)
+                    center = (verts_min + verts_max) / 2.0
+                    size = np.max(verts_max - verts_min)
+                    # place camera above center, distance based on size
+                    self.gl_view.setCameraPosition(pos=QtCore.QVector3D(center[0], center[1], size*1.0), elevation=90, azimuth=0)
+                except Exception:
+                    pass
+                # save a one-time screenshot for verification
+                try:
+                    out_dir = getattr(self.sim, 'model_dir', None) or '.'
+                    out_path = os.path.join(out_dir, 'outputs', 'tin_screenshot.png')
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    img = self.gl_view.readQImage()
+                    img.save(out_path)
+                    print(f'[TIN] screenshot saved: {out_path}')
+                except Exception:
+                    try:
+                        # fallback: write a simple 2D matplotlib visualization of verts
+                        import matplotlib.pyplot as plt
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        ax.triplot(verts[:, 0], verts[:, 1], faces, linewidth=0.2)
+                        ax.set_aspect('equal')
+                        ax.set_title('TIN preview (2D)')
+                        fig.savefig(out_path, dpi=150)
+                        plt.close(fig)
+                        print(f'[TIN] fallback 2D screenshot saved: {out_path}')
+                    except Exception:
+                        pass
 
             builder.mesh_ready.connect(_on_mesh)
             try:
@@ -227,6 +325,15 @@ class SalmonViewer(QtWidgets.QWidget):
             pass
         self.gl_agent_scatter = scatter
         self.gl_view.addItem(self.gl_agent_scatter)
+        # if perimeter data exists and GL available, add perimeter overlay
+        try:
+            if getattr(self, 'perimeter_pts', None) is not None and gl is not None:
+                perim = self.perimeter_pts
+                perim_pts3 = np.column_stack([perim[:,0], perim[:,1], np.zeros(len(perim))])
+                self.perim_scatter = gl.GLScatterPlotItem(pos=perim_pts3, color=(0.0, 0.8, 0.0, 1.0), size=2)
+                self.gl_view.addItem(self.perim_scatter)
+        except Exception:
+            pass
 
     def toggle_pause(self):
         self.paused = not self.paused
@@ -245,6 +352,16 @@ class SalmonViewer(QtWidgets.QWidget):
 
     def run(self):
         self.show()
+        try:
+            # attempt to raise and activate the window so it appears on top
+            try:
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
+            print('[VIEWER] shown')
+        except Exception:
+            pass
         return QtWidgets.QApplication.instance().exec_()
 
 
