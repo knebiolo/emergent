@@ -17,7 +17,8 @@ jobs:
           python-version: '3.10'
       - name: Install requirements
         run: |
-          python -m pip install -r requirements.txt
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt 2>&1 | tee tools/pip_install.log || true
       - name: Warmup numba cache (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -28,9 +29,23 @@ jobs:
           pwsh -Command "scripts\warmup.ps1"
       - name: Run short benchmark
         run: |
-          NUMBA_NUM_THREADS=4 NUMBA_DEFAULT_NUM_THREADS=4 python tools/profile_timestep_cprofile.py --agents 200 --timesteps 5 --out tools/ci_profile.pstats
+          set -e
+          pwd; echo '--- repo root listing ---'; ls -la || true
+          echo '--- tools/ directory listing ---'; ls -la tools || true
+          # ensure profiling script exists
+          if [ ! -f tools/profile_timestep_cprofile.py ]; then
+            echo 'ERROR: tools/profile_timestep_cprofile.py missing' > tools/profile_error.log
+            exit 2
+          fi
+          # run benchmark with verbose output captured
+          NUMBA_NUM_THREADS=4 NUMBA_DEFAULT_NUM_THREADS=4 python tools/profile_timestep_cprofile.py --agents 200 --timesteps 5 --out tools/ci_profile.pstats 2>&1 | tee tools/ci_profile_run.log
       - name: Upload pstats
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ci-profile
-          path: tools/ci_profile.pstats
+          path: |
+            tools/ci_profile.pstats
+            tools/ci_profile_run.log
+            tools/profile_error.log
+            tools/pip_install.log
