@@ -129,30 +129,56 @@ class SalmonViewer(QtWidgets.QWidget):
         raise FileNotFoundError(path)
 
     def _build_ui(self):
-        self.setWindowTitle('SalmonViewer v2')
+        self.setWindowTitle('SalmonViewer')
         main = QHBoxLayout(self)
 
+        # Left panel: tools and metrics
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left.setMinimumWidth(260)
+
+        # Center: main plot or GL view
+        center = QWidget()
+        center_layout = QVBoxLayout(center)
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setMinimumSize(600, 600)
-        main.addWidget(self.plot_widget, 3)
+        center_layout.addWidget(self.plot_widget)
 
+        # Right: RL controls and status
         right = QWidget()
         rlay = QVBoxLayout(right)
-        btn_play = QPushButton('Play')
-        btn_play.clicked.connect(self._on_play)
-        btn_pause = QPushButton('Pause')
-        btn_pause.clicked.connect(self.toggle_pause)
-        btn_reset = QPushButton('Reset')
-        btn_reset.clicked.connect(self.reset_simulation)
-        rlay.addWidget(btn_play)
-        btn_perim = QPushButton('Toggle Perimeter')
-        btn_perim.clicked.connect(self.toggle_perimeter)
-        rlay.addWidget(btn_perim)
+        # Playback controls (match original viewer ordering and widget names)
+        self.play_btn = QPushButton('Play')
+        self.play_btn.clicked.connect(self._on_play)
+        self.pause_btn = QPushButton('Pause')
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.reset_btn = QPushButton('Reset')
+        self.reset_btn.clicked.connect(self.reset_simulation)
+        rlay.addWidget(self.play_btn)
+        rlay.addWidget(self.pause_btn)
+        rlay.addWidget(self.reset_btn)
+
+        # Utility buttons (match original viewer ordering)
         btn_rebuild = QPushButton('Rebuild TIN')
         btn_rebuild.clicked.connect(self.rebuild_tin_action)
         rlay.addWidget(btn_rebuild)
-        rlay.addWidget(btn_pause)
-        rlay.addWidget(btn_reset)
+        btn_perim = QPushButton('Toggle Perimeter')
+        btn_perim.clicked.connect(self.toggle_perimeter)
+        rlay.addWidget(btn_perim)
+
+        # Small visual toggles to match original viewer
+        try:
+            self.show_dead_cb = QCheckBox('Show Dead')
+            self.show_dead_cb.setChecked(False)
+            rlay.addWidget(self.show_dead_cb)
+            self.show_direction_cb = QCheckBox('Show Direction')
+            self.show_direction_cb.setChecked(False)
+            rlay.addWidget(self.show_direction_cb)
+            self.show_tail_cb = QCheckBox('Show Tail')
+            self.show_tail_cb.setChecked(False)
+            rlay.addWidget(self.show_tail_cb)
+        except Exception:
+            pass
 
         ve_group = QGroupBox('Vertical Exaggeration')
         ve_layout = QVBoxLayout()
@@ -167,7 +193,9 @@ class SalmonViewer(QtWidgets.QWidget):
         ve_group.setLayout(ve_layout)
         rlay.addWidget(ve_group)
 
-        rlay.addStretch()
+        # assemble main three-column layout: left | center | right
+        main.addWidget(left, 1)
+        main.addWidget(center, 3)
         main.addWidget(right, 1)
 
         # Metrics placeholders (ported from original viewer)
@@ -204,7 +232,6 @@ class SalmonViewer(QtWidgets.QWidget):
                 'energy_efficiency', 'mean_passage_delay'
             ]
             self.track_metric_cbs = {}
-
             def add_label_with_cb(label_widget, metric_key, default_checked=False):
                 h = QHBoxLayout()
                 h.setContentsMargins(0, 0, 0, 0)
@@ -217,6 +244,13 @@ class SalmonViewer(QtWidgets.QWidget):
                 metrics_layout.addLayout(h)
                 self.track_metric_cbs[metric_key] = cb
 
+            # Map labels to metric keys (match original viewer)
+            # collision_count label (new)
+            self.collision_count_label = QLabel('Collision Count: --')
+            add_label_with_cb(self.collision_count_label, 'collision_count')
+            add_label_with_cb(self.upstream_progress_label, 'mean_upstream_progress')
+            self.mean_upstream_velocity_label = QLabel('Mean Upstream Velocity: --')
+            add_label_with_cb(self.mean_upstream_velocity_label, 'mean_upstream_velocity')
             add_label_with_cb(self.mean_energy_label, 'energy_efficiency')
             add_label_with_cb(self.mean_passage_delay_label, 'mean_passage_delay')
 
@@ -245,6 +279,11 @@ class SalmonViewer(QtWidgets.QWidget):
 
     def _on_play(self):
         self.paused = False
+        try:
+            self.play_btn.setText('Play')
+            self.pause_btn.setText('Pause')
+        except Exception:
+            pass
 
     def toggle_perimeter(self):
         try:
@@ -415,12 +454,28 @@ class SalmonViewer(QtWidgets.QWidget):
             return
         if not (hasattr(self.sim, 'X') and hasattr(self.sim, 'Y')):
             return
-        alive = (getattr(self.sim, 'dead', np.zeros(getattr(self.sim, 'num_agents', 0))) == 0)
-        if getattr(self.sim, 'num_agents', 0) == 0:
+        num_agents = getattr(self.sim, 'num_agents', 0)
+        if num_agents == 0:
             return
-        x = self.sim.X[alive]; y = self.sim.Y[alive]
+
+        dead_mask = (getattr(self.sim, 'dead', np.zeros(num_agents)) != 0)
+        alive_mask = ~dead_mask
+
+        # Respect show-dead checkbox if present
+        try:
+            if getattr(self, 'show_dead_cb', None) and self.show_dead_cb.isChecked():
+                x = self.sim.X; y = self.sim.Y
+                # color alive vs dead
+                colors = np.where(alive_mask[:, None], [1.0, 0.4, 0.4, 0.9], [0.4, 0.4, 0.4, 0.4])
+            else:
+                x = self.sim.X[alive_mask]; y = self.sim.Y[alive_mask]
+                colors = np.tile([1.0, 0.4, 0.4, 0.9], (len(x), 1))
+        except Exception:
+            x = self.sim.X[alive_mask]; y = self.sim.Y[alive_mask]
+            colors = np.tile([1.0, 0.4, 0.4, 0.9], (len(x), 1))
+
         pts = np.column_stack([x, y, np.zeros_like(x)])
-        scatter = gl.GLScatterPlotItem(pos=pts, color=(1.0, 0.4, 0.4, 0.9), size=6)
+        scatter = gl.GLScatterPlotItem(pos=pts, color=colors, size=6)
         try:
             if hasattr(self, 'gl_agent_scatter') and self.gl_agent_scatter is not None:
                 self.gl_view.removeItem(self.gl_agent_scatter)
@@ -428,6 +483,33 @@ class SalmonViewer(QtWidgets.QWidget):
             pass
         self.gl_agent_scatter = scatter
         self.gl_view.addItem(self.gl_agent_scatter)
+
+        # Direction indicators (basic implementation)
+        try:
+            if getattr(self, 'show_direction_cb', None) and self.show_direction_cb.isChecked() and hasattr(self.sim, 'heading'):
+                if hasattr(self, 'gl_direction_lines'):
+                    for item in getattr(self, 'gl_direction_lines', []):
+                        try:
+                            self.gl_view.removeItem(item)
+                        except Exception:
+                            pass
+                self.gl_direction_lines = []
+                if getattr(self, 'show_dead_cb', None) and self.show_dead_cb.isChecked():
+                    headings = self.sim.heading
+                    pos_x, pos_y = self.sim.X, self.sim.Y
+                else:
+                    headings = self.sim.heading[alive_mask]
+                    pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
+                arrow_length = 5.0
+                end_x = pos_x - arrow_length * np.cos(headings)
+                end_y = pos_y - arrow_length * np.sin(headings)
+                for i in range(len(pos_x)):
+                    seg_pts = np.array([[pos_x[i], pos_y[i], 0], [end_x[i], end_y[i], 0]])
+                    seg = gl.GLLinePlotItem(pos=seg_pts, color=(1.0, 0.78, 0.39, 0.6), width=1.5, antialias=True, mode='lines')
+                    self.gl_view.addItem(seg)
+                    self.gl_direction_lines.append(seg)
+        except Exception:
+            pass
         # if perimeter data exists and GL available, add perimeter overlay
         try:
             if getattr(self, 'perimeter_pts', None) is not None and gl is not None:
@@ -440,6 +522,55 @@ class SalmonViewer(QtWidgets.QWidget):
 
     def toggle_pause(self):
         self.paused = not self.paused
+        try:
+            if self.paused:
+                self.play_btn.setEnabled(True)
+                self.pause_btn.setText('Pause')
+            else:
+                self.play_btn.setEnabled(False)
+                self.pause_btn.setText('Running')
+        except Exception:
+            pass
+
+    def update_metrics_panel(self, metrics):
+        """Update metrics panel labels (ported from original viewer)."""
+        def fmt_metric(val):
+            try:
+                return f"{float(val):.2f}"
+            except Exception:
+                return str(val) if val is not None else "--"
+        try:
+            self.mean_speed_label.setText(f"Mean Speed: {fmt_metric(metrics.get('mean_speed', None))}")
+            self.max_speed_label.setText(f"Max Speed: {fmt_metric(metrics.get('max_speed', None))}")
+            self.mean_energy_label.setText(f"Mean Energy: {fmt_metric(metrics.get('mean_energy', None))}")
+            self.min_energy_label.setText(f"Min Energy: {fmt_metric(metrics.get('min_energy', None))}")
+            upstream_val = metrics.get('upstream_progress', metrics.get('mean_upstream_progress', '--'))
+            if isinstance(upstream_val, (int, float)):
+                self.upstream_progress_label.setText(f"Upstream Progress: {upstream_val:.2f}")
+            else:
+                self.upstream_progress_label.setText(f"Upstream Progress: --")
+            self.mean_centerline_label.setText(f"Mean Centerline: {fmt_metric(metrics.get('mean_centerline', None))}")
+            self.mean_passage_delay_label.setText(f"Mean Passage Delay: {fmt_metric(metrics.get('mean_passage_delay', None))}")
+            if 'passage_success_rate' in metrics:
+                self.passage_success_rate_label.setText(f"Passage Success: {metrics['passage_success_rate']:.1%}")
+            elif 'success_rate' in metrics:
+                self.passage_success_rate_label.setText(f"Passage Success: {metrics['success_rate']:.1%}")
+            self.mean_nn_dist_label.setText(f"Mean NN Dist: {fmt_metric(metrics.get('mean_nn_dist', None))}")
+            self.polarization_label.setText(f"Polarization: {fmt_metric(metrics.get('polarization', None))}")
+
+            # accumulate per-timestep values into episode accumulators if checkboxes enabled
+            for m, cb in getattr(self, 'track_metric_cbs', {}).items():
+                try:
+                    if cb.isChecked() and m in metrics:
+                        if not hasattr(self, 'episode_metric_accumulators'):
+                            self.episode_metric_accumulators = {}
+                        if m not in self.episode_metric_accumulators:
+                            self.episode_metric_accumulators[m] = []
+                        self.episode_metric_accumulators[m].append(float(metrics[m]))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def refresh_rl_labels(self):
         try:

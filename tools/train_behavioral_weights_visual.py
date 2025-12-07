@@ -85,6 +85,7 @@ def main():
     parser.add_argument('--agents', type=int, default=100, help='Number of agents')
     parser.add_argument('--fish-length', type=int, default=450, help='Fish length (mm)')
     parser.add_argument('--dt', type=float, default=0.1, help='Timestep duration (s)')
+    parser.add_argument('--no-visual', action='store_true', help='Run without launching the viewer (headless)')
     
     args = parser.parse_args()
     
@@ -97,8 +98,17 @@ def main():
     n = args.timesteps
     dt = args.dt
 
-    # Run the simulation directly. This keeps the script minimal and delegates
-    # execution to the `simulation` class (which owns PID and the run loop).
+    # Launch visual viewer by default unless --no-visual is provided
+    if not args.no_visual:
+        try:
+            launch_viewer(simulation=sim, dt=dt, T=n, rl_trainer=trainer)
+            return
+        except Exception:
+            # Fallback to headless run if viewer fails to start
+            import traceback
+            traceback.print_exc()
+
+    # Run the simulation directly headless (no GUI)
     sim.run(model_name, n, dt, video=False, interactive=False)
 
 
