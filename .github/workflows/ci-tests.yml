@@ -35,4 +35,13 @@ jobs:
           source "$HOME/.bashrc" || true
           source "${CONDA_PREFIX:-$HOME/micromamba}/etc/profile.d/conda.sh" || true
           conda activate emergent
-          python -m pytest -q
+          conda list --explicit > conda_list.txt || true
+          python -m pytest -q --junitxml=pytest-junit.xml 2>&1 | tee pytest.log || true
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts
+          path: |
+            pytest.log
+            pytest-junit.xml
+            conda_list.txt
