@@ -1,0 +1,28 @@
+{
+  "modules": [
+    {
+      "path": "src/emergent/salmon_abm/sockeye_SoA_OpenGL_RL.py",
+      "role": "Simulation core",
+      "owns": ["hecras ingestion", "perimeter_points", "perimeter_polygon", "wetted_mask", "pid_controller"],
+      "notes": "Authoritative source for environment geometry and agent state."
+    },
+    {
+      "path": "src/emergent/salmon_abm/salmon_viewer_v2.py",
+      "role": "Viewer",
+      "owns": ["visualization only"],
+      "notes": "Reads sim.perimeter_*; does not compute perimeter."
+    },
+    {
+      "path": "src/emergent/salmon_abm/tin_helpers.py",
+      "role": "Spatial helpers",
+      "owns": ["sample_evenly", "alpha_shape"],
+      "notes": "Utilities for sampling and concave-hull polygonization."
+    },
+    {
+      "path": "tools/",
+      "role": "Experimental scripts",
+      "owns": ["diagnostics", "experiments"],
+      "notes": "May be archived after integration."
+    }
+  ]
+}

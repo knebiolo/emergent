@@ -12,7 +12,8 @@ import sys
 import numpy as np
 from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QWidget, QSlider, QGroupBox
+from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QWidget, QSlider, QGroupBox, QCheckBox
+import os
 
 import pyqtgraph as pg
 
@@ -33,28 +34,27 @@ except Exception:
 class _GLMeshBuilder(QtCore.QThread):
     mesh_ready = QtCore.pyqtSignal(object)
 
-    def __init__(self, pts, vals, vert_exag=1.0, parent=None):
+    def __init__(self, pts, vals, vert_exag=1.0, poly=None, parent=None):
         super().__init__(parent=parent)
         self.pts = np.asarray(pts, dtype=float)
         self.vals = np.asarray(vals, dtype=float)
         self.vert_exag = float(vert_exag)
+        self.poly = poly
 
     def run(self):
         try:
             # compute triangulation in the worker thread to avoid blocking the UI
             try:
-                from scipy.spatial import Delaunay
-                tri = Delaunay(self.pts)
-                tris = tri.simplices
+                # Prefer the helper which triangulates and clips using the sim polygon
+                try:
+                    from emergent.salmon_abm.tin_helpers import triangulate_and_clip
+                except Exception:
+                    from .tin_helpers import triangulate_and_clip
+
+                verts, tris = triangulate_and_clip(self.pts, self.vals * self.vert_exag if self.pts.shape[0] == self.vals.shape[0] else np.zeros(len(self.pts)), poly=self.poly)
             except Exception as e:
                 self.mesh_ready.emit({"error": e})
                 return
-
-            if self.pts.shape[0] == self.vals.shape[0]:
-                z = self.vals * self.vert_exag
-                verts = np.column_stack([self.pts[:, 0], self.pts[:, 1], z])
-            else:
-                verts = np.column_stack([self.pts[:, 0], self.pts[:, 1], np.zeros(len(self.pts))])
 
             # simple color mapping
             try:
@@ -118,6 +118,9 @@ class SalmonViewer(QtWidgets.QWidget):
         btn_perim = QPushButton('Toggle Perimeter')
         btn_perim.clicked.connect(self.toggle_perimeter)
         rlay.addWidget(btn_perim)
+        btn_rebuild = QPushButton('Rebuild TIN')
+        btn_rebuild.clicked.connect(self.rebuild_tin_action)
+        rlay.addWidget(btn_rebuild)
         rlay.addWidget(btn_pause)
         rlay.addWidget(btn_reset)
 
@@ -136,6 +139,79 @@ class SalmonViewer(QtWidgets.QWidget):
 
         rlay.addStretch()
         main.addWidget(right, 1)
+
+        # Metrics placeholders (ported from original viewer)
+        self.mean_speed_label = QLabel('Mean Speed: --')
+        self.max_speed_label = QLabel('Max Speed: --')
+        self.mean_energy_label = QLabel('Mean Energy: --')
+        self.min_energy_label = QLabel('Min Energy: --')
+        self.upstream_progress_label = QLabel('Upstream Progress: --')
+        self.mean_centerline_label = QLabel('Mean Centerline: --')
+        self.mean_passage_delay_label = QLabel('Mean Passage Delay: --')
+        self.passage_success_rate_label = QLabel('Passage Success: --')
+
+        # compact metrics layout at the bottom of the right pane
+        try:
+            metrics_box = QGroupBox('Metrics')
+            metrics_layout = QVBoxLayout()
+            metrics_layout.addWidget(self.mean_speed_label)
+            metrics_layout.addWidget(self.max_speed_label)
+            metrics_layout.addWidget(self.mean_energy_label)
+            metrics_layout.addWidget(self.min_energy_label)
+            metrics_layout.addWidget(self.upstream_progress_label)
+            metrics_layout.addWidget(self.mean_centerline_label)
+            metrics_layout.addWidget(self.mean_passage_delay_label)
+            metrics_layout.addWidget(self.passage_success_rate_label)
+            # small extras
+            self.mean_nn_dist_label = QLabel('Mean NN Dist: --')
+            self.polarization_label = QLabel('Polarization: --')
+            metrics_layout.addWidget(self.mean_nn_dist_label)
+            metrics_layout.addWidget(self.polarization_label)
+
+            # per-episode metrics tracking helper (checkboxes)
+            self._available_episode_metrics = [
+                'collision_count', 'mean_upstream_progress', 'mean_upstream_velocity',
+                'energy_efficiency', 'mean_passage_delay'
+            ]
+            self.track_metric_cbs = {}
+
+            def add_label_with_cb(label_widget, metric_key, default_checked=False):
+                h = QHBoxLayout()
+                h.setContentsMargins(0, 0, 0, 0)
+                h.setSpacing(6)
+                h.addWidget(label_widget)
+                cb = QCheckBox()
+                cb.setChecked(default_checked)
+                cb.setFixedWidth(22)
+                h.addWidget(cb)
+                metrics_layout.addLayout(h)
+                self.track_metric_cbs[metric_key] = cb
+
+            add_label_with_cb(self.mean_energy_label, 'energy_efficiency')
+            add_label_with_cb(self.mean_passage_delay_label, 'mean_passage_delay')
+
+            # per-episode plot
+            self.per_episode_plot = pg.PlotWidget(title='Per-Episode Metrics')
+            self.per_episode_plot.setLabel('bottom', 'Episode')
+            self.per_episode_plot.setLabel('left', 'Metric Value')
+            self.per_episode_plot.setMaximumHeight(220)
+            metrics_layout.addWidget(self.per_episode_plot)
+
+            metrics_box.setLayout(metrics_layout)
+            rlay.addWidget(metrics_box)
+        except Exception:
+            pass
+
+        # RL status labels
+        try:
+            self.episode_label = QLabel('Episode: 0 | Timestep: 0')
+            self.reward_label = QLabel('Reward: 0.00')
+            self.best_reward_label = QLabel('Best: 0.00')
+            rlay.addWidget(self.episode_label)
+            rlay.addWidget(self.reward_label)
+            rlay.addWidget(self.best_reward_label)
+        except Exception:
+            pass
 
     def _on_play(self):
         self.paused = False
@@ -191,29 +267,15 @@ class SalmonViewer(QtWidgets.QWidget):
                 return
 
             # Triangulation will be computed in the background builder thread
-            # compute perimeter points (wetted cells that touch dry neighbors)
+            # Use perimeter generated by the simulation (vector-first). Viewer no longer
+            # performs its own dry-cell inference — sim is the single source of truth.
             try:
-                from scipy.spatial import cKDTree
-                all_coords = coords
-                all_depth = depth
-                wetted_idx = np.where(all_depth > depth_thresh)[0]
-                if len(wetted_idx) == 0:
-                    self.perimeter_pts = None
+                sim_perim = getattr(self.sim, 'perimeter_points', None)
+                if sim_perim is not None and getattr(sim_perim, 'shape', (0,))[0] > 0:
+                    self.perimeter_pts = np.asarray(sim_perim)
                 else:
-                    tree = cKDTree(all_coords)
-                    # query 8 nearest neighbors (including self)
-                    k = 8
-                    neigh_dists, neigh_idx = tree.query(all_coords[wetted_idx], k=k)
-                    # check if any neighbor is dry
-                    is_perim = []
-                    for nbrs in neigh_idx:
-                        nbrs = np.array(nbrs)
-                        if np.any(all_depth[nbrs] <= depth_thresh):
-                            is_perim.append(True)
-                        else:
-                            is_perim.append(False)
-                    perim_mask = np.array(is_perim, dtype=bool)
-                    self.perimeter_pts = all_coords[wetted_idx][perim_mask]
+                    # No perimeter available from sim; do not attempt local inference.
+                    self.perimeter_pts = None
             except Exception:
                 self.perimeter_pts = None
 
@@ -229,7 +291,9 @@ class SalmonViewer(QtWidgets.QWidget):
                 self.plot_widget.hide()
                 layout.addWidget(self.gl_view)
 
-            builder = _GLMeshBuilder(pts, vals, vert_exag=getattr(self.sim, 'vert_exag', 1.0), parent=self)
+            # pass sim polygon so clipping happens in worker thread
+            sim_poly = getattr(self.sim, 'perimeter_polygon', None)
+            builder = _GLMeshBuilder(pts, vals, vert_exag=getattr(self.sim, 'vert_exag', 1.0), poly=sim_poly, parent=self)
 
             def _on_mesh(payload):
                 if 'error' in payload:
@@ -242,6 +306,7 @@ class SalmonViewer(QtWidgets.QWidget):
                     pass
                 # payload received and stored at `self.last_mesh_payload`
                 verts = payload['verts']; faces = payload['faces']; colors = payload['colors']
+                # clipping already handled in worker thread
                 meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
                 mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded')
                 if self.tin_mesh is not None:
@@ -291,6 +356,14 @@ class SalmonViewer(QtWidgets.QWidget):
         except Exception as e:
             print('[RENDER] setup_background failed:', e)
 
+    def rebuild_tin_action(self):
+        try:
+            if hasattr(self, 've_slider'):
+                self.sim.vert_exag = self.ve_slider.value() / 100.0
+            QtCore.QTimer.singleShot(10, self.setup_background)
+        except Exception as e:
+            print('[REBUILD] Exception rebuilding TIN:', e)
+
     def update_simulation(self):
         if self.paused:
             return
@@ -337,6 +410,14 @@ class SalmonViewer(QtWidgets.QWidget):
 
     def toggle_pause(self):
         self.paused = not self.paused
+
+    def refresh_rl_labels(self):
+        try:
+            self.episode_label.setText(f"Episode: {getattr(self, 'current_episode', 0)} | Timestep: {getattr(self, 'current_timestep', 0)}")
+            self.reward_label.setText(f"Reward: {getattr(self, 'episode_reward', 0.0):.2f}")
+            self.best_reward_label.setText(f"Best: {getattr(self, 'best_reward', 0.0):.2f}")
+        except Exception:
+            pass
 
     def reset_simulation(self):
         try:
