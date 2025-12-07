@@ -62,6 +62,15 @@ def setup_training_simulation(args):
     os.makedirs(config['model_dir'], exist_ok=True)
     
     sim = simulation(**config)
+    # The simulation constructor doesn't accept an explicit `hecras_perim_timestep`
+    # kwarg in some versions. Attach it here as an attribute so the sim can
+    # read it during initialization or later. This avoids breaking the API.
+    try:
+        sim.hecras_perim_timestep = args.hecras_perim_timestep
+        # also set legacy attribute name some codepaths may check
+        sim._hecras_timestep = args.hecras_perim_timestep
+    except Exception:
+        pass
     trainer = RLTrainer(sim)
     try:
             sim.apply_behavioral_weights(trainer.behavioral_weights)
@@ -86,6 +95,7 @@ def main():
     parser.add_argument('--fish-length', type=int, default=450, help='Fish length (mm)')
     parser.add_argument('--dt', type=float, default=0.1, help='Timestep duration (s)')
     parser.add_argument('--no-visual', action='store_true', help='Run without launching the viewer (headless)')
+    parser.add_argument('--hecras-perim-timestep', type=int, default=None, help='HECRAS timestep index to use for perimeter inference (default: middle)')
     
     args = parser.parse_args()
     
@@ -100,6 +110,12 @@ def main():
 
     # Launch visual viewer by default unless --no-visual is provided
     if not args.no_visual:
+        # Log the HECRAS perimeter timestep chosen by the simulation (if available)
+        perim_info = getattr(sim, 'hecras_perim_timestep', None)
+        if perim_info is None:
+            # Some sims expose the chosen timestep differently; attempt a best-effort
+            perim_info = getattr(sim, '_hecras_timestep', None)
+        print(f'Using HECRAS perimeter timestep: {perim_info}')
         try:
             launch_viewer(simulation=sim, dt=dt, T=n, rl_trainer=trainer)
             return

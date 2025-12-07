@@ -402,11 +402,22 @@ def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, m
                     print('No valid perimeter polygons from vector method')
                 raise RuntimeError('No valid perimeter polygons from vector method')
             merged = unary_union(polys)
-            # Return exterior coords for merged polygon(s)
+            # Build a consistent dict return value
+            rings = []
             if merged.geom_type == 'Polygon':
-                return [list(merged.exterior.coords)]
+                rings = [list(merged.exterior.coords)]
             else:
-                return [list(g.exterior.coords) for g in merged.geoms]
+                rings = [list(g.exterior.coords) for g in merged.geoms]
+            # choose largest ring as primary
+            primary = max(rings, key=lambda r: len(r) if hasattr(r, '__len__') else 0)
+            pts = np.asarray(primary)
+            # perimeter_cells and wetted_mask are not available here; return placeholders
+            return {
+                'perimeter_points': pts,
+                'perimeter_cells': np.zeros((pts.shape[0],), dtype=int),
+                'wetted_mask': None,
+                'median_spacing': None
+            }
 
         except Exception as e:
             # Vector method failed — log and fall back to raster
@@ -462,9 +473,17 @@ def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, m
                 raise RuntimeError('Raster fallback produced no polygons')
             merged = unary_union(polys)
             if merged.geom_type == 'Polygon':
-                return [list(merged.exterior.coords)]
+                rings = [list(merged.exterior.coords)]
             else:
-                return [list(g.exterior.coords) for g in merged.geoms]
+                rings = [list(g.exterior.coords) for g in merged.geoms]
+            primary = max(rings, key=lambda r: len(r) if hasattr(r, '__len__') else 0)
+            pts = np.asarray(primary)
+            return {
+                'perimeter_points': pts,
+                'perimeter_cells': np.zeros((pts.shape[0],), dtype=int),
+                'wetted_mask': None,
+                'median_spacing': None
+            }
         except Exception as e:
             # both methods failed
             raise RuntimeError('Both vector and raster wetted-perimeter inference failed: ' + str(e))

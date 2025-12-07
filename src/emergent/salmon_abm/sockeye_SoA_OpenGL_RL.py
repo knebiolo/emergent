@@ -3979,6 +3979,29 @@ class simulation():
                         perim_info = None
 
                     if perim_info is not None:
+                        # Some older helper implementations return a list of rings
+                        # (e.g., [list(coords), ...]) rather than a dict. Coerce to
+                        # a consistent dict shape so downstream code can safely call
+                        # `.get(...)` without raising AttributeError.
+                        if not isinstance(perim_info, dict):
+                            try:
+                                # Accept list/tuple/ndarray of rings; pick the largest ring
+                                if isinstance(perim_info, (list, tuple, np.ndarray)) and len(perim_info) > 0:
+                                    rings = list(perim_info)
+                                    # each ring is an iterable of (x,y) pairs
+                                    ring = max(rings, key=lambda r: len(r) if hasattr(r, '__len__') else 0)
+                                    pts = np.asarray(ring)
+                                    perim_info = {
+                                        'perimeter_points': pts,
+                                        'perimeter_cells': np.zeros((pts.shape[0],), dtype=int),
+                                        'wetted_mask': None
+                                    }
+                                else:
+                                    # Unknown shape -> treat as no perimeter
+                                    perim_info = {'perimeter_points': np.zeros((0,2)), 'perimeter_cells': np.zeros((0,), dtype=int), 'wetted_mask': None}
+                            except Exception:
+                                perim_info = {'perimeter_points': np.zeros((0,2)), 'perimeter_cells': np.zeros((0,), dtype=int), 'wetted_mask': None}
+
                         # attach raw perimeter points and masks
                         self.perimeter_points = np.asarray(perim_info.get('perimeter_points', np.zeros((0,2))))
                         self.perimeter_cells = np.asarray(perim_info.get('perimeter_cells', np.zeros((0,), dtype=int)))
