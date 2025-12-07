@@ -25,15 +25,23 @@ except Exception:
 class _GLMeshBuilder(QtCore.QThread):
     mesh_ready = QtCore.pyqtSignal(object)
 
-    def __init__(self, pts, vals, tris, vert_exag=1.0, parent=None):
+    def __init__(self, pts, vals, vert_exag=1.0, parent=None):
         super().__init__(parent=parent)
         self.pts = np.asarray(pts, dtype=float)
         self.vals = np.asarray(vals, dtype=float)
-        self.tris = np.asarray(tris, dtype=np.int32)
         self.vert_exag = float(vert_exag)
 
     def run(self):
         try:
+            # compute triangulation in the worker thread to avoid blocking the UI
+            try:
+                from scipy.spatial import Delaunay
+                tri = Delaunay(self.pts)
+                tris = tri.simplices
+            except Exception as e:
+                self.mesh_ready.emit({"error": e})
+                return
+
             if self.pts.shape[0] == self.vals.shape[0]:
                 z = self.vals * self.vert_exag
                 verts = np.column_stack([self.pts[:, 0], self.pts[:, 1], z])
@@ -54,7 +62,7 @@ class _GLMeshBuilder(QtCore.QThread):
             except Exception:
                 colors = np.tile([0.6, 0.6, 0.6, 1.0], (len(verts), 1))
 
-            self.mesh_ready.emit({"verts": verts.astype(float), "faces": self.tris.astype(int), "colors": colors.astype(float)})
+            self.mesh_ready.emit({"verts": verts.astype(float), "faces": tris.astype(int), "colors": colors.astype(float)})
         except Exception as e:
             self.mesh_ready.emit({"error": e})
 
@@ -140,9 +148,7 @@ class SalmonViewer(QtWidgets.QWidget):
             if len(pts) < 3:
                 print('[RENDER] Not enough points for TIN')
                 return
-            from scipy.spatial import Delaunay
-            tri = Delaunay(pts)
-            tris = tri.simplices
+            # Triangulation will be computed in the background builder thread
 
             if gl is None:
                 print('[RENDER] GL not available')
@@ -156,12 +162,18 @@ class SalmonViewer(QtWidgets.QWidget):
                 self.plot_widget.hide()
                 layout.addWidget(self.gl_view)
 
-            builder = _GLMeshBuilder(pts, vals, tris, vert_exag=getattr(self.sim, 'vert_exag', 1.0), parent=self)
+            builder = _GLMeshBuilder(pts, vals, vert_exag=getattr(self.sim, 'vert_exag', 1.0), parent=self)
 
             def _on_mesh(payload):
                 if 'error' in payload:
                     print('[TIN] builder error', payload['error'])
                     return
+                # expose latest payload for external tests/inspection
+                try:
+                    self.last_mesh_payload = payload
+                except Exception:
+                    pass
+                # payload received and stored at `self.last_mesh_payload`
                 verts = payload['verts']; faces = payload['faces']; colors = payload['colors']
                 meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
                 mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded')
