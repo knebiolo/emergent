@@ -12,13 +12,20 @@ from typing import Optional
 
 
 def _get_sockeye_module() -> Optional[types.ModuleType]:
-    try:
-        return importlib.import_module('emergent.salmon_abm.sockeye_SoA')
-    except Exception:
+    # Prefer the canonical `sockeye` module.  Fall back to legacy names
+    # for compatibility with older callers/scripts.
+    candidates = [
+        'emergent.salmon_abm.sockeye',
+        'emergent.salmon_abm.sockeye_SoA',
+        'emergent.salmon_abm.sockeye_SoA_OpenGL_RL',
+        'emergent.salmon_abm.sockeye_SoA_OpenGL'
+    ]
+    for name in candidates:
         try:
-            return importlib.import_module('emergent.salmon_abm.sockeye_SoA')
+            return importlib.import_module(name)
         except Exception:
-            return None
+            continue
+    return None
 
 
 def numba_warmup_for_sim(sim) -> None:

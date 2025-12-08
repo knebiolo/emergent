@@ -22,7 +22,7 @@ sim, trainer, hecras_plan = setup_training_simulation(args)
 
 # Import Qt and the viewer
 from PyQt5 import QtWidgets
-from emergent.salmon_abm.salmon_viewer_v2 import SalmonViewer
+from emergent.salmon_abm.salmon_viewer import SalmonViewer
 
 app = QtWidgets.QApplication.instance()
 if app is None:

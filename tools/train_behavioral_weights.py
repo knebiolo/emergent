@@ -20,7 +20,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation, RLTrainer, BehavioralWeights
+from emergent.salmon_abm.sockeye import simulation, RLTrainer, BehavioralWeights
 import numpy as np
 
 

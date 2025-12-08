@@ -59,6 +59,8 @@ from scipy.stats import beta
 from shapely.geometry import Point, LineString, Polygon
 from shapely.geometry.base import BaseGeometry
 from sklearn.decomposition import PCA
+import logging
+logger = logging.getLogger(__name__)
 try:
     from sksurv.nonparametric import kaplan_meier_estimator
     _HAS_SKSURV = True
@@ -73,6 +75,10 @@ try:
 except Exception:
     numba = None
     _HAS_NUMBA = False
+    try:
+        logging.getLogger(__name__).warning('Numba import failed; falling back to pure-Python implementations')
+    except Exception:
+        pass
 class BehavioralWeights:
     def __init__(self):
         # Alignment SOG augmentation
@@ -893,7 +899,8 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
     """
     try:
         from emergent.salmon_abm.hecras_helpers import infer_wetted_perimeter_from_hecras as _central
-    except Exception:
+    except Exception as e:
+        logger.exception('Failed to import central hecras helper; falling back to local import: %s', e)
         # local fallback: import from package-relative path
         from .hecras_helpers import infer_wetted_perimeter_from_hecras as _central
 
@@ -912,7 +919,8 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
 def compute_distance_to_bank_hecras(wetted_info, coords, median_spacing=None):
     try:
         from emergent.salmon_abm.hecras_helpers import compute_distance_to_bank_hecras as _central
-    except Exception:
+    except Exception as e:
+        logger.exception('Failed to import central compute_distance_to_bank_hecras; falling back to local import: %s', e)
         from .hecras_helpers import compute_distance_to_bank_hecras as _central
     return _central(wetted_info, coords, median_spacing=median_spacing)
 
@@ -921,7 +929,8 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
                                            min_distance_threshold=None, min_length=50):
     try:
         from emergent.salmon_abm.hecras_helpers import derive_centerline_from_hecras_distance as _central
-    except Exception:
+    except Exception as e:
+        logger.exception('Failed to import central derive_centerline_from_hecras_distance; falling back to local import: %s', e)
         from .hecras_helpers import derive_centerline_from_hecras_distance as _central
     return _central(coords, distances, wetted_mask, crs=crs, min_distance_threshold=min_distance_threshold, min_length=min_length)
     """Derive centerline from distance-to-bank field on irregular HECRAS mesh.
@@ -3630,11 +3639,11 @@ class simulation():
         # execution paths that expect `sim.pid_controller` to exist. Keep silent
         # (no prints) to reduce console noise.
         try:
-            from .sockeye_SoA_OpenGL_RL import PID_controller
+            from .sockeye import PID_controller
         except Exception:
             # fallback: try absolute import path
             try:
-                from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import PID_controller
+                from emergent.salmon_abm.sockeye import PID_controller
             except Exception:
                 PID_controller = None
 
@@ -3788,6 +3797,10 @@ class simulation():
                         if name in env:
                             self._env_cache[name] = np.asarray(env[name][:])
                     except Exception:
+                        try:
+                            logger.exception("Failed to load environment raster '%s' into _env_cache", name)
+                        except Exception:
+                            pass
                         self._env_cache[name] = None
         except Exception:
             self._env_cache = {}
@@ -3799,14 +3812,20 @@ class simulation():
                 warm_n = max(1024, int(getattr(self, 'num_agents', 128)))
                 _numba_warmup(m=warm_n)
         except Exception:
-            pass
+            try:
+                logger.exception("_numba_warmup failed during init warmup")
+            except Exception:
+                pass
 
         # perform an exact-shape warmup using this simulation's sizes
         try:
             if _HAS_NUMBA:
                 _numba_warmup_for_sim(self)
         except Exception:
-            pass
+            try:
+                logger.exception("_numba_warmup_for_sim failed during sim warmup")
+            except Exception:
+                pass
 
         # Optionally compute along-stream raster on init if user provided
         # an external environment HDF path via env_files special key 'hecras_hdf'
@@ -3843,33 +3862,57 @@ class simulation():
                             # attempt to map commonly used rasters from HECRAS onto our HDF grid
                             map_hecras_to_env_rasters(self, hecras_hdf, raster_names=['depth','wetted','vel_x','vel_y'])
                         except Exception:
+                            try:
+                                logger.exception("map_hecras_to_env_rasters failed for %s, will try cached load", hecras_hdf)
+                            except Exception:
+                                pass
                             # fallback: try loading HECRAS plan into cache (KDTree) and then map
                             try:
                                 load_hecras_plan_cached(self, hecras_hdf)
                                 map_hecras_to_env_rasters(self, hecras_hdf, raster_names=['depth','wetted','vel_x','vel_y'])
                             except Exception:
-                                pass
+                                try:
+                                    logger.exception("load_hecras_plan_cached or second map_hecras_to_env_rasters attempt failed for %s", hecras_hdf)
+                                except Exception:
+                                    pass
 
                         # compute coarsened alongstream raster using created env rasters
                         try:
                             compute_coarsened_alongstream_raster(self, factor=factor, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist')
                         except Exception:
                             try:
-                                compute_alongstream_raster(self, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist')
+                                logger.exception("compute_coarsened_alongstream_raster failed, will try compute_alongstream_raster")
                             except Exception:
                                 pass
+                            try:
+                                compute_alongstream_raster(self, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist')
+                            except Exception:
+                                try:
+                                    logger.exception("compute_alongstream_raster also failed")
+                                except Exception:
+                                    pass
                     except Exception:
+                        try:
+                            logger.exception("mapping external HDF failed, will try computing alongstream on current hdf5")
+                        except Exception:
+                            pass
                         # if reading external HDF fails, try computing on current hdf5
                         try:
                             compute_coarsened_alongstream_raster(self, factor=factor)
                         except Exception:
-                            pass
+                            try:
+                                logger.exception("compute_coarsened_alongstream_raster fallback failed")
+                            except Exception:
+                                pass
                 else:
                     # compute on in-project HDF if environment rasters were loaded
                     try:
                         compute_coarsened_alongstream_raster(self, factor=factor)
                     except Exception:
-                        pass
+                            try:
+                                logger.exception("compute_coarsened_alongstream_raster failed when computing on in-project HDF")
+                            except Exception:
+                                pass
             except Exception:
                 pass
         
@@ -4289,10 +4332,13 @@ class simulation():
         try:
             wdict = weights.to_dict()
             keys = ', '.join(sorted(wdict.keys()))
-            print(f"Applied behavioral weights (keys): {keys}")
+            try:
+                logger.info("Applied behavioral weights (keys): %s", keys)
+            except Exception:
+                pass
         except Exception:
             try:
-                print('Applied behavioral weights (some fields may be unavailable)')
+                logger.warning('Applied behavioral weights (some fields may be unavailable)')
             except Exception:
                 pass
         # Numba warm-up: call compiled loops with tiny inputs to trigger JIT at initialization
@@ -4308,14 +4354,23 @@ class simulation():
                 try:
                     _compute_schooling_loop(dummy_pos, dummy_head, dummy_data, dummy_offsets, 1.0, 1.0, dummy_coh, dummy_align, 2)
                 except Exception:
-                    pass
+                    try:
+                        logger.exception("_compute_schooling_loop warmup failed")
+                    except Exception:
+                        pass
                 dummy_drag = np.zeros(2, dtype=np.float64)
                 try:
                     _compute_drafting_loop(dummy_pos, dummy_head, dummy_data, dummy_offsets, 0.5, 0.1, 0.2, dummy_drag, 2)
                 except Exception:
-                    pass
+                    try:
+                        logger.exception("_compute_drafting_loop warmup failed")
+                    except Exception:
+                        pass
         except Exception:
-            pass
+            try:
+                logger.exception("apply_behavioral_weights: unexpected failure during numba warmup block")
+            except Exception:
+                pass
     
     def reset_spatial_state(self, reset_positions=False):
         """Reset all spatial/ephemeral state for a new simulation episode.
@@ -4620,43 +4675,50 @@ class simulation():
         
     def initialize_hdf5(self):
         '''Initialize an HDF5 database for a simulation'''
-        # Create groups for organization (optional)
-        agent_data = self.hdf5.create_group("agent_data")
-        
-        # Create datasets for agent properties that are static
-        agent_data.create_dataset("sex", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("length", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("ucrit", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("weight", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("body_depth", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("too_shallow", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("opt_wat_depth", (self.num_agents,), dtype='f4')
-      
-        # Create datasets for agent properties that change with time
-        # Use chunking optimized for column (per-timestep) writes: chunks=(num_agents,1)
-        chunk_shape = (self.num_agents, 1)
-        agent_data.create_dataset("X", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("Y", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("Z", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("prev_X", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("prev_Y", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("heading", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("sog", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("ideal_sog", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("swim_speed", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("battery", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("swim_behav", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("swim_mode", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("recover_stopwatch", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("ttfr", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("time_out_of_water", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("drag", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("thrust", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("Hz", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("bout_no", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("dist_per_bout", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("bout_dur", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
-        agent_data.create_dataset("time_of_jump", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        try:
+            # Create groups for organization (optional)
+            agent_data = self.hdf5.create_group("agent_data")
+            
+            # Create datasets for agent properties that are static
+            agent_data.create_dataset("sex", (self.num_agents,), dtype='f4')
+            agent_data.create_dataset("length", (self.num_agents,), dtype='f4')
+            agent_data.create_dataset("ucrit", (self.num_agents,), dtype='f4')
+            agent_data.create_dataset("weight", (self.num_agents,), dtype='f4')
+            agent_data.create_dataset("body_depth", (self.num_agents,), dtype='f4')
+            agent_data.create_dataset("too_shallow", (self.num_agents,), dtype='f4')
+            agent_data.create_dataset("opt_wat_depth", (self.num_agents,), dtype='f4')
+          
+            # Create datasets for agent properties that change with time
+            # Use chunking optimized for column (per-timestep) writes: chunks=(num_agents,1)
+            chunk_shape = (self.num_agents, 1)
+            agent_data.create_dataset("X", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("Y", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("Z", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("prev_X", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("prev_Y", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("heading", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("sog", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("ideal_sog", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("swim_speed", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("battery", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("swim_behav", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("swim_mode", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("recover_stopwatch", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("ttfr", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("time_out_of_water", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("drag", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("thrust", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("Hz", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("bout_no", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("dist_per_bout", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("bout_dur", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+            agent_data.create_dataset("time_of_jump", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
+        except Exception:
+            try:
+                logger.exception("initialize_hdf5: failed while creating HDF5 datasets")
+            except Exception:
+                pass
+            raise
         agent_data.create_dataset("kcal", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
         
         # Set attributes (metadata) if needed
@@ -5989,8 +6051,13 @@ class simulation():
                     self.closest_agent = np.full(self.num_agents, np.nan)
                     self.nearest_neighbor_distance = np.full(self.num_agents, np.nan)
         except Exception:
-            # If neighbor computation fails, provide a safe fallback
+            try:
+                logger.exception("Neighbor computation failed during init — falling back to NaN arrays")
+            except Exception:
+                pass
+            # If neighbor computation fails, provide safe fallbacks for both arrays
             self.closest_agent = np.full(self.num_agents, np.nan)
+            self.nearest_neighbor_distance = np.full(self.num_agents, np.nan)
 
         # Optional: override or augment raster-sampled fields with HECRAS plan mapping
         # To enable, set `self.hecras_plan_path` (string path) and `self.hecras_fields` (list of field names)
@@ -6066,7 +6133,11 @@ class simulation():
                 try:
                     inv = get_inv_transform(self, transform)
                     rows, cols = geo_to_pixel_from_inv(inv, X, Y)
-                except Exception:
+                except Exception as e:
+                    try:
+                        logger.exception("precompute_pixel_indices: get_inv_transform or geo_to_pixel_from_inv failed for key=%s", key)
+                    except Exception:
+                        pass
                     rows, cols = geo_to_pixel(X, Y, transform)
                 cache[key] = (rows.astype(np.int32), cols.astype(np.int32))
 
@@ -9182,20 +9253,29 @@ class simulation():
                 sin_h = np.ascontiguousarray(np.sin(heading_a), dtype=np.float64)
                 # reuse an output drags array to avoid extra allocations
                 drags_out = np.zeros((self.simulation.num_agents, 2), dtype=np.float64)
-                swim_speeds, bl_s, prolonged, sprint, sustained = _merged_swim_drag_fatigue_numba(sog_a, cos_h, sin_h, xv, yv, mask_arr, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf, dragc, wave, self.simulation.swim_behav, maxs, maxp, batt, swim_buf)
-                mask_dict = {'prolonged': prolonged, 'sprint': sprint, 'sustained': sustained}
-                # set drag into simulation state using the preallocated buffer
                 try:
-                    self.simulation.drag = drags_out
+                    swim_speeds, bl_s, prolonged, sprint, sustained = _merged_swim_drag_fatigue_numba(
+                        sog_a, cos_h, sin_h, xv, yv, mask_arr,
+                        float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0),
+                        surf, dragc, wave, self.simulation.swim_behav, maxs, maxp, batt, swim_buf)
+                    mask_dict = {'prolonged': prolonged, 'sprint': sprint, 'sustained': sustained}
+                    # set drag into simulation state using the preallocated buffer
+                    try:
+                        self.simulation.drag = drags_out
+                    except Exception:
+                        try:
+                            self.simulation.drag = np.ascontiguousarray(drags_out)
+                        except Exception:
+                            logger.exception('Failed to set simulation.drag from numba kernel output')
                 except Exception:
-                    self.simulation.drag = np.ascontiguousarray(drags_out)
-            except Exception:
-                swim_speeds = self.swim_speeds()
-                bl_s = self.bl_s(swim_speeds)
-                mask_dict = dict()
-                mask_dict['prolonged'] = np.where((self.simulation.max_s_U < bl_s) & (bl_s <= self.simulation.max_p_U), True, False)
-                mask_dict['sprint'] = np.where(bl_s > self.simulation.max_p_U, True, False)
-                mask_dict['sustained'] = bl_s <= self.simulation.max_s_U
+                    # If the numba path fails entirely, log and fallback to Python implementation
+                    logger.exception('Numba swim/drag kernel failed; falling back to pure-Python path')
+                    swim_speeds = self.swim_speeds()
+                    bl_s = self.bl_s(swim_speeds)
+                    mask_dict = dict()
+                    mask_dict['prolonged'] = np.where((self.simulation.max_s_U < bl_s) & (bl_s <= self.simulation.max_p_U), True, False)
+                    mask_dict['sprint'] = np.where(bl_s > self.simulation.max_p_U, True, False)
+                    mask_dict['sustained'] = bl_s <= self.simulation.max_s_U
 
             # calculate how far this fish has travelled this bout
             self.bout_distance()

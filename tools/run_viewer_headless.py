@@ -12,8 +12,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 try:
-    from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation
-    from emergent.salmon_abm.salmon_viewer_v2 import SalmonViewer
+    from emergent.salmon_abm.sockeye import simulation
+    from emergent.salmon_abm.salmon_viewer import SalmonViewer
 except Exception as e:
     print('Import error:', e)
     raise

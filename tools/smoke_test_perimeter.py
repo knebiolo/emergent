@@ -14,7 +14,7 @@ if not os.path.exists(hecras_default):
     print('HECRAS plan not found:', hecras_default)
     sys.exit(2)
 
-from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation
+from emergent.salmon_abm.sockeye import simulation
 
 # create start polygon convex hull if not present
 start_poly = os.path.join(ROOT, 'data', 'start_polygon.geojson')

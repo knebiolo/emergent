@@ -64,7 +64,7 @@ python tools/train_behavioral_weights.py --episodes 50 --timesteps 100 --agents 
 ### 2. Use Trained Weights in Simulations
 
 ```python
-from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation
+from emergent.salmon_abm.sockeye import simulation
 
 # Initialize simulation
 sim = simulation(**config)
@@ -110,7 +110,7 @@ reward = (
 
 ## Key Files
 
-- **`src/emergent/salmon_abm/sockeye_SoA_OpenGL_RL.py`**: Main simulation with RL infrastructure
+- **`src/emergent/salmon_abm/sockeye.py`** (formerly `sockeye_SoA_OpenGL_RL.py`): Main simulation with RL infrastructure
   - `BehavioralWeights`: Container for instinctual parameters
   - `RLTrainer`: Training loop with reward computation
   - `simulation.apply_behavioral_weights()`: Apply learned weights
@@ -172,4 +172,4 @@ python tools/run_hecras_opengl.py --hecras-plan data/new_river.p05.hdf --agents 
 
 ---
 
-**Questions?** See the code comments in `sockeye_SoA_OpenGL_RL.py` for implementation details.
+**Questions?** See the code comments in `src/emergent/salmon_abm/sockeye.py` (legacy name: `sockeye_SoA_OpenGL_RL.py`) for implementation details.

@@ -9,6 +9,7 @@ Purpose: provide a working baseline so you can run the RL visual training GUI
 and verify GL TIN rendering without the mangled original file.
 """
 import sys
+import logging
 import numpy as np
 from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtCore import Qt, QTimer
@@ -24,7 +25,8 @@ except Exception:
     gl = None
 finally:
     try:
-        print(f'[GL] pyqtgraph.opengl available: {gl is not None}')
+        logger = logging.getLogger(__name__)
+        logger.debug('pyqtgraph.opengl available: %s', gl is not None)
     except Exception:
         pass
 
@@ -40,9 +42,14 @@ def maybe_suppress(context: str | None = None):
         ctx = f" ({context})" if context else ""
         try:
             tb = traceback.format_exc()
-            print(f"maybe_suppress caught exception{ctx}: {exc}\n{tb}")
+            logger = logging.getLogger(__name__)
+            logger.exception('maybe_suppress caught exception%s: %s', ctx, exc)
+            logger.debug('\n%s', tb)
         except Exception:
-            print(f"maybe_suppress caught exception{ctx}: {exc}")
+            try:
+                logging.getLogger(__name__).error('maybe_suppress caught exception%s: %s', ctx, exc)
+            except Exception:
+                pass
 
 
 if gl is not None:
@@ -160,7 +167,7 @@ class OffscreenQtFBORenderer:
 try:
     if os.name == 'nt' and os.environ.get('QT_OPENGL', '').strip() == '':
         os.environ['QT_OPENGL'] = 'desktop'
-        print('[GL] Forcing QT_OPENGL=desktop to prefer native OpenGL on Windows')
+        logging.getLogger(__name__).info('Forcing QT_OPENGL=desktop to prefer native OpenGL on Windows')
 except Exception:
     pass
 
@@ -193,11 +200,13 @@ class _GLMeshBuilder(QtCore.QThread):
                 except Exception:
                     from .tin_helpers import triangulate_and_clip
 
-                print(f'[MESH_BUILDER] starting triangulation: pts={self.pts.shape}, vals={self.vals.shape}, poly={type(self.poly)}')
+                logging.getLogger(__name__).debug('MESH_BUILDER starting triangulation: pts=%s, vals=%s, poly=%s', self.pts.shape, self.vals.shape, type(self.poly))
                 verts, tris = triangulate_and_clip(self.pts, self.vals * self.vert_exag if self.pts.shape[0] == self.vals.shape[0] else np.zeros(len(self.pts)), poly=self.poly)
-                print(f'[MESH_BUILDER] triangulation complete: verts={verts.shape}, tris={tris.shape}')
+                logging.getLogger(__name__).debug('MESH_BUILDER triangulation complete: verts=%s, tris=%s', getattr(verts, 'shape', None), getattr(tris, 'shape', None))
             except Exception as e:
-                self.mesh_ready.emit({"error": e})
+                tb = traceback.format_exc()
+                logging.getLogger(__name__).exception('MESH_BUILDER triangulation failed: %s', e)
+                self.mesh_ready.emit({"error": e, "traceback": tb})
                 return
 
             # simple color mapping
@@ -214,10 +223,12 @@ class _GLMeshBuilder(QtCore.QThread):
             except Exception:
                 colors = np.tile([0.6, 0.6, 0.6, 1.0], (len(verts), 1))
 
-            print('[MESH_BUILDER] emitting mesh_ready payload')
+            logging.getLogger(__name__).debug('MESH_BUILDER emitting mesh_ready payload')
             self.mesh_ready.emit({"verts": verts.astype(float), "faces": tris.astype(int), "colors": colors.astype(float)})
         except Exception as e:
-            self.mesh_ready.emit({"error": e})
+            tb = traceback.format_exc()
+            logging.getLogger(__name__).exception('MESH_BUILDER unexpected failure: %s', e)
+            self.mesh_ready.emit({"error": e, "traceback": tb})
 
 
 class SalmonViewer(QtWidgets.QWidget):
@@ -238,10 +249,10 @@ class SalmonViewer(QtWidgets.QWidget):
         # Remove legacy PersistentOffscreenRenderer and PyOpenGL OffscreenFBORenderer fallbacks.
         try:
             self.qt_fbo_renderer = OffscreenQtFBORenderer(width=800, height=600)
-            print('[QTFBO] OffscreenQtFBORenderer created')
+            logging.getLogger(__name__).info('OffscreenQtFBORenderer created')
         except Exception as e:
             self.qt_fbo_renderer = None
-            print('[QTFBO] Could not create OffscreenQtFBORenderer:', e)
+            logging.getLogger(__name__).warning('Could not create OffscreenQtFBORenderer: %s', e)
 
         self._build_ui()
         # preview cache for low-res background images
@@ -253,7 +264,7 @@ class SalmonViewer(QtWidgets.QWidget):
 
         QTimer.singleShot(10, self.setup_background)
         try:
-            print(f'[VIEWER_INIT] gl_available={gl is not None}, hecras={getattr(self.sim, "use_hecras", False)}, plan={getattr(self.sim, "hecras_plan_path", None)}')
+            logging.getLogger(__name__).debug('VIEWER_INIT gl_available=%s, hecras=%s, plan=%s', gl is not None, getattr(self.sim, 'use_hecras', False), getattr(self.sim, 'hecras_plan_path', None))
         except Exception:
             pass
 

@@ -3,7 +3,7 @@
 - **Purpose**: single-file reference describing module responsibilities, data ownership, and important runtime defaults to avoid duplicated logic and drift.
 
 Core modules (one-liners):
-- `src/emergent/salmon_abm/sockeye_SoA_OpenGL_RL.py`: Simulation core — owns HECRAS ingestion, wetted-perimeter inference, `perimeter_points` / `perimeter_polygon` / `wetted_mask`, agent state, and PID controllers. This is the authoritative source for environment geometry.
+- `src/emergent/salmon_abm/sockeye.py` (formerly `sockeye_SoA_OpenGL_RL.py`): Simulation core — owns HECRAS ingestion, wetted-perimeter inference, `perimeter_points` / `perimeter_polygon` / `wetted_mask`, agent state, and PID controllers. This is the authoritative source for environment geometry.
 - `src/emergent/salmon_abm/salmon_viewer_v2.py`: GL viewer — visualizes the simulation; reads perimeter and mesh payloads from `sim` (does NOT compute perimeter). Performs mesh clipping for display only.
 - `src/emergent/salmon_abm/tin_helpers.py`: Spatial helpers — `sample_evenly()` for stratified sampling and `alpha_shape()` for concave hull polygonization.
 - `tools/`: Experiment and diagnostic scripts — exploratory code, not authoritative. These may be archived or removed after integration.
@@ -20,7 +20,7 @@ Key invariants (single-source rules):
 - Polygonization: prefer vector-first `alpha_shape()` (concave hull). If that fails, fallback to convex hull. Store result as a Shapely geometry on `sim.perimeter_polygon`.
 
 Developer workflow notes:
-- When changing perimeter inference, update `sockeye_SoA_OpenGL_RL.py` only and ensure `sim.perimeter_*` attributes are set.
+- When changing perimeter inference, update the canonical simulation module (`src/emergent/salmon_abm/sockeye.py`) and ensure `sim.perimeter_*` attributes are set. Legacy filenames (e.g. `sockeye_SoA_OpenGL_RL.py`) may still appear in older logs; treat `sockeye.py` as the source of truth.
 - Avoid copying inference logic into viewers, tools, or ABM modules. If a tool needs to run experiments, keep it under `tools/` and mark it as experimental.
 - Keep `tin_helpers.py` small and dependency-light (alpha-shape uses `scipy` + `shapely`).
 

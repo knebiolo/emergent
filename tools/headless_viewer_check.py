@@ -4,7 +4,7 @@ Runs a minimal import and API checks for `salmon_viewer_v2` without using pytest
 Usage: `python tools/headless_viewer_check.py`
 """
 import numpy as np
-from emergent.salmon_abm.salmon_viewer_v2 import SalmonViewer
+from emergent.salmon_abm.salmon_viewer import SalmonViewer
 from PyQt5 import QtWidgets
 
 

@@ -13,7 +13,7 @@ import numpy as np
 from time import sleep
 
 try:
-    from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation
+    from emergent.salmon_abm.sockeye import simulation
     from emergent.salmon_abm.tin_helpers import sample_evenly
 except Exception as e:
     print('Import error:', e)
