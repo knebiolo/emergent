@@ -162,7 +162,10 @@ class BehavioralWeights:
         import json
         with open(filepath, 'w') as f:
             json.dump(self.to_dict(), f, indent=2)
-        print(f"Saved behavioral weights to {filepath}")
+        try:
+            logger.info("Saved behavioral weights to %s", filepath)
+        except Exception:
+            pass
     
     def load(self, filepath):
         """Load learned weights from JSON file."""
@@ -170,7 +173,10 @@ class BehavioralWeights:
         with open(filepath, 'r') as f:
             data = json.load(f)
         self.from_dict(data)
-        print(f"Loaded behavioral weights from {filepath}")
+        try:
+            logger.info("Loaded behavioral weights from %s", filepath)
+        except Exception:
+            pass
     
     def mutate(self, scale=0.1):
         """Apply small random perturbations for exploration during training."""
@@ -706,7 +712,10 @@ class RLTrainer:
         best_reward = -np.inf
         best_weights = None
         
-        print(f"Starting RL training: {num_episodes} episodes {timesteps_per_episode} timesteps")
+        try:
+            logger.info("Starting RL training: %s episodes %s timesteps", num_episodes, timesteps_per_episode)
+        except Exception:
+            pass
         
         for episode in range(num_episodes):
             # Run episode with current weights
@@ -723,7 +732,10 @@ class RLTrainer:
             if episode_reward > best_reward:
                 best_reward = episode_reward
                 best_weights = self.behavioral_weights.to_dict()
-                print(f"Episode {episode}: New best reward = {episode_reward:.2f}")
+                try:
+                    logger.info("Episode %s: New best reward = %0.2f", episode, episode_reward)
+                except Exception:
+                    pass
                 
                 if save_path:
                     self.behavioral_weights.save(save_path)
@@ -1028,10 +1040,16 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     # Create LineString
     centerline = LineString(ordered_coords)
     
-    print(f"Centerline extracted: {centerline.length:.2f}m long")
+    try:
+        logger.info("Centerline extracted: %0.2fm long", centerline.length)
+    except Exception:
+        pass
     
     if centerline.length < min_length:
-        print(f"Centerline too short ({centerline.length:.2f}m < {min_length}m)")
+        try:
+            logger.warning("Centerline too short (%0.2fm < %sm)", centerline.length, min_length)
+        except Exception:
+            pass
         return None
     
     return centerline
@@ -3941,11 +3959,20 @@ class simulation():
             # Use absolute path if provided, otherwise join with model_dir
             path = fp if os.path.isabs(fp) else os.path.join(model_dir, fp)
             if os.path.exists(path):
-                print(f'Importing {key} from {path} as {surface_type}')
+                try:
+                    logger.info("Importing %s from %s as %s", key, path, surface_type)
+                except Exception:
+                    pass
                 self.enviro_import(path, surface_type)
-                print(f'Successfully imported {key}')
+                try:
+                    logger.info("Successfully imported %s", key)
+                except Exception:
+                    pass
             else:
-                print(f'Raster file not found: {path}')
+                try:
+                    logger.warning("Raster file not found: %s", path)
+                except Exception:
+                    pass
 
         # If a HECRAS plan is provided, prefer it and skip raster imports
         self.hecras_plan_path = hecras_plan_path
@@ -4085,14 +4112,22 @@ class simulation():
                     self.perimeter_polygon = None
                 
             except Exception as e:
-                print(f"ERROR: HECRAS initialization failed: {e}")
-                import traceback
-                traceback.print_exc()
+                try:
+                    logger.exception("HECRAS initialization failed: %s", e)
+                except Exception:
+                    pass
                 # Fall back to loading KDTree only
                 try:
                     load_hecras_plan_cached(self, self.hecras_plan_path, field_names=self.hecras_fields)
                 except Exception:
+                    # Disable HECRAS mode to avoid inconsistent later assumptions
+                    try:
+                        logger.warning("load_hecras_plan_cached failed; disabling HECRAS mode")
+                    except Exception:
+                        pass
                     self.hecras_plan_path = None
+                    self.use_hecras = False
+                    self.hecras_mapping_enabled = False
                     
         self.hdf5.flush()
         # Initialize in-memory buffers for per-timestep datasets to reduce small writes
@@ -4905,7 +4940,11 @@ class simulation():
         # get raster properties
         try:
             src = rasterio.open(data_dir)
-        except Exception:
+        except Exception as e:
+            try:
+                logger.exception("Failed to open raster %s: %s", data_dir, e)
+            except Exception:
+                pass
             return
         num_bands = src.count
         width = src.width
@@ -4926,7 +4965,10 @@ class simulation():
 
         # Create x_coords and y_coords if they don't exist (needed for all behavioral cues)
         if 'x_coords' not in self.hdf5:
-            print(f"Creating x_coords and y_coords with dimensions: height={height}, width={width}, rows={src.shape[0]}, cols={src.shape[1]}")
+            try:
+                logger.info("Creating x_coords and y_coords with dimensions: height=%s, width=%s, rows=%s, cols=%s", height, width, src.shape[0], src.shape[1])
+            except Exception:
+                pass
             # Get the dimensions of the raster
             rows, cols = src.shape
         
@@ -4936,7 +4978,10 @@ class simulation():
             # Set up HDF5 file and datasets
             dset_x = self.hdf5.create_dataset('x_coords', (height, width), dtype='float32')
             dset_y = self.hdf5.create_dataset('y_coords', (height, width), dtype='float32')
-            print(f"Created datasets with shape: {dset_x.shape}")
+            try:
+                logger.info("Created datasets with shape: %s", dset_x.shape)
+            except Exception:
+                pass
         
             # Process and write in chunks
             for i in range(0, rows, chunk_size):
@@ -9314,6 +9359,10 @@ class simulation():
                     self.simulation.drag = np.ascontiguousarray(new_drags)
                     self.simulation.battery = np.ascontiguousarray(new_batt)
             except Exception:
+                try:
+                    logger.exception("_drag_and_battery_numba failed; falling back to Python calc_battery")
+                except Exception:
+                    pass
                 # fallback: previous behavior
                 self.calc_battery(per_rec, ttf,  mask_dict)
             
@@ -9352,7 +9401,10 @@ class simulation():
                 self.precompute_pixel_indices()
             except Exception:
                 # If precompute fails, do not block timestep (fallback to on-demand geo_to_pixel)
-                pass
+                try:
+                    logger.exception("precompute_pixel_indices failed during timestep; falling back to on-demand geo_to_pixel")
+                except Exception:
+                    pass
         
         # Update refugia map - skip in HECRAS-only mode (requires HDF5 file I/O)
         if not getattr(self, 'use_hecras', False) or not getattr(self, 'hecras_mapping_enabled', False):
