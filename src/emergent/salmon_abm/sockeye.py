@@ -1246,8 +1246,15 @@ def map_hecras_for_agents(simulation, agent_xy, plan_path, field_names=None, k=8
     """Wrapper: map agent XY to HECRAS fields via central helper."""
     try:
         from emergent.salmon_abm.hecras_helpers import map_hecras_for_agents as _central
-    except Exception:
-        from .hecras_helpers import map_hecras_for_agents as _central
+    except ImportError:
+        try:
+            from .hecras_helpers import map_hecras_for_agents as _central
+        except Exception:
+            try:
+                logger.exception('Failed to import hecras_helpers.map_hecras_for_agents')
+            except Exception:
+                pass
+            raise
     return _central(simulation, agent_xy, plan_path, field_names=field_names, k=k, timestep=timestep)
 
 
@@ -1256,8 +1263,15 @@ def ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=None, targ
     """Wrapper: ensure `x_coords`/`y_coords` exist in `simulation.hdf5` by calling central helper."""
     try:
         from emergent.salmon_abm.hecras_helpers import ensure_hdf_coords_from_hecras as _central
-    except Exception:
-        from .hecras_helpers import ensure_hdf_coords_from_hecras as _central
+    except ImportError:
+        try:
+            from .hecras_helpers import ensure_hdf_coords_from_hecras as _central
+        except Exception:
+            try:
+                logger.exception('Failed to import local hecras_helpers.ensure_hdf_coords_from_hecras')
+            except Exception:
+                pass
+            raise
     return _central(simulation, plan_path, target_shape=target_shape, target_transform=target_transform, timestep=timestep)
     
     
@@ -5066,7 +5080,7 @@ class simulation():
         # get raster properties
         try:
             src = rasterio.open(data_dir)
-        except Exception as e:
+        except (OSError, IOError) as e:
             try:
                 logger.exception("Failed to open raster %s: %s", data_dir, e)
             except Exception:
@@ -5090,43 +5104,66 @@ class simulation():
         self.height = height
 
         # Create x_coords and y_coords if they don't exist (needed for all behavioral cues)
-        if 'x_coords' not in self.hdf5:
-            try:
-                logger.info("Creating x_coords and y_coords with dimensions: height=%s, width=%s, rows=%s, cols=%s", height, width, src.shape[0], src.shape[1])
-            except Exception:
-                pass
-            # Get the dimensions of the raster
-            rows, cols = src.shape
-        
-            # Define chunk size (you can adjust this based on your memory constraints)
-            chunk_size = 1024  # Example chunk size
-        
-            # Set up HDF5 file and datasets
-            dset_x = self.hdf5.create_dataset('x_coords', (height, width), dtype='float32')
-            dset_y = self.hdf5.create_dataset('y_coords', (height, width), dtype='float32')
-            try:
-                logger.info("Created datasets with shape: %s", dset_x.shape)
-            except Exception:
-                pass
-        
-            # Process and write in chunks
-            for i in range(0, rows, chunk_size):
-                row_chunk = slice(i, min(i + chunk_size, rows))
-                row_indices, col_indices = np.meshgrid(np.arange(row_chunk.start, row_chunk.stop), np.arange(cols), indexing='ij')
-    
-                # Apply the affine transformation
-                x_coords, y_coords = transform * (col_indices, row_indices)
-    
-                # Write the chunk to the HDF5 datasets
-                dset_x[row_chunk, :] = x_coords
-                dset_y[row_chunk, :] = y_coords
-            
-            # Flush to ensure data is written
-            self.hdf5.flush()
-            try:
-                logger.info("Successfully created x_coords and y_coords; flushed to disk. Shape: %s, first value: %s", dset_x.shape, dset_x[0,0])
-            except Exception:
-                pass
+            if 'x_coords' not in self.hdf5:
+                try:
+                    logger.info("Creating x_coords and y_coords with dimensions: height=%s, width=%s, rows=%s, cols=%s", height, width, src.shape[0], src.shape[1])
+                except Exception:
+                    pass
+
+                # Get the dimensions of the raster
+                rows, cols = src.shape
+
+                # Define chunk size (adjust based on memory constraints)
+                chunk_size = 1024
+
+                # Set up HDF5 file and datasets
+                try:
+                    dset_x = self.hdf5.create_dataset('x_coords', (height, width), dtype='float32')
+                    dset_y = self.hdf5.create_dataset('y_coords', (height, width), dtype='float32')
+                except (OSError, IOError, ValueError) as e:
+                    try:
+                        logger.exception('Failed to create x_coords/y_coords datasets: %s', e)
+                    except Exception:
+                        pass
+                    raise
+
+                try:
+                    logger.info("Created datasets with shape: %s", dset_x.shape)
+                except Exception:
+                    pass
+
+                # Process and write in chunks
+                for i in range(0, rows, chunk_size):
+                    row_chunk = slice(i, min(i + chunk_size, rows))
+                    try:
+                        row_indices, col_indices = np.meshgrid(np.arange(row_chunk.start, row_chunk.stop), np.arange(cols), indexing='ij')
+                        # Apply the affine transformation
+                        x_coords, y_coords = transform * (col_indices, row_indices)
+
+                        # Write the chunk to the HDF5 datasets
+                        dset_x[row_chunk, :] = x_coords.astype('float32')
+                        dset_y[row_chunk, :] = y_coords.astype('float32')
+                    except (OSError, IOError, ValueError, IndexError) as e:
+                        try:
+                            logger.exception('Failed writing x/y coords chunk starting at row %s: %s', i, e)
+                        except Exception:
+                            pass
+                        raise
+
+                # Flush to ensure data is written
+                try:
+                    self.hdf5.flush()
+                except (OSError, IOError) as e:
+                    try:
+                        logger.exception('Failed to flush HDF5 after writing x/y coords: %s', e)
+                    except Exception:
+                        pass
+                    raise
+
+                try:
+                    logger.info("Successfully created x_coords and y_coords; flushed to disk. Shape: %s, first value: %s", dset_x.shape, dset_x[0,0])
+                except Exception:
+                    pass
         else:
             try:
                 logger.info("x_coords already exists with shape: %s", self.hdf5['x_coords'].shape)
