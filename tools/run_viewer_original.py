@@ -1,15 +1,15 @@
-"""Non-blocking diagnostic: build SalmonViewer, call setup_background(), wait for mesh payload, print statuses."""
-import time
+"""Launch the original `salmon_viewer.py` for visual testing.
+"""
 import sys
 import os
+import time
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from emergent.salmon_abm.salmon_viewer_v2 import SalmonViewer
+from emergent.salmon_abm.salmon_viewer import SalmonViewer
 from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation
 
-# Minimal sim config: reuse training launcher discovery
 hecras_folder = os.path.join(REPO_ROOT, 'data', 'salmon_abm', '20240506')
 hecras_plan = None
 for f in os.listdir(hecras_folder):
@@ -47,24 +47,8 @@ if app is None:
     app = QtWidgets.QApplication(sys.argv)
 
 viewer = SalmonViewer(sim, dt=0.1, T=10, rl_trainer=None)
-print('Viewer instantiated')
+print('Original viewer instantiated')
 viewer.setup_background()
-try:
-    viewer.show()
-except Exception:
-    pass
-print('setup_background called; waiting for mesh payload...')
-# wait up to 10s for payload
-for i in range(20):
-    time.sleep(0.5)
-    # process Qt events so signals from QThread are delivered
-    try:
-        app.processEvents()
-    except Exception:
-        pass
-    payload = getattr(viewer, 'last_mesh_payload', None)
-    print(f'wait {i}: last_mesh_payload present={payload is not None}')
-    if payload is not None:
-        print('Payload keys:', list(payload.keys()))
-        break
-print('Diagnostic complete')
+print('setup_background called; viewer should appear')
+viewer.show()
+app.exec_()

@@ -1,23 +1,20 @@
 """
-Cleaned SalmonViewer implementation (rebuilt).
+salmon_viewer_v2.py
 
-This preserves the original UI panels, GL-based TIN rendering, HECRAS perimeter
-inference hook, RL panels, and weight controls. It is intentionally conservative
-"""
-Minimal SalmonViewer replacement (clean start).
+A clean, minimal replacement viewer module to be used while we repair the
+original `salmon_viewer.py`. This file contains a single-threaded GL mesh
+builder (QThread) and a compact `SalmonViewer` QWidget with `launch_viewer`.
 
-Provides:
-- _GLMeshBuilder: QThread that emits mesh payloads
-- SalmonViewer: compact QWidget with GL view (if available) and basic controls
-- launch_viewer: convenience to create QApplication and start the viewer
-
-This intentionally omits advanced metric panels to ensure a clean baseline.
+Purpose: provide a working baseline so you can run the RL visual training GUI
+and verify GL TIN rendering without the mangled original file.
 """
 import sys
 import numpy as np
 from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QSurfaceFormat
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QPushButton, QLabel, QWidget, QSlider, QGroupBox, QCheckBox
+import os
 
 import pyqtgraph as pg
 
@@ -25,34 +22,188 @@ try:
     import pyqtgraph.opengl as gl
 except Exception:
     gl = None
+finally:
+    try:
+        print(f'[GL] pyqtgraph.opengl available: {gl is not None}')
+    except Exception:
+        pass
+
+from contextlib import contextmanager
+import traceback
+
+
+@contextmanager
+def maybe_suppress(context: str | None = None):
+    try:
+        yield
+    except Exception as exc:
+        ctx = f" ({context})" if context else ""
+        try:
+            tb = traceback.format_exc()
+            print(f"maybe_suppress caught exception{ctx}: {exc}\n{tb}")
+        except Exception:
+            print(f"maybe_suppress caught exception{ctx}: {exc}")
+
+
+if gl is not None:
+    try:
+        class DebugGLViewWidget(gl.GLViewWidget):
+            def paintGL(self, *args, **kwargs):
+                try:
+                    from PyQt5.QtGui import QOpenGLContext
+                    ctx = QOpenGLContext.currentContext()
+                    print(f'[DBG_GL] paintGL called; currentContext={ctx}')
+                    if ctx is not None:
+                        try:
+                            fmt = ctx.format()
+                            print(f'[DBG_GL] ctx fmt: {fmt.majorVersion()}.{fmt.minorVersion()} profile={fmt.profile()}')
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print('[DBG_GL] paintGL context query failed:', e)
+                try:
+                    super().paintGL(*args, **kwargs)
+                except Exception as e:
+                    print('[DBG_GL] super().paintGL raised:', e)
+    except Exception:
+        DebugGLViewWidget = None
+else:
+    DebugGLViewWidget = None
+
+
+# PyOpenGL-based FBO renderer removed — prefer the Qt CPU painter renderer below.
+
+
+# PersistentOffscreenRenderer removed: prefer Qt CPU painter renderer (OffscreenQtFBORenderer).
+
+
+class OffscreenQtFBORenderer:
+    """PyQt-native FBO renderer using QOpenGLFramebufferObject + QPainter.
+
+    This renderer avoids PyOpenGL and uses Qt painting to draw a simple
+    triangle mesh projection into an image. It's robust across ANGLE and
+    desktop contexts.
+    """
+    def __init__(self, width=800, height=600):
+        # CPU-based painter rendering into a QImage; avoids GL context issues
+        self.width = int(width)
+        self.height = int(height)
+        self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+
+    def render(self, payload, size=None, bgcolor=(0.94, 0.94, 0.94, 1.0)):
+        from PyQt5.QtGui import QPainter, QColor, QImage
+        from PyQt5.QtCore import QRectF
+
+        if size is not None:
+            w, h = int(size[0]), int(size[1])
+            if (w, h) != (self.width, self.height):
+                self.width, self.height = w, h
+
+        verts = np.asarray(payload['verts'], dtype=float)
+        faces = np.asarray(payload['faces'], dtype=int)
+        colors = np.asarray(payload['colors'], dtype=float)
+
+        # paint into a QImage using QPainter (CPU rasterization)
+        from PyQt5.QtGui import QImage
+        img = QImage(self.width, self.height, QImage.Format_RGBA8888)
+        img.fill(0)
+        qp = QPainter()
+        try:
+            if not qp.begin(img):
+                raise RuntimeError('QPainter.begin(QImage) failed')
+            # fill background
+            bg = QColor()
+            bg.setRgbF(*bgcolor[:3], bgcolor[3] if len(bgcolor) > 3 else 1.0)
+            qp.fillRect(0, 0, self.width, self.height, bg)
+
+            # simple orthographic projection: map XY to image coordinates
+            minxy = np.min(verts[:, :2], axis=0)
+            maxxy = np.max(verts[:, :2], axis=0)
+            center = (minxy + maxxy) / 2.0
+            span = max(maxxy - minxy)
+            if span <= 0:
+                span = 1.0
+            sx = (self.width * 0.9) / span
+            sy = (self.height * 0.9) / span
+            tx = self.width / 2.0 - (center[0] * sx)
+            ty = self.height / 2.0 + (center[1] * sy)
+
+            # draw triangles
+            from PyQt5.QtGui import QPolygonF
+            from PyQt5.QtCore import QPointF
+            for tri in faces:
+                pts = []
+                cols = []
+                for idx in tri:
+                    x, y = verts[idx, 0], verts[idx, 1]
+                    px = x * sx + tx
+                    py = -y * sy + ty
+                    pts.append((px, py))
+                    cols.append(colors[idx])
+                # average color for triangle
+                meanc = np.clip(np.mean(np.asarray(cols), axis=0), 0.0, 1.0)
+                c = QColor()
+                c.setRgbF(float(meanc[0]), float(meanc[1]), float(meanc[2]), float(meanc[3] if len(meanc) > 3 else 1.0))
+                qp.setBrush(c)
+                qp.setPen(c)
+                poly = QPolygonF([QPointF(p[0], p[1]) for p in pts])
+                qp.drawPolygon(poly)
+        finally:
+            try:
+                qp.end()
+            except Exception:
+                pass
+        return img
+
+# On Windows, force desktop OpenGL to avoid ANGLE/renderer issues that can
+# produce blank/grey GL widgets. Respect existing env only if explicitly set.
+try:
+    if os.name == 'nt' and os.environ.get('QT_OPENGL', '').strip() == '':
+        os.environ['QT_OPENGL'] = 'desktop'
+        print('[GL] Forcing QT_OPENGL=desktop to prefer native OpenGL on Windows')
+except Exception:
+    pass
+
+try:
+    from .tin_helpers import sample_evenly
+except Exception:
+    try:
+        from emergent.salmon_abm.tin_helpers import sample_evenly
+    except Exception:
+        sample_evenly = None
 
 
 class _GLMeshBuilder(QtCore.QThread):
     mesh_ready = QtCore.pyqtSignal(object)
 
-    def __init__(self, tri_pts, tri_vals, tris, vert_exag=1.0, parent=None):
+    def __init__(self, pts, vals, vert_exag=1.0, poly=None, parent=None):
         super().__init__(parent=parent)
-        self.tri_pts = np.asarray(tri_pts, dtype=float)
-        self.tri_vals = np.asarray(tri_vals, dtype=float)
-        self.tris = np.asarray(tris, dtype=np.int32)
+        self.pts = np.asarray(pts, dtype=float)
+        self.vals = np.asarray(vals, dtype=float)
         self.vert_exag = float(vert_exag)
+        self.poly = poly
 
     def run(self):
         try:
-            pts = self.tri_pts
-            vals = self.tri_vals
-            faces = self.tris
-            if pts.shape[0] == vals.shape[0]:
-                z = vals * self.vert_exag
-                verts = np.column_stack([pts[:, 0], pts[:, 1], z])
-            else:
-                verts = np.column_stack([pts[:, 0], pts[:, 1], np.zeros(len(pts))])
+            # compute triangulation in the worker thread to avoid blocking the UI
+            try:
+                # Prefer the helper which triangulates and clips using the sim polygon
+                try:
+                    from emergent.salmon_abm.tin_helpers import triangulate_and_clip
+                except Exception:
+                    from .tin_helpers import triangulate_and_clip
 
-            # color map based on z
+                print(f'[MESH_BUILDER] starting triangulation: pts={self.pts.shape}, vals={self.vals.shape}, poly={type(self.poly)}')
+                verts, tris = triangulate_and_clip(self.pts, self.vals * self.vert_exag if self.pts.shape[0] == self.vals.shape[0] else np.zeros(len(self.pts)), poly=self.poly)
+                print(f'[MESH_BUILDER] triangulation complete: verts={verts.shape}, tris={tris.shape}')
+            except Exception as e:
+                self.mesh_ready.emit({"error": e})
+                return
+
+            # simple color mapping
             try:
                 zvals = verts[:, 2]
-                vmin = np.nanmin(zvals)
-                vmax = np.nanmax(zvals)
+                vmin, vmax = np.nanmin(zvals), np.nanmax(zvals)
                 span = vmax - vmin if vmax > vmin else 1.0
                 norm = (zvals - vmin) / span
                 colors = np.zeros((len(verts), 4), dtype=float)
@@ -63,8 +214,8 @@ class _GLMeshBuilder(QtCore.QThread):
             except Exception:
                 colors = np.tile([0.6, 0.6, 0.6, 1.0], (len(verts), 1))
 
-            payload = {"verts": verts.astype(float), "faces": faces.astype(int), "colors": colors.astype(float)}
-            self.mesh_ready.emit(payload)
+            print('[MESH_BUILDER] emitting mesh_ready payload')
+            self.mesh_ready.emit({"verts": verts.astype(float), "faces": tris.astype(int), "colors": colors.astype(float)})
         except Exception as e:
             self.mesh_ready.emit({"error": e})
 
@@ -78,39 +229,192 @@ class SalmonViewer(QtWidgets.QWidget):
         self.rl_trainer = rl_trainer
 
         self.current_timestep = 0
-        self.paused = True
+        # Start running immediately so agents swim over the TIN
+        self.paused = False
 
         self.tin_mesh = None
         self.gl_view = None
+        # Use only the Qt CPU-based offscreen renderer (QImage + QPainter).
+        # Remove legacy PersistentOffscreenRenderer and PyOpenGL OffscreenFBORenderer fallbacks.
+        try:
+            self.qt_fbo_renderer = OffscreenQtFBORenderer(width=800, height=600)
+            print('[QTFBO] OffscreenQtFBORenderer created')
+        except Exception as e:
+            self.qt_fbo_renderer = None
+            print('[QTFBO] Could not create OffscreenQtFBORenderer:', e)
 
         self._build_ui()
+        # preview cache for low-res background images
+        self._preview_cache = {}
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_simulation)
         self.timer.start(int(self.dt * 1000))
 
         QTimer.singleShot(10, self.setup_background)
+        try:
+            print(f'[VIEWER_INIT] gl_available={gl is not None}, hecras={getattr(self.sim, "use_hecras", False)}, plan={getattr(self.sim, "hecras_plan_path", None)}')
+        except Exception:
+            pass
+
+    def load_tin_payload(self, payload_or_path):
+        """Headless-friendly loader: accept a payload dict (as emitted by _GLMeshBuilder)
+        or a `.npz`/`.npy` file path and return (verts, faces, colors).
+
+        This function does not require OpenGL and can be used in headless tests.
+        """
+        # payload dict path
+        if isinstance(payload_or_path, dict):
+            payload = payload_or_path
+            if 'error' in payload:
+                raise RuntimeError(f"payload contains error: {payload['error']}")
+            verts = payload.get('verts')
+            faces = payload.get('faces')
+            colors = payload.get('colors')
+            return np.asarray(verts), np.asarray(faces), np.asarray(colors)
+
+        # file path path
+        path = str(payload_or_path)
+        if os.path.exists(path):
+            if path.endswith('.npz'):
+                data = np.load(path)
+                verts = data.get('verts')
+                faces = data.get('faces')
+                colors = data.get('colors')
+                return np.asarray(verts), np.asarray(faces), np.asarray(colors)
+            elif path.endswith('.npy'):
+                verts = np.load(path)
+                return np.asarray(verts), np.zeros((0, 3), dtype=int), np.zeros((len(verts), 4))
+        raise FileNotFoundError(path)
+
+    # Lightweight safe add/remove helpers for GL view to avoid ValueError
+    # when backends have different internal item list behaviors.
+    def _safe_add(self, item, mark: str | None = None):
+        try:
+            if getattr(self, 'gl_view', None) is None or item is None:
+                return False
+            try:
+                self.gl_view.addItem(item)
+            except Exception:
+                try:
+                    # some backends require different calling patterns
+                    add = getattr(self.gl_view, 'addItem', None)
+                    if callable(add):
+                        add(item)
+                except Exception:
+                    print('[GL] _safe_add failed to add item')
+                    return False
+            # optional marker attribute for later removal sweeps
+            if mark is not None:
+                try:
+                    setattr(item, '_marker', mark)
+                except Exception:
+                    pass
+            try:
+                self.gl_view.update()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    def _safe_remove(self, item):
+        try:
+            if getattr(self, 'gl_view', None) is None or item is None:
+                return False
+            try:
+                self.gl_view.removeItem(item)
+                try:
+                    self.gl_view.update()
+                except Exception:
+                    pass
+                return True
+            except Exception:
+                # attempt sweep-based removal by marker or repr match
+                try:
+                    items = getattr(self.gl_view, 'items', lambda: [])()
+                    if not items:
+                        return False
+                    # remove matching by marker attribute
+                    for it in list(items):
+                        try:
+                            if getattr(it, '_marker', None) == getattr(item, '_marker', None) and getattr(it, '_marker', None) is not None:
+                                try:
+                                    self.gl_view.removeItem(it)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    try:
+                        self.gl_view.update()
+                    except Exception:
+                        pass
+                    return True
+                except Exception:
+                    return False
+        except Exception:
+            return False
 
     def _build_ui(self):
         self.setWindowTitle('SalmonViewer')
         main = QHBoxLayout(self)
 
+        # Left panel: tools and metrics
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left.setMinimumWidth(260)
+
+        # Center: main plot or GL view
+        center = QWidget()
+        center_layout = QVBoxLayout(center)
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setMinimumSize(600, 600)
-        main.addWidget(self.plot_widget, 3)
+        center_layout.addWidget(self.plot_widget)
+        # Always show a 2D preview image under the main canvas so the center
+        # is not blank if GL rendering fails or is unavailable.
+        try:
+            self.preview_label = QLabel()
+            self.preview_label.setAlignment(Qt.AlignCenter)
+            self.preview_label.setMinimumHeight(240)
+            center_layout.addWidget(self.preview_label)
+        except Exception:
+            self.preview_label = None
 
+        # Right: RL controls and status
         right = QWidget()
         rlay = QVBoxLayout(right)
+        # Playback controls (match original viewer ordering and widget names)
+        self.play_btn = QPushButton('Play')
+        self.play_btn.clicked.connect(self._on_play)
+        self.pause_btn = QPushButton('Pause')
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.reset_btn = QPushButton('Reset')
+        self.reset_btn.clicked.connect(self.reset_simulation)
+        rlay.addWidget(self.play_btn)
+        rlay.addWidget(self.pause_btn)
+        rlay.addWidget(self.reset_btn)
 
-        btn_play = QPushButton('Play')
-        btn_play.clicked.connect(self._on_play)
-        btn_pause = QPushButton('Pause')
-        btn_pause.clicked.connect(self.toggle_pause)
-        btn_reset = QPushButton('Reset')
-        btn_reset.clicked.connect(self.reset_simulation)
-        rlay.addWidget(btn_play)
-        rlay.addWidget(btn_pause)
-        rlay.addWidget(btn_reset)
+        # Utility buttons (match original viewer ordering)
+        btn_rebuild = QPushButton('Rebuild TIN')
+        btn_rebuild.clicked.connect(self.rebuild_tin_action)
+        rlay.addWidget(btn_rebuild)
+        btn_perim = QPushButton('Toggle Perimeter')
+        btn_perim.clicked.connect(self.toggle_perimeter)
+        rlay.addWidget(btn_perim)
+
+        # Small visual toggles to match original viewer
+        try:
+            self.show_dead_cb = QCheckBox('Show Dead')
+            self.show_dead_cb.setChecked(False)
+            rlay.addWidget(self.show_dead_cb)
+            self.show_direction_cb = QCheckBox('Show Direction')
+            self.show_direction_cb.setChecked(False)
+            rlay.addWidget(self.show_direction_cb)
+            self.show_tail_cb = QCheckBox('Show Tail')
+            self.show_tail_cb.setChecked(False)
+            rlay.addWidget(self.show_tail_cb)
+        except Exception:
+            pass
 
         ve_group = QGroupBox('Vertical Exaggeration')
         ve_layout = QVBoxLayout()
@@ -125,14 +429,151 @@ class SalmonViewer(QtWidgets.QWidget):
         ve_group.setLayout(ve_layout)
         rlay.addWidget(ve_group)
 
-        rlay.addStretch()
+        # assemble main three-column layout: left | center | right
+        main.addWidget(left, 1)
+        main.addWidget(center, 3)
         main.addWidget(right, 1)
+
+        # Metrics placeholders (ported from original viewer)
+        self.mean_speed_label = QLabel('Mean Speed: --')
+        self.max_speed_label = QLabel('Max Speed: --')
+        self.mean_energy_label = QLabel('Mean Energy: --')
+        self.min_energy_label = QLabel('Min Energy: --')
+        self.upstream_progress_label = QLabel('Upstream Progress: --')
+        self.mean_centerline_label = QLabel('Mean Centerline: --')
+        self.mean_passage_delay_label = QLabel('Mean Passage Delay: --')
+        self.passage_success_rate_label = QLabel('Passage Success: --')
+
+        # compact metrics layout at the bottom of the right pane
+        try:
+            metrics_box = QGroupBox('Metrics')
+            metrics_layout = QVBoxLayout()
+            metrics_layout.addWidget(self.mean_speed_label)
+            metrics_layout.addWidget(self.max_speed_label)
+            metrics_layout.addWidget(self.mean_energy_label)
+            metrics_layout.addWidget(self.min_energy_label)
+            metrics_layout.addWidget(self.upstream_progress_label)
+            metrics_layout.addWidget(self.mean_centerline_label)
+            metrics_layout.addWidget(self.mean_passage_delay_label)
+            metrics_layout.addWidget(self.passage_success_rate_label)
+            # small extras
+            self.mean_nn_dist_label = QLabel('Mean NN Dist: --')
+            self.polarization_label = QLabel('Polarization: --')
+            metrics_layout.addWidget(self.mean_nn_dist_label)
+            metrics_layout.addWidget(self.polarization_label)
+
+            # per-episode metrics tracking helper (checkboxes)
+            self._available_episode_metrics = [
+                'collision_count', 'mean_upstream_progress', 'mean_upstream_velocity',
+                'energy_efficiency', 'mean_passage_delay'
+            ]
+            self.track_metric_cbs = {}
+            def add_label_with_cb(label_widget, metric_key, default_checked=False):
+                h = QHBoxLayout()
+                h.setContentsMargins(0, 0, 0, 0)
+                h.setSpacing(6)
+                h.addWidget(label_widget)
+                cb = QCheckBox()
+                cb.setChecked(default_checked)
+                cb.setFixedWidth(22)
+                h.addWidget(cb)
+                metrics_layout.addLayout(h)
+                self.track_metric_cbs[metric_key] = cb
+
+            # Map labels to metric keys (match original viewer)
+            # collision_count label (new)
+            self.collision_count_label = QLabel('Collision Count: --')
+            add_label_with_cb(self.collision_count_label, 'collision_count')
+            add_label_with_cb(self.upstream_progress_label, 'mean_upstream_progress')
+            self.mean_upstream_velocity_label = QLabel('Mean Upstream Velocity: --')
+            add_label_with_cb(self.mean_upstream_velocity_label, 'mean_upstream_velocity')
+            add_label_with_cb(self.mean_energy_label, 'energy_efficiency')
+            add_label_with_cb(self.mean_passage_delay_label, 'mean_passage_delay')
+
+            # per-episode plot
+            self.per_episode_plot = pg.PlotWidget(title='Per-Episode Metrics')
+            self.per_episode_plot.setLabel('bottom', 'Episode')
+            self.per_episode_plot.setLabel('left', 'Metric Value')
+            self.per_episode_plot.setMaximumHeight(220)
+            metrics_layout.addWidget(self.per_episode_plot)
+
+            metrics_box.setLayout(metrics_layout)
+            # Place metrics box in the left column to match original viewer layout
+            try:
+                left_layout.addWidget(metrics_box)
+            except Exception:
+                rlay.addWidget(metrics_box)
+        except Exception:
+            pass
+
+        # RL status labels
+        try:
+            self.episode_label = QLabel('Episode: 0 | Timestep: 0')
+            self.reward_label = QLabel('Reward: 0.00')
+            self.best_reward_label = QLabel('Best: 0.00')
+            rlay.addWidget(self.episode_label)
+            rlay.addWidget(self.reward_label)
+            rlay.addWidget(self.best_reward_label)
+        except Exception:
+            pass
+        # RL training state (port from original viewer)
+        try:
+            self.current_episode = 0
+            self.n_timesteps = getattr(self, 'T', 600)
+            self.episode_reward = 0.0
+            self.best_reward = float('-inf')
+            self.prev_metrics = None
+            self.rewards_history = []
+            # reward plot placeholder (optional)
+            try:
+                from pyqtgraph import mkPen
+                self.reward_plot = pg.PlotWidget(title='Episode Rewards')
+                self.reward_plot.setMaximumHeight(160)
+                rlay.addWidget(self.reward_plot)
+            except Exception:
+                self.reward_plot = None
+        except Exception:
+            pass
 
     def _on_play(self):
         self.paused = False
+        try:
+            self.play_btn.setText('Play')
+            self.pause_btn.setText('Pause')
+        except Exception:
+            pass
+
+    def toggle_perimeter(self):
+        try:
+            if not hasattr(self, 'perim_visible'):
+                self.perim_visible = True
+            # toggle
+            self.perim_visible = not self.perim_visible
+            if getattr(self, 'perim_scatter', None) is None:
+                return
+            if self.perim_visible:
+                try:
+                    self.gl_view.addItem(self.perim_scatter)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.gl_view.removeItem(self.perim_scatter)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def setup_background(self):
         try:
+            print('[RENDER] setup_background start')
+            try:
+                perim_info = getattr(self.sim, 'perimeter_points', None)
+                print(f'[RENDER] sim.perimeter_points type={type(perim_info)}')
+                if hasattr(perim_info, 'shape'):
+                    print(f'[RENDER] sim.perimeter_points shape={getattr(perim_info, "shape", None)}')
+            except Exception:
+                pass
             if not (hasattr(self.sim, 'use_hecras') and self.sim.use_hecras and hasattr(self.sim, 'hecras_plan_path')):
                 print('[RENDER] No HECRAS configured')
                 return
@@ -141,12 +582,18 @@ class SalmonViewer(QtWidgets.QWidget):
             with h5py.File(plan, 'r') as hdf:
                 coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:])
                 depth = np.array(hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'][0, :])
+            # determine sampling parameters
+            max_nodes = getattr(self.sim, 'tin_max_nodes', 5000)
+            depth_thresh = getattr(self.sim, 'tin_depth_thresh', 0.05)
 
-            mask = depth > 0.05
+            mask = depth > depth_thresh
             pts = coords[mask]
             vals = depth[mask]
-            max_nodes = getattr(self.sim, 'tin_max_nodes', 5000)
-            if len(pts) > max_nodes:
+
+            # improved spatial sampling (if helper available)
+            if sample_evenly is not None and len(pts) > max_nodes:
+                pts, vals = sample_evenly(pts, vals, max_nodes=max_nodes, grid_dim=120)
+            elif len(pts) > max_nodes:
                 idx = np.random.default_rng(0).choice(len(pts), size=max_nodes, replace=False)
                 pts = pts[idx]; vals = vals[idx]
 
@@ -154,80 +601,729 @@ class SalmonViewer(QtWidgets.QWidget):
                 print('[RENDER] Not enough points for TIN')
                 return
 
-            from scipy.spatial import Delaunay
-            tri = Delaunay(pts)
-            tris = tri.simplices
+            # Triangulation will be computed in the background builder thread
+            # Use perimeter generated by the simulation (vector-first). Viewer no longer
+            # performs its own dry-cell inference — sim is the single source of truth.
+            try:
+                sim_perim = getattr(self.sim, 'perimeter_points', None)
+                # Be tolerant: perimeter_points may be a list, array, or other container.
+                if sim_perim is None:
+                    self.perimeter_pts = None
+                else:
+                    try:
+                        # If it's a list of pairs or dicts, convert to an Nx2 array
+                        if isinstance(sim_perim, list):
+                            if len(sim_perim) == 0:
+                                self.perimeter_pts = None
+                            else:
+                                first = sim_perim[0]
+                                if isinstance(first, dict):
+                                    # common keys might be 'x','y' or 'lon','lat' or '0','1'
+                                    xs = []
+                                    ys = []
+                                    for item in sim_perim:
+                                        if 'x' in item and 'y' in item:
+                                            xs.append(item['x']); ys.append(item['y'])
+                                        elif 'lon' in item and 'lat' in item:
+                                            xs.append(item['lon']); ys.append(item['lat'])
+                                        elif 0 in item and 1 in item:
+                                            xs.append(item[0]); ys.append(item[1])
+                                        else:
+                                            # try to unpack list-like
+                                            try:
+                                                a, b = list(item)[:2]
+                                                xs.append(a); ys.append(b)
+                                            except Exception:
+                                                xs.append(np.nan); ys.append(np.nan)
+                                    self.perimeter_pts = np.column_stack([np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)])
+                                else:
+                                    # list of numeric pairs
+                                    try:
+                                        arr = np.asarray(sim_perim, dtype=float)
+                                        if arr.ndim == 2 and arr.shape[1] >= 2:
+                                            self.perimeter_pts = arr[:, :2]
+                                        else:
+                                            self.perimeter_pts = None
+                                    except Exception:
+                                        self.perimeter_pts = None
+                        else:
+                            # numpy array or other; try to coerce
+                            arr = np.asarray(sim_perim)
+                            if arr.ndim >= 2 and arr.shape[1] >= 2:
+                                self.perimeter_pts = arr[:, :2]
+                            else:
+                                self.perimeter_pts = None
+                    except Exception as e:
+                        print(f"[RENDER] Warning: couldn't coerce sim.perimeter_points: {e} (type={type(sim_perim)})")
+                        self.perimeter_pts = None
+            except Exception:
+                self.perimeter_pts = None
 
-            if gl is None:
-                print('[RENDER] GL not available')
-                return
+            # Even if GL is unavailable, we still run the mesh builder so we
+            # can produce a matplotlib-based 2D preview. Only create a GL
+            # view if `pyqtgraph.opengl` is available.
+            if gl is not None and self.gl_view is None:
+                try:
+                    if DebugGLViewWidget is not None:
+                        self.gl_view = DebugGLViewWidget()
+                    else:
+                        self.gl_view = gl.GLViewWidget()
+                    try:
+                        self.gl_view.setMouseTracking(True)
+                        vp = getattr(self.gl_view, 'viewport', None)
+                        if callable(vp):
+                            try:
+                                vobj = self.gl_view.viewport()
+                                vobj.setMouseTracking(True)
+                            except Exception:
+                                pass
+                        # Encourage a native window backing which many Windows
+                        # drivers require for on-screen GL rendering.
+                        try:
+                            from PyQt5.QtCore import Qt
+                            try:
+                                self.gl_view.setAttribute(Qt.WA_NativeWindow, True)
+                            except Exception:
+                                pass
+                            try:
+                                self.gl_view.setAttribute(Qt.WA_PaintOnScreen, True)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        try:
+                            self.gl_view.setMinimumSize(200, 200)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    parent = self.plot_widget.parent()
+                    layout = parent.layout()
+                    layout.removeWidget(self.plot_widget)
+                    self.plot_widget.hide()
+                    layout.addWidget(self.gl_view)
+                    # Make GL background light so meshes are visible
+                    try:
+                        from PyQt5.QtGui import QColor
+                        self.gl_view.setBackgroundColor(QColor(240, 240, 240))
+                    except Exception:
+                        try:
+                            self.gl_view.setBackgroundColor((1, 1, 1, 1))
+                        except Exception:
+                            pass
+                    # Add a grid for orientation and visual reference
+                    try:
+                        grid = gl.GLGridItem()
+                        grid.scale(10.0, 10.0, 1.0)
+                        try:
+                            self._safe_add(grid, mark='grid')
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    # Debug: print active QOpenGLContext and GL strings
+                    try:
+                        from PyQt5.QtGui import QOpenGLContext
+                        ctx = QOpenGLContext.currentContext()
+                        print(f'[GL] QOpenGLContext current: {ctx}')
+                        if ctx is not None:
+                            fmt = ctx.format()
+                            try:
+                                print(f"[GL] Context version: {fmt.majorVersion()}.{fmt.minorVersion()} profile={fmt.profile()}")
+                            except Exception:
+                                pass
+                        try:
+                            # query GL renderer strings via PyOpenGL if available
+                            import OpenGL.GL as GL
+                            try:
+                                renderer = GL.glGetString(GL.GL_RENDERER)
+                                vendor = GL.glGetString(GL.GL_VENDOR)
+                                version = GL.glGetString(GL.GL_VERSION)
+                                print(f"[GL] Vendor={vendor} Renderer={renderer} Version={version}")
+                            except Exception as e:
+                                print('[GL] glGetString failed:', e)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    # set a safe initial camera position
+                    try:
+                        self.gl_view.setCameraPosition(distance=200, elevation=20, azimuth=-30)
+                    except Exception:
+                        try:
+                            self.gl_view.setCameraPosition(pos=None, distance=200, elevation=20, azimuth=-30)
+                        except Exception:
+                            pass
+                except Exception:
+                    self.gl_view = None
 
-            if self.gl_view is None:
-                self.gl_view = gl.GLViewWidget()
-                parent = self.plot_widget.parent()
-                layout = parent.layout()
-                layout.removeWidget(self.plot_widget)
-                self.plot_widget.hide()
-                layout.addWidget(self.gl_view)
-
-            builder = _GLMeshBuilder(pts, vals, tris, vert_exag=getattr(self.sim, 'vert_exag', 1.0), parent=self)
+            # pass sim polygon so clipping happens in worker thread
+            sim_poly = getattr(self.sim, 'perimeter_polygon', None)
+            if getattr(self, 'perimeter_pts', None) is None:
+                print('[RENDER] Warning: sim.perimeter_points unavailable or malformed; viewer will still attempt TIN but may have holes')
+            builder = _GLMeshBuilder(pts, vals, vert_exag=getattr(self.sim, 'vert_exag', 1.0), poly=sim_poly, parent=self)
 
             def _on_mesh(payload):
                 if 'error' in payload:
                     print('[TIN] builder error', payload['error'])
                     return
+                # expose latest payload for external tests/inspection
+                try:
+                    self.last_mesh_payload = payload
+                except Exception:
+                    pass
+                # payload received and stored at `self.last_mesh_payload`
                 verts = payload['verts']; faces = payload['faces']; colors = payload['colors']
-                meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
-                mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded')
-                if self.tin_mesh is not None:
+                try:
+                    print(f'[TIN] payload shapes: verts={getattr(verts,"shape",None)}, faces={getattr(faces,"shape",None)}, colors={getattr(colors,"shape",None)}')
+                except Exception:
+                    pass
+                # If GL is available and we have a GL view, create a GL mesh
+                # item; otherwise skip GL rendering and rely on 2D preview.
+                if gl is not None and getattr(self, 'gl_view', None) is not None:
                     try:
-                        self.gl_view.removeItem(self.tin_mesh)
+                        # clipping already handled in worker thread
+                        meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
+                        mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded')
+                        if self.tin_mesh is not None:
+                            try:
+                                self._safe_remove(self.tin_mesh)
+                            except Exception:
+                                pass
+                        self.tin_mesh = mesh
+                        try:
+                            # Enable edges so the mesh is visible even if shaded lighting is poor
+                            mesh.setGLOptions('opaque')
+                            mesh.opts['drawEdges'] = True
+                            try:
+                                mesh.opts['edgeColor'] = (0.2, 0.2, 0.2, 1.0)
+                            except Exception:
+                                pass
+                            try:
+                                self._safe_add(mesh, mark='tin_mesh')
+                            except Exception:
+                                # fallback to direct add
+                                try:
+                                    self.gl_view.addItem(mesh)
+                                except Exception:
+                                    print('[TIN] failed to add mesh to gl_view')
+                        except Exception:
+                            try:
+                                self._safe_add(mesh, mark='tin_mesh')
+                            except Exception:
+                                try:
+                                    self.gl_view.addItem(mesh)
+                                except Exception as e:
+                                    print('[TIN] GL mesh creation failed to add mesh:', e)
+                    except Exception as e:
+                        print('[TIN] GL mesh creation failed:', e)
+
+                    # Also add a lightweight point overlay (robust fallback)
+                    try:
+                        if getattr(self, 'tin_points', None) is not None:
+                            try:
+                                self._safe_remove(self.tin_points)
+                            except Exception:
+                                pass
+                        pts3 = verts[:, :3].astype(float)
+                        # use a bright, opaque color for points
+                        try:
+                            pcolors = (1.0, 0.2, 0.2, 1.0)
+                        except Exception:
+                            pcolors = None
+                        self.tin_points = gl.GLScatterPlotItem(pos=pts3, color=pcolors, size=6)
+                        try:
+                            self._safe_add(self.tin_points, mark='tin_points')
+                        except Exception:
+                            try:
+                                self.gl_view.addItem(self.tin_points)
+                            except Exception as e:
+                                print('[TIN] failed to add scatter overlay:', e)
+                    except Exception as e:
+                        print('[TIN] failed to add scatter overlay:', e)
+
+                    # Force the GL widget to refresh/raise so it's visible on-screen
+                    try:
+                        try:
+                            self.gl_view.setVisible(True)
+                            self.gl_view.show()
+                            self.gl_view.raise_()
+                            self.gl_view.update()
+                            self.gl_view.repaint()
+                        except Exception:
+                            pass
+                        try:
+                            geom = self.gl_view.geometry()
+                            print(f'[TIN] gl_view visible={self.gl_view.isVisible()}, geometry={geom.getRect() if geom is not None else None}')
+                        except Exception:
+                            pass
+                        try:
+                            # list child widgets for debugging
+                            parent = self.gl_view.parent()
+                            children = parent.findChildren(QtWidgets.QWidget) if parent is not None else []
+                            print(f'[TIN] parent {parent}; child_count={len(children)}')
+                        except Exception:
+                            pass
                     except Exception:
                         pass
-                self.tin_mesh = mesh
-                self.gl_view.addItem(mesh)
+
+                    # fit camera to mesh extents and save a one-time screenshot for verification
+                    try:
+                        verts_min = np.min(verts[:, :2], axis=0)
+                        verts_max = np.max(verts[:, :2], axis=0)
+                        center = (verts_min + verts_max) / 2.0
+                        size = np.max(verts_max - verts_min)
+                        try:
+                            self.gl_view.setCameraPosition(pos=QtCore.QVector3D(center[0], center[1], size*1.0), elevation=90, azimuth=0)
+                        except Exception:
+                            try:
+                                self.gl_view.setCameraPosition(distance=max(1.0, size*3.0), elevation=60, azimuth=45)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    try:
+                        out_dir = getattr(self.sim, 'model_dir', None) or '.'
+                        out_path = os.path.join(out_dir, 'outputs', 'tin_screenshot.png')
+                        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                        try:
+                            img = self.gl_view.readQImage()
+                            img.save(out_path)
+                            print(f'[TIN] screenshot saved: {out_path}')
+                            try:
+                                from datetime import datetime
+                                repo_out_dir = os.path.join(os.getcwd(), 'outputs')
+                                os.makedirs(repo_out_dir, exist_ok=True)
+                                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                repo_path = os.path.join(repo_out_dir, f'tin_screenshot_{ts}.png')
+                                img.save(repo_path)
+                                print(f'[TIN] repo screenshot saved: {repo_path}')
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                else:
+                    # No GL available: still save a matplotlib-based preview as a PNG
+                    try:
+                        from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+                        from datetime import datetime
+                        # We'll save the matplotlib preview below; create file paths first
+                        out_dir = getattr(self.sim, 'model_dir', None) or '.'
+                        out_path = os.path.join(out_dir, 'outputs', 'tin_preview.png')
+                        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                    except Exception:
+                        out_path = None
+
+                # Prefer a Qt-native FBO renderer for a preview when GL view is not presenting
+                try:
+                    preview_img = None
+                    # try low-res cached render first to keep background updates fast
+                    try:
+                        key = (verts.shape[0], faces.shape[0], int(getattr(self, 've_slider', None).value() if getattr(self, 've_slider', None) is not None else 100))
+                        if hasattr(self, '_preview_cache') and key in self._preview_cache:
+                            preview_img = self._preview_cache[key]
+                        else:
+                            # generate low-res and cache it
+                            if getattr(self, 'qt_fbo_renderer', None) is not None:
+                                try:
+                                    low = self.qt_fbo_renderer.render({'verts': verts, 'faces': faces, 'colors': colors}, size=(320, 240))
+                                    if low is not None:
+                                        preview_img = low
+                                        try:
+                                            self._preview_cache[key] = low
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    # Attempt Qt-native FBO first
+                    if getattr(self, 'qt_fbo_renderer', None) is not None:
+                        try:
+                            preview_img = self.qt_fbo_renderer.render({'verts': verts, 'faces': faces, 'colors': colors}, size=(self.preview_label.width() or 640, self.preview_label.height() or 480))
+                            print('[TIN] preview generated by OffscreenQtFBORenderer')
+                        except Exception as e:
+                            print('[TIN] OffscreenQtFBORenderer failed:', e)
+
+                    # Removed legacy PyOpenGL and persistent hidden GL fallbacks.
+                    # If qt_fbo_renderer produced None or is unavailable, we'll fall back to saving a matplotlib preview below.
+
+                    # If we have an image, display and save it
+                    if preview_img is not None:
+                        try:
+                            from PyQt5.QtGui import QPixmap
+                            pix = QPixmap.fromImage(preview_img)
+                            if getattr(self, 'preview_label', None) is not None:
+                                try:
+                                    self.preview_label.setPixmap(pix.scaled(self.preview_label.width(), self.preview_label.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                                except Exception:
+                                    self.preview_label.setPixmap(pix)
+                            # save preview images
+                            try:
+                                out_dir = getattr(self.sim, 'model_dir', None) or '.'
+                                out_path = os.path.join(out_dir, 'outputs', 'tin_preview.png')
+                                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                                preview_img.save(out_path)
+                                print(f'[TIN] preview saved: {out_path}')
+                            except Exception:
+                                pass
+                            try:
+                                from datetime import datetime
+                                repo_out_dir = os.path.join(os.getcwd(), 'outputs')
+                                os.makedirs(repo_out_dir, exist_ok=True)
+                                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                repo_path = os.path.join(repo_out_dir, f'tin_preview_{ts}.png')
+                                preview_img.save(repo_path)
+                                print(f'[TIN] repo preview saved: {repo_path}')
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            print('[TIN] failed to display/save preview image:', e)
+                    else:
+                        # Last-resort: matplotlib preview
+                        try:
+                            import matplotlib.pyplot as plt
+                            from io import BytesIO
+                            fig, ax = plt.subplots(figsize=(6, 4))
+                            ax.triplot(verts[:, 0], verts[:, 1], faces, linewidth=0.5)
+                            ax.set_aspect('equal')
+                            ax.axis('off')
+                            buf = BytesIO()
+                            fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                            plt.close(fig)
+                            buf.seek(0)
+                            from PyQt5.QtGui import QImage, QPixmap
+                            qim = QImage.fromData(buf.getvalue())
+                            pix = QPixmap.fromImage(qim)
+                            if getattr(self, 'preview_label', None) is not None:
+                                try:
+                                    self.preview_label.setPixmap(pix.scaled(self.preview_label.width(), self.preview_label.height(), Qt.KeepAspectRatio))
+                                except Exception:
+                                    self.preview_label.setPixmap(pix)
+                            # save matplotlib preview
+                            try:
+                                out_dir = getattr(self.sim, 'model_dir', None) or '.'
+                                out_path = os.path.join(out_dir, 'outputs', 'tin_preview.png')
+                                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                                with open(out_path, 'wb') as f:
+                                    f.write(buf.getvalue())
+                                print(f'[TIN] preview saved: {out_path}')
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            print('[TIN] matplotlib preview failed:', e)
+                except Exception as e:
+                    print('[TIN] preview generation failed:', e)
+                    # save to disk when no GL view available
+                    try:
+                        if out_path is not None:
+                            with open(out_path, 'wb') as f:
+                                f.write(buf.getvalue())
+                            print(f'[TIN] preview saved: {out_path}')
+                            try:
+                                repo_out_dir = os.path.join(os.getcwd(), 'outputs')
+                                os.makedirs(repo_out_dir, exist_ok=True)
+                                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                repo_path = os.path.join(repo_out_dir, f'tin_preview_{ts}.png')
+                                with open(repo_path, 'wb') as f:
+                                    f.write(buf.getvalue())
+                                print(f'[TIN] repo preview saved: {repo_path}')
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
             builder.mesh_ready.connect(_on_mesh)
             try:
                 builder.start()
             except Exception:
                 builder.run()
-
         except Exception as e:
             print('[RENDER] setup_background failed:', e)
+
+    def rebuild_tin_action(self):
+        try:
+            if hasattr(self, 've_slider'):
+                self.sim.vert_exag = self.ve_slider.value() / 100.0
+            QtCore.QTimer.singleShot(10, self.setup_background)
+        except Exception as e:
+            print('[REBUILD] Exception rebuilding TIN:', e)
 
     def update_simulation(self):
         if self.paused:
             return
         try:
-            self.sim.timestep(self.current_timestep, self.dt, 9.81, None)
+            # Require the simulation to provide a PID controller. No fallback.
+            pid = getattr(self.sim, 'pid_controller', None)
+            if pid is None:
+                raise RuntimeError('Simulation has no pid_controller; ensure the sim creates it before visualization (no fallback allowed)')
+
+            self.sim.timestep(self.current_timestep, self.dt, 9.81, pid)
             self.current_timestep += 1
+            # RL training logic
+            if self.rl_trainer:
+                try:
+                    self.update_rl_training()
+                except Exception as e:
+                    print('[ERROR] update_rl_training failed:', e)
+            # Update displays
             self.update_displays()
         except Exception as e:
             print('[ERROR] simulation step failed:', e)
             self.paused = True
 
-    def update_displays(self):
-        if gl is None or self.gl_view is None:
-            return
-        if not (hasattr(self.sim, 'X') and hasattr(self.sim, 'Y')):
-            return
-        alive = (getattr(self.sim, 'dead', np.zeros(getattr(self.sim, 'num_agents', 0))) == 0)
-        if getattr(self.sim, 'num_agents', 0) == 0:
-            return
-        x = self.sim.X[alive]; y = self.sim.Y[alive]
-        pts = np.column_stack([x, y, np.zeros_like(x)])
-        scatter = gl.GLScatterPlotItem(pos=pts, color=(1.0, 0.4, 0.4, 0.9), size=6)
+    def update_rl_training(self):
+        """Update RL training metrics and episode management (ported behavior)."""
+        # Extract current state
         try:
-            if hasattr(self, 'gl_agent_scatter') and self.gl_agent_scatter is not None:
-                self.gl_view.removeItem(self.gl_agent_scatter)
+            current_metrics = self.rl_trainer.extract_state_metrics()
+        except Exception:
+            current_metrics = {}
+
+        try:
+            self.update_metrics_panel(current_metrics)
         except Exception:
             pass
-        self.gl_agent_scatter = scatter
-        self.gl_view.addItem(self.gl_agent_scatter)
+
+        # Compute reward
+        try:
+            if self.prev_metrics is not None:
+                reward = self.rl_trainer.compute_reward(self.prev_metrics, current_metrics)
+                self.episode_reward += reward
+        except Exception:
+            pass
+
+        self.prev_metrics = current_metrics
+
+        # Check if episode complete
+        if self.current_timestep >= self.n_timesteps:
+            print('\n' + ('='*80))
+            print(f'EPISODE {self.current_episode} COMPLETE | Reward: {self.episode_reward:.2f}')
+            self.rewards_history.append(self.episode_reward)
+
+            # Update best and save weights
+            try:
+                if self.episode_reward > self.best_reward:
+                    self.best_reward = self.episode_reward
+                    print(f'*** NEW BEST REWARD: {self.best_reward:.2f}')
+                    import json, os
+                    save_dir = os.path.join(os.getcwd(), 'outputs', 'rl_training')
+                    os.makedirs(save_dir, exist_ok=True)
+                    save_path = os.path.join(save_dir, 'best_weights.json')
+                    with open(save_path, 'w') as f:
+                        json.dump(self.rl_trainer.behavioral_weights.to_dict(), f, indent=2)
+                    print(f'Saved to {save_path}')
+            except Exception as e:
+                print('[ERROR] Saving best weights failed:', e)
+
+            # Mutate weights for next episode
+            try:
+                self.rl_trainer.behavioral_weights.mutate(scale=0.1)
+                self.sim.apply_behavioral_weights(self.rl_trainer.behavioral_weights)
+            except Exception as e:
+                print('[ERROR] Mutating/applying weights failed:', e)
+
+            # Reset for next episode (including agent positions)
+            try:
+                self.sim.reset_spatial_state(reset_positions=True)
+            except Exception:
+                try:
+                    self.sim.reset_spatial_state()
+                except Exception:
+                    pass
+            self.current_episode += 1
+            self.current_timestep = 0
+            self.episode_reward = 0.0
+            self.prev_metrics = None
+
+            # Update reward plot
+            try:
+                if hasattr(self, 'reward_plot') and self.reward_plot is not None:
+                    from pyqtgraph import mkPen
+                    self.reward_plot.plot(range(len(self.rewards_history)), self.rewards_history, pen=mkPen('g', width=2), clear=True)
+            except Exception:
+                pass
+
+            # Compute and append per-episode means for any tracked metrics
+            try:
+                if hasattr(self, 'episode_metric_accumulators'):
+                    for m, vals in self.episode_metric_accumulators.items():
+                        if len(vals) == 0:
+                            continue
+                        mean_val = float(np.mean(vals))
+                        if m not in self.per_episode_series:
+                            self.per_episode_series[m] = []
+                        self.per_episode_series[m].append(mean_val)
+                        if m not in self.per_episode_handles:
+                            pen = pg.mkPen('y', width=2)
+                            self.per_episode_handles[m] = self.per_episode_plot.plot(list(range(len(self.per_episode_series[m]))), self.per_episode_series[m], pen=pen, name=m)
+                        else:
+                            handle = self.per_episode_handles[m]
+                            handle.setData(list(range(len(self.per_episode_series[m]))), self.per_episode_series[m])
+                    # clear accumulators for next episode
+                    self.episode_metric_accumulators = {}
+            except Exception as e:
+                print('[ERROR] Exception in per-episode metrics update:', e)
+
+    def update_displays(self):
+        # If GL is unavailable, we'll draw into the 2D `plot_widget` instead.
+        use_2d = (gl is None) or (getattr(self, 'gl_view', None) is None)
+        if not (hasattr(self.sim, 'X') and hasattr(self.sim, 'Y')):
+            return
+        num_agents = getattr(self.sim, 'num_agents', 0)
+        if num_agents == 0:
+            return
+
+        dead_mask = (getattr(self.sim, 'dead', np.zeros(num_agents)) != 0)
+        alive_mask = ~dead_mask
+
+        # Respect show-dead checkbox if present
+        try:
+            if getattr(self, 'show_dead_cb', None) and self.show_dead_cb.isChecked():
+                x = self.sim.X; y = self.sim.Y
+                # color alive vs dead
+                colors = np.where(alive_mask[:, None], [1.0, 0.4, 0.4, 0.9], [0.4, 0.4, 0.4, 0.4])
+            else:
+                x = self.sim.X[alive_mask]; y = self.sim.Y[alive_mask]
+                colors = np.tile([1.0, 0.4, 0.4, 0.9], (len(x), 1))
+        except Exception:
+            x = self.sim.X[alive_mask]; y = self.sim.Y[alive_mask]
+            colors = np.tile([1.0, 0.4, 0.4, 0.9], (len(x), 1))
+
+        if use_2d:
+            try:
+                self.plot_widget.clear()
+                self.plot_widget.plot(x, y, pen=None, symbol='o', symbolBrush=pg.mkBrush(255, 102, 102), symbolSize=6)
+                # perimeter overlay
+                if getattr(self, 'perimeter_pts', None) is not None:
+                    perim = self.perimeter_pts
+                    self.plot_widget.plot(perim[:, 0], perim[:, 1], pen=pg.mkPen('g', width=1))
+            except Exception:
+                pass
+        else:
+            pts = np.column_stack([x, y, np.zeros_like(x)])
+            scatter = gl.GLScatterPlotItem(pos=pts, color=colors, size=6)
+            try:
+                if hasattr(self, 'gl_agent_scatter') and self.gl_agent_scatter is not None:
+                    try:
+                        self._safe_remove(self.gl_agent_scatter)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            self.gl_agent_scatter = scatter
+            self._safe_add(self.gl_agent_scatter, mark='agents')
+
+        # Direction indicators (basic implementation)
+        try:
+            if getattr(self, 'show_direction_cb', None) and self.show_direction_cb.isChecked() and hasattr(self.sim, 'heading'):
+                if hasattr(self, 'gl_direction_lines'):
+                    for item in getattr(self, 'gl_direction_lines', []):
+                            try:
+                                self._safe_remove(item)
+                            except Exception:
+                                pass
+                self.gl_direction_lines = []
+                if getattr(self, 'show_dead_cb', None) and self.show_dead_cb.isChecked():
+                    headings = self.sim.heading
+                    pos_x, pos_y = self.sim.X, self.sim.Y
+                else:
+                    headings = self.sim.heading[alive_mask]
+                    pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
+                arrow_length = 5.0
+                end_x = pos_x - arrow_length * np.cos(headings)
+                end_y = pos_y - arrow_length * np.sin(headings)
+                for i in range(len(pos_x)):
+                    seg_pts = np.array([[pos_x[i], pos_y[i], 0], [end_x[i], end_y[i], 0]])
+                    seg = gl.GLLinePlotItem(pos=seg_pts, color=(1.0, 0.78, 0.39, 0.6), width=1.5, antialias=True, mode='lines')
+                    try:
+                        self._safe_add(seg, mark='dir')
+                    except Exception:
+                        pass
+                    self.gl_direction_lines.append(seg)
+        except Exception:
+            pass
+        # if perimeter data exists and GL available, add perimeter overlay
+        try:
+            if getattr(self, 'perimeter_pts', None) is not None:
+                perim = self.perimeter_pts
+                if use_2d:
+                    # already drawn above in plot_widget
+                    pass
+                else:
+                    perim_pts3 = np.column_stack([perim[:,0], perim[:,1], np.zeros(len(perim))])
+                    self.perim_scatter = gl.GLScatterPlotItem(pos=perim_pts3, color=(0.0, 0.8, 0.0, 1.0), size=2)
+                    try:
+                        self._safe_add(self.perim_scatter, mark='perim')
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def toggle_pause(self):
         self.paused = not self.paused
+        try:
+            if self.paused:
+                self.play_btn.setEnabled(True)
+                self.pause_btn.setText('Pause')
+            else:
+                self.play_btn.setEnabled(False)
+                self.pause_btn.setText('Running')
+        except Exception:
+            pass
+
+    def update_metrics_panel(self, metrics):
+        """Update metrics panel labels (ported from original viewer)."""
+        def fmt_metric(val):
+            try:
+                return f"{float(val):.2f}"
+            except Exception:
+                return str(val) if val is not None else "--"
+        try:
+            self.mean_speed_label.setText(f"Mean Speed: {fmt_metric(metrics.get('mean_speed', None))}")
+            self.max_speed_label.setText(f"Max Speed: {fmt_metric(metrics.get('max_speed', None))}")
+            self.mean_energy_label.setText(f"Mean Energy: {fmt_metric(metrics.get('mean_energy', None))}")
+            self.min_energy_label.setText(f"Min Energy: {fmt_metric(metrics.get('min_energy', None))}")
+            upstream_val = metrics.get('upstream_progress', metrics.get('mean_upstream_progress', '--'))
+            if isinstance(upstream_val, (int, float)):
+                self.upstream_progress_label.setText(f"Upstream Progress: {upstream_val:.2f}")
+            else:
+                self.upstream_progress_label.setText(f"Upstream Progress: --")
+            self.mean_centerline_label.setText(f"Mean Centerline: {fmt_metric(metrics.get('mean_centerline', None))}")
+            self.mean_passage_delay_label.setText(f"Mean Passage Delay: {fmt_metric(metrics.get('mean_passage_delay', None))}")
+            if 'passage_success_rate' in metrics:
+                self.passage_success_rate_label.setText(f"Passage Success: {metrics['passage_success_rate']:.1%}")
+            elif 'success_rate' in metrics:
+                self.passage_success_rate_label.setText(f"Passage Success: {metrics['success_rate']:.1%}")
+            self.mean_nn_dist_label.setText(f"Mean NN Dist: {fmt_metric(metrics.get('mean_nn_dist', None))}")
+            self.polarization_label.setText(f"Polarization: {fmt_metric(metrics.get('polarization', None))}")
+
+            # accumulate per-timestep values into episode accumulators if checkboxes enabled
+            for m, cb in getattr(self, 'track_metric_cbs', {}).items():
+                try:
+                    if cb.isChecked() and m in metrics:
+                        if not hasattr(self, 'episode_metric_accumulators'):
+                            self.episode_metric_accumulators = {}
+                        if m not in self.episode_metric_accumulators:
+                            self.episode_metric_accumulators[m] = []
+                        self.episode_metric_accumulators[m].append(float(metrics[m]))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def refresh_rl_labels(self):
+        try:
+            self.episode_label.setText(f"Episode: {getattr(self, 'current_episode', 0)} | Timestep: {getattr(self, 'current_timestep', 0)}")
+            self.reward_label.setText(f"Reward: {getattr(self, 'episode_reward', 0.0):.2f}")
+            self.best_reward_label.setText(f"Best: {getattr(self, 'best_reward', 0.0):.2f}")
+        except Exception:
+            pass
 
     def reset_simulation(self):
         try:
@@ -243,764 +1339,74 @@ class SalmonViewer(QtWidgets.QWidget):
 
     def run(self):
         self.show()
-        return QtWidgets.QApplication.instance().exec_()
-
-
-def launch_viewer(simulation, dt=0.1, T=600, rl_trainer=None, **kwargs):
-    app = QtWidgets.QApplication.instance()
-    if app is None:
-        app = QtWidgets.QApplication(sys.argv)
-    viewer = SalmonViewer(simulation, dt=dt, T=T, rl_trainer=rl_trainer, **kwargs)
-    return viewer.run()
-                                                if len(pts) > max_nodes:
-                                                    rng = np.random.default_rng(0)
-                                                    idx = rng.choice(len(pts), size=max_nodes, replace=False)
-                                                    pts = pts[idx]; vals = vals[idx]
-
-                                                if len(pts) < 3:
-                                                    print('[TIN] Not enough points for TIN')
-                                                    return
-
-                                                from scipy.spatial import Delaunay
-                                                tri = Delaunay(pts)
-                                                tris = tri.simplices
-
-                                                if gl is None:
-                                                    print('[RENDER] pyqtgraph.opengl not available, skipping GL render')
-                                                    return
-
-                                                if self.gl_view is None:
-                                                    self.gl_view = gl.GLViewWidget()
-                                                    parent = self.plot_widget.parent()
-                                                    layout = parent.layout()
-                                                    layout.removeWidget(self.plot_widget)
-                                                    self.plot_widget.hide()
-                                                    layout.addWidget(self.gl_view)
-
-                                                builder = _GLMeshBuilder(pts, vals, tris, vert_exag=getattr(self.sim, 'vert_exag', 1.0), parent=self)
-
-                                                def _on_mesh_ready(payload):
-                                                    if 'error' in payload:
-                                                        print('[TIN] GL mesh builder error:', payload['error'])
-                                                        return
-                                                    verts = payload['verts']; faces = payload['faces']; colors = payload['colors']
-                                                    meshdata = gl.MeshData(vertexes=verts, faces=faces, vertexColors=colors)
-                                                    mesh = gl.GLMeshItem(meshdata=meshdata, smooth=True, drawEdges=False, shader='shaded', glOptions='opaque')
-                                                    mesh.setGLOptions('opaque')
-                                                    if self.tin_mesh is not None:
-                                                        try:
-                                                            self.gl_view.removeItem(self.tin_mesh)
-                                                        except Exception:
-                                                            pass
-                                                    self.tin_mesh = mesh
-                                                    self.gl_view.addItem(mesh)
-
-                                                builder.mesh_ready.connect(_on_mesh_ready)
-                                                try:
-                                                    builder.start()
-                                                except Exception:
-                                                    builder.run()
-
-                                                return
-
-                                            print('[RENDER] No HECRAS data; skipping background TIN build')
-                                        except Exception as e:
-                                            print('[RENDER] setup_background failed:', e)
-
-                                    def rebuild_tin_action(self):
-                                        try:
-                                            if hasattr(self, 've_slider'):
-                                                self.sim.vert_exag = self.ve_slider.value() / 100.0
-                                            QtCore.QTimer.singleShot(10, self.setup_background)
-                                        except Exception as e:
-                                            print('[REBUILD] Exception rebuilding TIN:', e)
-
-                                    def update_simulation(self):
-                                        if self.paused:
-                                            return
-                                        try:
-                                            self.sim.timestep(self.current_timestep, self.dt, 9.81, None)
-                                            self.current_timestep += 1
-                                            self.update_displays()
-                                        except Exception as e:
-                                            print('[ERROR] update_simulation failed:', e)
-                                            import traceback
-                                            traceback.print_exc()
-                                            self.paused = True
-
-                                    def update_displays(self):
-                                        try:
-                                            if gl is None or self.gl_view is None:
-                                                return
-                                            if not (hasattr(self.sim, 'X') and hasattr(self.sim, 'Y')):
-                                                return
-                                            alive_mask = (getattr(self.sim, 'dead', np.zeros(getattr(self.sim, 'num_agents', 0))) == 0)
-                                            if getattr(self.sim, 'num_agents', 0) == 0:
-                                                return
-                                            x = self.sim.X[alive_mask]; y = self.sim.Y[alive_mask]
-                                            pts = np.column_stack([x, y, np.zeros_like(x)])
-                                            scatter = gl.GLScatterPlotItem(pos=pts, color=(1.0, 0.4, 0.4, 0.9), size=6)
-                                            try:
-                                                if hasattr(self, 'gl_agent_scatter') and self.gl_agent_scatter is not None:
-                                                    self.gl_view.removeItem(self.gl_agent_scatter)
-                                            except Exception:
-                                                pass
-                                            self.gl_agent_scatter = scatter
-                                            self.gl_view.addItem(self.gl_agent_scatter)
-                                        except Exception as e:
-                                            print('[RENDER] update_displays error:', e)
-
-                                    def toggle_pause(self):
-                                        self.paused = not self.paused
-
-                                    def reset_simulation(self):
-                                        try:
-                                            if hasattr(self.sim, 'reset_spatial_state'):
-                                                try:
-                                                    self.sim.reset_spatial_state(reset_positions=True)
-                                                except TypeError:
-                                                    self.sim.reset_spatial_state()
-                                        except Exception as e:
-                                            print('[RESET] Exception:', e)
-                                        self.current_timestep = 0
-                                        self.current_episode = 0
-                                        self.episode_reward = 0.0
-                                        try:
-                                            self.update_displays()
-                                        except Exception:
-                                            pass
-
-                                    def run(self):
-                                        self.show()
-                                        return QtWidgets.QApplication.instance().exec_()
-
-
-                                def launch_viewer(simulation, dt=0.1, T=600, rl_trainer=None, **kwargs):
-                                    print('=== INSIDE launch_viewer ===')
-                                    print('Creating Qt Application...')
-                                    app = QtWidgets.QApplication.instance()
-                                    if app is None:
-                                        app = QtWidgets.QApplication(sys.argv)
-                                    print('Creating SalmonViewer...')
-                                    viewer = SalmonViewer(simulation, dt=dt, T=T, rl_trainer=rl_trainer, **kwargs)
-                                    print('Starting viewer.run()...')
-                                    return viewer.run()
-
-
-                                # End of minimal viewer
-        self.mean_nn_dist_label = QLabel("Mean NN Dist: --")
-        self.polarization_label = QLabel("Polarization: --")
-        layout.addWidget(self.mean_nn_dist_label)
-        layout.addWidget(self.polarization_label)
-
-        # (Removed time-series plots for collisions, upstream progress, and upstream velocity)
-
-        # Per-episode tracking toggles (inline next to metric labels)
-        # Available metrics that can be tracked per-episode
-        self._available_episode_metrics = [
-            'collision_count', 'mean_upstream_progress', 'mean_upstream_velocity',
-            'energy_efficiency', 'mean_passage_delay'
-        ]
-        self.track_metric_cbs = {}
-
-        # Helper to add a label+checkbox inline
-        def add_label_with_cb(label_widget, metric_key, default_checked=False):
-            h = QHBoxLayout()
-            h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(6)
-            # ensure label_widget is a widget
-            h.addWidget(label_widget)
-            cb = QCheckBox()
-            cb.setChecked(default_checked)
-            cb.setFixedWidth(22)
-            h.addWidget(cb)
-            layout.addLayout(h)
-            self.track_metric_cbs[metric_key] = cb
-
-        # collision_count (no real-time label previously) -> add new label
-        self.collision_count_label = QLabel("Collision Count: --")
-        add_label_with_cb(self.collision_count_label, 'collision_count')
-
-        # mean_upstream_progress -> use existing upstream_progress_label
-        add_label_with_cb(self.upstream_progress_label, 'mean_upstream_progress')
-
-        # mean_upstream_velocity (no label previously) -> add new label
-        self.mean_upstream_velocity_label = QLabel("Mean Upstream Velocity: --")
-        add_label_with_cb(self.mean_upstream_velocity_label, 'mean_upstream_velocity')
-
-        # energy_efficiency -> map to mean_energy_label
-        add_label_with_cb(self.mean_energy_label, 'energy_efficiency')
-
-        # mean_passage_delay -> map to mean_passage_delay_label
-        add_label_with_cb(self.mean_passage_delay_label, 'mean_passage_delay')
-
-        # Per-episode metrics plot (shows one point per episode per tracked metric)
-        self.per_episode_plot = pg.PlotWidget(title="Per-Episode Metrics")
-        self.per_episode_plot.setLabel('bottom', 'Episode')
-        self.per_episode_plot.setLabel('left', 'Metric Value')
-        self.per_episode_plot.setMaximumHeight(220)
-        layout.addWidget(self.per_episode_plot)
-        # storage for per-episode series and plot handles
-        self.per_episode_series = {m: [] for m in self._available_episode_metrics}
-        self.per_episode_handles = {}
-        
-        metrics_group.setLayout(layout)
-        return metrics_group
-    
-    def update_metrics_panel(self, metrics):
-        """Update metrics panel labels."""
-        def fmt_metric(val):
-            try:
-                return f"{float(val):.2f}"
-            except Exception:
-                return str(val) if val is not None else "--"
-        self.mean_speed_label.setText(f"Mean Speed: {fmt_metric(metrics.get('mean_speed', None))}")
-        self.max_speed_label.setText(f"Max Speed: {fmt_metric(metrics.get('max_speed', None))}")
-        self.mean_energy_label.setText(f"Mean Energy: {fmt_metric(metrics.get('mean_energy', None))}")
-        self.min_energy_label.setText(f"Min Energy: {fmt_metric(metrics.get('min_energy', None))}")
-        # Upstream progress may be reported as 'upstream_progress' or 'mean_upstream_progress'
-        upstream_val = metrics.get('upstream_progress', metrics.get('mean_upstream_progress', '--'))
-        if isinstance(upstream_val, (int, float)):
-            self.upstream_progress_label.setText(f"Upstream Progress: {upstream_val:.2f}")
-        else:
-            self.upstream_progress_label.setText(f"Upstream Progress: --")
-        def fmt_metric(val):
-            try:
-                return f"{float(val):.2f}"
-            except Exception:
-                return str(val) if val is not None else "--"
-        self.mean_centerline_label.setText(f"Mean Centerline: {fmt_metric(metrics.get('mean_centerline', None))}")
-        self.mean_passage_delay_label.setText(f"Mean Passage Delay: {fmt_metric(metrics.get('mean_passage_delay', None))}")
-        # Optional passage stats
-        if 'passage_success_rate' in metrics:
-            self.passage_success_rate_label.setText(f"Passage Success: {metrics['passage_success_rate']:.1%}")
-        elif 'success_rate' in metrics:
-            self.passage_success_rate_label.setText(f"Passage Success: {metrics['success_rate']:.1%}")
-        self.mean_nn_dist_label.setText(f"Mean NN Dist: {fmt_metric(metrics.get('mean_nn_dist', None))}")
-        self.polarization_label.setText(f"Polarization: {fmt_metric(metrics.get('polarization', None))}")
-        # Update collision time-series if provided
         try:
-            # (time-series plots removed; per-episode tracking still supported via checkboxes)
-
-            # Accumulate values for per-episode reporting when toggled ON
-            for m, cb in getattr(self, 'track_metric_cbs', {}).items():
-                try:
-                    if cb.isChecked() and m in metrics:
-                        if not hasattr(self, 'episode_metric_accumulators'):
-                            self.episode_metric_accumulators = {}
-                        if m not in self.episode_metric_accumulators:
-                            self.episode_metric_accumulators[m] = []
-                        # store numeric value for later per-episode averaging
-                        self.episode_metric_accumulators[m].append(float(metrics[m]))
-                except Exception:
-                    pass
-
-            if 'mean_upstream_velocity' in metrics:
-                # per-timestep upstream velocity not plotted; saved in accumulators if tracking enabled
+            # attempt to raise and activate the window so it appears on top
+            try:
+                self.raise_()
+                self.activateWindow()
+            except Exception:
                 pass
+            print('[VIEWER] shown')
         except Exception:
             pass
-
-    def refresh_rl_labels(self):
-        # Update episode and reward labels in RL panel
-        try:
-            self.episode_label.setText(f"Episode: {self.current_episode} | Timestep: {self.current_timestep}")
-            self.reward_label.setText(f"Reward: {self.episode_reward:.2f}")
-            self.best_reward_label.setText(f"Best: {self.best_reward:.2f}")
-        except Exception:
-            pass
-
-    
-    
-    def update_simulation(self):
-        """Main simulation update loop (called by timer)."""
-        if self.paused or self.current_timestep >= self.n_timesteps:
-            return
-        # Run one simulation timestep
-        try:
-            # Create dummy PID controller if needed
-            if not hasattr(self, 'pid_controller'):
-                from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import PID_controller
-                self.pid_controller = PID_controller(
-                    self.sim.num_agents,
-                    k_p=0.5, k_i=0.0, k_d=0.1
-                )
-            self.sim.timestep(
-                self.current_timestep,
-                self.dt,
-                9.81,  # gravity
-                self.pid_controller
-            )
-            self.current_timestep += 1
-            # RL training logic
-            if self.rl_trainer:
-                self.update_rl_training()
-            # Update displays
-            self.update_displays()
-        except Exception as e:
-            print(f"[ERROR] Error in simulation update: {e}")
-            import traceback
-            traceback.print_exc()
-            self.paused = True
-            try:
-                self.play_btn.setText("Play")
-                self.pause_btn.setText("Pause")
-            except Exception as e2:
-                print(f"[ERROR] Exception updating play/pause buttons: {e2}")
-                import traceback
-                traceback.print_exc()
-    
-    def update_rl_training(self):
-        """Update RL training metrics and episode management."""
-        # Extract current state
-        current_metrics = self.rl_trainer.extract_state_metrics()
-        # Update metrics panel immediately so time-series (collisions) are plotted
-        try:
-            self.update_metrics_panel(current_metrics)
-        except Exception as e:
-            print(f"[ERROR] Exception in update_metrics_panel: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Compute reward
-        if self.prev_metrics is not None:
-            reward = self.rl_trainer.compute_reward(self.prev_metrics, current_metrics)
-            self.episode_reward += reward
-        
-        self.prev_metrics = current_metrics
-        
-        # Check if episode complete
-        if self.current_timestep >= self.n_timesteps:
-            print(f"\n{'='*80}")
-            print(f"EPISODE {self.current_episode} COMPLETE | Reward: {self.episode_reward:.2f}")
-            
-            self.rewards_history.append(self.episode_reward)
-            
-            # Update best
-            if self.episode_reward > self.best_reward:
-                self.best_reward = self.episode_reward
-                print(f"*** NEW BEST REWARD: {self.best_reward:.2f}")
-                
-                # Save weights
-                import json
-                import os
-                save_dir = os.path.join(os.getcwd(), 'outputs', 'rl_training')
-                os.makedirs(save_dir, exist_ok=True)
-                save_path = os.path.join(save_dir, 'best_weights.json')
-                with open(save_path, 'w') as f:
-                    json.dump(self.rl_trainer.behavioral_weights.to_dict(), f, indent=2)
-                print(f"Saved to {save_path}")
-            
-            print(f"{'='*80}\n")
-            
-            # Mutate weights for next episode
-            self.rl_trainer.behavioral_weights.mutate(scale=0.1)
-            self.sim.apply_behavioral_weights(self.rl_trainer.behavioral_weights)
-            
-            # Reset for next episode (including agent positions)
-            self.sim.reset_spatial_state(reset_positions=True)
-            self.current_episode += 1
-            self.current_timestep = 0
-            self.episode_reward = 0.0
-            self.prev_metrics = None
-            
-            # Update reward plot
-            if hasattr(self, 'reward_plot'):
-                self.reward_plot.plot(
-                    range(len(self.rewards_history)),
-                    self.rewards_history,
-                    pen=mkPen('g', width=2),
-                    clear=True
-                )
-            
-            # Update metrics panel with passage delay
-            if hasattr(self.sim, 'get_mean_passage_delay'):
-                mean_delay = self.sim.get_mean_passage_delay()
-                self.update_metrics_panel({'mean_passage_delay': mean_delay})
-                print(f"Mean Passage Delay: {mean_delay:.2f} timesteps")
-
-            # Compute and append per-episode means for any tracked metrics
-            try:
-                if hasattr(self, 'episode_metric_accumulators'):
-                    for m, vals in self.episode_metric_accumulators.items():
-                        if len(vals) == 0:
-                            continue
-                        mean_val = float(np.mean(vals))
-                        # append to per-episode series
-                        if m not in self.per_episode_series:
-                            self.per_episode_series[m] = []
-                        self.per_episode_series[m].append(mean_val)
-                        # plot/update handle
-                        if m not in self.per_episode_handles:
-                            pen = mkPen('y', width=2)
-                            self.per_episode_handles[m] = self.per_episode_plot.plot(
-                                list(range(len(self.per_episode_series[m]))),
-                                self.per_episode_series[m],
-                                pen=pen,
-                                name=m
-                            )
-                        else:
-                            # update existing handle
-                            handle = self.per_episode_handles[m]
-                            handle.setData(list(range(len(self.per_episode_series[m]))), self.per_episode_series[m])
-                    # clear accumulators for next episode
-                    self.episode_metric_accumulators = {}
-            except Exception as e:
-                print(f"[ERROR] Exception in per-episode metrics update: {e}")
-                import traceback
-                traceback.print_exc()
-    
-    def update_displays(self):
-        """Update all display elements."""
-        # Minimal runtime checks (avoid noisy prints)
-        if not hasattr(self, 'tin_mesh') or self.tin_mesh is None:
-            print("[RENDER] tin_mesh not ready")
-        if not (hasattr(self.sim, 'X') and hasattr(self.sim, 'Y')):
-            print("[RENDER] Agent position data missing")
-        alive_mask = (self.sim.dead == 0)
-        import pyqtgraph.opengl as gl
-        # Agents
-        if self.show_dead_cb.isChecked():
-            x = self.sim.X
-            y = self.sim.Y
-            colors = np.where(alive_mask[:, np.newaxis], [1, 0.4, 0.4, 0.8], [0.4, 0.4, 0.4, 0.4])
-        else:
-            x = self.sim.X[alive_mask]
-            y = self.sim.Y[alive_mask]
-            colors = np.tile([1, 0.4, 0.4, 0.8], (len(x), 1))
-        if hasattr(self, 'gl_agent_scatter') and self.gl_agent_scatter is not None:
-            self.gl_view.removeItem(self.gl_agent_scatter)
-        pts = np.column_stack([x, y, np.zeros_like(x)])
-        self.gl_agent_scatter = gl.GLScatterPlotItem(pos=pts, color=colors, size=6)
-        self.gl_view.addItem(self.gl_agent_scatter)
-        print(f"[RENDER DEBUG] GLScatterPlotItem added, n_agents={len(x)}")
-
-        # Direction indicators
-        if hasattr(self, 'gl_direction_lines'):
-            for item in self.gl_direction_lines:
-                self.gl_view.removeItem(item)
-        self.gl_direction_lines = []
-        if self.show_direction_cb.isChecked() and hasattr(self.sim, 'heading'):
-            if self.show_dead_cb.isChecked():
-                headings = self.sim.heading
-                pos_x, pos_y = self.sim.X, self.sim.Y
-            else:
-                headings = self.sim.heading[alive_mask]
-                pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
-            arrow_length = 5.0
-            end_x = pos_x - arrow_length * np.cos(headings)
-            end_y = pos_y - arrow_length * np.sin(headings)
-            for i in range(len(pos_x)):
-                seg_pts = np.array([[pos_x[i], pos_y[i], 0], [end_x[i], end_y[i], 0]])
-                seg = gl.GLLinePlotItem(pos=seg_pts, color=(1.0, 0.78, 0.39, 0.6), width=1.5, antialias=True, mode='lines')
-                self.gl_view.addItem(seg)
-                self.gl_direction_lines.append(seg)
-
-        # Flapping tails
-        if hasattr(self, 'gl_tail_lines'):
-            for item in self.gl_tail_lines:
-                self.gl_view.removeItem(item)
-        self.gl_tail_lines = []
-        if self.show_tail_cb.isChecked() and hasattr(self.sim, 'heading'):
-            if self.show_dead_cb.isChecked():
-                headings = self.sim.heading
-                pos_x, pos_y = self.sim.X, self.sim.Y
-            else:
-                headings = self.sim.heading[alive_mask]
-                pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
-            current_time = getattr(self, 'current_timestep', 0) * float(getattr(self, 'dt', 1.0))
-            nvis = len(pos_x)
-            phases = self.tail_phases
-            if len(phases) != self.sim.num_agents:
-                phases = np.resize(phases, self.sim.num_agents)
-            for i in range(nvis):
-                if self.show_dead_cb.isChecked():
-                    gidx = i
-                else:
-                    alive_idx = np.nonzero(alive_mask)[0]
-                    if i < len(alive_idx):
-                        gidx = int(alive_idx[i])
-                    else:
-                        gidx = i
-                h = float(headings[i])
-                x0 = float(pos_x[i])
-                y0 = float(pos_y[i])
-                x1 = x0 - self.tail_L1 * np.cos(h)
-                y1 = y0 - self.tail_L1 * np.sin(h)
-                phase = float(phases[gidx]) if gidx < len(phases) else 0.0
-                theta = self.tail_amp * np.sin(2.0 * np.pi * self.tail_freq * current_time + phase)
-                x2 = x1 - self.tail_L2 * np.cos(h + theta)
-                y2 = y1 - self.tail_L2 * np.sin(h + theta)
-                seg1_pts = np.array([[x0, y0, 0], [x1, y1, 0]])
-                seg1 = gl.GLLinePlotItem(pos=seg1_pts, color=(0.7, 0.7, 1.0, 0.8), width=2, antialias=True, mode='lines')
-                self.gl_view.addItem(seg1)
-                self.gl_tail_lines.append(seg1)
-                seg2_pts = np.array([[x1, y1, 0], [x2, y2, 0]])
-                seg2 = gl.GLLinePlotItem(pos=seg2_pts, color=(1.0, 0.86, 0.7, 0.86), width=1, antialias=True, mode='lines')
-                self.gl_view.addItem(seg2)
-                self.gl_tail_lines.append(seg2)
-
-        # Draw direction indicators (OpenGL only)
-        import pyqtgraph.opengl as gl
-        if hasattr(self, 'gl_direction_lines'):
-            for item in self.gl_direction_lines:
-                self.gl_view.removeItem(item)
-        self.gl_direction_lines = []
-        if self.show_direction_cb.isChecked() and hasattr(self.sim, 'heading'):
-            if self.show_dead_cb.isChecked():
-                headings = self.sim.heading
-                pos_x, pos_y = self.sim.X, self.sim.Y
-            else:
-                headings = self.sim.heading[alive_mask]
-                pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
-            arrow_length = 5.0
-            end_x = pos_x - arrow_length * np.cos(headings)
-            end_y = pos_y - arrow_length * np.sin(headings)
-            for i in range(len(pos_x)):
-                seg_pts = np.array([[pos_x[i], pos_y[i], 0], [end_x[i], end_y[i], 0]])
-                seg = gl.GLLinePlotItem(pos=seg_pts, color=(1.0, 0.78, 0.39, 0.6), width=1.5, antialias=True, mode='lines')
-                self.gl_view.addItem(seg)
-                self.gl_direction_lines.append(seg)
-
-        # Draw purely-visual two-segment tails (proximal rigid + distal oscillating)
-        import pyqtgraph.opengl as gl
-        if hasattr(self, 'gl_view') and self.gl_view.isVisible():
-            # OpenGL mode
-            if hasattr(self, 'gl_tail_lines'):
-                for item in self.gl_tail_lines:
-                    self.gl_view.removeItem(item)
-            self.gl_tail_lines = []
-            if self.show_tail_cb.isChecked() and hasattr(self.sim, 'heading'):
-                if self.show_dead_cb.isChecked():
-                    headings = self.sim.heading
-                    pos_x, pos_y = self.sim.X, self.sim.Y
-                else:
-                    alive_mask = (self.sim.dead == 0)
-                    headings = self.sim.heading[alive_mask]
-                    pos_x, pos_y = self.sim.X[alive_mask], self.sim.Y[alive_mask]
-                current_time = getattr(self, 'current_timestep', 0) * float(getattr(self, 'dt', 1.0))
-                nvis = len(pos_x)
-                phases = self.tail_phases
-                if len(phases) != self.sim.num_agents:
-                    phases = np.resize(phases, self.sim.num_agents)
-                for i in range(nvis):
-                    if self.show_dead_cb.isChecked():
-                        gidx = i
-                    else:
-                        alive_idx = np.nonzero(alive_mask)[0]
-                        if i < len(alive_idx):
-                            gidx = int(alive_idx[i])
-                        else:
-                            gidx = i
-                    h = float(headings[i])
-                    x0 = float(pos_x[i])
-                    y0 = float(pos_y[i])
-                    x1 = x0 - self.tail_L1 * np.cos(h)
-                    y1 = y0 - self.tail_L1 * np.sin(h)
-                    phase = float(phases[gidx]) if gidx < len(phases) else 0.0
-                    theta = self.tail_amp * np.sin(2.0 * np.pi * self.tail_freq * current_time + phase)
-                    x2 = x1 - self.tail_L2 * np.cos(h + theta)
-                    y2 = y1 - self.tail_L2 * np.sin(h + theta)
-                    # Proximal segment
-                    seg1_pts = np.array([[x0, y0, 0], [x1, y1, 0]])
-                    seg1 = gl.GLLinePlotItem(pos=seg1_pts, color=(0.7, 0.7, 1.0, 0.8), width=2, antialias=True, mode='lines')
-                    self.gl_view.addItem(seg1)
-                    self.gl_tail_lines.append(seg1)
-                    # Distal segment
-                    seg2_pts = np.array([[x1, y1, 0], [x2, y2, 0]])
-                    seg2 = gl.GLLinePlotItem(pos=seg2_pts, color=(1.0, 0.86, 0.7, 0.86), width=1, antialias=True, mode='lines')
-                    self.gl_view.addItem(seg2)
-                    self.gl_tail_lines.append(seg2)
-        else:
-            # 2D mode
-            if self.show_tail_cb.isChecked() and hasattr(self.sim, 'heading'):
-                # clear old tail lines
-                if not hasattr(self, 'tail_lines'):
-                    self.tail_lines = []
-                for line in getattr(self, 'tail_lines', []):
-                    try:
-                        self.plot_widget.removeItem(line)
-                    except Exception:
-                        pass
-                # reset tail lines container
-                self.tail_lines = []
-            else:
-                # Clear tail lines when disabled
-                if hasattr(self, 'tail_lines'):
-                    for line in self.tail_lines:
-                        try:
-                            self.plot_widget.removeItem(line)
-                        except Exception:
-                            pass
-                    self.tail_lines = []
-        
-        # Update trajectories if enabled
-        if self.show_trajectories_cb.isChecked():
-            # Store current positions
-            self.trajectory_history.append((self.current_timestep, self.sim.X.copy(), self.sim.Y.copy()))
-            
-            # Limit history to last 100 timesteps to avoid slowdown
-            if len(self.trajectory_history) > 100:
-                self.trajectory_history.pop(0)
-            
-            # Clear old trajectory lines
-            for line in self.trajectory_lines:
-                self.plot_widget.removeItem(line)
-            self.trajectory_lines = []
-
-        # Refresh RL labels and metrics display
-        try:
-            self.refresh_rl_labels()
-        except Exception:
-            pass
-
-    def reset_simulation(self):
-        """Reset simulation state (UI Reset button handler)."""
-        try:
-            if hasattr(self, 'sim') and hasattr(self.sim, 'reset_spatial_state'):
-                try:
-                    self.sim.reset_spatial_state(reset_positions=True)
-                except TypeError:
-                    # older signature
-                    self.sim.reset_spatial_state()
-        except Exception as e:
-            print('[RESET] Exception calling sim.reset_spatial_state():', e)
-        # Reset viewer counters
-        try:
-            self.current_timestep = 0
-            self.current_episode = 0
-            self.episode_reward = 0.0
-            self.prev_metrics = None
-        except Exception:
-            pass
-        try:
-            # Update displays to reflect reset
-            self.update_displays()
-        except Exception:
-            pass
-        
-        
-        # Update status labels
-        current_time = self.current_timestep * self.dt
-        self.timestep_label.setText(f"Timestep: {self.current_timestep} / {self.n_timesteps}")
-        self.time_label.setText(f"Time: {current_time:.1f} / {self.T:.1f}s")
-        self.alive_label.setText(f"Alive: {alive_mask.sum()} / {self.sim.num_agents}")
-        
-        # Update agent count labels
-        if hasattr(self, 'agent_count_label'):
-            self.agent_count_label.setText(f"Total: {self.sim.num_agents}")
-            self.alive_count_label.setText(f"Alive: {alive_mask.sum()}")
-        
-        # Update RL labels
-        if self.rl_trainer:
-            self.episode_label.setText(f"Episode: {self.current_episode} | Timestep: {self.current_timestep}")
-            self.reward_label.setText(f"Reward: {self.episode_reward:.2f}")
-            self.best_reward_label.setText(f"Best: {self.best_reward:.2f}")
-            
-            # Update behavioral weights display during RL training
-            if hasattr(self.sim, 'behavioral_weights') and self.weight_labels:
-                weights = self.sim.behavioral_weights
-                for attr, label in self.weight_labels.items():
-                    if hasattr(weights, attr):
-                        value = getattr(weights, attr)
-                        label.setText(f"{attr.replace('_', ' ').title()}: {value:.3f}")
-                        label.setStyleSheet("font-size: 9pt; color: black;")  # Keep black always
-        
-        # Update metrics
-        try:
-            if hasattr(self.sim, 'swim_speeds') and alive_mask.sum() > 0:
-                mean_speed = np.nanmean(self.sim.swim_speeds[alive_mask, -1])
-                max_speed = np.nanmax(self.sim.swim_speeds[alive_mask, -1])
-                self.mean_speed_label.setText(f"Mean Speed: {mean_speed:.2f} m/s")
-                self.max_speed_label.setText(f"Max Speed: {max_speed:.2f} m/s")
-            
-            if hasattr(self.sim, 'battery') and alive_mask.sum() > 0:
-                mean_energy = np.mean(self.sim.battery[alive_mask])
-                min_energy = np.min(self.sim.battery[alive_mask])
-                self.mean_energy_label.setText(f"Mean Energy: {mean_energy:.1f}")
-                self.min_energy_label.setText(f"Min Energy: {min_energy:.1f}")
-            
-            if hasattr(self.sim, 'current_centerline_meas') and alive_mask.sum() > 0:
-                mean_cl = np.mean(self.sim.current_centerline_meas[alive_mask])
-                self.mean_centerline_label.setText(f"Mean Centerline: {mean_cl:.1f} m")
-                
-            # Schooling metrics (if available)
-            if alive_mask.sum() > 1:
-                from scipy.spatial import cKDTree
-                alive_pos = np.column_stack([self.sim.X[alive_mask], self.sim.Y[alive_mask]])
-                tree = cKDTree(alive_pos)
-                distances, _ = tree.query(alive_pos, k=2)
-                mean_nn_dist = np.mean(distances[:, 1])
-                self.mean_nn_dist_label.setText(f"Mean NN Dist: {mean_nn_dist:.1f} m")
-                
-                # Polarization (alignment of headings)
-                if hasattr(self.sim, 'heading'):
-                    alive_headings = self.sim.heading[alive_mask]
-                    mean_vec = np.array([np.mean(np.cos(alive_headings)), np.mean(np.sin(alive_headings))])
-                    polarization = np.linalg.norm(mean_vec)
-                    self.polarization_label.setText(f"Polarization: {polarization:.3f}")
-        except Exception:
-            pass
-    
-    def toggle_pause(self):
-        """Toggle simulation pause state from play/pause button."""
-        self.paused = not self.paused
-        print(f"[SalmonViewer] Paused set to {self.paused}")
-    
-    def run(self):
-        """Start the viewer (blocking call)."""
-        self.show()
         return QtWidgets.QApplication.instance().exec_()
-
-    def reset_simulation(self):
-        """Reset simulation state (UI Reset button handler)."""
-        try:
-            if hasattr(self, 'sim') and hasattr(self.sim, 'reset_spatial_state'):
-                try:
-                    self.sim.reset_spatial_state(reset_positions=True)
-                except TypeError:
-                    self.sim.reset_spatial_state()
-        except Exception as e:
-            print('[RESET] Exception calling sim.reset_spatial_state():', e)
-        try:
-            self.current_timestep = 0
-            self.current_episode = 0
-            self.episode_reward = 0.0
-            self.prev_metrics = None
-        except Exception:
-            pass
-        try:
-            self.update_displays()
-        except Exception:
-            pass
 
 
 def launch_viewer(simulation, dt=0.1, T=600, rl_trainer=None, **kwargs):
-    """Convenience function to launch viewer.
-    
-    Parameters
-    ----------
-    simulation : simulation object
-        Initialized salmon simulation
-    dt : float
-        Timestep in seconds
-    T : float
-        Total simulation time
-    rl_trainer : RLTrainer, optional
-        RL trainer for training visualization
-    **kwargs : additional arguments passed to SalmonViewer
-    
-    Returns
-    -------
-    int
-        Qt application exit code
-    """
-    print("=== INSIDE launch_viewer ===")
-    print(f"Creating Qt Application...")
-    app = QtWidgets.QApplication.instance()
-    if app is None:
-        app = QtWidgets.QApplication(sys.argv)
-    print(f"Creating SalmonViewer...")
-    viewer = SalmonViewer(simulation, dt=dt, T=T, rl_trainer=rl_trainer, **kwargs)
-    print(f"Starting viewer.run()...")
-    return viewer.run()
+    try:
+        print('[LAUNCH] checking for existing QApplication')
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            print('[LAUNCH] creating QApplication')
+            try:
+                # Prefer desktop OpenGL at the application level; must be set
+                # before QApplication is constructed.
+                try:
+                    from PyQt5.QtCore import QCoreApplication
+                    QCoreApplication.setAttribute(Qt.AA_UseDesktopOpenGL, True)
+                    print('[GL] QCoreApplication attribute AA_UseDesktopOpenGL set')
+                except Exception as e:
+                    print('[GL] Failed to set AA_UseDesktopOpenGL attribute:', e)
+            except Exception:
+                pass
+            # Set a reasonable default surface format to enable desktop GL
+            try:
+                fmt = QSurfaceFormat()
+                fmt.setRenderableType(QSurfaceFormat.OpenGL)
+                try:
+                    # Prefer a recent Core profile (desktop GL) which is
+                    # likely to provide modern GL functions.
+                    fmt.setProfile(QSurfaceFormat.CoreProfile)
+                    fmt.setVersion(3, 3)
+                    fmt.setDepthBufferSize(24)
+                    QSurfaceFormat.setDefaultFormat(fmt)
+                    print('[GLFMT] QSurfaceFormat set: OpenGL 3.3 Core')
+                except Exception:
+                    try:
+                        # Fallback to compatibility 2.0 for legacy drivers
+                        fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
+                        fmt.setVersion(2, 0)
+                        QSurfaceFormat.setDefaultFormat(fmt)
+                        print('[GLFMT] QSurfaceFormat set: OpenGL 2.0 Compatibility (fallback)')
+                    except Exception:
+                        try:
+                            # Final fallback: Core 3.2
+                            fmt.setProfile(QSurfaceFormat.CoreProfile)
+                            fmt.setVersion(3, 2)
+                            QSurfaceFormat.setDefaultFormat(fmt)
+                            print('[GLFMT] QSurfaceFormat set: OpenGL 3.2 Core (final fallback)')
+                        except Exception as e:
+                            print('[GLFMT] Failed to set requested QSurfaceFormat profiles:', e)
+            except Exception as e:
+                print('[GLFMT] Failed to set QSurfaceFormat:', e)
+            app = QtWidgets.QApplication(sys.argv)
+        viewer = SalmonViewer(simulation, dt=dt, T=T, rl_trainer=rl_trainer, **kwargs)
+        print('[LAUNCH] launching viewer.run()')
+        rc = viewer.run()
+        print(f'[LAUNCH] viewer.run() exited with code {rc}')
+        return rc
+    except Exception as e:
+        print('[LAUNCH] Exception launching viewer:', e)
+        import traceback
+        traceback.print_exc()
+        raise
