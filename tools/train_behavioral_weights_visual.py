@@ -117,7 +117,11 @@ def main():
             perim_info = getattr(sim, '_hecras_timestep', None)
         print(f'Using HECRAS perimeter timestep: {perim_info}')
         try:
-            launch_viewer(simulation=sim, dt=dt, T=n, rl_trainer=trainer)
+            print('Launching viewer (about to call launch_viewer)')
+            sys.stdout.flush()
+            rc = launch_viewer(sim, dt=dt, T=n, rl_trainer=trainer)
+            print(f'launch_viewer returned: {rc}')
+            sys.stdout.flush()
             return
         except Exception:
             # Fallback to headless run if viewer fails to start

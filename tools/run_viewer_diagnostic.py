@@ -53,6 +53,11 @@ print('setup_background called; waiting for mesh payload...')
 # wait up to 10s for payload
 for i in range(20):
     time.sleep(0.5)
+    # process Qt events so signals from QThread are delivered
+    try:
+        app.processEvents()
+    except Exception:
+        pass
     payload = getattr(viewer, 'last_mesh_payload', None)
     print(f'wait {i}: last_mesh_payload present={payload is not None}')
     if payload is not None:

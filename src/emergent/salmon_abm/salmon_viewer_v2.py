@@ -44,6 +44,93 @@ def maybe_suppress(context: str | None = None):
         except Exception:
             print(f"maybe_suppress caught exception{ctx}: {exc}")
 
+
+if gl is not None:
+    try:
+        class DebugGLViewWidget(gl.GLViewWidget):
+            def paintGL(self, *args, **kwargs):
+                try:
+                    from PyQt5.QtGui import QOpenGLContext
+                    ctx = QOpenGLContext.currentContext()
+                    print(f'[DBG_GL] paintGL called; currentContext={ctx}')
+                    if ctx is not None:
+                        try:
+                            fmt = ctx.format()
+                            print(f'[DBG_GL] ctx fmt: {fmt.majorVersion()}.{fmt.minorVersion()} profile={fmt.profile()}')
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print('[DBG_GL] paintGL context query failed:', e)
+                # Attempt to temporarily wrap glClearColor to catch GLError
+                wrapped = False
+                orig_clear = None
+                orig_glClear = None
+                try:
+                    import OpenGL.GL as _gl
+                    orig_clear = getattr(_gl, 'glClearColor', None)
+                    orig_glClear = getattr(_gl, 'glClear', None)
+                    if orig_clear is not None:
+                        def _safe_clear(r, g, b, a):
+                            try:
+                                return orig_clear(r, g, b, a)
+                            except Exception as _e:
+                                print('[DBG_GL] glClearColor suppressed error:', _e)
+                        _gl.glClearColor = _safe_clear
+                        wrapped = True
+                    if orig_glClear is not None:
+                        def _safe_glClear(mask):
+                            try:
+                                return orig_glClear(mask)
+                            except Exception as _e:
+                                print('[DBG_GL] glClear suppressed error:', _e)
+                        _gl.glClear = _safe_glClear
+                        wrapped = True
+                except Exception as e:
+                    print('[DBG_GL] Failed to wrap gl functions:', e)
+                # call parent implementation
+                try:
+                    try:
+                        import OpenGL.GL as _gl
+                        try:
+                            err_before = _gl.glGetError()
+                            print(f'[DBG_GL] glGetError before paint: {err_before}')
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(_gl, 'glCheckFramebufferStatus'):
+                                fstat = _gl.glCheckFramebufferStatus(_gl.GL_FRAMEBUFFER)
+                                print(f'[DBG_GL] glCheckFramebufferStatus: {fstat}')
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    super().paintGL(*args, **kwargs)
+                except Exception as e:
+                    print('[DBG_GL] super().paintGL raised:', e)
+                    try:
+                        import OpenGL.GL as _gl
+                        try:
+                            err_after = _gl.glGetError()
+                            print(f'[DBG_GL] glGetError after paint error: {err_after}')
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                finally:
+                    if wrapped:
+                        try:
+                            import OpenGL.GL as _gl
+                            if orig_clear is not None:
+                                _gl.glClearColor = orig_clear
+                            if orig_glClear is not None:
+                                _gl.glClear = orig_glClear
+                        except Exception:
+                            pass
+    except Exception:
+        DebugGLViewWidget = None
+else:
+    DebugGLViewWidget = None
+
 # On Windows, force desktop OpenGL to avoid ANGLE/renderer issues that can
 # produce blank/grey GL widgets. Respect existing env only if explicitly set.
 try:
@@ -543,7 +630,10 @@ class SalmonViewer(QtWidgets.QWidget):
             # view if `pyqtgraph.opengl` is available.
             if gl is not None and self.gl_view is None:
                 try:
-                    self.gl_view = gl.GLViewWidget()
+                    if DebugGLViewWidget is not None:
+                        self.gl_view = DebugGLViewWidget()
+                    else:
+                        self.gl_view = gl.GLViewWidget()
                     try:
                         self.gl_view.setMouseTracking(True)
                         vp = getattr(self.gl_view, 'viewport', None)
@@ -553,6 +643,24 @@ class SalmonViewer(QtWidgets.QWidget):
                                 vobj.setMouseTracking(True)
                             except Exception:
                                 pass
+                        # Encourage a native window backing which many Windows
+                        # drivers require for on-screen GL rendering.
+                        try:
+                            from PyQt5.QtCore import Qt
+                            try:
+                                self.gl_view.setAttribute(Qt.WA_NativeWindow, True)
+                            except Exception:
+                                pass
+                            try:
+                                self.gl_view.setAttribute(Qt.WA_PaintOnScreen, True)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        try:
+                            self.gl_view.setMinimumSize(200, 200)
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     parent = self.plot_widget.parent()
@@ -575,6 +683,31 @@ class SalmonViewer(QtWidgets.QWidget):
                         grid.scale(10.0, 10.0, 1.0)
                         try:
                             self._safe_add(grid, mark='grid')
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    # Debug: print active QOpenGLContext and GL strings
+                    try:
+                        from PyQt5.QtGui import QOpenGLContext
+                        ctx = QOpenGLContext.currentContext()
+                        print(f'[GL] QOpenGLContext current: {ctx}')
+                        if ctx is not None:
+                            fmt = ctx.format()
+                            try:
+                                print(f"[GL] Context version: {fmt.majorVersion()}.{fmt.minorVersion()} profile={fmt.profile()}")
+                            except Exception:
+                                pass
+                        try:
+                            # query GL renderer strings via PyOpenGL if available
+                            import OpenGL.GL as GL
+                            try:
+                                renderer = GL.glGetString(GL.GL_RENDERER)
+                                vendor = GL.glGetString(GL.GL_VENDOR)
+                                version = GL.glGetString(GL.GL_VERSION)
+                                print(f"[GL] Vendor={vendor} Renderer={renderer} Version={version}")
+                            except Exception as e:
+                                print('[GL] glGetString failed:', e)
                         except Exception:
                             pass
                     except Exception:
@@ -632,94 +765,95 @@ class SalmonViewer(QtWidgets.QWidget):
                                 mesh.opts['edgeColor'] = (0.2, 0.2, 0.2, 1.0)
                             except Exception:
                                 pass
-                            self.gl_view.addItem(mesh)
+                            try:
+                                self._safe_add(mesh, mark='tin_mesh')
+                            except Exception:
+                                # fallback to direct add
+                                try:
+                                    self.gl_view.addItem(mesh)
+                                except Exception:
+                                    print('[TIN] failed to add mesh to gl_view')
                         except Exception:
                             try:
                                 self._safe_add(mesh, mark='tin_mesh')
                             except Exception:
-                                print('[TIN] failed to add mesh to gl_view')
-                        # Also add a lightweight point overlay (robust fallback)
+                                try:
+                                    self.gl_view.addItem(mesh)
+                                except Exception as e:
+                                    print('[TIN] GL mesh creation failed to add mesh:', e)
+                    except Exception as e:
+                        print('[TIN] GL mesh creation failed:', e)
+
+                    # Also add a lightweight point overlay (robust fallback)
+                    try:
+                        if getattr(self, 'tin_points', None) is not None:
                             try:
-                                if getattr(self, 'tin_points', None) is not None:
-                                    try:
-                                        self._safe_remove(self.tin_points)
-                                    except Exception:
-                                        pass
-                            pts3 = verts[:, :3].astype(float)
-                            # use a bright, opaque color for points
-                            try:
-                                pcolors = (1.0, 0.2, 0.2, 1.0)
+                                self._safe_remove(self.tin_points)
                             except Exception:
-                                pcolors = None
-                            self.tin_points = gl.GLScatterPlotItem(pos=pts3, color=pcolors, size=6)
+                                pass
+                        pts3 = verts[:, :3].astype(float)
+                        # use a bright, opaque color for points
+                        try:
+                            pcolors = (1.0, 0.2, 0.2, 1.0)
+                        except Exception:
+                            pcolors = None
+                        self.tin_points = gl.GLScatterPlotItem(pos=pts3, color=pcolors, size=6)
+                        try:
                             self._safe_add(self.tin_points, mark='tin_points')
-                        except Exception as e:
-                            print('[TIN] failed to add scatter overlay:', e)
-                        # Force the GL widget to refresh/raise so it's visible on-screen
-                        try:
-                                try:
-                                    self.gl_view.setVisible(True)
-                                    self.gl_view.show()
-                                    self.gl_view.raise_()
-                                    self.gl_view.update()
-                                    self.gl_view.repaint()
-                                except Exception:
-                                    pass
-                            try:
-                                geom = self.gl_view.geometry()
-                                print(f'[TIN] gl_view visible={self.gl_view.isVisible()}, geometry={geom.getRect() if geom is not None else None}')
-                            except Exception:
-                                pass
-                            try:
-                                # list child widgets for debugging
-                                parent = self.gl_view.parent()
-                                children = parent.findChildren(QtWidgets.QWidget) if parent is not None else []
-                                print(f'[TIN] parent {parent}; child_count={len(children)}')
-                            except Exception:
-                                pass
                         except Exception:
-                            pass
-                        except Exception as e:
-                            print('[TIN] failed to add scatter overlay:', e)
-                        # fit camera to mesh extents with explicit distance/elevation
-                        try:
-                            verts_min = np.min(verts[:, :2], axis=0)
-                            verts_max = np.max(verts[:, :2], axis=0)
-                            center = (verts_min + verts_max) / 2.0
-                            size = np.max(verts_max - verts_min)
-                            # set camera distance and angles explicitly
                             try:
-                                self.gl_view.setCameraPosition(pos=None, distance=max(1.0, size*3.0), elevation=60, azimuth=45)
-                            except Exception:
-                                try:
-                                    try:
-                                        self.gl_view.setCameraPosition(pos=QtCore.QVector3D(center[0], center[1], size*2.0), elevation=60, azimuth=45)
-                                    except Exception:
-                                        pass
-                                except Exception:
-                                    pass
+                                self.gl_view.addItem(self.tin_points)
+                            except Exception as e:
+                                print('[TIN] failed to add scatter overlay:', e)
+                    except Exception as e:
+                        print('[TIN] failed to add scatter overlay:', e)
+
+                    # Force the GL widget to refresh/raise so it's visible on-screen
+                    try:
+                        try:
+                            self.gl_view.setVisible(True)
+                            self.gl_view.show()
+                            self.gl_view.raise_()
+                            self.gl_view.update()
+                            self.gl_view.repaint()
                         except Exception:
                             pass
                         try:
-                            items = getattr(self.gl_view, 'items', lambda: [])()
-                            print(f'[TIN] gl_view has {len(items) if items is not None else 0} items')
+                            geom = self.gl_view.geometry()
+                            print(f'[TIN] gl_view visible={self.gl_view.isVisible()}, geometry={geom.getRect() if geom is not None else None}')
                         except Exception:
                             pass
-                        # fit camera to mesh extents
                         try:
-                            verts_min = np.min(verts[:, :2], axis=0)
-                            verts_max = np.max(verts[:, :2], axis=0)
-                            center = (verts_min + verts_max) / 2.0
-                            size = np.max(verts_max - verts_min)
-                            # place camera above center, distance based on size
+                            # list child widgets for debugging
+                            parent = self.gl_view.parent()
+                            children = parent.findChildren(QtWidgets.QWidget) if parent is not None else []
+                            print(f'[TIN] parent {parent}; child_count={len(children)}')
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                    # fit camera to mesh extents and save a one-time screenshot for verification
+                    try:
+                        verts_min = np.min(verts[:, :2], axis=0)
+                        verts_max = np.max(verts[:, :2], axis=0)
+                        center = (verts_min + verts_max) / 2.0
+                        size = np.max(verts_max - verts_min)
+                        try:
                             self.gl_view.setCameraPosition(pos=QtCore.QVector3D(center[0], center[1], size*1.0), elevation=90, azimuth=0)
                         except Exception:
-                            pass
-                        # save a one-time screenshot for verification
+                            try:
+                                self.gl_view.setCameraPosition(distance=max(1.0, size*3.0), elevation=60, azimuth=45)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    try:
+                        out_dir = getattr(self.sim, 'model_dir', None) or '.'
+                        out_path = os.path.join(out_dir, 'outputs', 'tin_screenshot.png')
+                        os.makedirs(os.path.dirname(out_path), exist_ok=True)
                         try:
-                            out_dir = getattr(self.sim, 'model_dir', None) or '.'
-                            out_path = os.path.join(out_dir, 'outputs', 'tin_screenshot.png')
-                            os.makedirs(os.path.dirname(out_path), exist_ok=True)
                             img = self.gl_view.readQImage()
                             img.save(out_path)
                             print(f'[TIN] screenshot saved: {out_path}')
@@ -735,8 +869,8 @@ class SalmonViewer(QtWidgets.QWidget):
                                 pass
                         except Exception:
                             pass
-                    except Exception as e:
-                        print('[TIN] GL mesh creation failed:', e)
+                    except Exception:
+                        pass
                 else:
                     # No GL available: still save a matplotlib-based preview as a PNG
                     try:
@@ -769,6 +903,26 @@ class SalmonViewer(QtWidgets.QWidget):
                             self.preview_label.setPixmap(pix.scaled(self.preview_label.width(), self.preview_label.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
                         except Exception:
                             self.preview_label.setPixmap(pix)
+                    # If the GL widget exists but isn't presenting its surface,
+                    # ensure the 2D preview is visible so the user sees something.
+                    try:
+                        if getattr(self, 'gl_view', None) is not None and (not self.gl_view.isVisible()):
+                            try:
+                                self.gl_view.hide()
+                            except Exception:
+                                pass
+                            try:
+                                if getattr(self, 'preview_label', None) is not None:
+                                    self.preview_label.show()
+                                    try:
+                                        self.preview_label.raise_()
+                                    except Exception:
+                                        pass
+                                    print('[TIN] GL view not presenting — showing matplotlib preview instead')
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     # save to disk when no GL view available
                     try:
                         if out_path is not None:
@@ -1110,25 +1264,47 @@ def launch_viewer(simulation, dt=0.1, T=600, rl_trainer=None, **kwargs):
         app = QtWidgets.QApplication.instance()
         if app is None:
             print('[LAUNCH] creating QApplication')
+            try:
+                # Prefer desktop OpenGL at the application level; must be set
+                # before QApplication is constructed.
+                try:
+                    from PyQt5.QtCore import QCoreApplication
+                    QCoreApplication.setAttribute(Qt.AA_UseDesktopOpenGL, True)
+                    print('[GL] QCoreApplication attribute AA_UseDesktopOpenGL set')
+                except Exception as e:
+                    print('[GL] Failed to set AA_UseDesktopOpenGL attribute:', e)
+            except Exception:
+                pass
             # Set a reasonable default surface format to enable desktop GL
             try:
                 fmt = QSurfaceFormat()
                 fmt.setRenderableType(QSurfaceFormat.OpenGL)
                 try:
+                    # Prefer a recent Core profile (desktop GL) which is
+                    # likely to provide modern GL functions.
                     fmt.setProfile(QSurfaceFormat.CoreProfile)
-                    fmt.setVersion(3, 2)
+                    fmt.setVersion(3, 3)
+                    fmt.setDepthBufferSize(24)
                     QSurfaceFormat.setDefaultFormat(fmt)
-                    print('[GL] QSurfaceFormat set: OpenGL 3.2 Core')
+                    print('[GLFMT] QSurfaceFormat set: OpenGL 3.3 Core')
                 except Exception:
                     try:
+                        # Fallback to compatibility 2.0 for legacy drivers
                         fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
                         fmt.setVersion(2, 0)
                         QSurfaceFormat.setDefaultFormat(fmt)
-                        print('[GL] QSurfaceFormat set: OpenGL 2.0 Compatibility')
-                    except Exception as e:
-                        print('[GL] Failed to set requested QSurfaceFormat profiles:', e)
+                        print('[GLFMT] QSurfaceFormat set: OpenGL 2.0 Compatibility (fallback)')
+                    except Exception:
+                        try:
+                            # Final fallback: Core 3.2
+                            fmt.setProfile(QSurfaceFormat.CoreProfile)
+                            fmt.setVersion(3, 2)
+                            QSurfaceFormat.setDefaultFormat(fmt)
+                            print('[GLFMT] QSurfaceFormat set: OpenGL 3.2 Core (final fallback)')
+                        except Exception as e:
+                            print('[GLFMT] Failed to set requested QSurfaceFormat profiles:', e)
             except Exception as e:
-                print('[GL] Failed to set QSurfaceFormat:', e)
+                print('[GLFMT] Failed to set QSurfaceFormat:', e)
             app = QtWidgets.QApplication(sys.argv)
         viewer = SalmonViewer(simulation, dt=dt, T=T, rl_trainer=rl_trainer, **kwargs)
         print('[LAUNCH] launching viewer.run()')
