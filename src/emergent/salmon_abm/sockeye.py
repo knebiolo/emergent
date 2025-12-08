@@ -178,8 +178,11 @@ class BehavioralWeights:
         self.from_dict(data)
         try:
             logger.info("Loaded behavioral weights from %s", filepath)
+        except (ValueError, IndexError, TypeError, AttributeError) as e:
+            logger.exception('Collision response failed; skipping collision handling for this timestep')
         except Exception:
-            pass
+            logger.exception('Unexpected error in collision response; re-raising')
+            raise
     
     def mutate(self, scale=0.1):
         """Apply small random perturbations for exploration during training."""
@@ -592,8 +595,12 @@ class RLTrainer:
                         if dist < pair_thresh:
                             collision_count += 1
                 metrics['collision_count'] = collision_count
-            except Exception:
+            except (ValueError, IndexError, TypeError, AttributeError):
+                logger.exception('Collision metric computation failed; returning 0 collisions')
                 metrics['collision_count'] = 0
+            except Exception:
+                logger.exception('Unexpected error computing collision metrics; re-raising')
+                raise
 
             # Dry / shallow detection
             try:
@@ -5370,7 +5377,8 @@ class simulation():
                 try:
                     inv = get_inv_transform(self, getattr(self, 'depth_rast_transform', None))
                     rows, cols = geo_to_pixel_from_inv(inv, self.X.flatten(), self.Y.flatten())
-                except Exception:
+                except (ValueError, TypeError, AttributeError) as e:
+                    logger.exception('geo_to_pixel_from_inv failed; falling back to KDTree nearest pixel')
                     # fallback to brute nearest neighbor in coords arrays
                     flat_xy = np.column_stack((xs.ravel(), ys.ravel()))
                     pts = np.column_stack((self.X.flatten(), self.Y.flatten()))
@@ -5379,6 +5387,9 @@ class simulation():
                     dists, inds = tree.query(pts, k=1)
                     rows = (inds // xs.shape[1]).astype(int)
                     cols = (inds % xs.shape[1]).astype(int)
+                except Exception:
+                    logger.exception('Unexpected error during geo->pixel conversion; re-raising')
+                    raise
                 # clamp
                 rows = np.clip(rows, 0, rast.shape[0]-1)
                 cols = np.clip(cols, 0, rast.shape[1]-1)
@@ -6270,14 +6281,14 @@ class simulation():
                 else:
                     self.closest_agent = np.full(self.num_agents, np.nan)
                     self.nearest_neighbor_distance = np.full(self.num_agents, np.nan)
-        except Exception:
-            try:
-                logger.exception("Neighbor computation failed during init — falling back to NaN arrays")
-            except Exception:
-                pass
-            # If neighbor computation fails, provide safe fallbacks for both arrays
+        except (ValueError, IndexError, TypeError, AttributeError) as e:
+            logger.exception("Neighbor computation failed during init — falling back to NaN arrays")
+            # Provide safe fallbacks for both arrays
             self.closest_agent = np.full(self.num_agents, np.nan)
             self.nearest_neighbor_distance = np.full(self.num_agents, np.nan)
+        except Exception:
+            logger.exception('Unexpected error during neighbor init; re-raising')
+            raise
 
         # Optional: override or augment raster-sampled fields with HECRAS plan mapping
         # To enable, set `self.hecras_plan_path` (string path) and `self.hecras_fields` (list of field names)
@@ -6326,9 +6337,18 @@ class simulation():
                     if 'vel_y' in self.hecras_node_fields:
                         vals = self.apply_hecras_mapping(self.hecras_node_fields['vel_y'])
                         self.y_vel = np.asarray(vals).flatten()
-            except Exception:
-                # If mapping fails for any reason, silently fall back to raster values
+            except (KeyError, IndexError, ValueError, OSError) as e:
+                try:
+                    logger.exception('HECRAS mapping failed for node fields; disabling HECRAS mapping for this sim: %s', e)
+                except Exception:
+                    pass
                 self.use_hecras = False
+            except Exception:
+                try:
+                    logger.exception('Unexpected error during HECRAS mapping — re-raising')
+                except Exception:
+                    pass
+                raise
 
     def precompute_pixel_indices(self):
         """
@@ -6353,12 +6373,18 @@ class simulation():
                 try:
                     inv = get_inv_transform(self, transform)
                     rows, cols = geo_to_pixel_from_inv(inv, X, Y)
-                except Exception as e:
+                except (ValueError, TypeError, KeyError, IndexError, OSError) as e:
                     try:
-                        logger.exception("precompute_pixel_indices: get_inv_transform or geo_to_pixel_from_inv failed for key=%s", key)
+                        logger.exception("precompute_pixel_indices: get_inv_transform or geo_to_pixel_from_inv failed for key=%s: %s", key, e)
                     except Exception:
                         pass
                     rows, cols = geo_to_pixel(X, Y, transform)
+                except Exception:
+                    try:
+                        logger.exception('precompute_pixel_indices: unexpected error — re-raising')
+                    except Exception:
+                        pass
+                    raise
                 cache[key] = (rows.astype(np.int32), cols.astype(np.int32))
 
         self._pixel_index_cache = cache
@@ -6460,30 +6486,34 @@ class simulation():
         positions = np.vstack([clean_x,clean_y]).T
         
         # Creating a KDTree for efficient spatial queries
+        agents_within_radius = None
+        nearest_neighbors = np.full(self.num_agents, np.nan)
+        nearest_neighbor_distances = np.full(self.num_agents, np.nan)
         try:
-           tree = cKDTree(positions)
-        except ValueError:
-            print ('something wrong with positions - is an agent off the map?')
-            print ('XY: %s'%(positions))
-            print ('wetted: %s'%(self.wet))
-            print ('dead: %s' %(self.dead))
-            sys.exit()
-        
-        # Radius for nearest neighbors search
-        #TODO changed from 2 to xx
-        radius = 6.
-        
-        # Find agents within the specified radius for each agent
-        agents_within_radius = tree.query_ball_tree(tree, r=radius)
-        
-        # Batch query for the two nearest neighbors (including self)
-        distances, indices = tree.query(positions, k=2)
-        
-        # Exclude self from results and handle no neighbors case
-        nearest_neighbors = np.where(distances[:, 1] != np.inf, indices[:, 1], np.nan)
+            tree = cKDTree(positions)
+        except (ValueError, TypeError, IndexError, AttributeError) as e:
+            logger.exception('KDTree build failed for agent positions; providing empty neighbor results')
+            tree = None
+        except Exception:
+            logger.exception('Unexpected error building KDTree; re-raising')
+            raise
 
-        # Extract the distance to the closest agent, excluding self
-        nearest_neighbor_distances = np.where(distances[:, 1] != np.inf, distances[:, 1], np.nan)
+        if tree is not None:
+            # Radius for nearest neighbors search
+            # TODO changed from 2 to xx
+            radius = 6.0
+
+            # Find agents within the specified radius for each agent
+            agents_within_radius = tree.query_ball_tree(tree, r=radius)
+
+            # Batch query for the two nearest neighbors (including self)
+            distances, indices = tree.query(positions, k=2)
+
+            # Exclude self from results and handle no neighbors case
+            nearest_neighbors = np.where(distances[:, 1] != np.inf, indices[:, 1], np.nan)
+
+            # Extract the distance to the closest agent, excluding self
+            nearest_neighbor_distances = np.where(distances[:, 1] != np.inf, distances[:, 1], np.nan)
 
         # Now `agents_within_buffers_dict` is a dictionary where each key is an agent index
         self.agents_within_buffers = agents_within_radius
@@ -7757,10 +7787,15 @@ class simulation():
                         refuge_nodes = hecras_nodes[refuge_mask]
                         
                         # Build KDTree for refuge nodes (cached if possible)
-                        if not hasattr(self.simulation, '_refuge_tree') or self.simulation._refuge_tree is None:
-                            from scipy.spatial import cKDTree
-                            self.simulation._refuge_tree = cKDTree(refuge_nodes)
-                            self.simulation._refuge_nodes = refuge_nodes
+                        if refuge_nodes.size == 0:
+                            logger.debug('Refuge nodes empty; skipping refuge KDTree build')
+                        elif not hasattr(self.simulation, '_refuge_tree') or self.simulation._refuge_tree is None:
+                            try:
+                                from scipy.spatial import cKDTree
+                                self.simulation._refuge_tree = cKDTree(refuge_nodes)
+                                self.simulation._refuge_nodes = refuge_nodes
+                            except (ValueError, TypeError, IndexError, AttributeError):
+                                logger.exception('Failed to build refuge KDTree; skipping refuge behavior')
                         
                         # Query nearest refuge for all agents at once (vectorized)
                         agent_positions = np.column_stack([self.simulation.X, self.simulation.Y])
@@ -8061,8 +8096,13 @@ class simulation():
                         node_distances = self.simulation.hecras_node_fields['distance_to']
 
                         from scipy.spatial import cKDTree
-                        if not hasattr(self.simulation, '_hecras_tree_cached'):
-                            self.simulation._hecras_tree_cached = cKDTree(hecras_nodes)
+                        if len(hecras_nodes) == 0:
+                            logger.debug('HECRAS nodes empty; skipping KDTree build')
+                        elif not hasattr(self.simulation, '_hecras_tree_cached'):
+                            try:
+                                self.simulation._hecras_tree_cached = cKDTree(hecras_nodes)
+                            except (ValueError, TypeError, IndexError, AttributeError):
+                                logger.exception('Failed to build HECRAS KDTree; skipping centerline sampling')
 
                         agent_positions = np.column_stack([self.simulation.X, self.simulation.Y])
                         # Choose k neighbors (at most number of nodes)
