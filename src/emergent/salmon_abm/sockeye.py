@@ -165,7 +165,10 @@ class BehavioralWeights:
         try:
             logger.info("Saved behavioral weights to %s", filepath)
         except Exception:
-            pass
+            try:
+                logger.exception('Collision response failed; skipping collision handling for this timestep')
+            except Exception:
+                pass
     
     def load(self, filepath):
         """Load learned weights from JSON file."""
@@ -765,7 +768,10 @@ class RLTrainer:
         # Load best weights
         if best_weights:
             self.behavioral_weights.from_dict(best_weights)
-            print(f"Training complete. Best reward: {best_reward:.2f}")
+            try:
+                logger.info("Training complete. Best reward: %0.2f", best_reward)
+            except Exception:
+                pass
         
         return self.behavioral_weights
 
@@ -886,7 +892,7 @@ class HECRASMap:
 
         Returns: dict where each key is a field name and value is a (N,) array.
         """
-        query = np.asarray(query_pts, dtype=np.float64)
+            query = np.asarray(query_pts, dtype=np.float64)  # Ensure query points are in the correct format
         if query.ndim == 1:
             query = query.reshape(1, 2)
         dists, inds = self.tree.query(query, k=k)
@@ -921,7 +927,7 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
     # we warn (when verbose) and proceed — consolidating into a single implementation keeps behavior consistent.
     if timestep != 0 and verbose:
         try:
-            print(f"[consolidation] Warning: central HECRAS helper ignores 'timestep' argument (requested {timestep}); using first timestep")
+            logger.warning("[consolidation] central HECRAS helper ignores 'timestep' argument (requested %s); using first timestep", timestep)
         except Exception:
             pass
 
@@ -983,7 +989,10 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     valid_distances = distances[valid_mask]
     
     if len(valid_coords) == 0:
-        print("No valid wetted cells for centerline extraction")
+        try:
+            logger.warning("No valid wetted cells for centerline extraction")
+        except Exception:
+            pass
         return None
     
     # Find ridge cells (high distance-to-bank)
@@ -994,10 +1003,16 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     ridge_coords = valid_coords[ridge_mask]
     ridge_distances = valid_distances[ridge_mask]
     
-    print(f"Ridge cells (distance >= {min_distance_threshold:.2f}m): {len(ridge_coords):,}")
+    try:
+        logger.info("Ridge cells (distance >= %0.2fm): %,d", min_distance_threshold, len(ridge_coords))
+    except Exception:
+        pass
     
     if len(ridge_coords) < 10:
-        print("Too few ridge cells for centerline extraction")
+        try:
+            logger.warning("Too few ridge cells for centerline extraction")
+        except Exception:
+            pass
         return None
     
     # Order ridge cells by connectivity (greedy nearest-neighbor path)
@@ -1099,12 +1114,18 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     import h5py
     from scipy.spatial import cKDTree
     
-    print("="*80)
-    print("HECRAS GEOMETRY INITIALIZATION")
-    print("="*80)
+    try:
+        logger.info("%s", "="*80)
+        logger.info("HECRAS GEOMETRY INITIALIZATION")
+        logger.info("%s", "="*80)
+    except Exception:
+        pass
     
     # Step 1: Load HECRAS geometry and build KDTree
-    print("\n1. Loading HECRAS plan and building KDTree...")
+    try:
+        logger.info("1. Loading HECRAS plan and building KDTree...")
+    except Exception:
+        pass
     with h5py.File(plan_path, 'r') as hdf:
         coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:], dtype=np.float64)
     
@@ -1116,10 +1137,16 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     if key not in simulation._hecras_maps:
         simulation._hecras_maps[key] = HECRASMap(str(plan_path), field_names=fields)
     hecras_map = simulation._hecras_maps[key]
-    print(f"   Loaded {len(coords):,} HECRAS cells")
+    try:
+        logger.info("Loaded %d HECRAS cells", len(coords))
+    except Exception:
+        pass
     
     # Step 2: Fast centerline extraction
-    print("\n2. Extracting centerline...")
+    try:
+        logger.info("2. Extracting centerline...")
+    except Exception:
+        pass
     centerline = extract_centerline_fast_hecras(
         plan_path,
         depth_threshold=depth_threshold,
@@ -1128,19 +1155,28 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     )
     
     if centerline is None:
-        print("   WARNING: Failed to extract centerline!")
+        try:
+            logger.warning("Failed to extract centerline!")
+        except Exception:
+            pass
 
     # Step 2b: Infer wetted perimeter (vectorize raster boundary)
     try:
         hecras_verbose = getattr(self, 'hecras_verbose', False)
         if hecras_verbose:
-            print("\n2b. Inferring wetted perimeter (vectorizing)...")
+            try:
+                logger.info("2b. Inferring wetted perimeter (vectorizing)...")
+            except Exception:
+                pass
         wetted_info = infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=depth_threshold, timestep=0, verbose=False)
         perimeter_points = wetted_info.get('perimeter_points', None)
         perimeter_cells = wetted_info.get('perimeter_cells', None)
         median_spacing = wetted_info.get('median_spacing', None)
         if hecras_verbose:
-            print(f"   Perimeter points: {0 if perimeter_points is None else len(perimeter_points):,}")
+            try:
+                logger.info("Perimeter points: %d", 0 if perimeter_points is None else len(perimeter_points))
+            except Exception:
+                pass
     except Exception:
         perimeter_points = None
         perimeter_cells = None
@@ -1149,7 +1185,10 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     # Step 3: Optionally create regular grid rasters
     transform = None
     if create_rasters:
-        print("\n3. Creating regular grid rasters...")
+        try:
+            logger.info("3. Creating regular grid rasters...")
+        except Exception:
+            pass
         
         # Compute affine transform from HECRAS cell spacing
         transform = compute_affine_from_hecras(coords, target_cell_size=target_cell_size)
@@ -1162,13 +1201,19 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
         width = int(np.ceil((maxx - minx) / cell_size))
         height = int(np.ceil((maxy - miny) / cell_size))
         
-        print(f"   Grid dimensions: {height} x {width} at {cell_size:.2f}m resolution")
+        try:
+            logger.info("Grid dimensions: %d x %d at %0.2fm resolution", height, width, cell_size)
+        except Exception:
+            pass
         
         # Create x_coords, y_coords in HDF5
         ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=(height, width), target_transform=transform)
         
         # Map initial HECRAS fields to rasters
-        print("\n4. Mapping HECRAS fields to rasters...")
+        try:
+            logger.info("4. Mapping HECRAS fields to rasters...")
+        except Exception:
+            pass
         map_hecras_to_env_rasters(simulation, plan_path, field_names=fields, k=1)  # k=1 for speed
     
     return {
@@ -1420,8 +1465,11 @@ def get_arr(use_gpu):
         try:
             import cupy as cp
             return cp
-        except:
-            print("CuPy not found. Falling back to Numpy.")
+        except Exception:
+            try:
+                logger.info("CuPy not found. Falling back to Numpy.")
+            except Exception:
+                pass
             import numpy as np
             return np
     else:
@@ -2026,7 +2074,10 @@ if _HAS_NUMBA:
         _ = _swim_speeds_numba(dummy, dummy, dummy, dummy)
         _ = _calc_battery_numba(dummy, dummy, dummy, np.ones(n, dtype=np.bool_), 0.1)
     except Exception:
-        pass
+        try:
+            logger.exception('Numba precompile at import time failed; continuing without warmed numba kernels')
+        except Exception:
+            pass
 
     # helper to ensure compilation completes at import time
     def _numba_warmup(m=None):
@@ -2046,13 +2097,19 @@ if _HAS_NUMBA:
             _ = _calc_battery_numba(np.ones(m, dtype=np.float64), d, d, b, 0.1)
             _ = _swim_core_numba(d, d, d, d, d, d, np.zeros(m, dtype=np.bool_), np.zeros(m, dtype=np.bool_), b, 0.1)
         except Exception:
-            pass
+            try:
+                logger.exception('_numba_warmup failed; numba kernels may not be available')
+            except Exception:
+                pass
 
     # attempt warmup (may still spend time but at import not during timed loop)
     try:
         _numba_warmup()
     except Exception:
-        pass
+        try:
+            logger.exception('_numba_warmup() failed during module init; continuing without warmed kernels')
+        except Exception:
+            pass
 
     def _numba_warmup_for_sim(sim):
         """Warm Numba kernels using arrays shaped to the given simulation instance.
@@ -2074,19 +2131,31 @@ if _HAS_NUMBA:
             try:
                 _compute_drags_numba(ones, ones, ones, ones, bmask, 1.0, ones, ones, ones, bi)
             except Exception:
-                pass
+                try:
+                    logger.exception('Exact-shape numba warmup: _compute_drags_numba failed for sim-shaped arrays')
+                except Exception:
+                    pass
             try:
                 _swim_speeds_numba(ones, ones, ones, ones)
             except Exception:
-                pass
+                try:
+                    logger.exception('Exact-shape numba warmup: _swim_speeds_numba failed for sim-shaped arrays')
+                except Exception:
+                    pass
             try:
                 # swim_speeds buffer shaped (na, max_ts)
                 buf = np.zeros((na, max_ts), dtype=np.float64)
                 _assess_fatigue_core(ones, ones, ones, ones, ones, ones, ones, buf)
             except Exception:
-                pass
+                try:
+                    logger.exception('Exact-shape numba warmup: _assess_fatigue_core failed for sim-shaped arrays')
+                except Exception:
+                    pass
         except Exception:
-            pass
+            try:
+                logger.exception('_numba_warmup_for_sim failed while preparing sim-shaped warmups')
+            except Exception:
+                pass
 
 
 # --- Swim numeric core helpers ---
@@ -2674,7 +2743,10 @@ def output_excel(records, model_dir, model_name):
     
     """
     # export record results to excel via pandas
-    print('\nexporting records to excel...')
+    try:
+        logger.info('exporting records to excel...')
+    except Exception:
+        pass
     
     # Create an Excel writer object
     output_excel = os.path.join(model_dir,f'output_{model_name}.xlsx')
@@ -2685,7 +2757,10 @@ def output_excel(records, model_dir, model_name):
                         sheet_name = 'gen' + str(generation_name),
                         index=False)
     
-    print('records exported. check output excel file.')
+    try:
+        logger.info('records exported. check output excel file: %s', output_excel)
+    except Exception:
+        pass
     
 def movie_maker(directory, model_name, crs, dt, depth_rast_transform):
     # connect to model
@@ -2751,7 +2826,10 @@ def movie_maker(directory, model_name, crs, dt, depth_rast_transform):
                                    Y_arr[:, i])
                 writer.grab_frame()
                     
-                print ('Time Step %s complete'%(i))
+                try:
+                    logger.info('Time Step %s complete', i)
+                except Exception:
+                    pass
 
     # clean up
     writer.finish()
@@ -3462,14 +3540,20 @@ class PID_optimization():
             #for i in range(len(self.population)):
             for i in range(self.pop_size):
             
-                print(f'\nrunning individual {i+1} of generation {generation+1}, {generation+1}, {generation+1}, {generation+1}, {generation+1}...')
+                try:
+                    logger.info('running individual %d of generation %d', i+1, generation+1)
+                except Exception:
+                    pass
                 
                 # useful to have these in pid_solution
                 self.p[i] = population[i][0]
                 self.i[i] = population[i][1]
                 self.d[i] = population[i][2]
                 
-                print(f'P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}')
+                try:
+                    logger.info('P: %0.3f, I: %0.3f, D: %0.3f', self.p[i], self.i[i], self.d[i])
+                except Exception:
+                    pass
                 
                 # set up the simulation
                 sim = sockeye.simulation(model_dir,
@@ -3495,8 +3579,11 @@ class PID_optimization():
                             k_d = self.d[i], # k_d
                             )
                     
-                except:
-                    print(f'failed --> P: {self.p[i]:0.3f}, I: {self.i[i]:0.3f}, D: {self.d[i]:0.3f}\n')
+                except Exception as e:
+                    try:
+                        logger.exception('PID run failed for P=%0.3f I=%0.3f D=%0.3f: %s', self.p[i], self.i[i], self.d[i], e)
+                    except Exception:
+                        pass
                     pop_error_array.append(sim.error_array)
                     self.errors[i] = sim.error_array
                     self.velocities[i] = np.sqrt(np.power(sim.vel_x_array,2) + np.power(sim.vel_y_array,2))
@@ -3523,7 +3610,10 @@ class PID_optimization():
             # combine crossover and mutation offspring to get next generation
             population = cross_offspring + mutated_offspring
             
-            print(f'completed generation {generation+1}.... ')
+            try:
+                logger.info('completed generation %d', generation+1)
+            except Exception:
+                pass
             
             if np.all(error_df.magnitude.values == 0):
                 return records
@@ -3991,9 +4081,12 @@ class simulation():
             _maybe_import('wetted', 'wetted')
         else:
             # HECRAS MODE: Initialize geometry with proper workflow
-            print("\n" + "="*80)
-            print("INITIALIZING HECRAS MODE")
-            print("="*80)
+            try:
+                logger.info("%s", "\n" + "="*80)
+                logger.info("INITIALIZING HECRAS MODE")
+                logger.info("%s", "="*80)
+            except Exception:
+                pass
             
             try:
                 # Call comprehensive HECRAS initialization
@@ -4013,7 +4106,10 @@ class simulation():
                 if hecras_info['centerline'] is not None:
                     self.centerline = hecras_info['centerline']
                     centerline_derived = True
-                    print(f"Using HECRAS-derived centerline ({self.centerline.length:.2f}m)")
+                    try:
+                        logger.info("Using HECRAS-derived centerline (%0.2fm)", self.centerline.length)
+                    except Exception:
+                        pass
                 
                 # Set depth_rast_transform if rasters were created
                 if hecras_info['transform'] is not None:
@@ -4021,7 +4117,10 @@ class simulation():
                     coords = hecras_info['coords']
                     x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
                     y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
-                    print(f"HECRAS extent: X=[{x_min:.2f}, {x_max:.2f}], Y=[{y_min:.2f}, {y_max:.2f}]")
+                    try:
+                        logger.info("HECRAS extent: X=[%0.2f, %0.2f], Y=[%0.2f, %0.2f]", x_min, x_max, y_min, y_max)
+                    except Exception:
+                        pass
 
                 # Generate wetted perimeter (vector-first) and attach to simulation
                 try:
@@ -4098,36 +4197,45 @@ class simulation():
                         except Exception:
                             self.perimeter_polygon = None
 
-                        print(f"HECRAS perimeter: {len(self.perimeter_points):,} points; polygon={'yes' if self.perimeter_polygon is not None else 'no'}")
+                        try:
+                            logger.info("HECRAS perimeter: %d points; polygon=%s", len(self.perimeter_points), 'yes' if self.perimeter_polygon is not None else 'no')
+                        except Exception:
+                            pass
                     else:
                         self.perimeter_points = np.zeros((0,2))
                         self.perimeter_cells = np.zeros((0,), dtype=int)
                         self.wetted_mask = None
                         self.perimeter_polygon = None
                 except Exception as e:
-                    print(f"Warning: failed to compute HECRAS perimeter: {e}")
+                    try:
+                        logger.warning("Failed to compute HECRAS perimeter: %s", e)
+                    except Exception:
+                        pass
                     self.perimeter_points = np.zeros((0,2))
                     self.perimeter_cells = np.zeros((0,), dtype=int)
                     self.wetted_mask = None
                     self.perimeter_polygon = None
                 
-            except Exception as e:
+            except (OSError, IOError, KeyError, ValueError) as e:
                 try:
-                    logger.exception("HECRAS initialization failed: %s", e)
+                    logger.exception("HECRAS initialization failed due to IO/Key/Value error: %s", e)
                 except Exception:
                     pass
                 # Fall back to loading KDTree only
                 try:
                     load_hecras_plan_cached(self, self.hecras_plan_path, field_names=self.hecras_fields)
-                except Exception:
+                except Exception as e2:
                     # Disable HECRAS mode to avoid inconsistent later assumptions
                     try:
-                        logger.warning("load_hecras_plan_cached failed; disabling HECRAS mode")
+                        logger.warning("load_hecras_plan_cached failed; disabling HECRAS mode: %s", e2)
                     except Exception:
                         pass
                     self.hecras_plan_path = None
                     self.use_hecras = False
                     self.hecras_mapping_enabled = False
+            except Exception:
+                # Re-raise unexpected exceptions so we don't mask programming errors
+                raise
                     
         self.hdf5.flush()
         # Initialize in-memory buffers for per-timestep datasets to reduce small writes
@@ -4242,7 +4350,10 @@ class simulation():
                             main_centerline, all_lines = derive_centerline_from_distance_raster(distance_to_rast, transform=target_affine, footprint_size=5, min_length=50)
                             if main_centerline is not None and main_centerline.length > 50:
                                 self.centerline = self.centerline_import(main_centerline)
-                                print('Derived centerline from HECRAS rasters (skeletonized)')
+                                try:
+                                    logger.info('Derived centerline from HECRAS rasters (skeletonized)')
+                                except Exception:
+                                    pass
                                 centerline_derived = True
                             else:
                                 # fallback to provided centerline file if available
@@ -4254,7 +4365,10 @@ class simulation():
                         except Exception as e:
                             raise
                 except Exception as e:
-                    print(f'Warning: could not derive centerline from HECRAS: {e}')
+                    try:
+                        logger.warning('Could not derive centerline from HECRAS: %s', e)
+                    except Exception:
+                        pass
                     # fall back to file-based import only if a valid file was provided
                     if centerline is not None and os.path.exists(centerline):
                         self.centerline = self.centerline_import(centerline)
@@ -4304,13 +4418,19 @@ class simulation():
                     node_fields = {}
                     try:
                         node_fields['depth'] = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Water Surface'][-1] - np.array(hdf.get('Geometry/2D Flow Areas/2D area/Cells Minimum Elevation'))
-                    except Exception:
-                        pass
+                    except (KeyError, IndexError, OSError) as e:
+                        try:
+                            logger.warning('HECRAS depth dataset missing or unreadable: %s', e)
+                        except Exception:
+                            pass
                     try:
                         node_fields['vel_x'] = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
                         node_fields['vel_y'] = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity Y'][-1]
-                    except Exception:
-                        pass
+                    except (KeyError, IndexError, OSError) as e:
+                        try:
+                            logger.warning('HECRAS velocity datasets missing or unreadable: %s', e)
+                        except Exception:
+                            pass
                 
                 if pts is not None and node_fields:
                     # Initialize agent arrays
@@ -4338,7 +4458,10 @@ class simulation():
                         self.vel_mag = np.sqrt(self.x_vel**2 + self.y_vel**2)
                     
             except Exception as e:
-                print(f"Warning: Failed to initialize HECRAS environment: {e}")
+                try:
+                    logger.warning("Failed to initialize HECRAS environment: %s", e)
+                except Exception:
+                    pass
         
         # error array
         self.error_array = np.array([])
@@ -4609,7 +4732,10 @@ class simulation():
             if 'distance_to' in self.hecras_node_fields:
                 self.distance_to = self.apply_hecras_mapping(self.hecras_node_fields['distance_to'])
         
-        print("Spatial state reset complete. Behavioral weights preserved.")
+        try:
+            logger.info("Spatial state reset complete. Behavioral weights preserved.")
+        except Exception:
+            pass
     
     def save_behavioral_weights(self, filepath):
         """Save current behavioral weights to file."""
@@ -4997,9 +5123,15 @@ class simulation():
             
             # Flush to ensure data is written
             self.hdf5.flush()
-            print(f"Successfully created x_coords and y_coords; flushed to disk. Shape: {dset_x.shape}, first value: {dset_x[0,0]}")
+            try:
+                logger.info("Successfully created x_coords and y_coords; flushed to disk. Shape: %s, first value: %s", dset_x.shape, dset_x[0,0])
+            except Exception:
+                pass
         else:
-            print(f"x_coords already exists with shape: {self.hdf5['x_coords'].shape}")
+            try:
+                logger.info("x_coords already exists with shape: %s", self.hdf5['x_coords'].shape)
+            except Exception:
+                pass
 
         shape = (num_bands, height, width)
         #shape = (num_bands, width, height)
@@ -5237,7 +5369,10 @@ class simulation():
         """
         # Check if we're in HECRAS mode and already have distance_to_bank
         if self.use_hecras and hasattr(self, '_hecras_geometry_info'):
-            print("Using HECRAS distance-to-bank (already computed)")
+            try:
+                logger.info("Using HECRAS distance-to-bank (already computed)")
+            except Exception:
+                pass
             # distance_to_bank was already written to HDF5 by initialize_hecras_geometry
             return
         
@@ -5246,7 +5381,10 @@ class simulation():
         try:
             env = self.hdf5.get('environment')
             if env is None or 'wetted' not in env:
-                print("Warning: No wetted raster found, skipping boundary_surface")
+                try:
+                    logger.warning("No wetted raster found, skipping boundary_surface")
+                except Exception:
+                    pass
                 return
             raster = env['wetted'][:]
             # Additional guard: ensure raster has valid shape
@@ -6376,7 +6514,10 @@ class simulation():
         kcal  = mg_O2 * (3.36 / 1000.0)          # kcal burned this timestep
     
         if np.any(kcal < 0):
-            print("🚨 Warning: Negative kcal detected!")
+            try:
+                logger.warning("Negative kcal detected!")
+            except Exception:
+                pass
     
         # Update cumulative odometer
         self.kcal += kcal
@@ -7189,7 +7330,10 @@ class simulation():
                 print (f'sog: {np.round(self.sog,4)}')
 
                 if np.any(np.isnan(error)):
-                    print('nan in error')
+                    try:
+                        logger.warning('nan in error')
+                    except Exception:
+                        pass
                     sys.exit()
                     
             else:
@@ -7289,12 +7433,18 @@ class simulation():
             
             # Debug at t=0
             if t == 0:
-                print(f'JUMP DEBUG t=0: mask[:3]={mask[:3]}, displacement[:3]={displacement[:3]}')
-                print(f'JUMP DEBUG t=0: heading[:3]={self.simulation.heading[:3]}, dx[:3]={dx[:3]}, dy[:3]={dy[:3]}')
-                print(f'JUMP DEBUG t=0: dxdy[:3]={dxdy[:3]}')
+                try:
+                    logger.debug('JUMP DEBUG t=0: mask[:3]=%s, displacement[:3]=%s', mask[:3], displacement[:3])
+                    logger.debug('JUMP DEBUG t=0: heading[:3]=%s, dx[:3]=%s, dy[:3]=%s', self.simulation.heading[:3], dx[:3], dy[:3])
+                    logger.debug('JUMP DEBUG t=0: dxdy[:3]=%s', dxdy[:3])
+                except Exception:
+                    pass
             
             if np.any(dxdy > 3):
-                print ('check jump parameters')
+                try:
+                    logger.warning('Jump displacement unexpectedly large; check jump parameters')
+                except Exception:
+                    pass
            
             return dxdy        
         
@@ -7918,7 +8068,10 @@ class simulation():
                                 thr_repr = (float(np.min(threshold_m)), float(np.max(threshold_m)))
                             else:
                                 thr_repr = float(threshold_m)
-                            print(f"border_cue: {n_close} agents too close, threshold={thr_repr}; sample forces (x,y): {list(zip(sample_fx, sample_fy))}")
+                            try:
+                                logger.debug("border_cue: %d agents too close, threshold=%s; sample forces (x,y): %s", n_close, thr_repr, list(zip(sample_fx, sample_fy)))
+                            except Exception:
+                                pass
                         except Exception:
                             pass
 
@@ -9176,6 +9329,10 @@ class simulation():
                     new_batt = _wrap_merged_battery_numba(batt, per_rec_a, ttf_a, mask_sust, float(self.dt))
                     self.simulation.battery = new_batt
                 except Exception:
+                    try:
+                        logger.exception('Numba merged battery kernel failed; falling back to pure-Python implementation')
+                    except Exception:
+                        pass
                     # fallback to original numpy behavior
                     battery[mask_sustained] += per_rec_arr[mask_sustained]
                     mask_non_sustained = ~mask_sustained
@@ -9264,13 +9421,20 @@ class simulation():
             is active in the simulation, primarily for debugging and optimization purposes.
             '''
             if self.simulation.pid_tuning == True:
-                print(f'battery: {np.round(self.battery,4)}')
-                print(f'swim behavior: {self.swim_behav[0]}')
-                print(f'swim mode: {self.swim_mode[0]}')
+                try:
+                    logger.info('battery: %s', np.round(self.battery,4))
+                    logger.info('swim behavior: %s', self.swim_behav[0])
+                    logger.info('swim mode: %s', self.swim_mode[0])
+                except Exception:
+                    pass
 
                 if np.any(self.simulation.swim_behav == 3):
-                    print('error no longer counts, fatigued')
-                    sys.exit()
+                    try:
+                        logger.warning('Error no longer counts, fatigued')
+                    except Exception:
+                        pass
+                    # Do not exit the host process; raise a RuntimeError to allow callers to handle
+                    raise RuntimeError('Fatigue condition reached during PID checks')
                     
         def assess_fatigue(self):
             '''
@@ -9581,9 +9745,10 @@ class simulation():
                         self.distance_to = self.apply_hecras_mapping(self.hecras_node_fields['distance_to'])
             except Exception as e:
                 # Log error - this shouldn't fail silently
-                print(f'ERROR resampling HECRAS data: {e}')
-                import traceback
-                traceback.print_exc()
+                try:
+                    logger.exception('ERROR resampling HECRAS data: %s', e)
+                except Exception:
+                    pass
                 # Revert to old positions on error
                 self.X = old_X
                 self.Y = old_Y
@@ -9688,7 +9853,10 @@ class simulation():
                             plt.pause(max(0.001, float(dt)))
                         except Exception:
                             time.sleep(max(0.001, float(dt)))
-                        print('Time Step %s complete' % (i))
+                        try:
+                            logger.info('Time Step %s complete', i)
+                        except Exception:
+                            pass
 
                     plt.ioff()
                     try:
@@ -9701,7 +9869,10 @@ class simulation():
                     # iterate over timesteps 
                     for i in range(int(n)):
                         self.timestep(i, dt, g, pid_controller)
-                        print ('Time Step %s complete'%(i))
+                        try:
+                            logger.info('Time Step %s complete', i)
+                        except Exception:
+                            pass
         3. Initializes the plot for the simulation visualization.
         4. Iterates over the specified number of time steps, updating the agents and capturing each frame.
         5. Cleans up resources and finalizes the movie file.
@@ -9800,7 +9971,10 @@ class simulation():
                 # iterate over timesteps 
                 for i in range(int(n)):
                     self.timestep(i, dt, g, pid_controller)
-                    print ('Time Step %s complete'%(i))
+                    try:
+                        logger.info('Time Step %s complete', i)
+                    except Exception:
+                        pass
                     
                 # close and cleanup
                 self.hdf5.flush()
@@ -9814,14 +9988,23 @@ class simulation():
                                             k_d)
             for i in range(n):
                 self.timestep(i, dt, g, pid_controller)
-                
-                print ('Time Step %s %s %s %s %s %s complete'%(i,i,i,i,i,i))
-                
+                try:
+                    logger.info('Time Step %s complete', i)
+                except Exception:
+                    pass
+
                 if i == range(n)[-1]:
-                    self.hdf5.close()
-                    sys.exit()
+                    try:
+                        self.hdf5.close()
+                    except Exception:
+                        pass
+                    # Avoid forcing a hard exit; raise to allow callers to decide
+                    raise SystemExit('Simulation complete')
             
-        print ('ABM took %s to compile'%(t1-t0))
+        try:
+            logger.info('ABM took %s to compile', (t1-t0))
+        except Exception:
+            pass
 
     def close(self):
         self.hdf5.flush()
@@ -10035,7 +10218,10 @@ class summary:
                                     bins = max(1, round((max(lengths_by_sex) - min(lengths_by_sex)) / bin_width))
                                     ax.hist(lengths_by_sex, bins=bins, alpha=0.7, color='blue' if sex == 0 else 'pink')
                                 except Exception as e:
-                                    print(f"Error in calculating histogram for {sex_label}: {e}")
+                                    try:
+                                        logger.exception('Error in calculating histogram for %s: %s', sex_label, e)
+                                    except Exception:
+                                        pass
                                     continue
 
                                 ax.set_title(f'{base_name} - {sex_label} Agent Lengths')
@@ -10045,7 +10231,10 @@ class summary:
                                 pdf.savefig(fig)
                                 plt.close()
                             else:
-                                print(f"No length values found for {sex_label}.")
+                                try:
+                                    logger.warning('No length values found for %s.', sex_label)
+                                except Exception:
+                                    pass
 
     def length_statistics(self):
         h5_files = self.h5_files
@@ -10121,10 +10310,16 @@ class summary:
                                     pdf.savefig(fig)
                                     plt.close()
                                 except Exception as e:
-                                    print(f"Error in calculating histogram for {sex_label}: {e}")
+                                    try:
+                                        logger.exception('Error in calculating histogram for %s: %s', sex_label, e)
+                                    except Exception:
+                                        pass
                                     plt.close(fig)
                             else:
-                                print(f"No weight values found for {sex_label} in {base_name}.")
+                                try:
+                                    logger.warning('No weight values found for %s in %s.', sex_label, base_name)
+                                except Exception:
+                                    pass
 
     def weight_statistics(self):
         h5_files = self.h5_files
@@ -10201,10 +10396,16 @@ class summary:
                                     pdf.savefig(fig)
                                     plt.close()
                                 except Exception as e:
-                                    print(f"Error in calculating histogram for {sex_label}: {e}")
+                                    try:
+                                        logger.exception('Error in calculating histogram for %s: %s', sex_label, e)
+                                    except Exception:
+                                        pass
                                     plt.close(fig)
                             else:
-                                print(f"No body depth values found for {sex_label} in {base_name}.")
+                                try:
+                                    logger.warning('No body depth values found for %s in %s.', sex_label, base_name)
+                                except Exception:
+                                    pass
 
     def body_depth_statistics(self):
         h5_files = self.h5_files
@@ -10393,7 +10594,10 @@ class summary:
                         all_female_kcals.extend(female_total_kcal)
     
             except Exception as e:
-                print(f"Failed to process {hdf_path}: {e}")
+                try:
+                    logger.exception('Failed to process %s: %s', hdf_path, e)
+                except Exception:
+                    pass
     
         # Convert lists to numpy arrays for histogram plotting
         all_male_kcals = np.array(all_male_kcals)
@@ -10419,7 +10623,10 @@ class summary:
         plt.savefig(female_histogram_path, format='jpeg', dpi=300)
         plt.close()
     
-        print(f"Kcal histograms saved to {male_histogram_path} and {female_histogram_path}")
+        try:
+            logger.info('Kcal histograms saved to %s and %s', male_histogram_path, female_histogram_path)
+        except Exception:
+            pass
             
 
 
@@ -10666,7 +10873,10 @@ class summary:
                     
                     # Insert the 2D array into the pre-allocated 3D array in HDF5
                     data_over_time[timestep, :, :] = agent_counts_grid
-                    print(f'file {filename} timestep {timestep} complete')
+                    try:
+                        logger.info('file %s timestep %s complete', filename, timestep)
+                    except Exception:
+                        pass
             
             # Now aggregate results from HDF5
             all_data = []
@@ -10697,5 +10907,8 @@ class summary:
             dst.write(self.average_per_cell, 1)  # Write the average to the first band
             dst.write(self.sd_per_cell, 2)       # Write the standard deviation to the second band
         
-        print(f'Dual band raster {output_file} created successfully.')
+        try:
+            logger.info('Dual band raster %s created successfully.', output_file)
+        except Exception:
+            pass
    
