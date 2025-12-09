@@ -4,8 +4,17 @@ Runs a minimal import and API checks for `salmon_viewer_v2` without using pytest
 Usage: `python tools/headless_viewer_check.py`
 """
 import numpy as np
+import traceback
 from emergent.salmon_abm.salmon_viewer import SalmonViewer
 from PyQt5 import QtWidgets
+
+# Attempt to import the sockeye simulation module to surface import-time errors
+try:
+    import emergent.salmon_abm.sockeye as sockeye
+    print('Imported emergent.salmon_abm.sockeye OK')
+except Exception as e:
+    print('Failed to import emergent.salmon_abm.sockeye:')
+    traceback.print_exc()
 
 
 class DummySim:

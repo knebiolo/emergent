@@ -96,13 +96,16 @@ except ImportError:
 try:
     import numba
     _HAS_NUMBA = True
-except Exception:
+except ImportError as e:
     numba = None
     _HAS_NUMBA = False
     try:
-        logging.getLogger(__name__).warning('Numba import failed; falling back to pure-Python implementations')
+        logger.warning('Numba import failed; falling back to pure-Python implementations: %s', e)
     except Exception:
         pass
+except Exception:
+    logger.exception('Unexpected error while importing numba; re-raising')
+    raise
 class BehavioralWeights:
     def __init__(self):
         # Alignment SOG augmentation
@@ -646,9 +649,16 @@ class RLTrainer:
 
                 metrics['dry_count'] = dry_count
                 metrics['shallow_count'] = shallow_count
-            except Exception:
+            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
+                try:
+                    logger.exception('Error computing dry/shallow counts; defaulting to 0: %s', e)
+                except Exception:
+                    pass
                 metrics['dry_count'] = 0
                 metrics['shallow_count'] = 0
+            except Exception:
+                logger.exception('Unexpected error computing dry/shallow counts; re-raising')
+                raise
         
         # 2. DRAFTING BENEFITS (Energy efficiency from swimming behind others)
         if hasattr(self.sim, 'X') and hasattr(self.sim, 'Y') and hasattr(self.sim, 'x_vel') and hasattr(self.sim, 'y_vel'):
@@ -705,8 +715,15 @@ class RLTrainer:
                     self.sim._upstream_vel_buf = deque(maxlen=window)
                 self.sim._upstream_vel_buf.append(mean_upstream_vel_inst)
                 metrics['mean_upstream_velocity'] = float(np.mean(self.sim._upstream_vel_buf))
-            except Exception:
+            except (ValueError, TypeError, IndexError, AttributeError) as e:
+                try:
+                    logger.exception('Error computing mean upstream velocity; defaulting to 0.0: %s', e)
+                except Exception:
+                    pass
                 metrics['mean_upstream_velocity'] = 0.0
+            except Exception:
+                logger.exception('Unexpected error computing mean upstream velocity; re-raising')
+                raise
             self.sim._prev_centerline_meas = self.sim.centerline_meas.copy()
         
         # 4. ENERGY EFFICIENCY (Distance per kcal, accounting for drafting)
@@ -790,11 +807,26 @@ class RLTrainer:
                 if hasattr(self.sim, '_last_drag_reductions'):
                     try:
                         del self.sim._last_drag_reductions
+                    except (AttributeError, NameError, RuntimeError) as e:
+                        try:
+                            logger.exception('Failed to delete _last_drag_reductions during cleanup: %s', e)
+                        except Exception:
+                            pass
+                try:
+                    gc.collect()
+                except (RuntimeError, OSError) as e:
+                    try:
+                        logger.exception('gc.collect() raised runtime error during cleanup: %s', e)
                     except Exception:
                         pass
-                gc.collect()
+            except (ImportError, RuntimeError, OSError) as e:
+                try:
+                    logger.exception('GC/cleanup block encountered runtime error: %s', e)
+                except Exception:
+                    pass
             except Exception:
-                pass
+                logger.exception('Unexpected error during GC/cleanup; re-raising')
+                raise
         
         # Load best weights
         if best_weights:
