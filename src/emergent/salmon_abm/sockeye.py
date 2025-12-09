@@ -151,32 +151,22 @@ class BehavioralWeights:
         
     def to_dict(self):
         """Export weights as dictionary for saving."""
+        # Collect public numeric/behavioral attributes into a dict for persistence
+        keys = [
+            'use_sog', 'sog_weight', 'cohesion_weight', 'alignment_weight', 'separation_weight',
+            'separation_radius', 'threat_level', 'cohesion_radius_relaxed', 'cohesion_radius_threatened',
+            'drafting_enabled', 'drafting_distance', 'drafting_angle_tolerance', 'drag_reduction_single',
+            'drag_reduction_dual', 'rheotaxis_weight', 'border_cue_weight', 'border_threshold_multiplier',
+            'border_max_force', 'collision_weight', 'collision_radius', 'upstream_priority',
+            'energy_efficiency_priority', 'learning_rate', 'exploration_epsilon'
+        ]
+        out = {}
+        for k in keys:
             try:
-                ss, bl_s_tmp, prolonged_tmp, sprint_tmp, sustained_tmp, drags_tmp, _ = _drag_and_battery_numba(
-                    sog_a, heading_a, xv_a, yv_a, mask_a, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf_a, dragc_a, wave_a, swim_behav_a, batt_a, per_rec_a, ttf_a, float(self.dt), True)
-            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
-                try:
-                    logger.exception("_drag_and_battery_numba failed with runtime issue; falling back to Python calc_battery: %s", e)
-                except Exception:
-                    pass
-                # fallback: use numpy/python implementation (same function also has numpy fallback)
-                try:
-                    ss, bl_s_tmp, prolonged_tmp, sprint_tmp, sustained_tmp, drags_tmp, _ = _drag_and_battery_numba(
-                        sog_a, heading_a, xv_a, yv_a, mask_a, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf_a, dragc_a, wave_a, swim_behav_a, batt_a, per_rec_a, ttf_a, float(self.dt), True)
-                except Exception:
-                    logger.exception('Fallback to Python _drag_and_battery_numba also failed; re-raising')
-                    raise
+                out[k] = getattr(self, k)
             except Exception:
-                logger.exception('Unexpected error in _drag_and_battery_numba; re-raising')
-                raise
-            'collision_radius': self.collision_radius,
-            'upstream_priority': self.upstream_priority,
-            'energy_efficiency_priority': self.energy_efficiency_priority,
-            'learning_rate': self.learning_rate,
-            'exploration_epsilon': self.exploration_epsilon
-            ,'use_sog': self.use_sog
-            ,'sog_weight': self.sog_weight
-        }
+                out[k] = None
+        return out
     
     def from_dict(self, data):
         """Load weights from dictionary."""
@@ -955,7 +945,7 @@ class HECRASMap:
 
         Returns: dict where each key is a field name and value is a (N,) array.
         """
-            query = np.asarray(query_pts, dtype=np.float64)  # Ensure query points are in the correct format
+        query = np.asarray(query_pts, dtype=np.float64)  # Ensure query points are in the correct format
         if query.ndim == 1:
             query = query.reshape(1, 2)
         dists, inds = self.tree.query(query, k=k)
@@ -2197,13 +2187,17 @@ if _HAS_NUMBA:
             d = np.zeros(m, dtype=np.float64)
             b = np.ones(m, dtype=np.bool_)
             bi = np.zeros(m, dtype=np.int64)
-            _ = _compute_drags_numba(d, d, d, d, b, 1.0, np.ones(m, dtype=np.float64), np.ones(m, dtype=np.float64), np.ones(m, dtype=np.float64), bi)
+            if '_compute_drags_numba' in globals():
+                _ = _compute_drags_numba(d, d, d, d, b, 1.0, np.ones(m, dtype=np.float64), np.ones(m, dtype=np.float64), np.ones(m, dtype=np.float64), bi)
             _ = _bout_distance_numba(d, d, d, d)
             _ = _time_to_fatigue_numba(d, b, np.zeros(m, dtype=np.bool_), 0.0, 0.0, 0.0, 0.0)
-            _ = _project_points_onto_line_numba(d, d, d, d)
+            if '_project_points_onto_line_numba' in globals():
+                _ = _project_points_onto_line_numba(d, d, d, d)
             _ = _swim_speeds_numba(d, d, d, d)
-            _ = _calc_battery_numba(np.ones(m, dtype=np.float64), d, d, b, 0.1)
-            _ = _swim_core_numba(d, d, d, d, d, d, np.zeros(m, dtype=np.bool_), np.zeros(m, dtype=np.bool_), b, 0.1)
+            if '_calc_battery_numba' in globals():
+                _ = _calc_battery_numba(np.ones(m, dtype=np.float64), d, d, b, 0.1)
+            if '_swim_core_numba' in globals():
+                _ = _swim_core_numba(d, d, d, d, d, d, np.zeros(m, dtype=np.bool_), np.zeros(m, dtype=np.bool_), b, 0.1)
         except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
             try:
                 logger.exception('_numba_warmup failed with expected runtime issue; numba kernels may not be available: %s', e)
@@ -5261,28 +5255,28 @@ class simulation():
         self.height = height
 
         # Create x_coords and y_coords if they don't exist (needed for all behavioral cues)
-            if 'x_coords' not in self.hdf5:
+        if 'x_coords' not in self.hdf5:
+            try:
+                logger.info("Creating x_coords and y_coords with dimensions: height=%s, width=%s, rows=%s, cols=%s", height, width, src.shape[0], src.shape[1])
+            except Exception:
+                pass
+
+            # Get the dimensions of the raster
+            rows, cols = src.shape
+
+            # Define chunk size (adjust based on memory constraints)
+            chunk_size = 1024
+
+            # Set up HDF5 file and datasets
+            try:
+                dset_x = self.hdf5.create_dataset('x_coords', (height, width), dtype='float32')
+                dset_y = self.hdf5.create_dataset('y_coords', (height, width), dtype='float32')
+            except (OSError, IOError, ValueError) as e:
                 try:
-                    logger.info("Creating x_coords and y_coords with dimensions: height=%s, width=%s, rows=%s, cols=%s", height, width, src.shape[0], src.shape[1])
+                    logger.exception('Failed to create x_coords/y_coords datasets: %s', e)
                 except Exception:
                     pass
-
-                # Get the dimensions of the raster
-                rows, cols = src.shape
-
-                # Define chunk size (adjust based on memory constraints)
-                chunk_size = 1024
-
-                # Set up HDF5 file and datasets
-                try:
-                    dset_x = self.hdf5.create_dataset('x_coords', (height, width), dtype='float32')
-                    dset_y = self.hdf5.create_dataset('y_coords', (height, width), dtype='float32')
-                except (OSError, IOError, ValueError) as e:
-                    try:
-                        logger.exception('Failed to create x_coords/y_coords datasets: %s', e)
-                    except Exception:
-                        pass
-                    raise
+                raise
 
                 try:
                     logger.info("Created datasets with shape: %s", dset_x.shape)
@@ -9755,6 +9749,19 @@ class simulation():
                 except Exception:
                     logger.exception('Unexpected error in merged swim/drag numba kernel; re-raising')
                     raise
+            # end compiled-core try: add runtime fallback for outer try
+            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
+                try:
+                    logger.exception('Compiled swim/drag/fatigue path failed at runtime; falling back to pure-Python path: %s', e)
+                except Exception:
+                    pass
+                # fallback: compute swim speeds and masks using Python implementations
+                swim_speeds = self.swim_speeds()
+                bl_s = self.bl_s(swim_speeds)
+                mask_dict = dict()
+                mask_dict['prolonged'] = np.where((self.simulation.max_s_U < bl_s) & (bl_s <= self.simulation.max_p_U), True, False)
+                mask_dict['sprint'] = np.where(bl_s > self.simulation.max_p_U, True, False)
+                mask_dict['sustained'] = bl_s <= self.simulation.max_s_U
 
             # calculate how far this fish has travelled this bout
             self.bout_distance()
@@ -9818,7 +9825,6 @@ class simulation():
             
             # perform PID checks if we are optimizing controller
             self.PID_checks()
-            
     def timestep(self, t, dt, g, pid_controller):
         """
         Simulates a single time step for all fish in the simulation."""
