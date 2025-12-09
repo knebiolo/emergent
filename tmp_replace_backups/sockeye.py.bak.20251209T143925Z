@@ -82,8 +82,7 @@ def _safe_log_exception(msg, exc, **ctx):
             import traceback
             print('LOGGING FAILURE:', msg, exc)
             print(traceback.format_exc())
-        except Exception as e:
-            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=85)
+        except Exception:
             pass
 
 
@@ -134,8 +133,7 @@ except ImportError as e:
             except Exception:
                 try:
                     print('Logging failure in schooling loop handler:', e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=136)
+                except Exception:
                     pass
 except Exception as e:
     # Log and re-raise unexpected exceptions during import
@@ -226,8 +224,7 @@ class BehavioralWeights:
                 try:
                     # final best-effort logging
                     print('Logging failure in BehavioralWeights.save:', _log_e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=227)
+                except Exception:
                     pass
     
     def load(self, filepath):
@@ -244,8 +241,7 @@ class BehavioralWeights:
             except Exception as _log_e:
                 try:
                     print('Logging failure in BehavioralWeights.load:', _log_e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=244)
+                except Exception:
                     pass
         except Exception as e:
             try:
@@ -253,8 +249,7 @@ class BehavioralWeights:
             except Exception as _log_e:
                 try:
                     print('Logging failure while handling exception in BehavioralWeights.load:', _log_e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=252)
+                except Exception:
                     pass
             raise
     
@@ -702,8 +697,7 @@ class RLTrainer:
                 except Exception as _log_e:
                     try:
                         logger.exception('Failed while logging dry/shallow counts error: %s', _log_e)
-                    except Exception as e:
-                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=700)
+                    except Exception:
                         pass
                 metrics['dry_count'] = 0
                 metrics['shallow_count'] = 0
