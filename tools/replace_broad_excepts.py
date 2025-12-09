@@ -35,6 +35,8 @@ BACKUP_DIR = ROOT / 'tmp_replace_backups'
 PATTERN = re.compile(r'(^[ \t]*)except\s+Exception\s*:\s*\n([ \t]*)pass\b', re.M)
 # one-line forms like: "except Exception: pass" or "except Exception as e: pass"
 PATTERN_ONELINE = re.compile(r'(^[ \t]*)except\s+Exception(?:\s+as\s+[A-Za-z_][\w]*)?\s*:\s*pass\b', re.M)
+# near-pass: except Exception: followed by up to 2 intervening lines and a pass
+PATTERN_NEAR = re.compile(r'(^[ \t]*)except\s+Exception\s*:\s*\n(?:[ \t]*.*\n){0,2}([ \t]*)pass\b', re.M)
 
 REPLACEMENT_TEMPLATE = """{indent}except Exception as e:
 {body_indent}_safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line={line})
@@ -63,13 +65,29 @@ def find_matches(text):
     For the one-line pattern, group(1) -> indent, group(2) -> body_indent (empty string).
     """
     out = []
+    spans = set()
     for m in PATTERN.finditer(text):
         out.append(m)
+        spans.add(m.span())
     for m in PATTERN_ONELINE.finditer(text):
         s, e = m.span()
+        if (s, e) in spans:
+            continue
         indent = m.group(1)
-        # body_indent left empty; do_batch will synthesize a body indent if empty
         out.append(_MatchLike(s, e, (indent, '')))
+        spans.add((s, e))
+    for m in PATTERN_NEAR.finditer(text):
+        s, e = m.span()
+        if (s, e) in spans:
+            continue
+        indent = m.group(1)
+        # synthesize body_indent by extracting the last line (the 'pass' line)
+        segment = text[s:e]
+        last_nl = segment.rfind('\n')
+        pass_line = segment[last_nl+1:] if last_nl != -1 else segment
+        body_indent = re.match(r'([ \t]*)', pass_line).group(1)
+        out.append(_MatchLike(s, e, (indent, body_indent)))
+        spans.add((s, e))
     # sort by start position
     out.sort(key=lambda mm: mm.span()[0])
     return out

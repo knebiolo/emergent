@@ -80,11 +80,15 @@ def _safe_log_exception(msg, exc, **ctx):
     except Exception:
         try:
             import traceback
-            print('LOGGING FAILURE:', msg, exc)
-            print(traceback.format_exc())
+            sys.stderr.write(f'LOGGING FAILURE: {msg} {exc}\n')
+            traceback.print_exc(file=sys.stderr)
         except Exception:
-            # avoid further recursion; give up silently
-            pass
+            try:
+                # Last-resort: attempt to write a minimal error to stderr
+                sys.stderr.write('LOGGING FAILURE: unable to format traceback\n')
+            except Exception:
+                # Give up silently to avoid infinite recursion
+                pass
 
 
 def _safe_build_kdtree(points, name='KDTree'):
@@ -126,20 +130,13 @@ except ImportError as e:
     try:
         logger.warning('Numba import failed; falling back to pure-Python implementations: %s', e)
     except Exception as _log_e:
-        try:
-            logger.exception('Failed while logging numba import warning: %s', _log_e)
-        except Exception as e:
-            try:
-                logger.exception('Error computing schooling loop step for agent %s: %s', i, e)
-            except Exception:
-                try:
-                    print('Logging failure in schooling loop handler:', e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=136)
-                    pass
+        _safe_log_exception('Failed while logging numba import warning', _log_e, context='import numba fallback')
 except Exception as e:
     # Log and re-raise unexpected exceptions during import
-    logger.exception('Unexpected error while importing numba: %s', e)
+    try:
+        logger.exception('Unexpected error while importing numba: %s', e)
+    except Exception as _log_e:
+        _safe_log_exception('Failed while logging unexpected numba import error', _log_e, context='import numba')
     raise
 class BehavioralWeights:
     def __init__(self):
@@ -218,17 +215,12 @@ class BehavioralWeights:
         with open(filepath, 'w') as f:
             json.dump(self.to_dict(), f, indent=2)
         try:
-            logger.info("Saved behavioral weights to %s", filepath)
+              logger.info("Saved behavioral weights to %s", filepath)
         except (OSError, IOError) as e:
             try:
                 logger.exception('Failed to log save operation for behavioral weights: %s', e)
             except Exception as _log_e:
-                try:
-                    # final best-effort logging
-                    print('Logging failure in BehavioralWeights.save:', _log_e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=227)
-                    pass
+                _safe_log_exception('Failed while logging save operation for BehavioralWeights', _log_e, file='sockeye.py', line=227)
     
     def load(self, filepath):
         """Load learned weights from JSON file."""
@@ -237,25 +229,17 @@ class BehavioralWeights:
             data = json.load(f)
         self.from_dict(data)
         try:
-            logger.info("Loaded behavioral weights from %s", filepath)
+              logger.info("Loaded behavioral weights from %s", filepath)
         except (OSError, IOError, ValueError) as e:
             try:
                 logger.exception('Failed to log load operation for behavioral weights: %s', e)
             except Exception as _log_e:
-                try:
-                    print('Logging failure in BehavioralWeights.load:', _log_e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=244)
-                    pass
+                _safe_log_exception('Failed while logging load operation for BehavioralWeights', _log_e, file='sockeye.py', line=244)
         except Exception as e:
             try:
                 logger.exception('Unexpected error while logging load operation; re-raising: %s', e)
             except Exception as _log_e:
-                try:
-                    print('Logging failure while handling exception in BehavioralWeights.load:', _log_e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=252)
-                    pass
+                _safe_log_exception('Logging failure while handling exception in BehavioralWeights.load', _log_e, file='sockeye.py', line=252)
             raise
     
     def mutate(self, scale=0.1):
@@ -700,11 +684,7 @@ class RLTrainer:
                 try:
                     logger.exception('Error computing dry/shallow counts; defaulting to 0: %s', e)
                 except Exception as _log_e:
-                    try:
-                        logger.exception('Failed while logging dry/shallow counts error: %s', _log_e)
-                    except Exception as e:
-                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=700)
-                        pass
+                    _safe_log_exception('Failed while logging dry/shallow counts error', _log_e, file='sockeye.py', line=700)
                 metrics['dry_count'] = 0
                 metrics['shallow_count'] = 0
             except Exception as e:
@@ -769,9 +749,9 @@ class RLTrainer:
             except (ValueError, TypeError, IndexError, AttributeError) as e:
                 try:
                     logger.exception('Error computing mean upstream velocity; defaulting to 0.0: %s', e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=772)
-                    pass
+                except Exception as _log_e:
+                    _safe_log_exception('Failed while logging upstream velocity error', _log_e, file='sockeye.py', line=772)
+                metrics['mean_upstream_velocity'] = 0.0
                 metrics['mean_upstream_velocity'] = 0.0
             except Exception as e:
                 logger.exception('Unexpected error computing mean upstream velocity; re-raising: %s', e)
@@ -824,11 +804,7 @@ class RLTrainer:
                 try:
                     logger.exception('Unexpected error in schooling metric aggregation: %s', e)
                 except Exception:
-                    try:
-                        print('Logging failure in schooling metric aggregation:', e)
-                    except Exception as e:
-                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=828)
-                        pass
+                    _safe_log_exception('Failed during schooling metric aggregation logging', e, file='sockeye.py', line=828)
         
         for episode in range(num_episodes):
             # Run episode with current weights
@@ -854,11 +830,7 @@ class RLTrainer:
                         try:
                             logger.exception('Failed during centroid computation: %s', e)
                         except Exception:
-                            try:
-                                print('Logging failure in centroid computation:', e)
-                            except Exception as e:
-                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=857)
-                                pass
+                            _safe_log_exception('Failed during centroid computation logging', e, file='sockeye.py', line=857)
                 
                 if save_path:
                     self.behavioral_weights.save(save_path)
@@ -1032,14 +1004,7 @@ class HECRASMap:
             try:
                 logger.warning('HECRAS plan: KDTree build failed; certain queries will be disabled')
             except Exception as e:
-                try:
-                    logger.exception('Error while updating alignment scores: %s', e)
-                except Exception:
-                    try:
-                        print('Logging failure in alignment update:', e)
-                    except Exception as e:
-                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1039)
-                        pass
+                _safe_log_exception('Failed while logging KDTree build warning', e, file='sockeye.py', line=1016)
 
     def map_idw(self, query_pts, k=8, eps=1e-8):
         """Map `query_pts` (N x 2) to a dict of field_name -> mapped values via IDW.
@@ -1074,8 +1039,7 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
     try:
         from emergent.salmon_abm.hecras_helpers import infer_wetted_perimeter_from_hecras as _central
     except Exception as e:
-        logger.exception('Failed to import central hecras helper; falling back to local import: %s', e)
-        # local fallback: import from package-relative path
+        _safe_log_exception('Failed to import central hecras helper; falling back to local import', e, module='hecras_helpers')
         from .hecras_helpers import infer_wetted_perimeter_from_hecras as _central
 
     # The central helper expects either an h5py.File or path and supports depth_threshold, max_nodes, raster_fallback_resolution, verbose
@@ -1085,11 +1049,7 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
         try:
             logger.warning("[consolidation] central HECRAS helper ignores 'timestep' argument (requested %s); using first timestep", timestep)
         except Exception as _log_e:
-            try:
-                logger.exception("Failed while logging HECRAS timestep warning: %s", _log_e)
-            except Exception as e:
-                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1088)
-                pass
+            _safe_log_exception('Failed while logging HECRAS timestep warning', _log_e, module='hecras_helpers')
 
     return _central(plan_path, depth_threshold=depth_threshold, max_nodes=(max_nodes if max_nodes is not None else 5000), raster_fallback_resolution=5.0, verbose=verbose)
 
@@ -1098,7 +1058,7 @@ def compute_distance_to_bank_hecras(wetted_info, coords, median_spacing=None):
     try:
         from emergent.salmon_abm.hecras_helpers import compute_distance_to_bank_hecras as _central
     except Exception as e:
-        logger.exception('Failed to import central compute_distance_to_bank_hecras; falling back to local import: %s', e)
+        _safe_log_exception('Failed to import central compute_distance_to_bank_hecras; falling back to local import', e, module='hecras_helpers')
         from .hecras_helpers import compute_distance_to_bank_hecras as _central
     return _central(wetted_info, coords, median_spacing=median_spacing)
 
@@ -1108,7 +1068,7 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     try:
         from emergent.salmon_abm.hecras_helpers import derive_centerline_from_hecras_distance as _central
     except Exception as e:
-        logger.exception('Failed to import central derive_centerline_from_hecras_distance; falling back to local import: %s', e)
+        _safe_log_exception('Failed to import central derive_centerline_from_hecras_distance; falling back to local import', e, module='hecras_helpers')
         from .hecras_helpers import derive_centerline_from_hecras_distance as _central
     return _central(coords, distances, wetted_mask, crs=crs, min_distance_threshold=min_distance_threshold, min_length=min_length)
     """Derive centerline from distance-to-bank field on irregular HECRAS mesh.
@@ -1152,8 +1112,7 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
         try:
             logger.warning("No valid wetted cells for centerline extraction")
         except Exception as e:
-            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1151)
-            pass
+            _safe_log_exception('Failed while logging no valid wetted cells warning', e, file='sockeye.py', line=1151)
         return None
     
     # Find ridge cells (high distance-to-bank)
@@ -1170,8 +1129,7 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
         try:
             logger.exception('Error during sksurv import fallback check: %s', e)
         except Exception as e:
-            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1168)
-            pass
+            _safe_log_exception('Failed while logging ridge cells info', e, file='sockeye.py', line=1168)
     
     if len(ridge_coords) < 10:
         try:
@@ -1193,8 +1151,8 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
         try:
             logger.warning('ridge_tree could not be built; aborting ordered ridge extraction')
         except Exception as e:
-            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1195)
-            pass
+            _safe_log_exception('Failed while logging ridge_tree build warning', e, file='sockeye.py', line=1195)
+        return None
         return None
     
     while remaining:
@@ -1234,8 +1192,7 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
         try:
             logger.exception('Unexpected error during sksurv import check: %s', e)
         except Exception as e:
-            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1235)
-            pass
+            _safe_log_exception('Failed while logging centerline extraction info', e, file='sockeye.py', line=1235)
     
     if centerline.length < min_length:
         try:
@@ -1252,7 +1209,8 @@ def extract_centerline_fast_hecras(plan_path, depth_threshold=0.05, sample_fract
     """Wrapper to centralized fast centerline helper."""
     try:
         from emergent.salmon_abm.hecras_helpers import extract_centerline_fast_hecras as _central
-    except Exception:
+    except Exception as e:
+        _safe_log_exception('Failed to import central extract_centerline_fast_hecras; falling back to local import', e, module='hecras_helpers')
         from .hecras_helpers import extract_centerline_fast_hecras as _central
     return _central(plan_path, depth_threshold=depth_threshold, sample_fraction=sample_fraction, min_length=min_length)
 
@@ -1320,8 +1278,7 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     try:
         logger.info("Loaded %d HECRAS cells", len(coords))
     except Exception as e:
-        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1317)
-        pass
+        _safe_log_exception('Failed while logging loaded HECRAS cells', e, file='sockeye.py', line=1317)
     
     # Step 2: Fast centerline extraction
     try:
@@ -1340,8 +1297,7 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
         try:
             logger.warning("Failed to extract centerline!")
         except Exception as e:
-            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1341)
-            pass
+            _safe_log_exception('Failed while logging centerline extraction failure', e, file='sockeye.py', line=1341)
 
     # Step 2b: Infer wetted perimeter (vectorize raster boundary)
     try:
@@ -1357,7 +1313,10 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
                         logger.exception('Failed to finalize cohesion calculation: %s', e)
                     except Exception:
                         try:
-                            print('Logging failure in cohesion finalization:', e)
+                            try:
+                                print('Logging failure in cohesion finalization:', e)
+                            except Exception as e:
+                                _safe_log_exception('Logging failure in cohesion finalization', e, file='sockeye.py', line=1337)
                         except Exception as e:
                             _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1359)
                             pass
@@ -1369,11 +1328,7 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
             try:
                 logger.info("Perimeter points: %d", 0 if perimeter_points is None else len(perimeter_points))
             except Exception as e:
-                try:
-                    logger.exception('Failed while attempting to warn about logger.info in BehavioralWeights.load: %s', e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1371)
-                    pass
+                _safe_log_exception('Failed while logging perimeter points count', e, file='sockeye.py', line=1371)
     except Exception:
         perimeter_points = None
         perimeter_cells = None
@@ -1451,13 +1406,9 @@ def map_hecras_for_agents(simulation, agent_xy, plan_path, field_names=None, k=8
             from .hecras_helpers import map_hecras_for_agents as _central
         except Exception:
             try:
-                logger.exception('Failed to import hecras_helpers.map_hecras_for_agents')
-            except Exception as e:
-                try:
-                    logger.exception('Failed while logging collision metric computation failure: %s', e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1457)
-                    pass
+                _safe_log_exception('Failed to import hecras_helpers.map_hecras_for_agents', Exception('import fallback'))
+            except Exception:
+                pass
             raise
     return _central(simulation, agent_xy, plan_path, field_names=field_names, k=k, timestep=timestep)
 
@@ -1472,13 +1423,9 @@ def ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=None, targ
             from .hecras_helpers import ensure_hdf_coords_from_hecras as _central
         except Exception:
             try:
-                logger.exception('Failed to import local hecras_helpers.ensure_hdf_coords_from_hecras')
-            except Exception as e:
-                try:
-                    logger.exception('Failed while logging dry/shallow counts computation error: %s', e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1477)
-                    pass
+                _safe_log_exception('Failed to import local hecras_helpers.ensure_hdf_coords_from_hecras', Exception('import fallback'))
+            except Exception:
+                pass
             raise
     return _central(simulation, plan_path, target_shape=target_shape, target_transform=target_transform, timestep=timestep)
     
@@ -1502,20 +1449,24 @@ def ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=None, targ
         existing = np.asarray(dset_x[:])
         # Check if uninit: all non-finite OR all zeros
         needs_populate = not np.isfinite(existing).any() or np.allclose(existing, 0.0)
-    except Exception:
+    except Exception as e:
+        _safe_log_exception('Failed checking existing x_coords dataset; assuming populate needed', e, file='sockeye.py', line=1466)
         needs_populate = True
 
     if needs_populate:
-        # build col and row indices then map to geo using target_transform
-        cols = np.arange(width, dtype=np.float64)
-        rows = np.arange(height, dtype=np.float64)
-        col_grid, row_grid = np.meshgrid(cols, rows)
-        # pixel centers to geo
-        xs, ys = pixel_to_geo(target_transform, row_grid, col_grid)
-        dset_x[:, :] = xs.astype('float32')
-        dset_y[:, :] = ys.astype('float32')
-
-    # store transforms on simulation for later geotransform usage
+        try:
+            # build col and row indices then map to geo using target_transform
+            cols = np.arange(width, dtype=np.float64)
+            rows = np.arange(height, dtype=np.float64)
+            col_grid, row_grid = np.meshgrid(cols, rows)
+            # pixel centers to geo
+            xs, ys = pixel_to_geo(target_transform, row_grid, col_grid)
+            dset_x[:, :] = xs.astype('float32')
+            dset_y[:, :] = ys.astype('float32')
+        except Exception as e:
+            _safe_log_exception('Failed populating x/y coordinate datasets from target_transform', e, file='sockeye.py', line=1489)
+            # best-effort population — if this fails we let the higher-level code handle missing coords
+            pass
     simulation.depth_rast_transform = target_transform
     simulation.hdf_height = height
     simulation.hdf_width = width
@@ -2999,8 +2950,8 @@ def compute_coarsened_alongstream_raster(simulation, factor=4, outlet_xy=None, d
             else:
                 env.create_dataset(out_name, data=upsampled.astype('f4'), dtype='f4')
             hw.flush()
-        except Exception:
-            # if writing to same file is not desired, just return the upsampled array
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=3002)
             pass
 
     # clean up temp group
@@ -5444,8 +5395,8 @@ class simulation():
                     except Exception as e:
                         _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5439)
                         pass
-                except Exception:
-                    # If memory group doesn't exist or write fails, skip silently
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5447)
                     pass
                 self.hdf5.flush()
 
@@ -6455,8 +6406,8 @@ class simulation():
 
                     # reshape into agent grid
                     self.wet = wet_arr.reshape(self.X.shape)
-                except Exception:
-                    # fallback: do not change self.wet here
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6458)
                     pass
         except Exception as e:
             _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6459)
@@ -9189,8 +9140,8 @@ class simulation():
                     # Combine heading alignment and SOG alignment weighted by sog_weight
                     alignment_array[:, 0] = (1.0 - sog_weight) * alignment_array[:, 0] + sog_weight * weight * v_hat_vel_x * no_school
                     alignment_array[:, 1] = (1.0 - sog_weight) * alignment_array[:, 1] + sog_weight * weight * v_hat_vel_y * no_school
-                except Exception:
-                    # On any error, fall back to heading-only alignment
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=9192)
                     pass
             
             # Calculate a new ideal speed based on the mean speed of those fish around
