@@ -170,8 +170,11 @@ class BehavioralWeights:
                 out[k] = getattr(self, k)
             except AttributeError:
                 out[k] = None
-            except Exception:
-                logger.exception('Unexpected error exporting weight %s; setting to None', k)
+            except Exception as e:
+                try:
+                    logger.exception('Unexpected error exporting weight %s; setting to None: %s', k, e)
+                except Exception:
+                    pass
                 out[k] = None
         return out
     
@@ -191,8 +194,12 @@ class BehavioralWeights:
         except (OSError, IOError) as e:
             try:
                 logger.exception('Failed to log save operation for behavioral weights: %s', e)
-            except Exception:
-                pass
+            except Exception as _log_e:
+                try:
+                    # final best-effort logging
+                    print('Logging failure in BehavioralWeights.save:', _log_e)
+                except Exception:
+                    pass
     
     def load(self, filepath):
         """Load learned weights from JSON file."""
@@ -205,13 +212,19 @@ class BehavioralWeights:
         except (OSError, IOError, ValueError) as e:
             try:
                 logger.exception('Failed to log load operation for behavioral weights: %s', e)
-            except Exception:
-                pass
+            except Exception as _log_e:
+                try:
+                    print('Logging failure in BehavioralWeights.load:', _log_e)
+                except Exception:
+                    pass
         except Exception as e:
             try:
                 logger.exception('Unexpected error while logging load operation; re-raising: %s', e)
-            except Exception:
-                pass
+            except Exception as _log_e:
+                try:
+                    print('Logging failure while handling exception in BehavioralWeights.load:', _log_e)
+                except Exception:
+                    pass
             raise
     
     def mutate(self, scale=0.1):
@@ -1093,8 +1106,11 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     
     try:
         logger.info("Ridge cells (distance >= %0.2fm): %,d", min_distance_threshold, len(ridge_coords))
-    except Exception:
-        pass
+    except Exception as e:
+        try:
+            logger.exception('Error during sksurv import fallback check: %s', e)
+        except Exception:
+            pass
     
     if len(ridge_coords) < 10:
         try:
@@ -1151,8 +1167,11 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     
     try:
         logger.info("Centerline extracted: %0.2fm long", centerline.length)
-    except Exception:
-        pass
+    except Exception as e:
+        try:
+            logger.exception('Unexpected error during sksurv import check: %s', e)
+        except Exception:
+            pass
     
     if centerline.length < min_length:
         try:
@@ -1260,8 +1279,11 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
         if hecras_verbose:
             try:
                 logger.info("2b. Inferring wetted perimeter (vectorizing)...")
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    logger.exception('Failed while attempting to warn about logger.info in BehavioralWeights.save: %s', e)
+                except Exception:
+                    pass
         wetted_info = infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=depth_threshold, timestep=0, verbose=False)
         perimeter_points = wetted_info.get('perimeter_points', None)
         perimeter_cells = wetted_info.get('perimeter_cells', None)
@@ -1269,8 +1291,11 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
         if hecras_verbose:
             try:
                 logger.info("Perimeter points: %d", 0 if perimeter_points is None else len(perimeter_points))
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    logger.exception('Failed while attempting to warn about logger.info in BehavioralWeights.load: %s', e)
+                except Exception:
+                    pass
     except Exception:
         perimeter_points = None
         perimeter_cells = None
@@ -1346,8 +1371,11 @@ def map_hecras_for_agents(simulation, agent_xy, plan_path, field_names=None, k=8
         except Exception:
             try:
                 logger.exception('Failed to import hecras_helpers.map_hecras_for_agents')
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    logger.exception('Failed while logging collision metric computation failure: %s', e)
+                except Exception:
+                    pass
             raise
     return _central(simulation, agent_xy, plan_path, field_names=field_names, k=k, timestep=timestep)
 
@@ -1363,8 +1391,11 @@ def ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=None, targ
         except Exception:
             try:
                 logger.exception('Failed to import local hecras_helpers.ensure_hdf_coords_from_hecras')
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    logger.exception('Failed while logging dry/shallow counts computation error: %s', e)
+                except Exception:
+                    pass
             raise
     return _central(simulation, plan_path, target_shape=target_shape, target_transform=target_transform, timestep=timestep)
     
@@ -1454,8 +1485,14 @@ def compute_affine_from_hecras(coords, target_cell_size=None):
     except (RuntimeError, ValueError, TypeError, IndexError, AttributeError) as e:
         try:
             logger.exception('KDTree spacing estimation failed; using fallback median spacing: %s', e)
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                logger.exception('Failed while logging HECRAS geometry init message: %s', e)
+            except Exception as e:
+                try:
+                    logger.exception('BehavioralWeights.to_dict: unexpected error while getting attribute %s: %s', k, e)
+                except Exception:
+                    pass
         # fallback: estimate spacing using bounding box / sqrt(n)
         bbox = coords.max(axis=0) - coords.min(axis=0)
         approx_cell = float(np.sqrt((bbox[0] * bbox[1]) / max(1, n)))
@@ -1586,8 +1623,11 @@ def get_arr(use_gpu):
         except Exception:
             try:
                 logger.info("CuPy not found. Falling back to Numpy.")
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    logger.exception('BehavioralWeights.from_dict encountered unexpected error: %s', e)
+                except Exception:
+                    pass
             import numpy as np
             return np
     else:
@@ -2252,8 +2292,11 @@ if _HAS_NUMBA:
         except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
             try:
                 logger.exception('_numba_warmup failed with expected runtime issue; numba kernels may not be available: %s', e)
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    logger.exception('BehavioralWeights.save logging failed: %s', e)
+                except Exception:
+                    pass
         except Exception:
             logger.exception('_numba_warmup failed with unexpected error; re-raising')
             raise
@@ -3769,8 +3812,11 @@ class PID_optimization():
                 except Exception as e:
                     try:
                         logger.exception('PID run failed for P=%0.3f I=%0.3f D=%0.3f: %s', self.p[i], self.i[i], self.d[i], e)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        try:
+                            logger.exception('Error while logging in collision metrics catch: %s', e)
+                        except Exception:
+                            pass
                     pop_error_array.append(sim.error_array)
                     self.errors[i] = sim.error_array
                     self.velocities[i] = np.sqrt(np.power(sim.vel_x_array,2) + np.power(sim.vel_y_array,2))
@@ -4067,8 +4113,11 @@ class simulation():
             except (OSError, IOError, ValueError, TypeError) as e:
                 try:
                     logger.exception('Failed to create MemmapLogWriter (runtime); disabling memmap logging: %s', e)
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        logger.exception('Failed while logging dry/shallow counts block: %s', e)
+                    except Exception:
+                        pass
                 self._memmap_writer = None
                 self._memmap_vars = []
             except Exception:
