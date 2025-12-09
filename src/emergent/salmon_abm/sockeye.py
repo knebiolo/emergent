@@ -755,8 +755,11 @@ class RLTrainer:
         
         try:
             logger.info("Starting RL training: %s episodes %s timesteps", num_episodes, timesteps_per_episode)
-        except Exception:
-            pass
+        except (ValueError, TypeError, AttributeError) as e:
+            try:
+                logger.exception('logger.info failed during RL training start: %s', e)
+            except Exception:
+                pass
         
         for episode in range(num_episodes):
             # Run episode with current weights
@@ -775,8 +778,11 @@ class RLTrainer:
                 best_weights = self.behavioral_weights.to_dict()
                 try:
                     logger.info("Episode %s: New best reward = %0.2f", episode, episode_reward)
-                except Exception:
-                    pass
+                except (ValueError, TypeError, AttributeError) as e:
+                    try:
+                        logger.exception('logger.info failed during episode logging: %s', e)
+                    except Exception:
+                        pass
                 
                 if save_path:
                     self.behavioral_weights.save(save_path)
@@ -823,8 +829,11 @@ class RLTrainer:
             self.behavioral_weights.from_dict(best_weights)
             try:
                 logger.info("Training complete. Best reward: %0.2f", best_reward)
-            except Exception:
-                pass
+            except (ValueError, TypeError, AttributeError) as e:
+                try:
+                    logger.exception('logger.info failed when finishing training: %s', e)
+                except Exception:
+                    pass
         
         return self.behavioral_weights
 
@@ -1075,7 +1084,13 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     remaining = set(range(len(ridge_coords))) - {start_idx}
     
     current_idx = start_idx
-    ridge_tree = cKDTree(ridge_coords)
+    ridge_tree = _safe_build_kdtree(ridge_coords, name='ridge_tree')
+    if ridge_tree is None:
+        try:
+            logger.warning('ridge_tree could not be built; aborting ordered ridge extraction')
+        except Exception:
+            pass
+        return None
     
     while remaining:
         # Find nearest unvisited neighbor
@@ -1406,12 +1421,22 @@ def compute_affine_from_hecras(coords, target_cell_size=None):
 
     # build KDTree and get 2nd NN distances (first is zero/self)
     try:
-        from scipy.spatial import cKDTree
+        tree = _safe_build_kdtree(coords, name='spacing_tree')
+        if tree is None:
+            raise RuntimeError('KDTree build failed for spacing estimation')
+        dists, _ = tree.query(sample, k=2)
+    except (RuntimeError, ValueError, TypeError, IndexError, AttributeError) as e:
+        try:
+            logger.exception('KDTree spacing estimation failed; using fallback median spacing: %s', e)
+        except Exception:
+            pass
+        # fallback: estimate spacing using bounding box / sqrt(n)
+        bbox = coords.max(axis=0) - coords.min(axis=0)
+        approx_cell = float(np.sqrt((bbox[0] * bbox[1]) / max(1, n)))
+        median_spacing = approx_cell
     except Exception:
-        # fallback to slower scipy.spatial.KDTree if cKDTree not available
-        from scipy.spatial import KDTree as cKDTree
-    tree = cKDTree(coords)
-    dists, _ = tree.query(sample, k=2)
+        logger.exception('Unexpected error during spacing KDTree; re-raising')
+        raise
     # second column are nearest neighbor distances
     nn = dists[:, 1]
     # median spacing
