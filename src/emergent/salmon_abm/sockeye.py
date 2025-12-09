@@ -148,24 +148,24 @@ class BehavioralWeights:
         
     def to_dict(self):
         """Export weights as dictionary for saving."""
-        return {
-            'cohesion_weight': self.cohesion_weight,
-            'alignment_weight': self.alignment_weight,
-            'separation_weight': self.separation_weight,
-            'separation_radius': self.separation_radius,
-            'threat_level': self.threat_level,
-            'cohesion_radius_relaxed': self.cohesion_radius_relaxed,
-            'cohesion_radius_threatened': self.cohesion_radius_threatened,
-            'drafting_enabled': self.drafting_enabled,
-            'drafting_distance': self.drafting_distance,
-            'drafting_angle_tolerance': self.drafting_angle_tolerance,
-            'drag_reduction_single': self.drag_reduction_single,
-            'drag_reduction_dual': self.drag_reduction_dual,
-            'rheotaxis_weight': self.rheotaxis_weight,
-            'border_cue_weight': self.border_cue_weight,
-            'border_threshold_multiplier': self.border_threshold_multiplier,
-            'border_max_force': self.border_max_force,
-            'collision_weight': self.collision_weight,
+            try:
+                ss, bl_s_tmp, prolonged_tmp, sprint_tmp, sustained_tmp, drags_tmp, _ = _drag_and_battery_numba(
+                    sog_a, heading_a, xv_a, yv_a, mask_a, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf_a, dragc_a, wave_a, swim_behav_a, batt_a, per_rec_a, ttf_a, float(self.dt), True)
+            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
+                try:
+                    logger.exception("_drag_and_battery_numba failed with runtime issue; falling back to Python calc_battery: %s", e)
+                except Exception:
+                    pass
+                # fallback: use numpy/python implementation (same function also has numpy fallback)
+                try:
+                    ss, bl_s_tmp, prolonged_tmp, sprint_tmp, sustained_tmp, drags_tmp, _ = _drag_and_battery_numba(
+                        sog_a, heading_a, xv_a, yv_a, mask_a, float(self.wat_dens(self.simulation.water_temp).mean() if hasattr(self.simulation, 'water_temp') else 1.0), surf_a, dragc_a, wave_a, swim_behav_a, batt_a, per_rec_a, ttf_a, float(self.dt), True)
+                except Exception:
+                    logger.exception('Fallback to Python _drag_and_battery_numba also failed; re-raising')
+                    raise
+            except Exception:
+                logger.exception('Unexpected error in _drag_and_battery_numba; re-raising')
+                raise
             'collision_radius': self.collision_radius,
             'upstream_priority': self.upstream_priority,
             'energy_efficiency_priority': self.energy_efficiency_priority,
@@ -2118,11 +2118,14 @@ if _HAS_NUMBA:
         _ = _project_points_onto_line_numba(dummy, dummy, dummy, dummy)
         _ = _swim_speeds_numba(dummy, dummy, dummy, dummy)
         _ = _calc_battery_numba(dummy, dummy, dummy, np.ones(n, dtype=np.bool_), 0.1)
-    except Exception:
+    except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
         try:
-            logger.exception('Numba precompile at import time failed; continuing without warmed numba kernels')
+            logger.exception('Numba precompile at import time failed (expected runtime issue); continuing without warmed numba kernels: %s', e)
         except Exception:
             pass
+    except Exception:
+        logger.exception('Numba precompile at import time failed with unexpected error; re-raising')
+        raise
 
     # helper to ensure compilation completes at import time
     def _numba_warmup(m=None):
@@ -2141,20 +2144,26 @@ if _HAS_NUMBA:
             _ = _swim_speeds_numba(d, d, d, d)
             _ = _calc_battery_numba(np.ones(m, dtype=np.float64), d, d, b, 0.1)
             _ = _swim_core_numba(d, d, d, d, d, d, np.zeros(m, dtype=np.bool_), np.zeros(m, dtype=np.bool_), b, 0.1)
-        except Exception:
+        except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
             try:
-                logger.exception('_numba_warmup failed; numba kernels may not be available')
+                logger.exception('_numba_warmup failed with expected runtime issue; numba kernels may not be available: %s', e)
             except Exception:
                 pass
+        except Exception:
+            logger.exception('_numba_warmup failed with unexpected error; re-raising')
+            raise
 
     # attempt warmup (may still spend time but at import not during timed loop)
     try:
         _numba_warmup()
-    except Exception:
+    except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
         try:
-            logger.exception('_numba_warmup() failed during module init; continuing without warmed kernels')
+            logger.exception('_numba_warmup() failed during module init with expected runtime issue; continuing without warmed kernels: %s', e)
         except Exception:
             pass
+    except Exception:
+        logger.exception('_numba_warmup() failed during module init with unexpected error; re-raising')
+        raise
 
     def _numba_warmup_for_sim(sim):
         """Warm Numba kernels using arrays shaped to the given simulation instance.
@@ -2175,27 +2184,36 @@ if _HAS_NUMBA:
             # exact-shape warmups
             try:
                 _compute_drags_numba(ones, ones, ones, ones, bmask, 1.0, ones, ones, ones, bi)
-            except Exception:
+            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
-                    logger.exception('Exact-shape numba warmup: _compute_drags_numba failed for sim-shaped arrays')
+                    logger.exception('Exact-shape numba warmup: _compute_drags_numba failed for sim-shaped arrays (runtime issue): %s', e)
                 except Exception:
                     pass
+            except Exception:
+                logger.exception('Exact-shape numba warmup: _compute_drags_numba failed with unexpected error; re-raising')
+                raise
             try:
                 _swim_speeds_numba(ones, ones, ones, ones)
-            except Exception:
+            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
-                    logger.exception('Exact-shape numba warmup: _swim_speeds_numba failed for sim-shaped arrays')
+                    logger.exception('Exact-shape numba warmup: _swim_speeds_numba failed for sim-shaped arrays (runtime issue): %s', e)
                 except Exception:
                     pass
+            except Exception:
+                logger.exception('Exact-shape numba warmup: _swim_speeds_numba failed with unexpected error; re-raising')
+                raise
             try:
                 # swim_speeds buffer shaped (na, max_ts)
                 buf = np.zeros((na, max_ts), dtype=np.float64)
                 _assess_fatigue_core(ones, ones, ones, ones, ones, ones, ones, buf)
-            except Exception:
+            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
-                    logger.exception('Exact-shape numba warmup: _assess_fatigue_core failed for sim-shaped arrays')
+                    logger.exception('Exact-shape numba warmup: _assess_fatigue_core failed for sim-shaped arrays (runtime issue): %s', e)
                 except Exception:
                     pass
+            except Exception:
+                logger.exception('Exact-shape numba warmup: _assess_fatigue_core failed with unexpected error; re-raising')
+                raise
         except Exception:
             try:
                 logger.exception('_numba_warmup_for_sim failed while preparing sim-shaped warmups')
