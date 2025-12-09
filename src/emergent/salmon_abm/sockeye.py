@@ -4574,19 +4574,25 @@ class simulation():
                 dummy_align = np.zeros(2, dtype=np.float64)
                 try:
                     _compute_schooling_loop(dummy_pos, dummy_head, dummy_data, dummy_offsets, 1.0, 1.0, dummy_coh, dummy_align, 2)
-                except Exception:
+                except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                     try:
-                        logger.exception("_compute_schooling_loop warmup failed")
+                        logger.exception("_compute_schooling_loop warmup failed (runtime): %s", e)
                     except Exception:
                         pass
+                except Exception:
+                    logger.exception('_compute_schooling_loop warmup failed with unexpected error; re-raising')
+                    raise
                 dummy_drag = np.zeros(2, dtype=np.float64)
                 try:
                     _compute_drafting_loop(dummy_pos, dummy_head, dummy_data, dummy_offsets, 0.5, 0.1, 0.2, dummy_drag, 2)
-                except Exception:
+                except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                     try:
-                        logger.exception("_compute_drafting_loop warmup failed")
+                        logger.exception("_compute_drafting_loop warmup failed (runtime): %s", e)
                     except Exception:
                         pass
+                except Exception:
+                    logger.exception('_compute_drafting_loop warmup failed with unexpected error; re-raising')
+                    raise
         except Exception:
             try:
                 logger.exception("apply_behavioral_weights: unexpected failure during numba warmup block")
@@ -5445,8 +5451,15 @@ class simulation():
         if _HAS_NUMBA:
             try:
                 dists = _wrap_project_points_onto_line_numba(xs_line, ys_line, px, py)
-            except Exception:
+            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
+                try:
+                    logger.exception('Numba project-points helper failed (runtime); falling back to numpy: %s', e)
+                except Exception:
+                    pass
                 dists = _project_points_onto_line_numpy(xs_line, ys_line, px, py)
+            except Exception:
+                logger.exception('Unexpected error in project-points numba helper; re-raising')
+                raise
         else:
             dists = _project_points_onto_line_numpy(xs_line, ys_line, px, py)
         return dists.reshape(self.X.shape)
@@ -7494,8 +7507,15 @@ class simulation():
                 dead_a = np.ascontiguousarray(dead_mask, dtype=np.bool_)
                 mask_a = np.ascontiguousarray(mask, dtype=np.bool_)
                 dxdy = _swim_core_numba(fv0x_a, fv0y_a, accx_a, accy_a, pidx_a, pidy_a, tired_a, dead_a, mask_a, float(dt))
-            except Exception:
+            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
+                try:
+                    logger.exception('Numba swim_core helper failed (runtime); falling back to Python path: %s', e)
+                except Exception:
+                    pass
                 dxdy = _swim_core_numba(fv0x, fv0y, accx, accy, pidx, pidy, tired_mask, dead_mask, mask, dt)
+            except Exception:
+                logger.exception('Unexpected error in swim_core numba helper; re-raising')
+                raise
                 
             # if np.any(np.linalg.norm(fish_vel_1,axis = -1) > 2* self.ideal_sog):
             #     print ('fuck - why')
