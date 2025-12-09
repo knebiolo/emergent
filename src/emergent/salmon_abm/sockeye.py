@@ -7258,9 +7258,16 @@ class simulation():
                     out = _wrap_drag_fun_numba(fx, fy, wx, wy, mask, float(density), surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav, out)
                 else:
                     out = _wrap_drag_fun_numba(fx, fy, wx, wy, mask, float(density), surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav, out)
-            except Exception:
+            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
+                try:
+                    logger.exception('Numba drag wrapper failed with runtime issue; falling back to Python compute_drags: %s', e)
+                except Exception:
+                    pass
                 # fallback
                 out = compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav)
+            except Exception:
+                logger.exception('Unexpected error in drag wrapper; re-raising')
+                raise
             self.simulation.drag = out
 
         def ideal_drag_fun(self, fish_velocities = None):
@@ -9300,8 +9307,15 @@ class simulation():
                 prev_Y = np.ascontiguousarray(self.simulation.prev_Y, dtype=np.float64)
                 Y = np.ascontiguousarray(self.simulation.Y, dtype=np.float64)
                 dist_travelled = _bout_distance_numba(prev_X, X, prev_Y, Y)
-            except Exception:
+            except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
+                try:
+                    logger.exception('Numba bout-distance helper failed (runtime); falling back to un-optimized call: %s', e)
+                except Exception:
+                    pass
                 dist_travelled = _bout_distance_numba(self.simulation.prev_X, self.simulation.X, self.simulation.prev_Y, self.simulation.Y)
+            except Exception:
+                logger.exception('Unexpected error in bout-distance numba helper; re-raising')
+                raise
             self.simulation.dist_per_bout += dist_travelled
 
             self.simulation.bout_dur += self.dt
@@ -9336,8 +9350,15 @@ class simulation():
                     m_pro = np.asarray(mask_dict['prolonged'], dtype=np.bool_)
                     m_sprint = np.asarray(mask_dict['sprint'], dtype=np.bool_)
                     ttf = _time_to_fatigue_numba(ss, m_pro, m_sprint, float(a_p), float(b_p), float(a_s), float(b_s))
-                except Exception:
+                except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
+                    try:
+                        logger.exception('Numba time-to-fatigue helper failed with runtime issue; falling back: %s', e)
+                    except Exception:
+                        pass
                     ttf = _time_to_fatigue_numba(swim_speeds, mask_dict['prolonged'].astype(bool), mask_dict['sprint'].astype(bool), a_p, b_p, a_s, b_s)
+                except Exception:
+                    logger.exception('Unexpected error in _time_to_fatigue_numba; re-raising')
+                    raise
                 return ttf
                 
             elif method == 'Katapodis_Gervais':
@@ -9447,11 +9468,11 @@ class simulation():
                     mask_sust = np.asarray(mask_sustained, dtype=np.bool_)
                     new_batt = _wrap_merged_battery_numba(batt, per_rec_a, ttf_a, mask_sust, float(self.dt))
                     self.simulation.battery = new_batt
-                except (ValueError, TypeError, IndexError, AttributeError):
-                    logger.exception('Numba merged battery kernel failed; falling back to pure-Python implementation')
-                except Exception:
-                    logger.exception('Unexpected error in merged battery numba kernel; re-raising')
-                    raise
+                except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
+                    try:
+                        logger.exception('Numba merged battery kernel failed (runtime); falling back to pure-Python implementation: %s', e)
+                    except Exception:
+                        pass
                     # fallback to original numpy behavior
                     battery[mask_sustained] += per_rec_arr[mask_sustained]
                     mask_non_sustained = ~mask_sustained
@@ -9460,6 +9481,9 @@ class simulation():
                     safe = ttf0 != 0
                     battery[mask_non_sustained] *= np.where(safe, np.maximum(0.0, ttf1 / ttf0), 0.0)
                     self.simulation.battery = np.clip(battery, 0, 1)
+                except Exception:
+                    logger.exception('Unexpected error in merged battery numba kernel; re-raising')
+                    raise
             else:
                 battery[mask_sustained] += per_rec_arr[mask_sustained]
                 mask_non_sustained = ~mask_sustained
@@ -9595,15 +9619,20 @@ class simulation():
                             self.simulation.drag = np.ascontiguousarray(drags_out)
                         except Exception:
                             logger.exception('Failed to set simulation.drag from numba kernel output')
-                except Exception:
-                    # If the numba path fails entirely, log and fallback to Python implementation
-                    logger.exception('Numba swim/drag kernel failed; falling back to pure-Python path')
+                except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
+                    try:
+                        logger.exception('Numba swim/drag kernel failed with runtime issue; falling back to pure-Python path: %s', e)
+                    except Exception:
+                        pass
                     swim_speeds = self.swim_speeds()
                     bl_s = self.bl_s(swim_speeds)
                     mask_dict = dict()
                     mask_dict['prolonged'] = np.where((self.simulation.max_s_U < bl_s) & (bl_s <= self.simulation.max_p_U), True, False)
                     mask_dict['sprint'] = np.where(bl_s > self.simulation.max_p_U, True, False)
                     mask_dict['sustained'] = bl_s <= self.simulation.max_s_U
+                except Exception:
+                    logger.exception('Unexpected error in merged swim/drag numba kernel; re-raising')
+                    raise
 
             # calculate how far this fish has travelled this bout
             self.bout_distance()
