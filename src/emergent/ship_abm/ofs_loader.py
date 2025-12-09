@@ -566,8 +566,15 @@ def get_current_fn(
             v_pts = np.column_stack((lon_v_valid, lat_v_valid))
 
         # Build separate KDTrees for U and V grids (FAST!)
-        u_tree = cKDTree(u_pts)
-        v_tree = cKDTree(v_pts)
+        try:
+            from emergent.salmon_abm.sockeye import _safe_build_kdtree
+            u_tree = _safe_build_kdtree(u_pts, name='ofs_u_tree')
+            v_tree = _safe_build_kdtree(v_pts, name='ofs_v_tree')
+        except Exception:
+            u_tree = None
+            v_tree = None
+        if u_tree is None or v_tree is None:
+            raise RuntimeError('KDTree unavailable for ROMS nearest-neighbor sampling')
         
         print(f"[ofs_loader] ✓ Built FAST nearest-neighbor interpolators for staggered grids")
         
@@ -641,7 +648,13 @@ def get_current_fn(
     except Exception:
         valid_pts = pts
 
-    tree = cKDTree(valid_pts)
+    try:
+        from emergent.salmon_abm.sockeye import _safe_build_kdtree
+        tree = _safe_build_kdtree(valid_pts, name='ofs_fvcom_tree')
+    except Exception:
+        tree = None
+    if tree is None:
+        raise RuntimeError('KDTree unavailable for FVCOM unstructured sampling')
     
     # Extract surface layer from 3D/4D data
     u_data = ds["u"]
@@ -698,7 +711,13 @@ def get_current_fn(
     except Exception:
         pass
 
-    valid_tree = cKDTree(valid_pts)
+    try:
+        from emergent.salmon_abm.sockeye import _safe_build_kdtree
+        valid_tree = _safe_build_kdtree(valid_pts, name='ofs_valid_tree')
+    except Exception:
+        valid_tree = None
+    if valid_tree is None:
+        raise RuntimeError('KDTree unavailable for OFS valid points sampling')
     
     print(f"[ofs_loader] ✓ Built FAST nearest-neighbor interpolator")
     

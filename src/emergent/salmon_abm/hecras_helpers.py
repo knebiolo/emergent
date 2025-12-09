@@ -182,14 +182,30 @@ def compute_distance_to_bank_hecras(wetted_info, coords, median_spacing=None):
         sample_size = min(1000, len(coords))
         sample_idx = np.random.choice(len(coords), size=sample_size, replace=False)
         sample_coords = coords[sample_idx]
-        sample_tree = cKDTree(sample_coords)
-        dists, _ = sample_tree.query(sample_coords, k=2)
-        median_spacing = np.median(dists[:, 1])
+        try:
+            from emergent.salmon_abm.sockeye import _safe_build_kdtree
+            sample_tree = _safe_build_kdtree(sample_coords, name='hecras_sample_tree')
+        except Exception:
+            sample_tree = None
+        if sample_tree is not None:
+            dists, _ = sample_tree.query(sample_coords, k=2)
+            median_spacing = np.median(dists[:, 1])
+        else:
+            # fallback heuristic: use bbox area / n
+            bbox = sample_coords.max(axis=0) - sample_coords.min(axis=0)
+            median_spacing = float(np.sqrt((bbox[0] * bbox[1]) / max(1, sample_size)))
 
     wetted_coords = coords[wetted_mask]
     wetted_indices = np.where(wetted_mask)[0]
     n_wetted = len(wetted_coords)
-    wetted_tree = cKDTree(wetted_coords)
+    try:
+        from emergent.salmon_abm.sockeye import _safe_build_kdtree
+        wetted_tree = _safe_build_kdtree(wetted_coords, name='hecras_wetted_tree')
+    except Exception:
+        wetted_tree = None
+    if wetted_tree is None:
+        # If we can't build a KDTree, return inf distances (no connectivity)
+        return np.full(len(coords), np.nan, dtype=np.float32)
     connectivity_radius = median_spacing * 1.5
     pairs = wetted_tree.query_pairs(r=connectivity_radius, output_type='ndarray')
     if len(pairs) > 0:
@@ -238,6 +254,14 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     ridge_mask = valid_distances >= min_distance_threshold
     ridge_coords = valid_coords[ridge_mask]
     ridge_distances = valid_distances[ridge_mask]
+    try:
+        from emergent.salmon_abm.sockeye import _safe_build_kdtree
+        ridge_tree = _safe_build_kdtree(ridge_coords, name='hecras_ridge_tree')
+    except Exception:
+        ridge_tree = None
+    if ridge_tree is None or len(ridge_coords) == 0:
+        return None
+    pairs = ridge_tree.query_pairs(r= np.inf, output_type='ndarray')
     if len(ridge_coords) < 10:
         return None
     start_idx = np.argmax(ridge_distances)
@@ -372,10 +396,18 @@ def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, m
             # Now extract ordered perimeter coordinates from 'Perimeter' dataset
             perim_coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Perimeter'])
             # Map perimeter coordinates to the facepoints index by nearest neighbor (facepoints may duplicate)
-            # Build KD-tree for facepoints for mapping if sizes are large — use simple nearest lookup here for clarity
-            from scipy.spatial import cKDTree
-            tree = cKDTree(facepoints)
-            dists, idxs = tree.query(perim_coords, k=1)
+            try:
+                from emergent.salmon_abm.sockeye import _safe_build_kdtree
+                tree = _safe_build_kdtree(facepoints, name='facepoints_tree')
+            except Exception:
+                tree = None
+            if tree is not None:
+                dists, idxs = tree.query(perim_coords, k=1)
+            else:
+                # brute-force fallback
+                dif = perim_coords[:, None, :] - facepoints[None, :, :]
+                dists = np.sqrt(np.sum(dif * dif, axis=2))
+                idxs = np.argmin(dists, axis=1)
             # keep only the perimeter coordinates that map to a touched facepoint
             touched = perim_touch[idxs]
             if not np.any(touched):

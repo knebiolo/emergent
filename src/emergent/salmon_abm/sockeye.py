@@ -946,8 +946,13 @@ class HECRASMap:
         self.coords = coords[mask].astype(np.float64)
         # store each field masked and casted
         self.fields = {k: np.asarray(v[mask], dtype=np.float64) for k, v in normed.items()}
-        # build KDTree once
-        self.tree = cKDTree(self.coords)
+        # build KDTree once (defensive)
+        self.tree = _safe_build_kdtree(self.coords, name='hecras_plan_tree')
+        if self.tree is None:
+            try:
+                logger.warning('HECRAS plan: KDTree build failed; certain queries will be disabled')
+            except Exception:
+                pass
 
     def map_idw(self, query_pts, k=8, eps=1e-8):
         """Map `query_pts` (N x 2) to a dict of field_name -> mapped values via IDW.
@@ -957,6 +962,8 @@ class HECRASMap:
         query = np.asarray(query_pts, dtype=np.float64)  # Ensure query points are in the correct format
         if query.ndim == 1:
             query = query.reshape(1, 2)
+        if getattr(self, 'tree', None) is None:
+            raise RuntimeError('IDW mapping requested but KDTree is unavailable (HECRAS plan tree build failed)')
         dists, inds = self.tree.query(query, k=k)
         if k == 1:
             dists = dists[:, None]
@@ -6083,18 +6090,34 @@ class simulation():
         hecras_nodes = np.asarray(hecras_nodes, dtype=float)
         abm_points = np.asarray(abm_points, dtype=float)
 
-        # Build KDTree once and cache it
+        # Build KDTree once and cache it (defensive)
+        tree = None
         if not hasattr(self, 'hecras_map') or self.hecras_map.get('tree') is None:
-            tree = cKDTree(hecras_nodes)
+            try:
+                from emergent.salmon_abm.sockeye import _safe_build_kdtree
+                tree = _safe_build_kdtree(hecras_nodes, name='hecras_nodes_tree')
+            except Exception:
+                tree = None
         else:
-            # Reuse existing tree if nodes haven't changed
             tree = self.hecras_map['tree']
-            
-        # Query tree for current agent positions
-        try:
-            dists, inds = tree.query(abm_points, k=k, n_jobs=-1)
-        except TypeError:
-            dists, inds = tree.query(abm_points, k=k)
+
+        # Query tree for current agent positions (fall back to brute-force if tree unavailable)
+        if tree is not None:
+            try:
+                dists, inds = tree.query(abm_points, k=k, n_jobs=-1)
+            except TypeError:
+                dists, inds = tree.query(abm_points, k=k)
+        else:
+            # Brute-force nearest neighbors (may be slower) using broadcasting
+            try:
+                diff = abm_points[:, None, :] - hecras_nodes[None, :, :]
+                dist_all = np.sqrt(np.sum(diff * diff, axis=2))
+                inds = np.argsort(dist_all, axis=1)[:, :k]
+                # gather distances
+                row_idxs = np.arange(dist_all.shape[0])[:, None]
+                dists = dist_all[row_idxs, inds]
+            except Exception:
+                raise RuntimeError('Failed to compute nearest HECRAS nodes (no KDTree and brute-force failed)')
         # ensure shapes (M,k)
         if k == 1:
             dists = dists[:, None]
@@ -7981,14 +8004,18 @@ class simulation():
                             logger.debug('Refuge nodes empty; skipping refuge KDTree build')
                         elif not hasattr(self.simulation, '_refuge_tree') or self.simulation._refuge_tree is None:
                             try:
-                                from scipy.spatial import cKDTree
-                                self.simulation._refuge_tree = cKDTree(refuge_nodes)
+                                from emergent.salmon_abm.sockeye import _safe_build_kdtree
+                                self.simulation._refuge_tree = _safe_build_kdtree(refuge_nodes, name='refuge_tree')
                                 self.simulation._refuge_nodes = refuge_nodes
-                            except (ValueError, TypeError, IndexError, AttributeError):
-                                logger.exception('Failed to build refuge KDTree; skipping refuge behavior')
+                            except Exception:
+                                self.simulation._refuge_tree = None
+                                self.simulation._refuge_nodes = refuge_nodes
                         
                         # Query nearest refuge for all agents at once (vectorized)
                         agent_positions = np.column_stack([self.simulation.X, self.simulation.Y])
+                        if getattr(self.simulation, '_refuge_tree', None) is None:
+                            # No KDTree available; skip refuge attraction
+                            pass
                         dists, idxs = self.simulation._refuge_tree.query(agent_positions, k=1)
                         
                         # Calculate direction vectors to nearest refuge

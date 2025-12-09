@@ -278,7 +278,14 @@ def build_wind_sampler(ds: xr.Dataset):
             raise ValueError(f"Mismatch: lon size = {lon_flat.size}, u10 flattened shape = {u_flat.shape}")
 
         xy = np.column_stack((lon_flat, lat_flat))
-        tree = cKDTree(xy)
+        try:
+            from emergent.salmon_abm.sockeye import _safe_build_kdtree
+            tree = _safe_build_kdtree(xy, name='wind_sampler_tree')
+        except Exception:
+            tree = None
+        if tree is None:
+            # If KDTree unavailable, raise a clear error so caller can fallback
+            raise RuntimeError('KDTree unavailable for station-based wind sampler')
         # Diagnostic: print basic stats about the native u/v arrays so we can
         # detect empty or all-zero data early. This helps debug station-based
         # OFS files that end up producing zero winds in the viewer.
