@@ -1607,16 +1607,28 @@ def safe_flush(hdf):
             try:
                 hdf.flush()
                 return
+            except (OSError, IOError) as e:
+                try:
+                    logger.exception('hdf.flush() failed (runtime): %s', e)
+                except Exception:
+                    pass
             except Exception:
-                pass
+                logger.exception('Unexpected error while calling hdf.flush(); re-raising')
+                raise
         # h5py Group has .file attribute referencing the File object
         fobj = getattr(hdf, 'file', None)
         if fobj is not None and hasattr(fobj, 'flush'):
             try:
                 fobj.flush()
                 return
+            except (OSError, IOError) as e:
+                try:
+                    logger.exception('hdf.file.flush() failed (runtime): %s', e)
+                except Exception:
+                    pass
             except Exception:
-                pass
+                logger.exception('Unexpected error while calling hdf.file.flush(); re-raising')
+                raise
         # fallback: try to open by filename and flush
         fname = getattr(hdf, 'filename', None) or getattr(hdf, 'name', None)
         if fname:
@@ -1624,12 +1636,28 @@ def safe_flush(hdf):
                 with h5py.File(fname, 'r+') as hw:
                     try:
                         hw.flush()
+                    except (OSError, IOError) as e:
+                        try:
+                            logger.exception('h5py.File(%s).flush() failed (runtime): %s', fname, e)
+                        except Exception:
+                            pass
                     except Exception:
-                        pass
+                        logger.exception('Unexpected error while flushing reopened HDF file; re-raising')
+                        raise
+            except (OSError, IOError) as e:
+                try:
+                    logger.exception('Failed to reopen HDF file %s for flush (runtime): %s', fname, e)
+                except Exception:
+                    pass
             except Exception:
-                pass
+                logger.exception('Unexpected error while reopening HDF file %s for flush; re-raising', fname)
+                raise
     except Exception:
-        pass
+        try:
+            logger.exception('safe_flush encountered unexpected error; re-raising')
+        except Exception:
+            pass
+        raise
 
 
 # --- Performance helpers for simulation math ---
@@ -2580,8 +2608,14 @@ def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', w
             env.create_dataset(out_name, data=out_arr, dtype='f4')
         try:
             safe_flush(hdf)
+        except (OSError, IOError) as e:
+            try:
+                logger.exception('safe_flush failed after writing along-stream raster (runtime): %s', e)
+            except Exception:
+                pass
         except Exception:
-            pass
+            logger.exception('Unexpected error during safe_flush after writing along-stream raster; re-raising')
+            raise
         wrote = True
     except (TypeError, ValueError, RuntimeError) as e:
         # try reopening the underlying file in r+ mode if possible
@@ -2596,11 +2630,24 @@ def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', w
                         envw.create_dataset(out_name, data=out_arr, dtype='f4')
                     try:
                         hw.flush()
+                    except (OSError, IOError) as e:
+                        try:
+                            logger.exception('hw.flush() failed while reopening HDF (runtime): %s', e)
+                        except Exception:
+                            pass
                     except Exception:
-                        pass
+                        logger.exception('Unexpected error while flushing reopened HDF; re-raising')
+                        raise
                     wrote = True
-            except Exception:
+            except (OSError, IOError) as e:
+                try:
+                    logger.exception('Failed to reopen HDF file %s for write (runtime): %s', fname, e)
+                except Exception:
+                    pass
                 wrote = False
+            except Exception:
+                logger.exception('Unexpected error while reopening HDF file %s for write; re-raising', fname)
+                raise
         if not wrote:
             # As a last resort, skip write and return the array
             pass
