@@ -104,8 +104,14 @@ except ImportError as e:
     except Exception as _log_e:
         try:
             logger.exception('Failed while logging numba import warning: %s', _log_e)
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                logger.exception('Error computing schooling loop step for agent %s: %s', i, e)
+            except Exception:
+                try:
+                    print('Logging failure in schooling loop handler:', e)
+                except Exception:
+                    pass
 except Exception as e:
     # Log and re-raise unexpected exceptions during import
     logger.exception('Unexpected error while importing numba: %s', e)
@@ -173,8 +179,14 @@ class BehavioralWeights:
             except Exception as e:
                 try:
                     logger.exception('Unexpected error exporting weight %s; setting to None: %s', k, e)
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        logger.exception('Failed in neighbor processing: %s', e)
+                    except Exception:
+                        try:
+                            print('Logging failure in neighbor processing:', e)
+                        except Exception:
+                            pass
                 out[k] = None
         return out
     
@@ -787,8 +799,14 @@ class RLTrainer:
         except (ValueError, TypeError, AttributeError) as e:
             try:
                 logger.exception('logger.info failed during RL training start: %s', e)
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    logger.exception('Unexpected error in schooling metric aggregation: %s', e)
+                except Exception:
+                    try:
+                        print('Logging failure in schooling metric aggregation:', e)
+                    except Exception:
+                        pass
         
         for episode in range(num_episodes):
             # Run episode with current weights
@@ -810,8 +828,14 @@ class RLTrainer:
                 except (ValueError, TypeError, AttributeError) as e:
                     try:
                         logger.exception('logger.info failed during episode logging: %s', e)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        try:
+                            logger.exception('Failed during centroid computation: %s', e)
+                        except Exception:
+                            try:
+                                print('Logging failure in centroid computation:', e)
+                            except Exception:
+                                pass
                 
                 if save_path:
                     self.behavioral_weights.save(save_path)
@@ -980,8 +1004,14 @@ class HECRASMap:
         if self.tree is None:
             try:
                 logger.warning('HECRAS plan: KDTree build failed; certain queries will be disabled')
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    logger.exception('Error while updating alignment scores: %s', e)
+                except Exception:
+                    try:
+                        print('Logging failure in alignment update:', e)
+                    except Exception:
+                        pass
 
     def map_idw(self, query_pts, k=8, eps=1e-8):
         """Map `query_pts` (N x 2) to a dict of field_name -> mapped values via IDW.
@@ -1282,8 +1312,14 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
             except Exception as e:
                 try:
                     logger.exception('Failed while attempting to warn about logger.info in BehavioralWeights.save: %s', e)
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        logger.exception('Failed to finalize cohesion calculation: %s', e)
+                    except Exception:
+                        try:
+                            print('Logging failure in cohesion finalization:', e)
+                        except Exception:
+                            pass
         wetted_info = infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=depth_threshold, timestep=0, verbose=False)
         perimeter_points = wetted_info.get('perimeter_points', None)
         perimeter_cells = wetted_info.get('perimeter_cells', None)
