@@ -8,7 +8,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from emergent.salmon_abm.salmon_viewer import SalmonViewer
-from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation
+from emergent.salmon_abm.sockeye import simulation
 
 hecras_folder = os.path.join(REPO_ROOT, 'data', 'salmon_abm', '20240506')
 hecras_plan = None

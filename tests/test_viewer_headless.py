@@ -1,5 +1,5 @@
 import numpy as np
-from emergent.salmon_abm.salmon_viewer_v2 import SalmonViewer
+from emergent.salmon_abm.salmon_viewer import SalmonViewer
 
 
 class DummySim:

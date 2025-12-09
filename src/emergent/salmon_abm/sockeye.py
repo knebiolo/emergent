@@ -61,6 +61,30 @@ from shapely.geometry.base import BaseGeometry
 from sklearn.decomposition import PCA
 import logging
 logger = logging.getLogger(__name__)
+
+
+def _safe_build_kdtree(points, name='KDTree'):
+    """Build a cKDTree for `points` defensively.
+
+    Returns the tree or None on expected runtime errors (logs the issue).
+    Re-raises unexpected exceptions.
+    """
+    try:
+        if points is None:
+            logger.debug('%s: points is None, not building tree', name)
+            return None
+        pts = np.asarray(points)
+        if pts.size == 0:
+            logger.debug('%s: points empty, not building tree', name)
+            return None
+        return cKDTree(pts)
+    except (ValueError, TypeError, IndexError, AttributeError):
+        logger.exception('%s: failed to build cKDTree for provided points', name)
+        return None
+    except Exception:
+        logger.exception('%s: unexpected error while building cKDTree; re-raising', name)
+        raise
+
 try:
     from sksurv.nonparametric import kaplan_meier_estimator
     _HAS_SKSURV = True
@@ -334,7 +358,7 @@ def compute_schooling_metrics_biological(positions, headings, body_lengths, beha
     
     # Build KDTree for efficient neighbor queries
     from scipy.spatial import cKDTree
-    tree = cKDTree(positions)
+    tree = _safe_build_kdtree(positions, name='neighbor_tree')
     
     # Fixed 1-meter radius for all agents (performance optimization)
     search_radius = 1.0
@@ -419,7 +443,7 @@ def compute_drafting_benefits(positions, headings, velocities, body_lengths, beh
         return drag_reductions
     
     from scipy.spatial import cKDTree
-    tree = cKDTree(positions)
+    tree = _safe_build_kdtree(positions, name='drafting_tree')
     
     # Fixed 1-meter drafting radius (performance optimization)
     drafting_radius = 1.0
@@ -460,7 +484,7 @@ class RLTrainer:
     
     def __init__(self, simulation):
         self.sim = simulation
-        self.behavioral_weights = BehavioralWeights()
+        self.behavioral_weights = BehavioralWeights()  # Initialize behavioral weights
         self.training_history = []
         # Configurable penalties (can be adjusted during training)
         self.collision_penalty_per_event = 100.0
@@ -585,7 +609,7 @@ class RLTrainer:
                 # per-agent threshold = 0.25 * body_length
                 per_agent_thresh = 0.25 * body_lengths
                 max_thresh = np.nanmax(per_agent_thresh)
-                tree = cKDTree(positions)
+                tree = _safe_build_kdtree(positions, name='metrics_collision_tree')
                 pairs = tree.query_pairs(r=max_thresh)
                 collision_count = 0
                 if pairs:
@@ -5383,7 +5407,7 @@ class simulation():
                     flat_xy = np.column_stack((xs.ravel(), ys.ravel()))
                     pts = np.column_stack((self.X.flatten(), self.Y.flatten()))
                     from scipy.spatial import cKDTree
-                    tree = cKDTree(flat_xy)
+                    tree = _safe_build_kdtree(flat_xy, name='env_flat_xy_tree')
                     dists, inds = tree.query(pts, k=1)
                     rows = (inds // xs.shape[1]).astype(int)
                     cols = (inds % xs.shape[1]).astype(int)
@@ -6272,7 +6296,7 @@ class simulation():
                 clean_y = self.Y.flatten()[~np.isnan(self.Y.flatten())]
                 if clean_x.size > 0:
                     positions = np.vstack([clean_x, clean_y]).T
-                    tree = cKDTree(positions)
+                    tree = _safe_build_kdtree(positions, name='closest_agent_tree')
                     distances, indices = tree.query(positions, k=2)
                     nearest_neighbors = np.where(distances[:, 1] != np.inf, indices[:, 1], np.nan)
                     self.closest_agent = nearest_neighbors
@@ -6490,7 +6514,7 @@ class simulation():
         nearest_neighbors = np.full(self.num_agents, np.nan)
         nearest_neighbor_distances = np.full(self.num_agents, np.nan)
         try:
-            tree = cKDTree(positions)
+               tree = _safe_build_kdtree(positions, name='positions_tree')
         except (ValueError, TypeError, IndexError, AttributeError) as e:
             logger.exception('KDTree build failed for agent positions; providing empty neighbor results')
             tree = None
@@ -8100,7 +8124,7 @@ class simulation():
                             logger.debug('HECRAS nodes empty; skipping KDTree build')
                         elif not hasattr(self.simulation, '_hecras_tree_cached'):
                             try:
-                                self.simulation._hecras_tree_cached = cKDTree(hecras_nodes)
+                                self.simulation._hecras_tree_cached = _safe_build_kdtree(hecras_nodes, name='hecras_nodes_cached_tree')
                             except (ValueError, TypeError, IndexError, AttributeError):
                                 logger.exception('Failed to build HECRAS KDTree; skipping centerline sampling')
 
@@ -9405,11 +9429,11 @@ class simulation():
                     mask_sust = np.asarray(mask_sustained, dtype=np.bool_)
                     new_batt = _wrap_merged_battery_numba(batt, per_rec_a, ttf_a, mask_sust, float(self.dt))
                     self.simulation.battery = new_batt
+                except (ValueError, TypeError, IndexError, AttributeError):
+                    logger.exception('Numba merged battery kernel failed; falling back to pure-Python implementation')
                 except Exception:
-                    try:
-                        logger.exception('Numba merged battery kernel failed; falling back to pure-Python implementation')
-                    except Exception:
-                        pass
+                    logger.exception('Unexpected error in merged battery numba kernel; re-raising')
+                    raise
                     # fallback to original numpy behavior
                     battery[mask_sustained] += per_rec_arr[mask_sustained]
                     mask_non_sustained = ~mask_sustained
@@ -9599,13 +9623,13 @@ class simulation():
                 except Exception:
                     self.simulation.drag = np.ascontiguousarray(new_drags)
                     self.simulation.battery = np.ascontiguousarray(new_batt)
-            except Exception:
-                try:
-                    logger.exception("_drag_and_battery_numba failed; falling back to Python calc_battery")
-                except Exception:
-                    pass
+            except (ValueError, TypeError, IndexError, AttributeError):
+                logger.exception("_drag_and_battery_numba failed; falling back to Python calc_battery")
                 # fallback: previous behavior
                 self.calc_battery(per_rec, ttf,  mask_dict)
+            except Exception:
+                logger.exception('Unexpected error in _drag_and_battery_numba; re-raising')
+                raise
             
             # set battery masks
             battery_dict = dict()
@@ -9726,7 +9750,7 @@ class simulation():
             # Build pairwise KDTree for alive agents only to be efficient
             from scipy.spatial import cKDTree
             positions = np.column_stack([self.X, self.Y])
-            tree = cKDTree(positions)
+            tree = _safe_build_kdtree(positions, name='pairwise_positions_tree')
             # query pairs within max threshold
             max_thresh = np.max(touch_thresh)
             pairs = tree.query_pairs(r=max_thresh)

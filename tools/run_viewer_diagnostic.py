@@ -6,8 +6,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from emergent.salmon_abm.salmon_viewer_v2 import SalmonViewer
-from emergent.salmon_abm.sockeye_SoA_OpenGL_RL import simulation
+from emergent.salmon_abm.salmon_viewer import SalmonViewer
+from emergent.salmon_abm.sockeye import simulation
 
 # Minimal sim config: reuse training launcher discovery
 hecras_folder = os.path.join(REPO_ROOT, 'data', 'salmon_abm', '20240506')
