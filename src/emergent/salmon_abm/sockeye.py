@@ -82,8 +82,8 @@ def _safe_log_exception(msg, exc, **ctx):
             import traceback
             print('LOGGING FAILURE:', msg, exc)
             print(traceback.format_exc())
-        except Exception as e:
-            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=85)
+        except Exception:
+            # avoid further recursion; give up silently
             pass
 
 
@@ -769,7 +769,8 @@ class RLTrainer:
             except (ValueError, TypeError, IndexError, AttributeError) as e:
                 try:
                     logger.exception('Error computing mean upstream velocity; defaulting to 0.0: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=772)
                     pass
                 metrics['mean_upstream_velocity'] = 0.0
             except Exception as e:
@@ -825,7 +826,8 @@ class RLTrainer:
                 except Exception:
                     try:
                         print('Logging failure in schooling metric aggregation:', e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=828)
                         pass
         
         for episode in range(num_episodes):
@@ -854,7 +856,8 @@ class RLTrainer:
                         except Exception:
                             try:
                                 print('Logging failure in centroid computation:', e)
-                            except Exception:
+                            except Exception as e:
+                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=857)
                                 pass
                 
                 if save_path:
@@ -879,19 +882,22 @@ class RLTrainer:
                     except (AttributeError, NameError, RuntimeError) as e:
                         try:
                             logger.exception('Failed to delete _last_drag_reductions during cleanup: %s', e)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=882)
                             pass
                 try:
                     gc.collect()
                 except (RuntimeError, OSError) as e:
                     try:
                         logger.exception('gc.collect() raised runtime error during cleanup: %s', e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=889)
                         pass
             except (ImportError, RuntimeError, OSError) as e:
                 try:
                     logger.exception('GC/cleanup block encountered runtime error: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=894)
                     pass
             except Exception:
                 logger.exception('Unexpected error during GC/cleanup; re-raising')
@@ -905,7 +911,8 @@ class RLTrainer:
             except (ValueError, TypeError, AttributeError) as e:
                 try:
                     logger.exception('logger.info failed when finishing training: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=914)
                     pass
         
         return self.behavioral_weights
@@ -1030,7 +1037,8 @@ class HECRASMap:
                 except Exception:
                     try:
                         print('Logging failure in alignment update:', e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1039)
                         pass
 
     def map_idw(self, query_pts, k=8, eps=1e-8):
@@ -1079,7 +1087,8 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
         except Exception as _log_e:
             try:
                 logger.exception("Failed while logging HECRAS timestep warning: %s", _log_e)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1088)
                 pass
 
     return _central(plan_path, depth_threshold=depth_threshold, max_nodes=(max_nodes if max_nodes is not None else 5000), raster_fallback_resolution=5.0, verbose=verbose)
@@ -1142,7 +1151,8 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     if len(valid_coords) == 0:
         try:
             logger.warning("No valid wetted cells for centerline extraction")
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1151)
             pass
         return None
     
@@ -1159,13 +1169,15 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     except Exception as e:
         try:
             logger.exception('Error during sksurv import fallback check: %s', e)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1168)
             pass
     
     if len(ridge_coords) < 10:
         try:
             logger.warning("Too few ridge cells for centerline extraction")
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1174)
             pass
         return None
     
@@ -1180,7 +1192,8 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     if ridge_tree is None:
         try:
             logger.warning('ridge_tree could not be built; aborting ordered ridge extraction')
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1195)
             pass
         return None
     
@@ -1220,13 +1233,15 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
     except Exception as e:
         try:
             logger.exception('Unexpected error during sksurv import check: %s', e)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1235)
             pass
     
     if centerline.length < min_length:
         try:
             logger.warning("Centerline too short (%0.2fm < %sm)", centerline.length, min_length)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1241)
             pass
         return None
     
@@ -1281,13 +1296,15 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
         logger.info("%s", "="*80)
         logger.info("HECRAS GEOMETRY INITIALIZATION")
         logger.info("%s", "="*80)
-    except Exception:
+    except Exception as e:
+        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1296)
         pass
     
     # Step 1: Load HECRAS geometry and build KDTree
     try:
         logger.info("1. Loading HECRAS plan and building KDTree...")
-    except Exception:
+    except Exception as e:
+        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1302)
         pass
     with h5py.File(plan_path, 'r') as hdf:
         coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:], dtype=np.float64)
@@ -1302,13 +1319,15 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     hecras_map = simulation._hecras_maps[key]
     try:
         logger.info("Loaded %d HECRAS cells", len(coords))
-    except Exception:
+    except Exception as e:
+        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1317)
         pass
     
     # Step 2: Fast centerline extraction
     try:
         logger.info("2. Extracting centerline...")
-    except Exception:
+    except Exception as e:
+        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1329)
         pass
     centerline = extract_centerline_fast_hecras(
         plan_path,
@@ -1320,7 +1339,8 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     if centerline is None:
         try:
             logger.warning("Failed to extract centerline!")
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1341)
             pass
 
     # Step 2b: Infer wetted perimeter (vectorize raster boundary)
@@ -1338,7 +1358,8 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
                     except Exception:
                         try:
                             print('Logging failure in cohesion finalization:', e)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1359)
                             pass
         wetted_info = infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=depth_threshold, timestep=0, verbose=False)
         perimeter_points = wetted_info.get('perimeter_points', None)
@@ -1350,7 +1371,8 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
             except Exception as e:
                 try:
                     logger.exception('Failed while attempting to warn about logger.info in BehavioralWeights.load: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1371)
                     pass
     except Exception:
         perimeter_points = None
@@ -1362,7 +1384,8 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
     if create_rasters:
         try:
             logger.info("3. Creating regular grid rasters...")
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1383)
             pass
         
         # Compute affine transform from HECRAS cell spacing
@@ -1378,7 +1401,8 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
         
         try:
             logger.info("Grid dimensions: %d x %d at %0.2fm resolution", height, width, cell_size)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1399)
             pass
         
         # Create x_coords, y_coords in HDF5
@@ -1387,7 +1411,8 @@ def initialize_hecras_geometry(simulation, plan_path, depth_threshold=0.05, crs=
         # Map initial HECRAS fields to rasters
         try:
             logger.info("4. Mapping HECRAS fields to rasters...")
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1414)
             pass
         map_hecras_to_env_rasters(simulation, plan_path, field_names=fields, k=1)  # k=1 for speed
     
@@ -1430,7 +1455,8 @@ def map_hecras_for_agents(simulation, agent_xy, plan_path, field_names=None, k=8
             except Exception as e:
                 try:
                     logger.exception('Failed while logging collision metric computation failure: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1457)
                     pass
             raise
     return _central(simulation, agent_xy, plan_path, field_names=field_names, k=k, timestep=timestep)
@@ -1450,7 +1476,8 @@ def ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=None, targ
             except Exception as e:
                 try:
                     logger.exception('Failed while logging dry/shallow counts computation error: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1477)
                     pass
             raise
     return _central(simulation, plan_path, target_shape=target_shape, target_transform=target_transform, timestep=timestep)
@@ -1547,7 +1574,8 @@ def compute_affine_from_hecras(coords, target_cell_size=None):
             except Exception as e:
                 try:
                     logger.exception('BehavioralWeights.to_dict: unexpected error while getting attribute %s: %s', k, e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1574)
                     pass
         # fallback: estimate spacing using bounding box / sqrt(n)
         bbox = coords.max(axis=0) - coords.min(axis=0)
@@ -1682,7 +1710,8 @@ def get_arr(use_gpu):
             except Exception as e:
                 try:
                     logger.exception('BehavioralWeights.from_dict encountered unexpected error: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1709)
                     pass
             import numpy as np
             return np
@@ -1779,7 +1808,8 @@ def safe_flush(hdf):
             except (OSError, IOError) as e:
                 try:
                     logger.exception('hdf.flush() failed (runtime): %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1806)
                     pass
             except Exception:
                 logger.exception('Unexpected error while calling hdf.flush(); re-raising')
@@ -1793,7 +1823,8 @@ def safe_flush(hdf):
             except (OSError, IOError) as e:
                 try:
                     logger.exception('hdf.file.flush() failed (runtime): %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1826)
                     pass
             except Exception:
                 logger.exception('Unexpected error while calling hdf.file.flush(); re-raising')
@@ -1808,7 +1839,8 @@ def safe_flush(hdf):
                     except (OSError, IOError) as e:
                         try:
                             logger.exception('h5py.File(%s).flush() failed (runtime): %s', fname, e)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1841)
                             pass
                     except Exception:
                         logger.exception('Unexpected error while flushing reopened HDF file; re-raising')
@@ -1816,7 +1848,8 @@ def safe_flush(hdf):
             except (OSError, IOError) as e:
                 try:
                     logger.exception('Failed to reopen HDF file %s for flush (runtime): %s', fname, e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1849)
                     pass
             except Exception:
                 logger.exception('Unexpected error while reopening HDF file %s for flush; re-raising', fname)
@@ -1824,7 +1857,8 @@ def safe_flush(hdf):
     except Exception:
         try:
             logger.exception('safe_flush encountered unexpected error; re-raising')
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=1857)
             pass
         raise
 
@@ -2318,7 +2352,8 @@ if _HAS_NUMBA:
     except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
         try:
             logger.exception('Numba precompile at import time failed (expected runtime issue); continuing without warmed numba kernels: %s', e)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2351)
             pass
     except Exception:
         logger.exception('Numba precompile at import time failed with unexpected error; re-raising')
@@ -2351,7 +2386,8 @@ if _HAS_NUMBA:
             except Exception as e:
                 try:
                     logger.exception('BehavioralWeights.save logging failed: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2384)
                     pass
         except Exception:
             logger.exception('_numba_warmup failed with unexpected error; re-raising')
@@ -2363,7 +2399,8 @@ if _HAS_NUMBA:
     except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
         try:
             logger.exception('_numba_warmup() failed during module init with expected runtime issue; continuing without warmed kernels: %s', e)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2402)
             pass
     except Exception:
         logger.exception('_numba_warmup() failed during module init with unexpected error; re-raising')
@@ -2391,7 +2428,8 @@ if _HAS_NUMBA:
             except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
                     logger.exception('Exact-shape numba warmup: _compute_drags_numba failed for sim-shaped arrays (runtime issue): %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2430)
                     pass
             except Exception:
                 logger.exception('Exact-shape numba warmup: _compute_drags_numba failed with unexpected error; re-raising')
@@ -2401,7 +2439,8 @@ if _HAS_NUMBA:
             except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
                     logger.exception('Exact-shape numba warmup: _swim_speeds_numba failed for sim-shaped arrays (runtime issue): %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2440)
                     pass
             except Exception:
                 logger.exception('Exact-shape numba warmup: _swim_speeds_numba failed with unexpected error; re-raising')
@@ -2413,7 +2452,8 @@ if _HAS_NUMBA:
             except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
                     logger.exception('Exact-shape numba warmup: _assess_fatigue_core failed for sim-shaped arrays (runtime issue): %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2452)
                     pass
             except Exception:
                 logger.exception('Exact-shape numba warmup: _assess_fatigue_core failed with unexpected error; re-raising')
@@ -2421,7 +2461,8 @@ if _HAS_NUMBA:
         except Exception:
             try:
                 logger.exception('_numba_warmup_for_sim failed while preparing sim-shaped warmups')
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2460)
                 pass
 
 
@@ -2787,7 +2828,8 @@ def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', w
         except (OSError, IOError) as e:
             try:
                 logger.exception('safe_flush failed after writing along-stream raster (runtime): %s', e)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2826)
                 pass
         except Exception:
             logger.exception('Unexpected error during safe_flush after writing along-stream raster; re-raising')
@@ -2809,7 +2851,8 @@ def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', w
                     except (OSError, IOError) as e:
                         try:
                             logger.exception('hw.flush() failed while reopening HDF (runtime): %s', e)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2854)
                             pass
                     except Exception:
                         logger.exception('Unexpected error while flushing reopened HDF; re-raising')
@@ -2818,7 +2861,8 @@ def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', w
             except (OSError, IOError) as e:
                 try:
                     logger.exception('Failed to reopen HDF file %s for write (runtime): %s', fname, e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2863)
                     pass
                 wrote = False
             except Exception:
@@ -2964,7 +3008,8 @@ def compute_coarsened_alongstream_raster(simulation, factor=4, outlet_xy=None, d
         with h5py.File(fname, 'r+') as hw2:
             if tmp_name in hw2:
                 del hw2[tmp_name]
-    except Exception:
+    except Exception as e:
+        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=3009)
         pass
 
     return upsampled.astype(np.float32)
@@ -3031,7 +3076,8 @@ def output_excel(records, model_dir, model_name):
     # export record results to excel via pandas
     try:
         logger.info('exporting records to excel...')
-    except Exception:
+    except Exception as e:
+        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=3076)
         pass
     
     # Create an Excel writer object
@@ -3045,7 +3091,8 @@ def output_excel(records, model_dir, model_name):
     
     try:
         logger.info('records exported. check output excel file: %s', output_excel)
-    except Exception:
+    except Exception as e:
+        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=3090)
         pass
     
 def movie_maker(directory, model_name, crs, dt, depth_rast_transform):
@@ -3114,7 +3161,8 @@ def movie_maker(directory, model_name, crs, dt, depth_rast_transform):
                     
                 try:
                     logger.info('Time Step %s complete', i)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=3159)
                     pass
 
     # clean up
@@ -3828,7 +3876,8 @@ class PID_optimization():
             
                 try:
                     logger.info('running individual %d of generation %d', i+1, generation+1)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=3879)
                     pass
                 
                 # useful to have these in pid_solution
@@ -3838,7 +3887,8 @@ class PID_optimization():
                 
                 try:
                     logger.info('P: %0.3f, I: %0.3f, D: %0.3f', self.p[i], self.i[i], self.d[i])
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=3889)
                     pass
                 
                 # set up the simulation
@@ -3871,7 +3921,8 @@ class PID_optimization():
                     except Exception as e:
                         try:
                             logger.exception('Error while logging in collision metrics catch: %s', e)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=3922)
                             pass
                     pop_error_array.append(sim.error_array)
                     self.errors[i] = sim.error_array
@@ -3901,7 +3952,8 @@ class PID_optimization():
             
             try:
                 logger.info('completed generation %d', generation+1)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=3952)
                 pass
             
             if np.all(error_df.magnitude.values == 0):
@@ -4051,7 +4103,8 @@ class simulation():
                 if hasattr(self.pid_controller, 'interp_PID'):
                     try:
                         self.pid_controller.interp_PID()
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4102)
                         pass
             except Exception:
                 # silently ignore PID attach failures to avoid noisy logs
@@ -4172,7 +4225,8 @@ class simulation():
                 except Exception as e:
                     try:
                         logger.exception('Failed while logging dry/shallow counts block: %s', e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4223)
                         pass
                 self._memmap_writer = None
                 self._memmap_vars = []
@@ -4206,7 +4260,8 @@ class simulation():
                     except (OSError, IOError, KeyError, ValueError, TypeError) as e:
                         try:
                             logger.exception("Failed to load environment raster '%s' into _env_cache' (runtime): %s", name, e)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4263)
                             pass
                         self._env_cache[name] = None
                     except Exception:
@@ -4215,7 +4270,8 @@ class simulation():
         except (OSError, IOError, AttributeError) as e:
             try:
                 logger.exception('Failed to access HDF environment group during init (runtime): %s', e)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4272)
                 pass
             self._env_cache = {}
         except Exception:
@@ -4231,7 +4287,8 @@ class simulation():
         except (ValueError, TypeError, OSError, RuntimeError) as e:
             try:
                 logger.exception("_numba_warmup failed during init warmup (runtime): %s", e)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4288)
                 pass
         except Exception:
             logger.exception('_numba_warmup failed during init warmup with unexpected error; re-raising')
@@ -4244,7 +4301,8 @@ class simulation():
         except (ValueError, TypeError, OSError, RuntimeError) as e:
             try:
                 logger.exception("_numba_warmup_for_sim failed during sim warmup (runtime): %s", e)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4301)
                 pass
         except Exception:
             logger.exception('_numba_warmup_for_sim failed during sim warmup with unexpected error; re-raising')
@@ -4287,7 +4345,8 @@ class simulation():
                         except Exception:
                             try:
                                 logger.exception("map_hecras_to_env_rasters failed for %s, will try cached load", hecras_hdf)
-                            except Exception:
+                            except Exception as e:
+                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4344)
                                 pass
                             # fallback: try loading HECRAS plan into cache (KDTree) and then map
                             try:
@@ -4296,7 +4355,8 @@ class simulation():
                             except Exception:
                                 try:
                                     logger.exception("load_hecras_plan_cached or second map_hecras_to_env_rasters attempt failed for %s", hecras_hdf)
-                                except Exception:
+                                except Exception as e:
+                                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4353)
                                     pass
 
                         # compute coarsened alongstream raster using created env rasters
@@ -4305,19 +4365,22 @@ class simulation():
                         except Exception:
                             try:
                                 logger.exception("compute_coarsened_alongstream_raster failed, will try compute_alongstream_raster")
-                            except Exception:
+                            except Exception as e:
+                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4368)
                                 pass
                             try:
                                 compute_alongstream_raster(self, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist')
                             except Exception:
                                 try:
                                     logger.exception("compute_alongstream_raster also failed")
-                                except Exception:
+                                except Exception as e:
+                                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4375)
                                     pass
                     except Exception:
                         try:
                             logger.exception("mapping external HDF failed, will try computing alongstream on current hdf5")
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4380)
                             pass
                         # if reading external HDF fails, try computing on current hdf5
                         try:
@@ -4325,7 +4388,8 @@ class simulation():
                         except Exception:
                             try:
                                 logger.exception("compute_coarsened_alongstream_raster fallback failed")
-                            except Exception:
+                            except Exception as e:
+                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4388)
                                 pass
                 else:
                     # compute on in-project HDF if environment rasters were loaded
@@ -4334,9 +4398,11 @@ class simulation():
                     except Exception:
                             try:
                                 logger.exception("compute_coarsened_alongstream_raster failed when computing on in-project HDF")
-                            except Exception:
+                            except Exception as e:
+                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4397)
                                 pass
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4399)
                 pass
         
         # Initialize agent properties using the restored methods from backup
@@ -4366,17 +4432,20 @@ class simulation():
             if os.path.exists(path):
                 try:
                     logger.info("Importing %s from %s as %s", key, path, surface_type)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4435)
                     pass
                 self.enviro_import(path, surface_type)
                 try:
                     logger.info("Successfully imported %s", key)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4440)
                     pass
             else:
                 try:
                     logger.warning("Raster file not found: %s", path)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4445)
                     pass
 
         # If a HECRAS plan is provided, prefer it and skip raster imports
@@ -4400,7 +4469,8 @@ class simulation():
                 logger.info("%s", "\n" + "="*80)
                 logger.info("INITIALIZING HECRAS MODE")
                 logger.info("%s", "="*80)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4469)
                 pass
             
             try:
@@ -4423,7 +4493,8 @@ class simulation():
                     centerline_derived = True
                     try:
                         logger.info("Using HECRAS-derived centerline (%0.2fm)", self.centerline.length)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4492)
                         pass
                 
                 # Set depth_rast_transform if rasters were created
@@ -4434,7 +4505,8 @@ class simulation():
                     y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
                     try:
                         logger.info("HECRAS extent: X=[%0.2f, %0.2f], Y=[%0.2f, %0.2f]", x_min, x_max, y_min, y_max)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4503)
                         pass
 
                 # Generate wetted perimeter (vector-first) and attach to simulation
@@ -4514,7 +4586,8 @@ class simulation():
 
                         try:
                             logger.info("HECRAS perimeter: %d points; polygon=%s", len(self.perimeter_points), 'yes' if self.perimeter_polygon is not None else 'no')
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4589)
                             pass
                     else:
                         self.perimeter_points = np.zeros((0,2))
@@ -4524,7 +4597,8 @@ class simulation():
                 except Exception as e:
                     try:
                         logger.warning("Failed to compute HECRAS perimeter: %s", e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4599)
                         pass
                     self.perimeter_points = np.zeros((0,2))
                     self.perimeter_cells = np.zeros((0,), dtype=int)
@@ -4534,7 +4608,8 @@ class simulation():
             except (OSError, IOError, KeyError, ValueError) as e:
                 try:
                     logger.exception("HECRAS initialization failed due to IO/Key/Value error: %s", e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4609)
                     pass
                 # Fall back to loading KDTree only
                 try:
@@ -4543,7 +4618,8 @@ class simulation():
                     # Disable HECRAS mode to avoid inconsistent later assumptions
                     try:
                         logger.warning("load_hecras_plan_cached failed; disabling HECRAS mode: %s", e2)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4618)
                         pass
                     self.hecras_plan_path = None
                     self.use_hecras = False
@@ -4611,7 +4687,8 @@ class simulation():
                                     x_coords = x_coords if x_coords is not None else np.array(env2['x_coords'])
                                 if env2 is not None and 'y_coords' in env2:
                                     y_coords = y_coords if y_coords is not None else np.array(env2['y_coords'])
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4686)
                             pass
 
                     # If distance_to not present, try to compute from wetted raster
@@ -4667,7 +4744,8 @@ class simulation():
                                 self.centerline = self.centerline_import(main_centerline)
                                 try:
                                     logger.info('Derived centerline from HECRAS rasters (skeletonized)')
-                                except Exception:
+                                except Exception as e:
+                                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4742)
                                     pass
                                 centerline_derived = True
                             else:
@@ -4682,7 +4760,8 @@ class simulation():
                 except Exception as e:
                     try:
                         logger.warning('Could not derive centerline from HECRAS: %s', e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4763)
                         pass
                     # fall back to file-based import only if a valid file was provided
                     if centerline is not None and os.path.exists(centerline):
@@ -4736,7 +4815,8 @@ class simulation():
                     except (KeyError, IndexError, OSError) as e:
                         try:
                             logger.warning('HECRAS depth dataset missing or unreadable: %s', e)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4817)
                             pass
                     try:
                         node_fields['vel_x'] = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Velocity - Velocity X'][-1]
@@ -4744,7 +4824,8 @@ class simulation():
                     except (KeyError, IndexError, OSError) as e:
                         try:
                             logger.warning('HECRAS velocity datasets missing or unreadable: %s', e)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4825)
                             pass
                 
                 if pts is not None and node_fields:
@@ -4775,7 +4856,8 @@ class simulation():
             except Exception as e:
                 try:
                     logger.warning("Failed to initialize HECRAS environment: %s", e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4856)
                     pass
         
         # error array
@@ -4807,12 +4889,14 @@ class simulation():
             keys = ', '.join(sorted(wdict.keys()))
             try:
                 logger.info("Applied behavioral weights (keys): %s", keys)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4888)
                 pass
         except Exception:
             try:
                 logger.warning('Applied behavioral weights (some fields may be unavailable)')
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4893)
                 pass
         # Numba warm-up: call compiled loops with tiny inputs to trigger JIT at initialization
         try:
@@ -4829,7 +4913,8 @@ class simulation():
                 except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                     try:
                         logger.exception("_compute_schooling_loop warmup failed (runtime): %s", e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4916)
                         pass
                 except Exception:
                     logger.exception('_compute_schooling_loop warmup failed with unexpected error; re-raising')
@@ -4840,7 +4925,8 @@ class simulation():
                 except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                     try:
                         logger.exception("_compute_drafting_loop warmup failed (runtime): %s", e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4927)
                         pass
                 except Exception:
                     logger.exception('_compute_drafting_loop warmup failed with unexpected error; re-raising')
@@ -4848,7 +4934,8 @@ class simulation():
         except Exception:
             try:
                 logger.exception("apply_behavioral_weights: unexpected failure during numba warmup block")
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4935)
                 pass
     
     def reset_spatial_state(self, reset_positions=False):
@@ -4907,7 +4994,8 @@ class simulation():
         try:
             # Add small random heading perturbation uniform [-pi, pi]
             self.heading = np.random.uniform(-np.pi, np.pi, size=self.num_agents)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4994)
             pass
         try:
             # Slightly randomize SOG around current ideal_sog (±10%)
@@ -4921,7 +5009,8 @@ class simulation():
                 high = 1.0 + float(frac)
                 self.sog = base * np.random.uniform(low, high, size=self.num_agents)
                 self.ideal_sog = self.sog.copy()
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5008)
             pass
 
         # Add a small random initial velocity jitter so agents don't all move identically
@@ -4934,7 +5023,8 @@ class simulation():
                 self.y_vel = np.zeros(self.num_agents)
             self.x_vel = self.x_vel + vel_jitter[:, 0]
             self.y_vel = self.y_vel + vel_jitter[:, 1]
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5021)
             pass
 
         # Optionally randomize behavioral weights per agent (small gaussian perturbation)
@@ -4949,14 +5039,17 @@ class simulation():
                         try:
                             newv = float(v) + np.random.normal(0, std)
                             setattr(bw, k, newv)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5042)
                             pass
                 # apply mutated weights
                 try:
                     self.apply_behavioral_weights(bw)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5047)
                     pass
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5049)
             pass
             self.Y = self._initial_positions['Y'].copy()
             if self._initial_positions['Z'] is not None:
@@ -5014,7 +5107,8 @@ class simulation():
                     del self._kdtree_cache
                 except Exception:
                     self._kdtree_cache = {}
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5107)
             pass
         try:
             if hasattr(self, '_hecras_map'):
@@ -5022,7 +5116,8 @@ class simulation():
                     del self._hecras_map
                 except Exception:
                     self._hecras_map = None
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5115)
             pass
         # Drop large historical buffers if present to reclaim memory
         try:
@@ -5030,13 +5125,15 @@ class simulation():
                 self.swim_speeds = np.full((self.num_agents, 1), np.nan)
             if hasattr(self, 'past_centerline_meas'):
                 self.past_centerline_meas = np.full((self.num_agents, 1), np.nan)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5123)
             pass
         # Force garbage collection to free memory immediately
         try:
             import gc
             gc.collect()
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5135)
             pass
         
         # Re-sample environmental conditions at reset positions
@@ -5055,7 +5152,8 @@ class simulation():
         
         try:
             logger.info("Spatial state reset complete. Behavioral weights preserved.")
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5154)
             pass
     
     def save_behavioral_weights(self, filepath):
@@ -5198,7 +5296,8 @@ class simulation():
         except Exception:
             try:
                 logger.exception("initialize_hdf5: failed while creating HDF5 datasets")
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5297)
                 pass
             raise
         agent_data.create_dataset("kcal", (self.num_agents, self.num_timesteps), dtype='f4', chunks=chunk_shape)
@@ -5281,7 +5380,8 @@ class simulation():
                                 arrays = {k: self._hdf5_buffers[k][:, offset].astype('f4') for k in self._hdf5_buffers.keys()}
                                 try:
                                     self._memmap_writer.append(t_idx, arrays)
-                                except Exception:
+                                except Exception as e:
+                                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5380)
                                     pass
                     elif getattr(self, '_log_writer', None) is not None:
                         # fallback to existing npz writer
@@ -5290,7 +5390,8 @@ class simulation():
                             arrays = {k: self._hdf5_buffers[k][:, offset].astype('f4') for k in self._hdf5_buffers.keys()}
                             try:
                                 self._log_writer.append(t_idx, arrays)
-                            except Exception:
+                            except Exception as e:
+                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5389)
                                 pass
                 else:
                     for k, buf in self._hdf5_buffers.items():
@@ -5340,7 +5441,8 @@ class simulation():
                             existing_r[mask] = acc_arr[mask]
                             dsr[:, :] = existing_r
                             acc_arr.fill(0)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5439)
                         pass
                 except Exception:
                     # If memory group doesn't exist or write fails, skip silently
@@ -5390,7 +5492,8 @@ class simulation():
         except (OSError, IOError) as e:
             try:
                 logger.exception("Failed to open raster %s: %s", data_dir, e)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5495)
                 pass
             return
         num_bands = src.count
@@ -5414,7 +5517,8 @@ class simulation():
         if 'x_coords' not in self.hdf5:
             try:
                 logger.info("Creating x_coords and y_coords with dimensions: height=%s, width=%s, rows=%s, cols=%s", height, width, src.shape[0], src.shape[1])
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5519)
                 pass
 
             # Get the dimensions of the raster
@@ -5430,13 +5534,15 @@ class simulation():
             except (OSError, IOError, ValueError) as e:
                 try:
                     logger.exception('Failed to create x_coords/y_coords datasets: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5535)
                     pass
                 raise
 
                 try:
                     logger.info("Created datasets with shape: %s", dset_x.shape)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5541)
                     pass
 
                 # Process and write in chunks
@@ -5453,7 +5559,8 @@ class simulation():
                     except (OSError, IOError, ValueError, IndexError) as e:
                         try:
                             logger.exception('Failed writing x/y coords chunk starting at row %s: %s', i, e)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5558)
                             pass
                         raise
 
@@ -5463,18 +5570,21 @@ class simulation():
                 except (OSError, IOError) as e:
                     try:
                         logger.exception('Failed to flush HDF5 after writing x/y coords: %s', e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5568)
                         pass
                     raise
 
                 try:
                     logger.info("Successfully created x_coords and y_coords; flushed to disk. Shape: %s, first value: %s", dset_x.shape, dset_x[0,0])
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5580)
                     pass
         else:
             try:
                 logger.info("x_coords already exists with shape: %s", self.hdf5['x_coords'].shape)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5585)
                 pass
 
         shape = (num_bands, height, width)
@@ -5696,7 +5806,8 @@ class simulation():
                 vals = rast[rows, cols]
                 # reshape to agent grid
                 return vals.reshape(self.X.shape)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5807)
             pass
 
         # prefer numba helper when available
@@ -5706,7 +5817,8 @@ class simulation():
             except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
                     logger.exception('Numba project-points helper failed (runtime); falling back to numpy: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5817)
                     pass
                 dists = _project_points_onto_line_numpy(xs_line, ys_line, px, py)
             except Exception:
@@ -5726,7 +5838,8 @@ class simulation():
         if self.use_hecras and hasattr(self, '_hecras_geometry_info'):
             try:
                 logger.info("Using HECRAS distance-to-bank (already computed)")
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5837)
                 pass
             # distance_to_bank was already written to HDF5 by initialize_hecras_geometry
             return
@@ -5738,7 +5851,8 @@ class simulation():
             if env is None or 'wetted' not in env:
                 try:
                     logger.warning("No wetted raster found, skipping boundary_surface")
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=5849)
                     pass
                 return
             raster = env['wetted'][:]
@@ -5975,7 +6089,8 @@ class simulation():
                 if hasattr(self, 'height') and hasattr(self, 'width'):
                     target_shape = (self.height, self.width)
                 ensure_hdf_coords_from_hecras(self, self.hecras_plan_path, target_shape=target_shape, target_transform=target_transform)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6092)
                 pass
 
             # Optionally update full environment rasters from HECRAS each timestep
@@ -5983,7 +6098,8 @@ class simulation():
             if getattr(self, 'hecras_write_rasters', False):
                 try:
                     map_hecras_to_env_rasters(self, self.hecras_plan_path, field_names=getattr(self, 'hecras_fields', None), k=getattr(self, 'hecras_k', 8))
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6100)
                     pass
 
             # Map HECRAS values directly to agents for requested raster names
@@ -6342,7 +6458,8 @@ class simulation():
                 except Exception:
                     # fallback: do not change self.wet here
                     pass
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6459)
             pass
 
     def apply_hecras_mapping(self, hecras_field):
@@ -6663,13 +6780,15 @@ class simulation():
             except (KeyError, IndexError, ValueError, OSError) as e:
                 try:
                     logger.exception('HECRAS mapping failed for node fields; disabling HECRAS mapping for this sim: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6780)
                     pass
                 self.use_hecras = False
             except Exception:
                 try:
                     logger.exception('Unexpected error during HECRAS mapping — re-raising')
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6786)
                     pass
                 raise
 
@@ -6699,13 +6818,15 @@ class simulation():
                 except (ValueError, TypeError, KeyError, IndexError, OSError) as e:
                     try:
                         logger.exception("precompute_pixel_indices: get_inv_transform or geo_to_pixel_from_inv failed for key=%s: %s", key, e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6816)
                         pass
                     rows, cols = geo_to_pixel(X, Y, transform)
                 except Exception:
                     try:
                         logger.exception('precompute_pixel_indices: unexpected error — re-raising')
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6828)
                         pass
                     raise
                 cache[key] = (rows.astype(np.int32), cols.astype(np.int32))
@@ -6779,9 +6900,11 @@ class simulation():
                     self.y_vel = np.zeros(self.num_agents)
                 self.x_vel += vel_jitter[:, 0]
                 self.y_vel += vel_jitter[:, 1]
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6902)
                 pass
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=6904)
             pass
                 
         # self.dead = np.where(self.wet != 1., 
@@ -6906,7 +7029,8 @@ class simulation():
         if np.any(kcal < 0):
             try:
                 logger.warning("Negative kcal detected!")
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=7029)
                 pass
     
         # Update cumulative odometer
@@ -7542,7 +7666,8 @@ class simulation():
             except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
                     logger.exception('Numba drag wrapper failed with runtime issue; falling back to Python compute_drags: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=7665)
                     pass
                 # fallback
                 out = compute_drags(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, self.simulation.wave_drag, self.simulation.swim_behav)
@@ -7729,7 +7854,8 @@ class simulation():
                 if np.any(np.isnan(error)):
                     try:
                         logger.warning('nan in error')
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=7852)
                         pass
                     sys.exit()
                     
@@ -7778,7 +7904,8 @@ class simulation():
             except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
                     logger.exception('Numba swim_core helper failed (runtime); falling back to Python path: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=7907)
                     pass
                 dxdy = _swim_core_numba(fv0x, fv0y, accx, accy, pidx, pidy, tired_mask, dead_mask, mask, dt)
             except Exception:
@@ -7841,13 +7968,15 @@ class simulation():
                     logger.debug('JUMP DEBUG t=0: mask[:3]=%s, displacement[:3]=%s', mask[:3], displacement[:3])
                     logger.debug('JUMP DEBUG t=0: heading[:3]=%s, dx[:3]=%s, dy[:3]=%s', self.simulation.heading[:3], dx[:3], dy[:3])
                     logger.debug('JUMP DEBUG t=0: dxdy[:3]=%s', dxdy[:3])
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=7970)
                     pass
             
             if np.any(dxdy > 3):
                 try:
                     logger.warning('Jump displacement unexpectedly large; check jump parameters')
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=7976)
                     pass
            
             return dxdy        
@@ -8488,9 +8617,11 @@ class simulation():
                                 thr_repr = float(threshold_m)
                             try:
                                 logger.debug("border_cue: %d agents too close, threshold=%s; sample forces (x,y): %s", n_close, thr_repr, list(zip(sample_fx, sample_fy)))
-                            except Exception:
+                            except Exception as e:
+                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=8617)
                                 pass
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=8619)
                             pass
 
                         return np.vstack([center_direction_x, center_direction_y])
@@ -9602,7 +9733,8 @@ class simulation():
             except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
                     logger.exception('Numba bout-distance helper failed (runtime); falling back to un-optimized call: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=9731)
                     pass
                 dist_travelled = _bout_distance_numba(self.simulation.prev_X, self.simulation.X, self.simulation.prev_Y, self.simulation.Y)
             except Exception:
@@ -9645,7 +9777,8 @@ class simulation():
                 except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                     try:
                         logger.exception('Numba time-to-fatigue helper failed with runtime issue; falling back: %s', e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=9780)
                         pass
                     ttf = _time_to_fatigue_numba(swim_speeds, mask_dict['prolonged'].astype(bool), mask_dict['sprint'].astype(bool), a_p, b_p, a_s, b_s)
                 except Exception:
@@ -9763,7 +9896,8 @@ class simulation():
                 except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                     try:
                         logger.exception('Numba merged battery kernel failed (runtime); falling back to pure-Python implementation: %s', e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=9898)
                         pass
                     # fallback to original numpy behavior
                     battery[mask_sustained] += per_rec_arr[mask_sustained]
@@ -9860,13 +9994,15 @@ class simulation():
                     logger.info('battery: %s', np.round(self.battery,4))
                     logger.info('swim behavior: %s', self.swim_behav[0])
                     logger.info('swim mode: %s', self.swim_mode[0])
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=9995)
                     pass
 
                 if np.any(self.simulation.swim_behav == 3):
                     try:
                         logger.warning('Error no longer counts, fatigued')
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10001)
                         pass
                     # Do not exit the host process; raise a RuntimeError to allow callers to handle
                     raise RuntimeError('Fatigue condition reached during PID checks')
@@ -9914,7 +10050,8 @@ class simulation():
                 except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                     try:
                         logger.exception('Numba swim/drag kernel failed with runtime issue; falling back to pure-Python path: %s', e)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10049)
                         pass
                     swim_speeds = self.swim_speeds()
                     bl_s = self.bl_s(swim_speeds)
@@ -9929,7 +10066,8 @@ class simulation():
             except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
                     logger.exception('Compiled swim/drag/fatigue path failed at runtime; falling back to pure-Python path: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10064)
                     pass
                 # fallback: compute swim speeds and masks using Python implementations
                 swim_speeds = self.swim_speeds()
@@ -10019,7 +10157,8 @@ class simulation():
                 # If precompute fails, do not block timestep (fallback to on-demand geo_to_pixel)
                 try:
                     logger.exception("precompute_pixel_indices failed during timestep; falling back to on-demand geo_to_pixel")
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10160)
                     pass
         
         # Update refugia map - skip in HECRAS-only mode (requires HDF5 file I/O)
@@ -10146,7 +10285,8 @@ class simulation():
                     # scale impulse by timestep to convert to velocity-like change
                     self.x_vel += impulse[:, 0] * dt_safe
                     self.y_vel += impulse[:, 1] * dt_safe
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10287)
             pass
         
         # Re-sample HECRAS environmental data at new positions
@@ -10199,7 +10339,8 @@ class simulation():
                 # Log error - this shouldn't fail silently
                 try:
                     logger.exception('ERROR resampling HECRAS data: %s', e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10340)
                     pass
                 # Revert to old positions on error
                 self.X = old_X
@@ -10214,7 +10355,8 @@ class simulation():
             out_dir = os.path.join('outputs', 'rl_training')
             try:
                 os.makedirs(out_dir, exist_ok=True)
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10355)
                 pass
             log_path = os.path.join(out_dir, 'sim_profile.log')
             try:
@@ -10222,7 +10364,8 @@ class simulation():
                     f.write(f"t={t}, ")
                     f.write(', '.join([f"{k}={v:.6f}" for k, v in stage_times.items()]))
                     f.write('\n')
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10363)
                 pass
         
         # Calculate sog from displacement
@@ -10307,14 +10450,16 @@ class simulation():
                             time.sleep(max(0.001, float(dt)))
                         try:
                             logger.info('Time Step %s complete', i)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10448)
                             pass
 
                     plt.ioff()
                     try:
                         self.hdf5.flush()
                         self.hdf5.close()
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10461)
                         pass
 
                 else:
@@ -10323,7 +10468,8 @@ class simulation():
                         self.timestep(i, dt, g, pid_controller)
                         try:
                             logger.info('Time Step %s complete', i)
-                        except Exception:
+                        except Exception as e:
+                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10470)
                             pass
         3. Initializes the plot for the simulation visualization.
         4. Iterates over the specified number of time steps, updating the agents and capturing each frame.
@@ -10425,7 +10571,8 @@ class simulation():
                     self.timestep(i, dt, g, pid_controller)
                     try:
                         logger.info('Time Step %s complete', i)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10572)
                         pass
                     
                 # close and cleanup
@@ -10442,20 +10589,23 @@ class simulation():
                 self.timestep(i, dt, g, pid_controller)
                 try:
                     logger.info('Time Step %s complete', i)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10589)
                     pass
 
                 if i == range(n)[-1]:
                     try:
                         self.hdf5.close()
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10595)
                         pass
                     # Avoid forcing a hard exit; raise to allow callers to decide
                     raise SystemExit('Simulation complete')
             
         try:
             logger.info('ABM took %s to compile', (t1-t0))
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10602)
             pass
 
     def close(self):
@@ -10672,7 +10822,8 @@ class summary:
                                 except Exception as e:
                                     try:
                                         logger.exception('Error in calculating histogram for %s: %s', sex_label, e)
-                                    except Exception:
+                                    except Exception as e:
+                                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10825)
                                         pass
                                     continue
 
@@ -10685,7 +10836,8 @@ class summary:
                             else:
                                 try:
                                     logger.warning('No length values found for %s.', sex_label)
-                                except Exception:
+                                except Exception as e:
+                                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10838)
                                     pass
 
     def length_statistics(self):
@@ -10764,13 +10916,15 @@ class summary:
                                 except Exception as e:
                                     try:
                                         logger.exception('Error in calculating histogram for %s: %s', sex_label, e)
-                                    except Exception:
+                                    except Exception as e:
+                                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10917)
                                         pass
                                     plt.close(fig)
                             else:
                                 try:
                                     logger.warning('No weight values found for %s in %s.', sex_label, base_name)
-                                except Exception:
+                                except Exception as e:
+                                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=10923)
                                     pass
 
     def weight_statistics(self):
@@ -10850,13 +11004,15 @@ class summary:
                                 except Exception as e:
                                     try:
                                         logger.exception('Error in calculating histogram for %s: %s', sex_label, e)
-                                    except Exception:
+                                    except Exception as e:
+                                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=11003)
                                         pass
                                     plt.close(fig)
                             else:
                                 try:
                                     logger.warning('No body depth values found for %s in %s.', sex_label, base_name)
-                                except Exception:
+                                except Exception as e:
+                                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=11009)
                                     pass
 
     def body_depth_statistics(self):
@@ -11048,7 +11204,8 @@ class summary:
             except Exception as e:
                 try:
                     logger.exception('Failed to process %s: %s', hdf_path, e)
-                except Exception:
+                except Exception as e:
+                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=11207)
                     pass
     
         # Convert lists to numpy arrays for histogram plotting
@@ -11077,7 +11234,8 @@ class summary:
     
         try:
             logger.info('Kcal histograms saved to %s and %s', male_histogram_path, female_histogram_path)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=11236)
             pass
             
 
@@ -11327,7 +11485,8 @@ class summary:
                     data_over_time[timestep, :, :] = agent_counts_grid
                     try:
                         logger.info('file %s timestep %s complete', filename, timestep)
-                    except Exception:
+                    except Exception as e:
+                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=11486)
                         pass
             
             # Now aggregate results from HDF5
@@ -11361,6 +11520,7 @@ class summary:
         
         try:
             logger.info('Dual band raster %s created successfully.', output_file)
-        except Exception:
+        except Exception as e:
+            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=11520)
             pass
    
