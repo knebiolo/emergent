@@ -1,4 +1,4 @@
-"""Safe replacer for broad `except Exception: pass` occurrences.
+r"""Safe replacer for broad `except Exception: pass` occurrences.
 
 This script finds occurrences of the exact pattern:
 
@@ -22,7 +22,7 @@ Usage:
 import re
 import argparse
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import subprocess
 import shutil
 import sys
@@ -33,14 +33,46 @@ SESSION_REPORT = ROOT / '.ai_journal' / 'session' / '2025-12-09-iterate-excepts.
 BACKUP_DIR = ROOT / 'tmp_replace_backups'
 
 PATTERN = re.compile(r'(^[ \t]*)except\s+Exception\s*:\s*\n([ \t]*)pass\b', re.M)
+# one-line forms like: "except Exception: pass" or "except Exception as e: pass"
+PATTERN_ONELINE = re.compile(r'(^[ \t]*)except\s+Exception(?:\s+as\s+[A-Za-z_][\w]*)?\s*:\s*pass\b', re.M)
 
 REPLACEMENT_TEMPLATE = """{indent}except Exception as e:
 {body_indent}_safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line={line})
 {body_indent}pass"""
 
 
+class _MatchLike:
+    def __init__(self, start, end, groups):
+        self._span = (start, end)
+        self._groups = groups
+
+    def span(self):
+        return self._span
+
+    def group(self, n):
+        # group indices 1-based
+        if 1 <= n <= len(self._groups):
+            return self._groups[n-1]
+        return ''
+
+
 def find_matches(text):
-    return list(PATTERN.finditer(text))
+    """Return a list of match-like objects covering multi-line and one-line patterns.
+
+    Each match-like object implements .span() and .group(n) for compatibility with do_batch.
+    For the one-line pattern, group(1) -> indent, group(2) -> body_indent (empty string).
+    """
+    out = []
+    for m in PATTERN.finditer(text):
+        out.append(m)
+    for m in PATTERN_ONELINE.finditer(text):
+        s, e = m.span()
+        indent = m.group(1)
+        # body_indent left empty; do_batch will synthesize a body indent if empty
+        out.append(_MatchLike(s, e, (indent, '')))
+    # sort by start position
+    out.sort(key=lambda mm: mm.span()[0])
+    return out
 
 
 def do_batch(text, matches, batch_size, start_idx=0):
@@ -95,12 +127,12 @@ def main():
     total_matches = len(matches)
     print(f'Found {total_matches} exact `except Exception:\n    pass` occurrences')
     if total_matches == 0:
-        append_session(f"[{datetime.utcnow().isoformat()}] replace_broad_excepts: no matches found.")
+        append_session(f"[{datetime.now(timezone.utc).isoformat()}] replace_broad_excepts: no matches found.")
         return 0
 
     # ensure backup dir
     BACKUP_DIR.mkdir(exist_ok=True)
-    timestamp = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+    timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     backup_path = BACKUP_DIR / f'sockeye.py.bak.{timestamp}'
     if not backup_path.exists():
         shutil.copy2(SOCKEYE, backup_path)
@@ -114,13 +146,13 @@ def main():
         matches = find_matches(cur_text)
         if not matches:
             print('No more matches; done')
-            append_session(f"[{datetime.utcnow().isoformat()}] replace_broad_excepts: completed all replacements; total_replaced={replaced_total}")
+            append_session(f"[{datetime.now(timezone.utc).isoformat()}] replace_broad_excepts: completed all replacements; total_replaced={replaced_total}")
             return 0
         # perform one batch
         new_text, done = do_batch(cur_text, matches, args.batch_size, start_idx=0)
         if done == 0:
             print('No replacements in batch; finished')
-            append_session(f"[{datetime.utcnow().isoformat()}] replace_broad_excepts: finished; total_replaced={replaced_total}")
+            append_session(f"[{datetime.now(timezone.utc).isoformat()}] replace_broad_excepts: finished; total_replaced={replaced_total}")
             return 0
         batch_idx += 1
         print(f'Applying batch {batch_idx}: replacing {done} occurrences...')
@@ -132,7 +164,7 @@ def main():
         SOCKEYE.write_text(new_text, encoding='utf-8')
         # Run smoke test
         rc, output = run_smoke()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         if rc != 0:
             # restore backup
             shutil.copy2(backup_path, SOCKEYE)
