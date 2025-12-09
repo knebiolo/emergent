@@ -101,10 +101,14 @@ except ImportError as e:
     _HAS_NUMBA = False
     try:
         logger.warning('Numba import failed; falling back to pure-Python implementations: %s', e)
-    except Exception:
-        pass
-except Exception:
-    logger.exception('Unexpected error while importing numba; re-raising')
+    except Exception as _log_e:
+        try:
+            logger.exception('Failed while logging numba import warning: %s', _log_e)
+        except Exception:
+            pass
+except Exception as e:
+    # Log and re-raise unexpected exceptions during import
+    logger.exception('Unexpected error while importing numba: %s', e)
     raise
 class BehavioralWeights:
     def __init__(self):
@@ -164,7 +168,10 @@ class BehavioralWeights:
         for k in keys:
             try:
                 out[k] = getattr(self, k)
+            except AttributeError:
+                out[k] = None
             except Exception:
+                logger.exception('Unexpected error exporting weight %s; setting to None', k)
                 out[k] = None
         return out
     
@@ -181,9 +188,9 @@ class BehavioralWeights:
             json.dump(self.to_dict(), f, indent=2)
         try:
             logger.info("Saved behavioral weights to %s", filepath)
-        except Exception:
+        except (OSError, IOError) as e:
             try:
-                logger.exception('Collision response failed; skipping collision handling for this timestep')
+                logger.exception('Failed to log save operation for behavioral weights: %s', e)
             except Exception:
                 pass
     
@@ -195,10 +202,16 @@ class BehavioralWeights:
         self.from_dict(data)
         try:
             logger.info("Loaded behavioral weights from %s", filepath)
-        except (ValueError, IndexError, TypeError, AttributeError) as e:
-            logger.exception('Collision response failed; skipping collision handling for this timestep')
-        except Exception:
-            logger.exception('Unexpected error in collision response; re-raising')
+        except (OSError, IOError, ValueError) as e:
+            try:
+                logger.exception('Failed to log load operation for behavioral weights: %s', e)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                logger.exception('Unexpected error while logging load operation; re-raising: %s', e)
+            except Exception:
+                pass
             raise
     
     def mutate(self, scale=0.1):
@@ -615,8 +628,8 @@ class RLTrainer:
             except (ValueError, IndexError, TypeError, AttributeError):
                 logger.exception('Collision metric computation failed; returning 0 collisions')
                 metrics['collision_count'] = 0
-            except Exception:
-                logger.exception('Unexpected error computing collision metrics; re-raising')
+            except Exception as e:
+                logger.exception('Unexpected error computing collision metrics; re-raising: %s', e)
                 raise
 
             # Dry / shallow detection
@@ -642,12 +655,15 @@ class RLTrainer:
             except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
                 try:
                     logger.exception('Error computing dry/shallow counts; defaulting to 0: %s', e)
-                except Exception:
-                    pass
+                except Exception as _log_e:
+                    try:
+                        logger.exception('Failed while logging dry/shallow counts error: %s', _log_e)
+                    except Exception:
+                        pass
                 metrics['dry_count'] = 0
                 metrics['shallow_count'] = 0
-            except Exception:
-                logger.exception('Unexpected error computing dry/shallow counts; re-raising')
+            except Exception as e:
+                logger.exception('Unexpected error computing dry/shallow counts; re-raising: %s', e)
                 raise
         
         # 2. DRAFTING BENEFITS (Energy efficiency from swimming behind others)
@@ -711,8 +727,8 @@ class RLTrainer:
                 except Exception:
                     pass
                 metrics['mean_upstream_velocity'] = 0.0
-            except Exception:
-                logger.exception('Unexpected error computing mean upstream velocity; re-raising')
+            except Exception as e:
+                logger.exception('Unexpected error computing mean upstream velocity; re-raising: %s', e)
                 raise
             self.sim._prev_centerline_meas = self.sim.centerline_meas.copy()
         
@@ -997,8 +1013,11 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
     if timestep != 0 and verbose:
         try:
             logger.warning("[consolidation] central HECRAS helper ignores 'timestep' argument (requested %s); using first timestep", timestep)
-        except Exception:
-            pass
+        except Exception as _log_e:
+            try:
+                logger.exception("Failed while logging HECRAS timestep warning: %s", _log_e)
+            except Exception:
+                pass
 
     return _central(plan_path, depth_threshold=depth_threshold, max_nodes=(max_nodes if max_nodes is not None else 5000), raster_fallback_resolution=5.0, verbose=verbose)
 
