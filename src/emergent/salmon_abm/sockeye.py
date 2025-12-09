@@ -3987,9 +3987,16 @@ class simulation():
                 self._memmap_writer = MemmapLogWriter(out_dir, var_shapes, dtype=np.float32)
                 # also make a small internal mapping so flush uses the same variables
                 self._memmap_vars = vars_to_log
-            except Exception:
+            except (OSError, IOError, ValueError, TypeError) as e:
+                try:
+                    logger.exception('Failed to create MemmapLogWriter (runtime); disabling memmap logging: %s', e)
+                except Exception:
+                    pass
                 self._memmap_writer = None
                 self._memmap_vars = []
+            except Exception:
+                logger.exception('Unexpected error while creating MemmapLogWriter; re-raising')
+                raise
         self.thrust = self.arr.zeros(num_agents)         # computed theoretical thrust Lighthill 
         self.Hz = self.arr.zeros(num_agents)             # tail beats per second
         self.bout_no = self.arr.zeros(num_agents)        # bout number - new bout whenever fish recovers
@@ -4014,14 +4021,24 @@ class simulation():
                     try:
                         if name in env:
                             self._env_cache[name] = np.asarray(env[name][:])
-                    except Exception:
+                    except (OSError, IOError, KeyError, ValueError, TypeError) as e:
                         try:
-                            logger.exception("Failed to load environment raster '%s' into _env_cache", name)
+                            logger.exception("Failed to load environment raster '%s' into _env_cache' (runtime): %s", name, e)
                         except Exception:
                             pass
                         self._env_cache[name] = None
-        except Exception:
+                    except Exception:
+                        logger.exception("Unexpected error while loading environment raster '%s'; re-raising", name)
+                        raise
+        except (OSError, IOError, AttributeError) as e:
+            try:
+                logger.exception('Failed to access HDF environment group during init (runtime): %s', e)
+            except Exception:
+                pass
             self._env_cache = {}
+        except Exception:
+            logger.exception('Unexpected error while initializing _env_cache; re-raising')
+            raise
 
         # Ensure Numba kernels are warmed with representative sizes to avoid JIT stalls in timed loops
         try:
@@ -4029,21 +4046,27 @@ class simulation():
                 # warmup with representative size to move JIT compile cost out of timed loop
                 warm_n = max(1024, int(getattr(self, 'num_agents', 128)))
                 _numba_warmup(m=warm_n)
-        except Exception:
+        except (ValueError, TypeError, OSError, RuntimeError) as e:
             try:
-                logger.exception("_numba_warmup failed during init warmup")
+                logger.exception("_numba_warmup failed during init warmup (runtime): %s", e)
             except Exception:
                 pass
+        except Exception:
+            logger.exception('_numba_warmup failed during init warmup with unexpected error; re-raising')
+            raise
 
         # perform an exact-shape warmup using this simulation's sizes
         try:
             if _HAS_NUMBA:
                 _numba_warmup_for_sim(self)
-        except Exception:
+        except (ValueError, TypeError, OSError, RuntimeError) as e:
             try:
-                logger.exception("_numba_warmup_for_sim failed during sim warmup")
+                logger.exception("_numba_warmup_for_sim failed during sim warmup (runtime): %s", e)
             except Exception:
                 pass
+        except Exception:
+            logger.exception('_numba_warmup_for_sim failed during sim warmup with unexpected error; re-raising')
+            raise
 
         # Optionally compute along-stream raster on init if user provided
         # an external environment HDF path via env_files special key 'hecras_hdf'
