@@ -224,3 +224,86 @@ def project_points_onto_line(xs_line, ys_line, px, py):
     chosen_seg = idx
     distances_along = cumlen[chosen_seg] + chosen_t * seg_len[chosen_seg]
     return distances_along
+
+
+def compute_distance_to_bank(coords, wetted_mask, perimeter_indices, median_spacing=None):
+    """Compute distance-to-bank on irregular mesh via graph Dijkstra.
+
+    Parameters
+    - coords: (N,2) array of point coordinates
+    - wetted_mask: boolean array of length N indicating wetted cells
+    - perimeter_indices: list/array of indices into coords marking perimeter cells
+    - median_spacing: optional precomputed spacing; if None, estimate from random sample
+
+    Returns:
+    - distances_all: (N,) float array where perimeter indices are 0 and non-wetted are NaN
+    """
+    coords = np.asarray(coords, dtype=float)
+    wetted_mask = np.asarray(wetted_mask, dtype=bool)
+    n = coords.shape[0]
+    # estimate median spacing if needed
+    if median_spacing is None:
+        sample_size = min(1000, len(coords))
+        if sample_size <= 0:
+            median_spacing = 1.0
+        else:
+            sample_idx = np.random.choice(len(coords), size=sample_size, replace=False)
+            sample_coords = coords[sample_idx]
+            try:
+                from emergent.fish_passage.utils import safe_build_kdtree
+                sample_tree = safe_build_kdtree(sample_coords, name='hecras_sample_tree')
+            except Exception:
+                sample_tree = None
+            if sample_tree is not None:
+                dists, _ = sample_tree.query(sample_coords, k=2)
+                median_spacing = float(np.median(dists[:, 1]))
+            else:
+                bbox = sample_coords.max(axis=0) - sample_coords.min(axis=0)
+                median_spacing = float(np.sqrt((bbox[0] * bbox[1]) / max(1, sample_size)))
+
+    wetted_coords = coords[wetted_mask]
+    wetted_indices = np.where(wetted_mask)[0]
+    n_wetted = len(wetted_coords)
+    try:
+        from emergent.fish_passage.utils import safe_build_kdtree
+        wetted_tree = safe_build_kdtree(wetted_coords, name='hecras_wetted_tree')
+    except Exception:
+        wetted_tree = None
+    if wetted_tree is None:
+        return np.full(len(coords), np.nan, dtype=np.float32)
+
+    connectivity_radius = median_spacing * 1.5
+    pairs = wetted_tree.query_pairs(r=connectivity_radius, output_type='ndarray')
+    if len(pairs) > 0:
+        row = pairs[:, 0]
+        col = pairs[:, 1]
+        edge_coords_i = wetted_coords[row]
+        edge_coords_j = wetted_coords[col]
+        edge_dists = np.sqrt(np.sum((edge_coords_i - edge_coords_j) ** 2, axis=1))
+        row_sym = np.concatenate([row, col])
+        col_sym = np.concatenate([col, row])
+        data_sym = np.concatenate([edge_dists, edge_dists])
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import dijkstra
+        graph = csr_matrix((data_sym, (row_sym, col_sym)), shape=(n_wetted, n_wetted))
+        perimeter_wetted_indices = []
+        for perim_idx in perimeter_indices:
+            pos = np.where(wetted_indices == perim_idx)[0]
+            if len(pos) > 0:
+                perimeter_wetted_indices.append(pos[0])
+        perimeter_wetted_indices = np.array(perimeter_wetted_indices, dtype=np.int32)
+        if len(perimeter_wetted_indices) > 0:
+            dist_matrix = dijkstra(csgraph=graph, directed=False, indices=perimeter_wetted_indices)
+            if dist_matrix.ndim == 2:
+                distances_wetted = np.min(dist_matrix, axis=0)
+            else:
+                distances_wetted = dist_matrix
+        else:
+            distances_wetted = np.full(n_wetted, np.inf)
+    else:
+        distances_wetted = np.full(n_wetted, np.inf)
+
+    distances_all = np.full(len(coords), np.nan, dtype=np.float32)
+    distances_all[wetted_indices] = distances_wetted.astype(np.float32)
+    distances_all[perimeter_indices] = 0.0
+    return distances_all
