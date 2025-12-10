@@ -91,3 +91,151 @@ def derive_centerline_from_hecras_distance(coords: np.ndarray,
     if centerline.length < min_length:
         return None
     return centerline
+
+
+def extract_centerline_fast(coords: np.ndarray, depths: np.ndarray, depth_threshold: float = 0.05, sample_fraction: float = 0.1, min_length: float = 50.0):
+    """Array-based fast centerline extraction (PCA + smoothing).
+
+    This mirrors the legacy `extract_centerline_fast_hecras` but operates on
+    in-memory `coords` and `depths` arrays to ease unit testing.
+    """
+    wetted_mask = depths > depth_threshold
+    coords_wet = coords[wetted_mask]
+    if len(coords_wet) < 10:
+        return None
+    n_sample = max(50, int(len(coords_wet) * sample_fraction))
+    idx = np.random.choice(len(coords_wet), size=n_sample, replace=False)
+    sample = coords_wet[idx]
+    mean = sample.mean(axis=0)
+    cov = np.cov((sample - mean).T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    principal = eigvecs[:, np.argmax(eigvals)]
+    proj = (sample - mean).dot(principal)
+    order = np.argsort(proj)
+    ordered = sample[order]
+    from scipy.ndimage import gaussian_filter1d
+    if len(ordered) > 5:
+        sigma = max(1, len(ordered) // 50)
+        sx = gaussian_filter1d(ordered[:, 0], sigma=sigma)
+        sy = gaussian_filter1d(ordered[:, 1], sigma=sigma)
+        ordered = np.column_stack((sx, sy))
+    centerline = LineString(ordered)
+    if centerline.length < min_length:
+        return None
+    return centerline
+
+
+def extract_centerline_fast_hecras(plan_path: str, depth_threshold: float = 0.05, sample_fraction: float = 0.1, min_length: float = 50.0):
+    """File-backed wrapper that reads coords/depths from a HECRAS HDF5 plan and calls `extract_centerline_fast`.
+    """
+    import h5py
+    with h5py.File(plan_path, 'r') as hdf:
+        coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
+        ds = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth']
+        if getattr(ds, 'ndim', 0) > 0 and ds.shape[0] > 1:
+            depth = np.array(ds[0])
+        else:
+            depth = np.array(ds[0])
+    return extract_centerline_fast(coords, depth, depth_threshold=depth_threshold, sample_fraction=sample_fraction, min_length=min_length)
+
+
+def infer_wetted_perimeter_from_arrays(coords: np.ndarray, depth: np.ndarray, depth_threshold: float = 0.05, max_nodes: int = 5000, raster_fallback_resolution: float = 5.0, verbose: bool = False):
+    """Infer wetted perimeter from arrays of coords and depth values.
+
+    This function mirrors legacy `infer_wetted_perimeter_from_hecras` vector path
+    and includes a raster fallback that rasterizes points to a coarse grid,
+    polygonizes, and returns exterior coordinates.
+    """
+    from shapely.geometry import Polygon
+    from scipy.spatial import cKDTree
+
+    wetted_mask = depth > depth_threshold
+    if not np.any(wetted_mask):
+        return None
+    # Vector approach: if HECRAS-style facepoints/perimeter mapping isn't available,
+    # we attempt a Delaunay/perimeter via convex hull of wetted points if small.
+    wetted_coords = coords[wetted_mask]
+    n = len(wetted_coords)
+    if n == 0:
+        return None
+    if n <= max_nodes:
+        # crude approach: compute convex hull of wetted points as perimeter proxy
+        try:
+            from shapely.geometry import MultiPoint
+            hull = MultiPoint(wetted_coords).convex_hull
+            if hull.is_empty:
+                return None
+            if isinstance(hull, Polygon):
+                exterior = np.array(hull.exterior.coords)
+                return exterior
+            else:
+                return np.array(hull.coords)
+        except Exception:
+            pass
+
+    # Raster fallback: coarse rasterize points to grid and polygonize
+    if verbose:
+        print('Using raster fallback for wetted perimeter')
+    # Estimate bounds and grid
+    minx, miny = float(coords[:, 0].min()), float(coords[:, 1].min())
+    maxx, maxy = float(coords[:, 0].max()), float(coords[:, 1].max())
+    nx = max(1, int(np.ceil((maxx - minx) / raster_fallback_resolution)))
+    ny = max(1, int(np.ceil((maxy - miny) / raster_fallback_resolution)))
+    # Build occupancy grid
+    cols = np.linspace(minx, maxx, nx)
+    rows = np.linspace(miny, maxy, ny)
+    col_grid, row_grid = np.meshgrid(cols, rows)
+    grid_xy = np.column_stack((col_grid.flatten(), row_grid.flatten()))
+    tree = cKDTree(coords)
+    dists, idxs = tree.query(grid_xy, k=1)
+    # assign grid cells as wetted if nearest point is wetted
+    nearest_wetted = wetted_mask[idxs]
+    grid_mask = nearest_wetted.reshape((ny, nx))
+    # polygonize contiguous wetted regions using shapely via marching squares-like approach
+    try:
+        import shapely.geometry as geom
+        from shapely.ops import unary_union
+        polys = []
+        for i in range(ny):
+            for j in range(nx):
+                if grid_mask[i, j]:
+                    x0 = cols[j]
+                    y0 = rows[i]
+                    x1 = cols[j] + (cols[1]-cols[0]) if nx>1 else cols[j]
+                    y1 = rows[i] + (rows[1]-rows[0]) if ny>1 else rows[i]
+                    polys.append(geom.box(x0, y0, x1, y1))
+        if not polys:
+            return None
+        u = unary_union(polys)
+        # take largest polygon exterior
+        if u.type == 'Polygon':
+            exterior = np.array(u.exterior.coords)
+            return exterior
+        elif u.type == 'MultiPolygon':
+            largest = max(u.geoms, key=lambda g: g.area)
+            return np.array(largest.exterior.coords)
+    except Exception:
+        return None
+
+
+def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold: float = 0.05, max_nodes: int = 5000, raster_fallback_resolution: float = 5.0, verbose: bool = False, timestep: int = 0):
+    """File-backed wrapper that reads depth and coords and calls `infer_wetted_perimeter_from_arrays`.
+    """
+    import h5py
+    close_file = False
+    if isinstance(hdf_path_or_file, str):
+        hdf = h5py.File(hdf_path_or_file, 'r')
+        close_file = True
+    else:
+        hdf = hdf_path_or_file
+    try:
+        ds = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth']
+        if getattr(ds, 'ndim', 0) > 0 and ds.shape[0] > 1:
+            depth = np.array(ds[int(min(timestep, ds.shape[0]-1))])
+        else:
+            depth = np.array(ds[0])
+        coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
+        return infer_wetted_perimeter_from_arrays(coords, depth, depth_threshold=depth_threshold, max_nodes=max_nodes, raster_fallback_resolution=raster_fallback_resolution, verbose=verbose)
+    finally:
+        if close_file:
+            hdf.close()
