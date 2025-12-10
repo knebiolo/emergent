@@ -82,16 +82,94 @@ def geo_to_pixel(transform, X, Y) -> Tuple[np.ndarray, np.ndarray]:
     if scalar:
         return rows[0], cols[0]
     return rows, cols
-"""
-geometry.py
 
-Preamble/Module plan for geometric utilities (moved to fish_passage).
 
-Responsibilities (planned):
-- Functions for coordinate transforms, pixel<->geo conversions, affine computations.
-- Utilities for perimeter simplification, point-in-polygon checks, and centerline derivation helpers.
-- Small helpers should be pure functions with clear input validation and documented bounds.
+def compute_affine_from_hecras(coords, target_cell_size=None):
+    """Compute a conservative Affine transform from irregular HECRAS cell centers.
 
-Notes:
-- Keep functions short (<60 lines) and well-tested.
-"""
+    Strategy:
+    - Use a KDTree to estimate typical nearest-neighbor spacing (median of 2nd NN).
+    - Use that spacing as square cell size (unless `target_cell_size` is provided).
+    - Set origin at (minx - 0.5*cell, maxy + 0.5*cell) so pixel centers align.
+
+    Returns: `affine.Affine` instance.
+    """
+    coords = np.asarray(coords, dtype=float)
+    if coords.ndim != 2 or coords.shape[1] != 2 or coords.shape[0] == 0:
+        from affine import Affine as _Affine
+        return _Affine(1.0, 0.0, 0.0, 0.0, -1.0, 0.0)
+
+    n = coords.shape[0]
+    sample_n = min(2000, n)
+    idx = np.random.choice(n, size=sample_n, replace=False)
+    sample = coords[idx]
+
+    try:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(coords)
+        dists, _ = tree.query(sample, k=2)
+        nn = dists[:, 1]
+        median_spacing = float(np.median(nn))
+    except Exception:
+        # fallback: approximate from bbox area
+        bbox = coords.max(axis=0) - coords.min(axis=0)
+        approx_cell = float(np.sqrt((bbox[0] * bbox[1]) / max(1, n)))
+        median_spacing = approx_cell
+
+    if target_cell_size is not None:
+        cell = float(target_cell_size)
+    else:
+        cell = max(median_spacing, 1e-6)
+
+    minx = float(coords[:, 0].min())
+    maxy = float(coords[:, 1].max())
+    origin_x = minx - 0.5 * cell
+    origin_y = maxy + 0.5 * cell
+
+    from affine import Affine as _Affine
+    return _Affine(cell, 0.0, origin_x, 0.0, -cell, origin_y)
+def pca_primary_axis(coords):
+    """Compute the primary PCA axis for a set of 2D coordinates.
+
+    Returns a unit vector (vx, vy) pointing along the first principal component
+    and the projected scalar coordinates along that axis for each input point.
+    """
+    coords = np.asarray(coords, dtype=float)
+    if coords.ndim != 2 or coords.shape[1] != 2 or coords.shape[0] == 0:
+        return (1.0, 0.0), np.asarray([])
+    # center
+    mean = coords.mean(axis=0)
+    X = coords - mean
+    # covariance
+    C = np.dot(X.T, X) / max(1, X.shape[0] - 1)
+    # eigen decomposition
+    vals, vecs = np.linalg.eigh(C)
+    # largest eigenvalue -> index
+    idx = np.argmax(vals)
+    vec = vecs[:, idx]
+    # ensure unit vector
+    norm = np.hypot(vec[0], vec[1])
+    if norm == 0:
+        vx, vy = 1.0, 0.0
+    else:
+        vx, vy = vec[0] / norm, vec[1] / norm
+    proj = np.dot(X, np.array([vx, vy]))
+    return (float(vx), float(vy)), proj
+
+
+def order_by_projection(coords):
+    """Return indices that order points along the primary PCA axis (ascending).
+
+    Ties are broken by projecting onto the secondary axis.
+    """
+    coords = np.asarray(coords, dtype=float)
+    if coords.ndim != 2 or coords.shape[1] != 2 or coords.shape[0] == 0:
+        return np.array([], dtype=int)
+    (vx, vy), proj = pca_primary_axis(coords)
+    # secondary axis
+    sx, sy = -vy, vx
+    sec = np.dot(coords - coords.mean(axis=0), np.array([sx, sy]))
+    # lexsort expects keys with the primary key last; provide secondary then primary
+    keys = np.vstack((sec, proj))
+    order = np.lexsort(keys)
+    return order
