@@ -65,3 +65,31 @@ def safe_build_kdtree(points: Any, name: str = 'KDTree') -> Optional[object]:
 	except Exception:
 		logger.exception('%s: unexpected error while building cKDTree; re-raising', name)
 		raise
+
+
+def get_inv_transform(sim, transform):
+	"""Return cached inverse Affine for `transform` on `sim`.
+
+	Caches by `id(transform)` on `sim._inv_transform_cache` to avoid repeated
+	Affine inversion costs. If `sim` is None or not writable, falls back to
+	returning `~transform` without caching.
+	"""
+	try:
+		key = id(transform)
+	except Exception:
+		return ~transform
+	cache = getattr(sim, '_inv_transform_cache', None)
+	if cache is None:
+		try:
+			cache = {}
+			setattr(sim, '_inv_transform_cache', cache)
+		except Exception:
+			return ~transform
+	inv = cache.get(key)
+	if inv is None:
+		try:
+			inv = ~transform
+		except Exception:
+			return ~transform
+		cache[key] = inv
+	return inv

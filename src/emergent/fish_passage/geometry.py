@@ -173,3 +173,54 @@ def order_by_projection(coords):
     keys = np.vstack((sec, proj))
     order = np.lexsort(keys)
     return order
+
+
+def project_points_onto_line(xs_line, ys_line, px, py):
+    """Project points (px,py) onto a polyline defined by xs_line, ys_line.
+
+    Returns distances along the polyline for each point (float array).
+    This is a numpy-vectorized implementation suitable for tests and small
+    to medium-sized inputs.
+    """
+    xs_line = np.asarray(xs_line, dtype=float)
+    ys_line = np.asarray(ys_line, dtype=float)
+    px = np.asarray(px, dtype=float)
+    py = np.asarray(py, dtype=float)
+
+    S = xs_line.size - 1
+    if S <= 0 or px.size == 0:
+        return np.zeros(px.size, dtype=float)
+
+    seg_x0 = xs_line[:-1]
+    seg_y0 = ys_line[:-1]
+    seg_x1 = xs_line[1:]
+    seg_y1 = ys_line[1:]
+    vx = seg_x1 - seg_x0
+    vy = seg_y1 - seg_y0
+    seg_len = np.hypot(vx, vy)
+    seg_len_safe = np.where(seg_len == 0, 1e-12, seg_len)
+    cumlen = np.concatenate([[0.0], np.cumsum(seg_len)])
+
+    # Broadcast shapes: M x S
+    M = px.size
+    px_e = px[:, None]
+    py_e = py[:, None]
+    x0_e = seg_x0[None, :]
+    y0_e = seg_y0[None, :]
+    vx_e = vx[None, :]
+    vy_e = vy[None, :]
+
+    wx = px_e - x0_e
+    wy = py_e - y0_e
+    denom = vx_e * vx_e + vy_e * vy_e
+    denom = np.where(denom == 0, 1e-12, denom)
+    t = (wx * vx_e + wy * vy_e) / denom
+    t_clamped = np.clip(t, 0.0, 1.0)
+    cx = x0_e + t_clamped * vx_e
+    cy = y0_e + t_clamped * vy_e
+    d2 = (px_e - cx) ** 2 + (py_e - cy) ** 2
+    idx = np.argmin(d2, axis=1)
+    chosen_t = t_clamped[np.arange(M), idx]
+    chosen_seg = idx
+    distances_along = cumlen[chosen_seg] + chosen_t * seg_len[chosen_seg]
+    return distances_along
