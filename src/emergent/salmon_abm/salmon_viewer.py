@@ -161,238 +161,6 @@ class OffscreenQtFBORenderer:
             except Exception:
                 pass
         return img
-
-# On Windows, force desktop OpenGL to avoid ANGLE/renderer issues that can
-# produce blank/grey GL widgets. Respect existing env only if explicitly set.
-try:
-    if os.name == 'nt' and os.environ.get('QT_OPENGL', '').strip() == '':
-        os.environ['QT_OPENGL'] = 'desktop'
-        logging.getLogger(__name__).info('Forcing QT_OPENGL=desktop to prefer native OpenGL on Windows')
-except Exception:
-    pass
-
-try:
-    from .tin_helpers import sample_evenly
-except Exception:
-    try:
-        from emergent.salmon_abm.tin_helpers import sample_evenly
-    except Exception:
-        sample_evenly = None
-
-
-class _GLMeshBuilder(QtCore.QThread):
-    mesh_ready = QtCore.pyqtSignal(object)
-
-    def __init__(self, pts, vals, vert_exag=1.0, poly=None, parent=None):
-        super().__init__(parent=parent)
-        self.pts = np.asarray(pts, dtype=float)
-        self.vals = np.asarray(vals, dtype=float)
-        self.vert_exag = float(vert_exag)
-        self.poly = poly
-
-    def run(self):
-        try:
-            # compute triangulation in the worker thread to avoid blocking the UI
-            try:
-                # Prefer the helper which triangulates and clips using the sim polygon
-                try:
-                    from emergent.salmon_abm.tin_helpers import triangulate_and_clip
-                except Exception:
-                    from .tin_helpers import triangulate_and_clip
-
-                logging.getLogger(__name__).debug('MESH_BUILDER starting triangulation: pts=%s, vals=%s, poly=%s', self.pts.shape, self.vals.shape, type(self.poly))
-                verts, tris = triangulate_and_clip(self.pts, self.vals * self.vert_exag if self.pts.shape[0] == self.vals.shape[0] else np.zeros(len(self.pts)), poly=self.poly)
-                logging.getLogger(__name__).debug('MESH_BUILDER triangulation complete: verts=%s, tris=%s', getattr(verts, 'shape', None), getattr(tris, 'shape', None))
-            except Exception as e:
-                tb = traceback.format_exc()
-                logging.getLogger(__name__).exception('MESH_BUILDER triangulation failed: %s', e)
-                self.mesh_ready.emit({"error": e, "traceback": tb})
-                return
-
-            # simple color mapping
-            try:
-                zvals = verts[:, 2]
-                vmin, vmax = np.nanmin(zvals), np.nanmax(zvals)
-                span = vmax - vmin if vmax > vmin else 1.0
-                norm = (zvals - vmin) / span
-                colors = np.zeros((len(verts), 4), dtype=float)
-                colors[:, 0] = 0.2 + 0.8 * norm
-                colors[:, 1] = 0.4 * (1.0 - norm)
-                colors[:, 2] = 0.6 * (1.0 - norm)
-                colors[:, 3] = 1.0
-            except Exception:
-                colors = np.tile([0.6, 0.6, 0.6, 1.0], (len(verts), 1))
-
-            logging.getLogger(__name__).debug('MESH_BUILDER emitting mesh_ready payload')
-            self.mesh_ready.emit({"verts": verts.astype(float), "faces": tris.astype(int), "colors": colors.astype(float)})
-        except Exception as e:
-            tb = traceback.format_exc()
-            logging.getLogger(__name__).exception('MESH_BUILDER unexpected failure: %s', e)
-            self.mesh_ready.emit({"error": e, "traceback": tb})
-
-
-class SalmonViewer(QtWidgets.QWidget):
-    def __init__(self, sim, dt=0.1, T=600, rl_trainer=None, parent=None, **kwargs):
-        super().__init__(parent=parent)
-        self.sim = sim
-        self.dt = dt
-        self.T = T
-        self.rl_trainer = rl_trainer
-
-        self.current_timestep = 0
-        # Start running immediately so agents swim over the TIN
-        self.paused = False
-
-        self.tin_mesh = None
-        self.gl_view = None
-        # Use only the Qt CPU-based offscreen renderer (QImage + QPainter).
-        # Remove legacy PersistentOffscreenRenderer and PyOpenGL OffscreenFBORenderer fallbacks.
-        try:
-            self.qt_fbo_renderer = OffscreenQtFBORenderer(width=800, height=600)
-            logging.getLogger(__name__).info('OffscreenQtFBORenderer created')
-        except Exception as e:
-            self.qt_fbo_renderer = None
-            logging.getLogger(__name__).warning('Could not create OffscreenQtFBORenderer: %s', e)
-
-        self._build_ui()
-        # preview cache for low-res background images
-        self._preview_cache = {}
-
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_simulation)
-        self.timer.start(int(self.dt * 1000))
-
-        QTimer.singleShot(10, self.setup_background)
-        try:
-            logging.getLogger(__name__).debug('VIEWER_INIT gl_available=%s, hecras=%s, plan=%s', gl is not None, getattr(self.sim, 'use_hecras', False), getattr(self.sim, 'hecras_plan_path', None))
-        except Exception:
-            pass
-
-    def load_tin_payload(self, payload_or_path):
-        """Headless-friendly loader: accept a payload dict (as emitted by _GLMeshBuilder)
-        or a `.npz`/`.npy` file path and return (verts, faces, colors).
-
-        This function does not require OpenGL and can be used in headless tests.
-        """
-        # payload dict path
-        if isinstance(payload_or_path, dict):
-            payload = payload_or_path
-            if 'error' in payload:
-                raise RuntimeError(f"payload contains error: {payload['error']}")
-            verts = payload.get('verts')
-            faces = payload.get('faces')
-            colors = payload.get('colors')
-            return np.asarray(verts), np.asarray(faces), np.asarray(colors)
-
-        # file path path
-        path = str(payload_or_path)
-        if os.path.exists(path):
-            if path.endswith('.npz'):
-                data = np.load(path)
-                verts = data.get('verts')
-                faces = data.get('faces')
-                colors = data.get('colors')
-                return np.asarray(verts), np.asarray(faces), np.asarray(colors)
-            elif path.endswith('.npy'):
-                verts = np.load(path)
-                return np.asarray(verts), np.zeros((0, 3), dtype=int), np.zeros((len(verts), 4))
-        raise FileNotFoundError(path)
-
-    # Lightweight safe add/remove helpers for GL view to avoid ValueError
-    # when backends have different internal item list behaviors.
-    def _safe_add(self, item, mark: str | None = None):
-        try:
-            if getattr(self, 'gl_view', None) is None or item is None:
-                return False
-            try:
-                self.gl_view.addItem(item)
-            except Exception:
-                try:
-                    # some backends require different calling patterns
-                    add = getattr(self.gl_view, 'addItem', None)
-                    if callable(add):
-                        add(item)
-                except Exception:
-                    print('[GL] _safe_add failed to add item')
-                    return False
-            # optional marker attribute for later removal sweeps
-            if mark is not None:
-                try:
-                    setattr(item, '_marker', mark)
-                except Exception:
-                    pass
-            try:
-                self.gl_view.update()
-            except Exception:
-                pass
-            return True
-        except Exception:
-            return False
-
-    def _safe_remove(self, item):
-        try:
-            if getattr(self, 'gl_view', None) is None or item is None:
-                return False
-            try:
-                self.gl_view.removeItem(item)
-                try:
-                    self.gl_view.update()
-                except Exception:
-                    pass
-                return True
-            except Exception:
-                # attempt sweep-based removal by marker or repr match
-                try:
-                    items = getattr(self.gl_view, 'items', lambda: [])()
-                    if not items:
-                        return False
-                    # remove matching by marker attribute
-                    for it in list(items):
-                        try:
-                            if getattr(it, '_marker', None) == getattr(item, '_marker', None) and getattr(it, '_marker', None) is not None:
-                                try:
-                                    self.gl_view.removeItem(it)
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                    try:
-                        self.gl_view.update()
-                    except Exception:
-                        pass
-                    return True
-                except Exception:
-                    return False
-        except Exception:
-            return False
-
-    def _build_ui(self):
-        self.setWindowTitle('SalmonViewer')
-        main = QHBoxLayout(self)
-
-        # Left panel: tools and metrics
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left.setMinimumWidth(260)
-
-        # Center: main plot or GL view
-        center = QWidget()
-        center_layout = QVBoxLayout(center)
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setMinimumSize(600, 600)
-        center_layout.addWidget(self.plot_widget)
-        # Always show a 2D preview image under the main canvas so the center
-        # is not blank if GL rendering fails or is unavailable.
-        try:
-            self.preview_label = QLabel()
-            self.preview_label.setAlignment(Qt.AlignCenter)
-            self.preview_label.setMinimumHeight(240)
-            center_layout.addWidget(self.preview_label)
-        except Exception:
-            self.preview_label = None
-
-        # Right: RL controls and status
-        right = QWidget()
         rlay = QVBoxLayout(right)
         # Playback controls (match original viewer ordering and widget names)
         self.play_btn = QPushButton('Play')
@@ -813,45 +581,48 @@ class SalmonViewer(QtWidgets.QWidget):
                             try:
                                 self._safe_add(mesh, mark='tin_mesh')
                             except Exception:
-                                # fallback to direct add
-                                try:
-                                    self.gl_view.addItem(mesh)
-                                except Exception:
-                                    print('[TIN] failed to add mesh to gl_view')
-                        except Exception:
-                            try:
-                                self._safe_add(mesh, mark='tin_mesh')
-                            except Exception:
                                 try:
                                     self.gl_view.addItem(mesh)
                                 except Exception as e:
-                                    print('[TIN] GL mesh creation failed to add mesh:', e)
-                    except Exception as e:
-                        print('[TIN] GL mesh creation failed:', e)
+                                    print('[TIN] failed to add mesh to gl_view', e)
+                        except Exception as e:
+                            print('[TIN] GL mesh creation failed:', e)
 
-                    # Also add a lightweight point overlay (robust fallback)
-                    try:
-                        if getattr(self, 'tin_points', None) is not None:
+                        # Debugging helper: log mesh vs sim agent bounds (non-fatal)
+                        try:
+                            if hasattr(self, 'inspect_mesh_against_sim'):
+                                try:
+                                    self.inspect_mesh_against_sim(verts)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        # Also add a lightweight point overlay (robust fallback)
+                        try:
+                            if getattr(self, 'tin_points', None) is not None:
+                                try:
+                                    self._safe_remove(self.tin_points)
+                                except Exception:
+                                    pass
+                            pts3 = verts[:, :3].astype(float)
+                            # use a bright, opaque color for points
                             try:
-                                self._safe_remove(self.tin_points)
+                                pcolors = (1.0, 0.2, 0.2, 1.0)
                             except Exception:
-                                pass
-                        pts3 = verts[:, :3].astype(float)
-                        # use a bright, opaque color for points
-                        try:
-                            pcolors = (1.0, 0.2, 0.2, 1.0)
-                        except Exception:
-                            pcolors = None
-                        self.tin_points = gl.GLScatterPlotItem(pos=pts3, color=pcolors, size=6)
-                        try:
-                            self._safe_add(self.tin_points, mark='tin_points')
-                        except Exception:
+                                pcolors = None
+                            self.tin_points = gl.GLScatterPlotItem(pos=pts3, color=pcolors, size=6)
                             try:
-                                self.gl_view.addItem(self.tin_points)
-                            except Exception as e:
-                                print('[TIN] failed to add scatter overlay:', e)
+                                self._safe_add(self.tin_points, mark='tin_points')
+                            except Exception:
+                                try:
+                                    self.gl_view.addItem(self.tin_points)
+                                except Exception as e:
+                                    print('[TIN] failed to add scatter overlay:', e)
+                        except Exception as e:
+                            print('[TIN] failed to add scatter overlay:', e)
                     except Exception as e:
-                        print('[TIN] failed to add scatter overlay:', e)
+                        print('[TIN] GL mesh overall failed:', e)
 
                     # Force the GL widget to refresh/raise so it's visible on-screen
                     try:
@@ -1046,8 +817,6 @@ class SalmonViewer(QtWidgets.QWidget):
                                 pass
                     except Exception:
                         pass
-                except Exception:
-                    pass
 
             builder.mesh_ready.connect(_on_mesh)
             try:

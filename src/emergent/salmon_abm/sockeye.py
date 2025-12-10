@@ -130,13 +130,13 @@ except ImportError as e:
     try:
         logger.warning('Numba import failed; falling back to pure-Python implementations: %s', e)
     except Exception as _log_e:
-        _safe_log_exception('Failed while logging numba import warning', _log_e, context='import numba fallback')
+        _safe_log_exception('Failed while logging numba import warning', _log_e, file='sockeye.py', context='import numba fallback')
 except Exception as e:
     # Log and re-raise unexpected exceptions during import
     try:
         logger.exception('Unexpected error while importing numba: %s', e)
     except Exception as _log_e:
-        _safe_log_exception('Failed while logging unexpected numba import error', _log_e, context='import numba')
+        _safe_log_exception('Failed while logging unexpected numba import error', _log_e, file='sockeye.py', context='import numba')
     raise
 class BehavioralWeights:
     def __init__(self):
@@ -199,7 +199,7 @@ class BehavioralWeights:
             except AttributeError:
                 out[k] = None
             except Exception as e:
-                _safe_log_exception('Unexpected error exporting weight; setting to None', e, key=k)
+                _safe_log_exception('Unexpected error exporting weight; setting to None', e, file='sockeye.py', key=k)
                 out[k] = None
         return out
     
@@ -829,8 +829,8 @@ class RLTrainer:
                     except Exception as e:
                         try:
                             logger.exception('Failed during centroid computation: %s', e)
-                        except Exception:
-                            _safe_log_exception('Failed during centroid computation logging', e, file='sockeye.py', line=857)
+                        except Exception as _log_e:
+                            _safe_log_exception('Failed during centroid computation logging', _log_e, file='sockeye.py', line=857)
                 
                 if save_path:
                     self.behavioral_weights.save(save_path)
@@ -854,17 +854,17 @@ class RLTrainer:
                     except (AttributeError, NameError, RuntimeError) as e:
                         try:
                             logger.exception('Failed to delete _last_drag_reductions during cleanup: %s', e)
-                        except Exception as e:
-                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=882)
-                            pass
+                        except Exception as _log_e:
+                            _safe_log_exception('Failed while logging deletion of _last_drag_reductions', _log_e, file='sockeye.py', line=882)
+                        pass
                 try:
                     gc.collect()
                 except (RuntimeError, OSError) as e:
                     try:
                         logger.exception('gc.collect() raised runtime error during cleanup: %s', e)
-                    except Exception as e:
-                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=889)
-                        pass
+                    except Exception as _log_e:
+                        _safe_log_exception('Failed while logging gc.collect() runtime error', _log_e, file='sockeye.py', line=889)
+                    pass
             except (ImportError, RuntimeError, OSError) as e:
                 try:
                     logger.exception('GC/cleanup block encountered runtime error: %s', e)
