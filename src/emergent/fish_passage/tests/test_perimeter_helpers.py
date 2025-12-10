@@ -22,3 +22,20 @@ def test_thin_perimeter_uniform_triangle():
 	# ensure returned points are subset of original points coordinates
 	for p in thinned:
 		assert any(np.allclose(p, q) for q in pts)
+
+
+def test_compute_distance_to_bank_hecras_wrapper_consistency():
+	# Create a small synthetic grid of points
+	xs, ys = np.meshgrid(np.arange(5), np.arange(5))
+	coords = np.column_stack((xs.flatten().astype(float), ys.flatten().astype(float)))
+	# wetted mask: central cross
+	wetted_mask = np.zeros(len(coords), dtype=bool)
+	wetted_mask[(coords[:,0]==2) | (coords[:,1]==2)] = True
+	perimeter_indices = np.where(wetted_mask & ((coords[:,0]==0)|(coords[:,0]==4)|(coords[:,1]==0)|(coords[:,1]==4)))[0]
+	# compute both ways
+	from emergent.fish_passage.geometry import compute_distance_to_bank
+	d1 = compute_distance_to_bank(coords, wetted_mask, perimeter_indices)
+	wetted_info = {'wetted_mask': wetted_mask, 'perimeter_cells': perimeter_indices}
+	from emergent.fish_passage.geometry import compute_distance_to_bank_hecras
+	d2 = compute_distance_to_bank_hecras(wetted_info, coords)
+	assert np.allclose(np.nan_to_num(d1, nan=-1.0), np.nan_to_num(d2, nan=-1.0))

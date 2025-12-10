@@ -309,6 +309,24 @@ def compute_distance_to_bank(coords, wetted_mask, perimeter_indices, median_spac
     return distances_all
 
 
+def compute_distance_to_bank_hecras(wetted_info, coords, median_spacing=None):
+    """Compatibility wrapper for legacy `compute_distance_to_bank_hecras`.
+
+    Accepts `wetted_info` dict-like with keys `'wetted_mask'` and `'perimeter_cells'`
+    to preserve the legacy API used by `salmon_abm` callers.
+    """
+    try:
+        wetted_mask = wetted_info['wetted_mask']
+        perimeter_indices = wetted_info.get('perimeter_cells', [])
+    except Exception:
+        # If caller passed (wetted_mask, perimeter_indices) directly, try to unpack
+        if isinstance(wetted_info, (list, tuple)) and len(wetted_info) >= 2:
+            wetted_mask, perimeter_indices = wetted_info[0], wetted_info[1]
+        else:
+            raise
+    return compute_distance_to_bank(coords, wetted_mask, perimeter_indices, median_spacing=median_spacing)
+
+
 def order_points_nearest_neighbor(points, start_idx=None):
     pts = np.asarray(points, dtype=float)
     n = pts.shape[0]
