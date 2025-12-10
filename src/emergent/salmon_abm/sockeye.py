@@ -2303,8 +2303,8 @@ if _HAS_NUMBA:
     except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
         try:
             logger.exception('Numba precompile at import time failed (expected runtime issue); continuing without warmed numba kernels: %s', e)
-        except Exception as e:
-            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2351)
+        except Exception as _log_e:
+            _safe_log_exception('Numba precompile logging failed', _log_e, file='sockeye.py', line=2351)
             pass
     except Exception:
         logger.exception('Numba precompile at import time failed with unexpected error; re-raising')
@@ -2334,12 +2334,9 @@ if _HAS_NUMBA:
         except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
             try:
                 logger.exception('_numba_warmup failed with expected runtime issue; numba kernels may not be available: %s', e)
-            except Exception as e:
-                try:
-                    logger.exception('BehavioralWeights.save logging failed: %s', e)
-                except Exception as e:
-                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2384)
-                    pass
+            except Exception as _log_e:
+                _safe_log_exception('_numba_warmup logging failed', _log_e, file='sockeye.py', line=2384)
+                pass
         except Exception:
             logger.exception('_numba_warmup failed with unexpected error; re-raising')
             raise
@@ -2350,8 +2347,8 @@ if _HAS_NUMBA:
     except (ValueError, TypeError, IndexError, AttributeError, OSError) as e:
         try:
             logger.exception('_numba_warmup() failed during module init with expected runtime issue; continuing without warmed kernels: %s', e)
-        except Exception as e:
-            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=2402)
+        except Exception as _log_e:
+            _safe_log_exception('_numba_warmup() logging failed', _log_e, file='sockeye.py', line=2402)
             pass
     except Exception:
         logger.exception('_numba_warmup() failed during module init with unexpected error; re-raising')
@@ -3997,7 +3994,8 @@ class simulation():
                     from emergent.io.log_writer import LogWriter
                     self._log_writer = LogWriter(log_dir)
                     self._memmap_writer = None
-            except Exception:
+            except Exception as e:
+                _safe_log_exception('Failed initializing LogWriter/memmap writer; disabling deferred logging', e, file='sockeye.py', line=4010)
                 self._log_writer = None
                 self._memmap_writer = None
 
@@ -4040,11 +4038,11 @@ class simulation():
         # (no prints) to reduce console noise.
         try:
             from .sockeye import PID_controller
-        except Exception:
-            # fallback: try absolute import path
+        except Exception as e:
             try:
                 from emergent.salmon_abm.sockeye import PID_controller
-            except Exception:
+            except Exception as _e:
+                _safe_log_exception('Failed to import PID_controller fallback', _e, file='sockeye.py', line=4100)
                 PID_controller = None
 
         if PID_controller is not None:
@@ -4055,7 +4053,7 @@ class simulation():
                     try:
                         self.pid_controller.interp_PID()
                     except Exception as e:
-                        _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4102)
+                        _safe_log_exception('PID_controller.interp_PID failed', e, file='sockeye.py', line=4108)
                         pass
             except Exception:
                 # silently ignore PID attach failures to avoid noisy logs
@@ -4211,9 +4209,8 @@ class simulation():
                     except (OSError, IOError, KeyError, ValueError, TypeError) as e:
                         try:
                             logger.exception("Failed to load environment raster '%s' into _env_cache' (runtime): %s", name, e)
-                        except Exception as e:
-                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4263)
-                            pass
+                        except Exception as _log_e:
+                            _safe_log_exception('Failed while logging environment raster load error', _log_e, file='sockeye.py', line=4263)
                         self._env_cache[name] = None
                     except Exception:
                         logger.exception("Unexpected error while loading environment raster '%s'; re-raising", name)
@@ -4221,9 +4218,8 @@ class simulation():
         except (OSError, IOError, AttributeError) as e:
             try:
                 logger.exception('Failed to access HDF environment group during init (runtime): %s', e)
-            except Exception as e:
-                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4272)
-                pass
+            except Exception as _log_e:
+                _safe_log_exception('Failed while logging HDF environment access error', _log_e, file='sockeye.py', line=4272)
             self._env_cache = {}
         except Exception:
             logger.exception('Unexpected error while initializing _env_cache; re-raising')
@@ -4232,14 +4228,13 @@ class simulation():
         # Ensure Numba kernels are warmed with representative sizes to avoid JIT stalls in timed loops
         try:
             if _HAS_NUMBA:
-                # warmup with representative size to move JIT compile cost out of timed loop
                 warm_n = max(1024, int(getattr(self, 'num_agents', 128)))
                 _numba_warmup(m=warm_n)
         except (ValueError, TypeError, OSError, RuntimeError) as e:
             try:
                 logger.exception("_numba_warmup failed during init warmup (runtime): %s", e)
-            except Exception as e:
-                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4288)
+            except Exception as _log_e:
+                _safe_log_exception('_numba_warmup logging failed during init warmup', _log_e, file='sockeye.py', line=4299)
                 pass
         except Exception:
             logger.exception('_numba_warmup failed during init warmup with unexpected error; re-raising')
@@ -4252,8 +4247,8 @@ class simulation():
         except (ValueError, TypeError, OSError, RuntimeError) as e:
             try:
                 logger.exception("_numba_warmup_for_sim failed during sim warmup (runtime): %s", e)
-            except Exception as e:
-                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4301)
+            except Exception as _log_e:
+                _safe_log_exception('_numba_warmup_for_sim logging failed during sim warmup', _log_e, file='sockeye.py', line=4301)
                 pass
         except Exception:
             logger.exception('_numba_warmup_for_sim failed during sim warmup with unexpected error; re-raising')
@@ -4274,31 +4269,28 @@ class simulation():
         if create_on_init:
             # try to find a matching .p05 in workspace data if a path wasn't provided
             try:
-                # user-specified override in env_files under key 'hecras_hdf'
                 hecras_hdf = None
                 if isinstance(env_files, dict):
                     hecras_hdf = env_files.get('hecras_hdf')
                 if not hecras_hdf:
-                    # default path the user indicated
                     hecras_dir = os.path.join(self.model_dir, 'data', 'salmon_abm', '20240506')
                     hecras_dir = os.path.normpath(hecras_dir)
                     candidate = os.path.join(hecras_dir, 'Nuyakuk_Production_.p05.hdf')
                     if os.path.exists(candidate):
                         hecras_hdf = candidate
+
                 # if we found an HDF, set simulation.hdf5 to it for compute, otherwise compute on current file
                 if hecras_hdf and os.path.exists(hecras_hdf):
                     # If the file is a HECRAS plan HDF without 'environment', use mapping helpers
                     try:
-                        # ensure x_coords/y_coords and environment rasters via mapping helper
+                        # attempt to map commonly used rasters from HECRAS onto our HDF grid
                         try:
-                            # attempt to map commonly used rasters from HECRAS onto our HDF grid
                             map_hecras_to_env_rasters(self, hecras_hdf, raster_names=['depth','wetted','vel_x','vel_y'])
                         except Exception:
                             try:
                                 logger.exception("map_hecras_to_env_rasters failed for %s, will try cached load", hecras_hdf)
-                            except Exception as e:
-                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4344)
-                                pass
+                            except Exception as _log_e:
+                                _safe_log_exception('map_hecras_to_env_rasters logging failed', _log_e, file='sockeye.py', line=4344)
                             # fallback: try loading HECRAS plan into cache (KDTree) and then map
                             try:
                                 load_hecras_plan_cached(self, hecras_hdf)
@@ -4306,55 +4298,49 @@ class simulation():
                             except Exception:
                                 try:
                                     logger.exception("load_hecras_plan_cached or second map_hecras_to_env_rasters attempt failed for %s", hecras_hdf)
-                                except Exception as e:
-                                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4353)
-                                    pass
+                                except Exception as _log_e:
+                                    _safe_log_exception('load_hecras_plan_cached logging failed', _log_e, file='sockeye.py', line=4353)
 
                         # compute coarsened alongstream raster using created env rasters
                         try:
                             compute_coarsened_alongstream_raster(self, factor=factor, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist')
-                        except Exception:
+                        except Exception as e:
                             try:
-                                logger.exception("compute_coarsened_alongstream_raster failed, will try compute_alongstream_raster")
-                            except Exception as e:
-                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4368)
-                                pass
+                                logger.exception("compute_coarsened_alongstream_raster failed, will try compute_alongstream_raster: %s", e)
+                            except Exception as _log_e:
+                                _safe_log_exception('compute_coarsened_alongstream_raster logging failed', _log_e, file='sockeye.py', line=4368)
                             try:
                                 compute_alongstream_raster(self, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist')
-                            except Exception:
+                            except Exception as e:
                                 try:
-                                    logger.exception("compute_alongstream_raster also failed")
-                                except Exception as e:
-                                    _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4375)
-                                    pass
-                    except Exception:
+                                    logger.exception("compute_alongstream_raster also failed: %s", e)
+                                except Exception as _log_e:
+                                    _safe_log_exception('compute_alongstream_raster logging failed', _log_e, file='sockeye.py', line=4375)
+                    except Exception as e:
                         try:
-                            logger.exception("mapping external HDF failed, will try computing alongstream on current hdf5")
-                        except Exception as e:
-                            _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4380)
-                            pass
+                            logger.exception("mapping external HDF failed, will try computing alongstream on current hdf5: %s", e)
+                        except Exception as _log_e:
+                            _safe_log_exception('mapping external HDF logging failed', _log_e, file='sockeye.py', line=4380)
                         # if reading external HDF fails, try computing on current hdf5
                         try:
                             compute_coarsened_alongstream_raster(self, factor=factor)
-                        except Exception:
+                        except Exception as e:
                             try:
-                                logger.exception("compute_coarsened_alongstream_raster fallback failed")
-                            except Exception as e:
-                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4388)
-                                pass
+                                logger.exception("compute_coarsened_alongstream_raster fallback failed: %s", e)
+                            except Exception as _log_e:
+                                _safe_log_exception('compute_coarsened_alongstream_raster fallback logging failed', _log_e, file='sockeye.py', line=4388)
                 else:
                     # compute on in-project HDF if environment rasters were loaded
                     try:
                         compute_coarsened_alongstream_raster(self, factor=factor)
-                    except Exception:
-                            try:
-                                logger.exception("compute_coarsened_alongstream_raster failed when computing on in-project HDF")
-                            except Exception as e:
-                                _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4397)
-                                pass
+                    except Exception as e:
+                        try:
+                            logger.exception("compute_coarsened_alongstream_raster failed when computing on in-project HDF: %s", e)
+                        except Exception as _log_e:
+                            _safe_log_exception('compute_coarsened_alongstream_raster logging failed', _log_e, file='sockeye.py', line=4397)
             except Exception as e:
                 _safe_log_exception('Auto-patched broad except', e, file='sockeye.py', line=4399)
-                pass
+                # swallow and continue
         
         # Initialize agent properties using the restored methods from backup
         self.sim_sex()
