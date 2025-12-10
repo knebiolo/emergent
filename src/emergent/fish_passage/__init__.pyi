@@ -1,0 +1,6 @@
+# Type stubs for fish_passage
+from typing import List, Tuple
+
+def compute_travel_times(distances: List[float], speed: float) -> List[float]: ...
+
+def summarize_times(times: List[float]) -> Tuple[float, float]: ...
