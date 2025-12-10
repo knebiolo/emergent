@@ -307,3 +307,4 @@ def compute_distance_to_bank(coords, wetted_mask, perimeter_indices, median_spac
     distances_all[wetted_indices] = distances_wetted.astype(np.float32)
     distances_all[perimeter_indices] = 0.0
     return distances_all
+
