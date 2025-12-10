@@ -1037,10 +1037,13 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
     authoritative implementation lives in `hecras_helpers.py`.
     """
     try:
-        from emergent.salmon_abm.hecras_helpers import infer_wetted_perimeter_from_hecras as _central
-    except Exception as e:
-        _safe_log_exception('Failed to import central hecras helper; falling back to local import', e, module='hecras_helpers')
-        from .hecras_helpers import infer_wetted_perimeter_from_hecras as _central
+        from emergent.fish_passage.centerline import infer_wetted_perimeter_from_hecras as _central
+    except Exception:
+        try:
+            from emergent.salmon_abm.hecras_helpers import infer_wetted_perimeter_from_hecras as _central
+        except Exception as e:
+            _safe_log_exception('Failed to import central hecras helper; falling back to local import', e, module='hecras_helpers')
+            from .hecras_helpers import infer_wetted_perimeter_from_hecras as _central
 
     # The central helper expects either an h5py.File or path and supports depth_threshold, max_nodes, raster_fallback_resolution, verbose
     # Note: the central helper currently operates on the first timestep (index 0). If a different `timestep` is requested,
@@ -1056,20 +1059,26 @@ def infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=0.05, timestep
 
 def compute_distance_to_bank_hecras(wetted_info, coords, median_spacing=None):
     try:
-        from emergent.salmon_abm.hecras_helpers import compute_distance_to_bank_hecras as _central
-    except Exception as e:
-        _safe_log_exception('Failed to import central compute_distance_to_bank_hecras; falling back to local import', e, module='hecras_helpers')
-        from .hecras_helpers import compute_distance_to_bank_hecras as _central
+        from emergent.fish_passage.geometry import compute_distance_to_bank_hecras as _central
+    except Exception:
+        try:
+            from emergent.salmon_abm.hecras_helpers import compute_distance_to_bank_hecras as _central
+        except Exception as e:
+            _safe_log_exception('Failed to import central compute_distance_to_bank_hecras; falling back to local import', e, module='hecras_helpers')
+            from .hecras_helpers import compute_distance_to_bank_hecras as _central
     return _central(wetted_info, coords, median_spacing=median_spacing)
 
 
 def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=None, 
                                            min_distance_threshold=None, min_length=50):
     try:
-        from emergent.salmon_abm.hecras_helpers import derive_centerline_from_hecras_distance as _central
-    except Exception as e:
-        _safe_log_exception('Failed to import central derive_centerline_from_hecras_distance; falling back to local import', e, module='hecras_helpers')
-        from .hecras_helpers import derive_centerline_from_hecras_distance as _central
+        from emergent.fish_passage.centerline import derive_centerline_from_hecras_distance as _central
+    except Exception:
+        try:
+            from emergent.salmon_abm.hecras_helpers import derive_centerline_from_hecras_distance as _central
+        except Exception as e:
+            _safe_log_exception('Failed to import central derive_centerline_from_hecras_distance; falling back to local import', e, module='hecras_helpers')
+            from .hecras_helpers import derive_centerline_from_hecras_distance as _central
     return _central(coords, distances, wetted_mask, crs=crs, min_distance_threshold=min_distance_threshold, min_length=min_length)
     """Derive centerline from distance-to-bank field on irregular HECRAS mesh.
     
@@ -1208,10 +1217,13 @@ def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=N
 def extract_centerline_fast_hecras(plan_path, depth_threshold=0.05, sample_fraction=0.1, min_length=50):
     """Wrapper to centralized fast centerline helper."""
     try:
-        from emergent.salmon_abm.hecras_helpers import extract_centerline_fast_hecras as _central
-    except Exception as e:
-        _safe_log_exception('Failed to import central extract_centerline_fast_hecras; falling back to local import', e, module='hecras_helpers')
-        from .hecras_helpers import extract_centerline_fast_hecras as _central
+        from emergent.fish_passage.centerline import extract_centerline_fast_hecras as _central
+    except Exception:
+        try:
+            from emergent.salmon_abm.hecras_helpers import extract_centerline_fast_hecras as _central
+        except Exception as e:
+            _safe_log_exception('Failed to import central extract_centerline_fast_hecras; falling back to local import', e, module='hecras_helpers')
+            from .hecras_helpers import extract_centerline_fast_hecras as _central
     return _central(plan_path, depth_threshold=depth_threshold, sample_fraction=sample_fraction, min_length=min_length)
 
 
