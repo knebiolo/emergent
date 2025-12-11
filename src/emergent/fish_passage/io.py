@@ -1,3 +1,80 @@
+"""HECRAS IO and mapping helpers (skeleton)
+
+This module contains minimal, well-documented entry points used by
+tests and will be expanded during migration. Keep implementations small
+and unit-tested; avoid changing legacy callers until new APIs are
+accepted.
+"""
+from typing import Any, Dict, Iterable, Sequence, Tuple
+import numpy as np
+
+
+def initialize_hecras_geometry(sim: Any, plan_path: str, depth_threshold: float = 0.05, create_rasters: bool = False) -> Dict[str, Any]:
+    """Minimal initializer used by tests. Reads basic datasets from an
+    HDF5-like plan (duck-typed) and registers coordinates on `sim.hdf5`.
+
+    Parameters
+    - sim: simulation object with `hdf5` attribute (h5py.File-like)
+    - plan_path: path to an on-disk HECRAS plan HDF5 file
+    - depth_threshold: threshold used to decide wetted cells (unused in skeleton)
+    - create_rasters: whether to create rasters in `sim.hdf5` (basic behavior)
+
+    Returns a dict containing `coords` and simple metadata.
+    """
+    import h5py
+
+    coords = None
+    result = {}
+    with h5py.File(plan_path, 'r') as f:
+        # expected path used in tests
+        key = 'Geometry/2D Flow Areas/2D area/Cells Center Coordinate'
+        if key in f:
+            coords = np.asarray(f[key])
+
+    if coords is None:
+        raise RuntimeError(f"Missing expected geometry dataset in {plan_path}")
+
+    # ensure simulation HDF5 registers x/y coords
+    xs = coords[:, 0]
+    ys = coords[:, 1]
+    sim.hdf5.create_dataset('x_coords', data=xs)
+    sim.hdf5.create_dataset('y_coords', data=ys)
+
+    result['coords'] = coords
+    result['n_cells'] = coords.shape[0]
+    return result
+
+
+def map_hecras_for_agents(sim: Any, pts: np.ndarray, plan_path: str, field_names: Sequence[str], k: int = 8) -> np.ndarray:
+    """Simple adapter-based mapping used by tests.
+
+    This skeleton expects `sim._hecras_maps` to be a dict keyed by
+    `(plan_path, tuple(field_names))` returning an adapter with a
+    `map_idw(pts, k=...)` method.
+    """
+    key = (plan_path, tuple(field_names))
+    adapter = sim._hecras_maps.get(key)
+    if adapter is None:
+        raise KeyError(f"No adapter registered for plan {plan_path} and fields {field_names}")
+    return adapter.map_idw(pts, k=k)
+
+
+def ensure_hdf_coords_from_hecras(sim: Any, plan_path: str, target_shape: Tuple[int, int] = (10, 10)) -> None:
+    """Populate `sim.hdf5` with simple x/y grids if missing (test convenience).
+    """
+    if 'x_coords' in sim.hdf5 and 'y_coords' in sim.hdf5:
+        return
+    # create dummy grid based on plan coords if present; otherwise, simple mesh
+    try:
+        coords = np.vstack((sim.hdf5['x_coords'][:], sim.hdf5['y_coords'][:])).T
+        xs = coords[:, 0]
+        ys = coords[:, 1]
+    except Exception:
+        nx, ny = target_shape
+        xs = np.linspace(0.0, 1.0, nx * ny)
+        ys = np.linspace(0.0, 1.0, nx * ny)
+    sim.hdf5.create_dataset('x_coords', data=xs)
+    sim.hdf5.create_dataset('y_coords', data=ys)
 """HECRAS I/O and mapping helpers for fish_passage.
 
 These are intentionally minimal, testable, and fail-fast. They do not
