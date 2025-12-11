@@ -1,3 +1,167 @@
+"""HECRAS I/O and mapping helpers for fish_passage.
+
+These are intentionally minimal, testable, and fail-fast. They do not
+attempt to replicate HECRASMap behavior — callers that need full HECRAS
+IDW mapping should provide a mapping object or adapter and register it on
+`simulation._hecras_maps` (keyed by plan path and field names).
+
+This design follows the project's programming guide: explicit errors,
+clear input validation, no broad silent fallbacks.
+"""
+from typing import Iterable, Optional, Sequence
+import numpy as np
+import h5py
+
+from emergent.fish_passage.geometry import compute_affine_from_hecras, pixel_to_geo
+
+
+def ensure_hdf_coords_from_hecras(simulation, plan_path: str, target_shape: Optional[tuple] = None, target_transform=None, timestep: int = 0):
+    """Populate `simulation.hdf5` with `x_coords` and `y_coords` datasets derived from HECRAS cell centers.
+
+    - `simulation` must have attribute `hdf5` which is an open `h5py.File` or a group-like object.
+    - `plan_path` is a path to a HECRAS HDF5 plan containing
+      `Geometry/2D Flow Areas/2D area/Cells Center Coordinate`.
+
+    This function will write `x_coords` and `y_coords` into `simulation.hdf5` if they are missing.
+    Raises `RuntimeError` for I/O problems or `KeyError` when required datasets are missing.
+    """
+    hdf = getattr(simulation, 'hdf5', None)
+    if hdf is None:
+        raise RuntimeError('Simulation object missing `hdf5` attribute')
+
+    try:
+        with h5py.File(str(plan_path), 'r') as ph:
+            coords = np.asarray(ph['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
+    except KeyError as e:
+        raise KeyError('HECRAS plan missing expected Cells Center Coordinate dataset') from e
+    except Exception as e:
+        raise RuntimeError('Failed to open HECRAS plan: ' + str(e)) from e
+
+    if target_transform is None:
+        target_transform = compute_affine_from_hecras(coords)
+
+    if target_shape is None:
+        aff = target_transform
+        minx, miny = float(coords[:, 0].min()), float(coords[:, 1].min())
+        maxx, maxy = float(coords[:, 0].max()), float(coords[:, 1].max())
+        width = max(1, int(np.ceil((maxx - minx) / abs(aff.a))))
+        height = max(1, int(np.ceil((maxy - miny) / abs(aff.e))))
+        target_shape = (height, width)
+
+    height, width = target_shape
+    if height <= 0 or width <= 0:
+        raise ValueError('Computed target_shape has non-positive dimensions')
+
+    # create or reuse datasets
+    if 'x_coords' not in hdf:
+        dset_x = hdf.create_dataset('x_coords', (height, width), dtype='f4')
+    else:
+        dset_x = hdf['x_coords']
+    if 'y_coords' not in hdf:
+        dset_y = hdf.create_dataset('y_coords', (height, width), dtype='f4')
+    else:
+        dset_y = hdf['y_coords']
+
+    # Populate if empty or contains non-finite values
+    try:
+        existing = np.asarray(dset_x[:])
+        needs_populate = not np.isfinite(existing).any()
+    except Exception:
+        needs_populate = True
+
+    if needs_populate:
+        cols = np.arange(width, dtype=np.float64)
+        rows = np.arange(height, dtype=np.float64)
+        col_grid, row_grid = np.meshgrid(cols, rows)
+        xs, ys = pixel_to_geo(target_transform, row_grid, col_grid)
+        dset_x[:, :] = xs.astype('f4')
+        dset_y[:, :] = ys.astype('f4')
+
+    # attach metadata to simulation for convenience
+    simulation.depth_rast_transform = target_transform
+    simulation.hdf_height = height
+    simulation.hdf_width = width
+
+
+def map_hecras_for_agents(simulation_or_plan, agent_xy: Iterable[Sequence[float]], plan_path: Optional[str] = None, field_names: Optional[Sequence[str]] = None, k: int = 8, timestep: int = 0):
+    """Map agent coordinates to HECRAS nodal fields via an injected mapping adapter.
+
+    This function expects a mapping adapter to be registered on the simulation object under
+    `simulation._hecras_maps[(plan_key, tuple(field_names))]` which implements `.map_idw(agent_xy, k=k)`.
+
+    If no adapter is found, this function raises NotImplementedError — callers should register an adapter
+    (e.g., a wrapper around HECRASMap) on the simulation prior to calling this function.
+    """
+    # Accept either a simulation-like object or a plan path string
+    if isinstance(simulation_or_plan, str):
+        # We intentionally do not attempt to build a mapping adapter here.
+        raise NotImplementedError('Direct plan_path mapping is not supported by this minimal adapter. Register an adapter on a simulation object or implement a HECRASMap adapter.')
+
+    sim = simulation_or_plan
+    if field_names is None:
+        field_names = getattr(sim, 'hecras_fields', None)
+    plan_key = str(plan_path or getattr(sim, 'hecras_plan_path', ''))
+    key = (plan_key, tuple(field_names) if field_names is not None else None)
+    maps = getattr(sim, '_hecras_maps', None)
+    if not maps or key not in maps:
+        raise NotImplementedError('No HECRAS mapping adapter registered on simulation for key: ' + repr(key))
+
+    adapter = maps[key]
+    # Expect adapter.map_idw to exist
+    if not hasattr(adapter, 'map_idw'):
+        raise RuntimeError('Registered HECRAS adapter missing required method `.map_idw`')
+
+    out = adapter.map_idw(agent_xy, k=k)
+    return out
+
+
+def map_hecras_to_env_rasters(simulation, plan_path: str, field_names: Optional[Sequence[str]] = None, k: int = 1):
+    """Map HECRAS nodal fields onto the simulation raster grid and write into `simulation.hdf5['environment']`.
+
+    This function requires `simulation.hdf5` to be present and `x_coords`/`y_coords` datasets created (see `ensure_hdf_coords_from_hecras`).
+    It uses `map_hecras_for_agents` to obtain mapped arrays and writes them as 2D datasets under group `environment`.
+    """
+    if not hasattr(simulation, 'hdf5') or getattr(simulation, 'hdf5', None) is None:
+        raise RuntimeError('Simulation missing hdf5; cannot write environment rasters')
+
+    if field_names is None:
+        field_names = getattr(simulation, 'hecras_fields', None)
+
+    hdf = simulation.hdf5
+    # ensure coords available
+    if 'x_coords' in hdf and 'y_coords' in hdf:
+        xarr = np.asarray(hdf['x_coords'])
+        yarr = np.asarray(hdf['y_coords'])
+        h, w = xarr.shape
+        XX = xarr.flatten()
+        YY = yarr.flatten()
+        grid_xy = np.column_stack((XX, YY))
+        simulation._hecras_grid_shape = (h, w)
+        simulation._hecras_grid_xy = grid_xy
+    else:
+        raise RuntimeError('x_coords/y_coords not present in simulation.hdf5; call ensure_hdf_coords_from_hecras first')
+
+    mapped = map_hecras_for_agents(simulation, simulation._hecras_grid_xy, plan_path=plan_path, field_names=field_names, k=k)
+
+    env = hdf.require_group('environment')
+    if isinstance(mapped, dict):
+        for name, arr in mapped.items():
+            h, w = simulation._hecras_grid_shape
+            ds_name = name
+            if ds_name in env:
+                del env[ds_name]
+            env.create_dataset(ds_name, (h, w), dtype='f4')
+            env[ds_name][:, :] = np.asarray(arr).reshape(h, w)
+    else:
+        arr = np.asarray(mapped)
+        h, w = simulation._hecras_grid_shape
+        ds_name = field_names[0] if field_names else 'field'
+        if ds_name in env:
+            del env[ds_name]
+        env.create_dataset(ds_name, (h, w), dtype='f4')
+        env[ds_name][:, :] = arr.reshape(h, w)
+
+    return True
 """
 io.py
 
