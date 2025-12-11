@@ -13,6 +13,11 @@ import numpy as np
 import h5py
 
 from emergent.fish_passage.geometry import compute_affine_from_hecras, pixel_to_geo
+from emergent.fish_passage.centerline import extract_centerline_fast_hecras, infer_wetted_perimeter_from_hecras
+from scipy.spatial import cKDTree
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def ensure_hdf_coords_from_hecras(simulation, plan_path: str, target_shape: Optional[tuple] = None, target_transform=None, timestep: int = 0):
@@ -162,6 +167,158 @@ def map_hecras_to_env_rasters(simulation, plan_path: str, field_names: Optional[
         env[ds_name][:, :] = arr.reshape(h, w)
 
     return True
+
+
+class HECRASMap:
+    """Minimal HECRAS plan adapter that supports IDW mapping for a small set of fields.
+
+    This is intentionally lightweight and only implements the subset of behavior
+    required by `initialize_hecras_geometry` and mapping for environment rasters.
+    """
+    def __init__(self, plan_path: str, field_names: Optional[Sequence[str]] = None, timestep: int = 0):
+        self.plan_path = str(plan_path)
+        self.field_names = list(field_names) if field_names is not None else []
+        self.timestep = int(timestep)
+        # lazy-loaded
+        self._coords = None
+        self._fields = {}
+        self._tree = None
+
+    def _load_coords(self):
+        if self._coords is None:
+            with h5py.File(self.plan_path, 'r') as hdf:
+                try:
+                    coords = np.asarray(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
+                except KeyError as e:
+                    raise KeyError('HECRAS plan missing Cells Center Coordinate') from e
+            self._coords = coords.astype(float)
+        return self._coords
+
+    def _ensure_tree(self):
+        if self._tree is None:
+            coords = self._load_coords()
+            if coords.size == 0:
+                raise RuntimeError('HECRAS plan has no coords')
+            self._tree = cKDTree(coords)
+        return self._tree
+
+    def _read_field(self, name: str):
+        # Try the conventional HECRAS path used in this project
+        path = 'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/' + name
+        with h5py.File(self.plan_path, 'r') as hdf:
+            if path in hdf:
+                ds = hdf[path]
+                # time-series dataset: pick requested timestep
+                if getattr(ds, 'ndim', 0) > 0 and ds.shape[0] > 1:
+                    arr = np.array(ds[min(self.timestep, ds.shape[0]-1)])
+                else:
+                    arr = np.array(ds[0]) if getattr(ds, 'ndim', 0) > 0 else np.array(ds)
+                return arr
+            else:
+                raise KeyError(f'Field dataset not found in HECRAS plan: {path}')
+
+    def map_idw(self, query_pts, k: int = 8):
+        """Return a dict of mapped fields keyed by field name, or a single array when one field requested.
+
+        Uses inverse-distance weighting with k neighbors; when k==1 uses nearest neighbor.
+        """
+        pts = np.asarray(query_pts, dtype=float)
+        tree = self._ensure_tree()
+        if pts.ndim == 1:
+            pts = pts[None, :]
+        if k <= 1:
+            dists, idxs = tree.query(pts, k=1)
+            idxs = np.atleast_1d(idxs)
+        else:
+            dists, idxs = tree.query(pts, k=k)
+
+        out = {}
+        for fname in self.field_names:
+            try:
+                vals = self._read_field(fname)
+            except Exception as e:
+                raise
+            # vals expected length equals number of HECRAS cells
+            vals = np.asarray(vals)
+            if k <= 1:
+                res = vals[idxs]
+            else:
+                # compute IDW
+                d = np.asarray(dists, dtype=float)
+                # avoid zero distances
+                d_safe = np.where(d == 0, 1e-12, d)
+                w = 1.0 / d_safe
+                wsum = np.sum(w, axis=1, keepdims=True)
+                res = np.sum(vals[idxs] * w, axis=1) / np.maximum(wsum.flatten(), 1e-12)
+            out[fname] = res
+        if len(self.field_names) == 1:
+            return out[self.field_names[0]]
+        return out
+
+
+def initialize_hecras_geometry(simulation, plan_path: str, depth_threshold: float = 0.05, crs=None,
+                                target_cell_size: Optional[float] = None, create_rasters: bool = True):
+    """Ported initializer: orchestrate HECRAS geometry setup using `fish_passage` helpers.
+
+    Behavior:
+    - reads HECRAS coords
+    - registers a minimal `HECRASMap` adapter on `simulation._hecras_maps`
+    - extracts centerline via `extract_centerline_fast_hecras`
+    - infers wetted perimeter via `infer_wetted_perimeter_from_hecras`
+    - optionally creates regular rasters (writes `x_coords`/`y_coords` and maps fields)
+
+    Raises descriptive exceptions on failure (no silent fallbacks).
+    """
+    # Validate simulation hdf5 presence
+    if not hasattr(simulation, 'hdf5') or getattr(simulation, 'hdf5', None) is None:
+        raise RuntimeError('Simulation must have an open `hdf5` attribute (h5py.File)')
+
+    # Step 1: load coords
+    with h5py.File(plan_path, 'r') as hdf:
+        try:
+            coords = np.asarray(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
+        except KeyError as e:
+            raise KeyError('HECRAS plan missing Cells Center Coordinate dataset') from e
+
+    coords = coords.astype(float)
+
+    # Register minimal HECRASMap adapter for common fields
+    fields = ['Cell Hydraulic Depth', 'Cell Velocity - Velocity X', 'Cell Velocity - Velocity Y', 'Water Surface']
+    if not hasattr(simulation, '_hecras_maps') or simulation._hecras_maps is None:
+        simulation._hecras_maps = {}
+    key = (str(plan_path), tuple(fields))
+    if key not in simulation._hecras_maps:
+        simulation._hecras_maps[key] = HECRASMap(str(plan_path), field_names=fields)
+
+    # Step 2: extract centerline
+    centerline = extract_centerline_fast_hecras(plan_path, depth_threshold=depth_threshold, sample_fraction=0.1, min_length=50)
+
+    # Step 2b: infer wetted perimeter
+    wetted_info = infer_wetted_perimeter_from_hecras(plan_path, depth_threshold=depth_threshold, timestep=0, verbose=False)
+    perimeter_points = wetted_info.get('perimeter_points', None) if isinstance(wetted_info, dict) else None
+    perimeter_cells = wetted_info.get('perimeter_cells', None) if isinstance(wetted_info, dict) else None
+    median_spacing = wetted_info.get('median_spacing', None) if isinstance(wetted_info, dict) else None
+
+    transform = None
+    if create_rasters:
+        transform = compute_affine_from_hecras(coords, target_cell_size=target_cell_size)
+        # compute raster dims
+        minx, miny = float(coords[:, 0].min()), float(coords[:, 1].min())
+        maxx, maxy = float(coords[:, 0].max()), float(coords[:, 1].max())
+        cell = abs(transform.a)
+        width = max(1, int(np.ceil((maxx - minx) / cell)))
+        height = max(1, int(np.ceil((maxy - miny) / cell)))
+        ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=(height, width), target_transform=transform)
+        map_hecras_to_env_rasters(simulation, plan_path, field_names=fields, k=1)
+
+    return {
+        'centerline': centerline,
+        'coords': coords,
+        'transform': transform,
+        'perimeter_points': perimeter_points,
+        'perimeter_cells': perimeter_cells,
+        'median_spacing': median_spacing
+    }
 """
 io.py
 
