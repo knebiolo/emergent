@@ -1,0 +1,19 @@
+name: Cleanup project temp directory
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # daily at 03:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+      - name: Run cleanup script
+        run: |
+          python tools/cleanup_temp.py --path tmp/pytest_tmp --max-age-hours 48

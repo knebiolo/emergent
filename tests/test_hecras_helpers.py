@@ -4,7 +4,10 @@ import h5py
 import numpy as np
 
 from emergent.salmon_abm.hecras_helpers import infer_wetted_perimeter_from_hecras
-from emergent.salmon_abm.salmon_viewer import SalmonViewer
+try:
+    from emergent.salmon_abm.salmon_viewer import SalmonViewer
+except Exception:
+    from emergent.salmon_abm.salmon_viewer_headless import SalmonViewer
 from emergent.salmon_abm.tin_helpers import triangulate_and_clip
 
 

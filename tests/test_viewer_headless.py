@@ -1,5 +1,8 @@
 import numpy as np
-from emergent.salmon_abm.salmon_viewer import SalmonViewer
+try:
+    from emergent.salmon_abm.salmon_viewer import SalmonViewer
+except Exception:
+    from emergent.salmon_abm.salmon_viewer_headless import SalmonViewer
 
 
 class DummySim:

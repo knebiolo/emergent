@@ -1,5 +1,21 @@
 import h5py
 import numpy as np
+
+
+def make_minimal_plan(path, coords=None, values=None):
+    coords = coords if coords is not None else np.array([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]])
+    values = values if values is not None else np.array([[0.0], [1.0], [0.2]])
+    with h5py.File(path, 'w') as f:
+        f.create_dataset('Geometry/Nodes/Coordinates', data=coords)
+        # also create 2D Flow Areas center coord for other consumers
+        f.create_dataset('Geometry/2D Flow Areas/2D area/Cells Center Coordinate', data=coords)
+        results = f.create_group('Results')
+        res = results.create_group('Results_0001')
+        chd = res.create_group('Cell Hydraulic Depth')
+        chd.create_dataset('Values', data=values)
+    return path
+import h5py
+import numpy as np
 from pathlib import Path
 
 
