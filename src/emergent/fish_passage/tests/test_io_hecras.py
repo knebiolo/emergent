@@ -1,4 +1,32 @@
 import tempfile
+import os
+import h5py
+import numpy as np
+from emergent.fish_passage.io import HECRASMap
+
+
+def make_minimal_hecras_hdf(path):
+    with h5py.File(path, 'w') as h:
+        grp = h.require_group('/Geometry/2D Flow Areas/2D area')
+        coords = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+        grp.create_dataset('Cells Center Coordinate', data=coords)
+        # create a simple field aligned to coords
+        grp.create_dataset('Cells Minimum Elevation', data=np.array([10.0, 11.0, 12.0]))
+
+
+def test_hecrasmap_idw(tmp_path):
+    p = tmp_path / 'plan.h5'
+    make_minimal_hecras_hdf(str(p))
+    mapper = HECRASMap(str(p), field_names=['Cells Minimum Elevation'])
+    pts = np.array([[0.1, 0.0], [1.5, 0.0]])
+    out = mapper.map_idw(pts, k=2)
+    assert 'Cells Minimum Elevation' in out
+    vals = out['Cells Minimum Elevation']
+    assert vals.shape == (2,)
+    # assert values are within expected range
+    assert 10.0 <= vals[0] <= 11.0
+    assert 11.0 <= vals[1] <= 12.0
+import tempfile
 import h5py
 import numpy as np
 from emergent.fish_passage.io import initialize_hecras_geometry
