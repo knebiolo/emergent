@@ -45,33 +45,44 @@ def compute_schooling_metrics_biological(positions: np.ndarray, headings: np.nda
 	cohesion_radius = float(getattr(behavioral_weights, 'cohesion_radius_relaxed', 2.0)) * mean_BL
 	separation_radius = float(getattr(behavioral_weights, 'separation_radius', 1.0)) * mean_BL
 
-	if _HAS_NUMBA:
-		coh, align, sep, overall = _schooling_numba_core(positions, headings, cohesion_radius, separation_radius)
-		return {'cohesion_score': float(coh), 'alignment_score': float(align), 'separation_penalty': float(sep), 'overall_schooling': float(overall)}
+	# Build KDTree and neighbor lists (use query_ball_point for per-agent neighbors)
+	from scipy.spatial import cKDTree as _cKDTree
+	tree = _cKDTree(positions)
+	neighbor_lists = tree.query_ball_point(positions, r=cohesion_radius)
 
-	tree = cKDTree(positions)
-	neighbors = tree.query_ball_tree(tree, r=cohesion_radius)
-
+	# Preallocate arrays
 	cohesion_scores = np.zeros(N, dtype=float)
-	alignment_scores = np.zeros(N, dtype=float)
+	alignment_scores = np.full(N, -0.5, dtype=float)
 	separation_penalty = np.zeros(N, dtype=float)
 
-	for i in range(N):
-		nbrs = [j for j in neighbors[i] if j != i]
-		if not nbrs:
-			continue
-		nbr_pos = positions[nbrs]
-		dists = np.linalg.norm(nbr_pos - positions[i], axis=1)
-		cohesion_scores[i] = float(np.mean(np.maximum(0.0, 1.0 - dists / cohesion_radius)))
-		alignment_scores[i] = float(np.mean(np.cos(headings[nbrs] - headings[i])))
-		close = dists < separation_radius
-		if np.any(close):
-			separation_penalty[i] = float(np.sum((separation_radius - dists[close]) / separation_radius) / len(dists))
+	# Vectorized nearest neighbor separation penalty (keep previous behaviour)
+	if N > 1:
+		nearest_dists, nearest_indices = tree.query(positions, k=2)
+		nearest_dists = nearest_dists[:, 1]
+		mean_BL = float(np.mean(body_lengths))
+		sep_mask = nearest_dists < mean_BL
+		separation_penalty[sep_mask] = -(mean_BL - nearest_dists[sep_mask]) / mean_BL
+
+		# Prepare flattened neighbor arrays for loop APIs
+		neighbor_data = []
+		neighbor_offsets = [0]
+		for nbrs in neighbor_lists:
+			neighbor_data.extend(nbrs)
+			neighbor_offsets.append(len(neighbor_data))
+		neighbor_data = np.array(neighbor_data, dtype=np.int32)
+		neighbor_offsets = np.array(neighbor_offsets, dtype=np.int32)
+
+		# Ideal distance for cohesion (legacy heuristic)
+		ideal_dist = 2.0 * mean_BL * (1 - 0.5 * float(getattr(behavioral_weights, 'threat_level', 0.0)))
+
+		# Call the ported loop (numba or python fallback)
+		_compute_schooling_loop(neighbor_data, neighbor_offsets, positions, headings, ideal_dist, mean_BL,
+				cohesion_scores, alignment_scores, N)
 
 	cohesion = float(np.mean(cohesion_scores))
 	alignment = float(np.mean(alignment_scores))
 	separation = float(np.mean(separation_penalty))
-	overall = cohesion * 0.5 + (alignment + 1.0) * 0.25 - separation * 0.25
+	overall = cohesion + alignment + separation
 	return {'cohesion_score': cohesion, 'alignment_score': alignment, 'separation_penalty': separation, 'overall_schooling': overall}
 
 
@@ -99,35 +110,28 @@ def compute_drafting_benefits(positions: np.ndarray, headings: np.ndarray, veloc
 	angle_tol_rad = np.deg2rad(float(getattr(behavioral_weights, 'drafting_angle_tolerance', 30.0)))
 	forward_radius = float(getattr(behavioral_weights, 'drafting_forward_radius', 2.0)) * mean_BL
 
-	if _HAS_NUMBA:
-		drag_red_single = float(getattr(behavioral_weights, 'drag_reduction_single', 0.15))
-		drag_red_dual = float(getattr(behavioral_weights, 'drag_reduction_dual', 0.25))
-		return _drafting_numba_core(positions, headings, forward_radius, angle_tol_rad, drag_red_single, drag_red_dual)
-
+	# Build KDTree and neighbor lists
 	tree = cKDTree(positions)
-	neighbors = tree.query_ball_tree(tree, r=forward_radius)
+	neighbor_lists = tree.query_ball_point(positions, r=forward_radius)
 
 	reductions = np.zeros(N, dtype=float)
-	for i in range(N):
-		nbrs = [j for j in neighbors[i] if j != i]
-		if not nbrs:
-			continue
-		count_ahead = 0
-		for j in nbrs:
-			vec = positions[j] - positions[i]
-			dist = np.linalg.norm(vec)
-			if dist == 0.0 or dist > forward_radius:
-				continue
-			heading_vec = np.array([np.cos(headings[i]), np.sin(headings[i])])
-			cosang = np.dot(heading_vec, vec / dist)
-			cosang = np.clip(cosang, -1.0, 1.0)
-			angle = np.arccos(cosang)
-			if angle <= angle_tol_rad:
-				count_ahead += 1
-		if count_ahead == 1:
-			reductions[i] = float(getattr(behavioral_weights, 'drag_reduction_single', 0.15))
-		elif count_ahead > 1:
-			reductions[i] = float(getattr(behavioral_weights, 'drag_reduction_dual', 0.25))
+
+	# Prepare flattened neighbor arrays
+	neighbor_data = []
+	neighbor_offsets = [0]
+	for nbrs in neighbor_lists:
+		neighbor_data.extend(nbrs)
+		neighbor_offsets.append(len(neighbor_data))
+	neighbor_data = np.array(neighbor_data, dtype=np.int32)
+	neighbor_offsets = np.array(neighbor_offsets, dtype=np.int32)
+
+	drag_red_single = float(getattr(behavioral_weights, 'drag_reduction_single', 0.15))
+	drag_red_dual = float(getattr(behavioral_weights, 'drag_reduction_dual', 0.25))
+
+	# Dispatch to loop implementation (numba or python fallback)
+	_compute_drafting_loop(neighbor_data, neighbor_offsets, positions, headings, angle_tol_rad,
+				drag_red_single, drag_red_dual, reductions, N)
+
 	return reductions
 
 
@@ -229,4 +233,172 @@ if _HAS_NUMBA:
 		# call once to trigger compilation
 		_ = _schooling_numba_core(pos, headings, 2.0, 1.0)
 		_ = _drafting_numba_core(pos, headings, 2.0, 0.5, 0.15, 0.25)
+
+
+# Fallback / portable loop APIs that accept flattened neighbor arrays
+def _compute_schooling_loop(neighbor_data, neighbor_offsets, positions, headings, ideal_dist, mean_BL,
+							cohesion_scores, alignment_scores, N):
+	"""Portable schooling loop. If Numba is available, the numba-jitted
+	version will be used by assigning to the same name at import time.
+	"""
+	if _HAS_NUMBA:
+		# call the compiled version present in legacy sockeye (if available)
+		try:
+			return _compute_schooling_loop_numba(neighbor_data, neighbor_offsets, positions, headings, ideal_dist, mean_BL,
+												 cohesion_scores, alignment_scores, N)
+		except NameError:
+			pass
+
+	# Pure Python fallback loop
+	for i in range(N):
+		start = neighbor_offsets[i]
+		end = neighbor_offsets[i + 1]
+		n_neighbors = 0
+		for idx in range(start, end):
+			if neighbor_data[idx] != i:
+				n_neighbors += 1
+		if n_neighbors == 0:
+			continue
+		# centroid
+		centroid_x = 0.0
+		centroid_y = 0.0
+		for idx in range(start, end):
+			j = neighbor_data[idx]
+			if j != i:
+				centroid_x += positions[j, 0]
+				centroid_y += positions[j, 1]
+		centroid_x /= n_neighbors
+		centroid_y /= n_neighbors
+		dx = positions[i, 0] - centroid_x
+		dy = positions[i, 1] - centroid_y
+		dist_to_centroid = (dx * dx + dy * dy) ** 0.5
+		cohesion_scores[i] = np.exp(-0.5 * ((dist_to_centroid - ideal_dist) / (0.5 * mean_BL)) ** 2)
+		# alignment
+		sin_sum = 0.0
+		cos_sum = 0.0
+		for idx in range(start, end):
+			j = neighbor_data[idx]
+			if j != i:
+				sin_sum += np.sin(headings[j])
+				cos_sum += np.cos(headings[j])
+		sin_mean = sin_sum / n_neighbors
+		cos_mean = cos_sum / n_neighbors
+		mean_heading = np.arctan2(sin_mean, cos_mean)
+		heading_diff = np.arctan2(np.sin(headings[i] - mean_heading), np.cos(headings[i] - mean_heading))
+		alignment_scores[i] = np.cos(heading_diff)
+
+
+def _compute_drafting_loop(neighbor_data, neighbor_offsets, positions, headings, angle_tol_rad,
+						   drag_reduction_single, drag_reduction_dual, drag_reductions, N):
+	if _HAS_NUMBA:
+		try:
+			return _compute_drafting_loop_numba(neighbor_data, neighbor_offsets, positions, headings, angle_tol_rad,
+												 drag_reduction_single, drag_reduction_dual, drag_reductions, N)
+		except NameError:
+			pass
+
+	for i in range(N):
+		start = neighbor_offsets[i]
+		end = neighbor_offsets[i + 1]
+		left_count = 0
+		right_count = 0
+		total_ahead = 0
+		for idx in range(start, end):
+			j = neighbor_data[idx]
+			if j == i:
+				continue
+			dx = positions[j, 0] - positions[i, 0]
+			dy = positions[j, 1] - positions[i, 1]
+			angle_to_neighbor = np.arctan2(dy, dx)
+			angle_diff = np.arctan2(np.sin(angle_to_neighbor - headings[i]), np.cos(angle_to_neighbor - headings[i]))
+			if abs(angle_diff) < angle_tol_rad:
+				total_ahead += 1
+				if angle_diff < 0:
+					left_count += 1
+				else:
+					right_count += 1
+		if total_ahead == 1:
+			drag_reductions[i] = drag_reduction_single
+		elif total_ahead >= 2:
+			if left_count > 0 and right_count > 0:
+				drag_reductions[i] = drag_reduction_dual
+			else:
+				drag_reductions[i] = drag_reduction_single
+
+# If Numba is available, expose compiled names expected by sockeye
+if _HAS_NUMBA:
+	try:
+		# attempt to compile equivalents using numba.jit similarly to sockeye
+
+		@numba.jit(nopython=True, parallel=True, fastmath=True, cache=True)
+		def _compute_schooling_loop_numba(neighbor_data, neighbor_offsets, positions, headings, ideal_dist, mean_BL,
+										 cohesion_scores, alignment_scores, N):
+			for i in numba.prange(N):
+				start = neighbor_offsets[i]
+				end = neighbor_offsets[i + 1]
+				n_neighbors = 0
+				for idx in range(start, end):
+					if neighbor_data[idx] != i:
+						n_neighbors += 1
+				if n_neighbors > 0:
+					centroid_x = 0.0
+					centroid_y = 0.0
+					for idx in range(start, end):
+						j = neighbor_data[idx]
+						if j != i:
+							centroid_x += positions[j, 0]
+							centroid_y += positions[j, 1]
+					centroid_x /= n_neighbors
+					centroid_y /= n_neighbors
+					dx = positions[i, 0] - centroid_x
+					dy = positions[i, 1] - centroid_y
+					dist_to_centroid = (dx * dx + dy * dy) ** 0.5
+					cohesion_scores[i] = math.exp(-0.5 * ((dist_to_centroid - ideal_dist) / (0.5 * mean_BL)) ** 2)
+					sin_sum = 0.0
+					cos_sum = 0.0
+					for idx in range(start, end):
+						j = neighbor_data[idx]
+						if j != i:
+							sin_sum += math.sin(headings[j])
+							cos_sum += math.cos(headings[j])
+					sin_mean = sin_sum / n_neighbors
+					cos_mean = cos_sum / n_neighbors
+					mean_heading = math.atan2(sin_mean, cos_mean)
+					heading_diff = math.atan2(math.sin(headings[i] - mean_heading), math.cos(headings[i] - mean_heading))
+					alignment_scores[i] = math.cos(heading_diff)
+
+
+		@numba.jit(nopython=True, parallel=True, fastmath=True, cache=True)
+		def _compute_drafting_loop_numba(neighbor_data, neighbor_offsets, positions, headings, angle_tol_rad,
+										 drag_reduction_single, drag_reduction_dual, drag_reductions, N):
+			for i in numba.prange(N):
+				start = neighbor_offsets[i]
+				end = neighbor_offsets[i + 1]
+				left_count = 0
+				right_count = 0
+				total_ahead = 0
+				for idx in range(start, end):
+					j = neighbor_data[idx]
+					if j == i:
+						continue
+					dx = positions[j, 0] - positions[i, 0]
+					dy = positions[j, 1] - positions[i, 1]
+					angle_to_neighbor = math.atan2(dy, dx)
+					angle_diff = math.atan2(math.sin(angle_to_neighbor - headings[i]), math.cos(angle_to_neighbor - headings[i]))
+					if math.fabs(angle_diff) < angle_tol_rad:
+						total_ahead += 1
+						if angle_diff < 0:
+							left_count += 1
+						else:
+							right_count += 1
+				if total_ahead == 1:
+					drag_reductions[i] = drag_reduction_single
+				elif total_ahead >= 2:
+					if left_count > 0 and right_count > 0:
+						drag_reductions[i] = drag_reduction_dual
+					else:
+						drag_reductions[i] = drag_reduction_single
+	except Exception:
+		# If compiling numba helpers fails during import, fall back silently to Python versions
+		pass
 
