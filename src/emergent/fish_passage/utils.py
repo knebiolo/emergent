@@ -1,3 +1,41 @@
+"""Utility helpers for fish_passage used across geometry and agents."""
+from typing import Any
+import numpy as np
+
+
+def safe_build_kdtree(points: Any, name: str = 'KDTree'):
+    """Build a scipy cKDTree defensively. Returns None on expected issues.
+
+    - points: array-like
+    - name: label for logging
+    """
+    try:
+        if points is None:
+            return None
+        pts = np.asarray(points)
+        if pts.size == 0:
+            return None
+        from scipy.spatial import cKDTree
+        return cKDTree(pts)
+    except (ValueError, TypeError, IndexError, AttributeError):
+        return None
+
+
+def standardize_shape(arr, target_shape=(5, 5), fill_value=np.nan):
+    """Ensure array has `target_shape`, padding or trimming as needed.
+
+    Useful for tests that expect fixed-size fixtures.
+    """
+    a = np.asarray(arr)
+    th, tw = target_shape
+    out = np.full((th, tw), fill_value, dtype=float)
+    h = min(th, a.shape[0]) if a.ndim >= 1 else 0
+    w = min(tw, a.shape[1]) if a.ndim >= 2 else 0
+    if a.ndim == 2 and h > 0 and w > 0:
+        out[:h, :w] = a[:h, :w]
+    elif a.ndim == 1 and th * tw == a.size:
+        out[:, :] = a.reshape((th, tw))
+    return out
 """
 utils.py
 
