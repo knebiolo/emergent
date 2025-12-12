@@ -131,10 +131,11 @@ def compute_drafting_benefits(positions: np.ndarray, headings: np.ndarray, veloc
 	return reductions
 
 
-# Numba accelerated cores
+# Numba accelerated cores and compile helper
 if _HAS_NUMBA:
+	import math
 
-	@njit(parallel=True)
+	@njit(parallel=True, fastmath=True)
 	def _schooling_numba_core(positions, headings, cohesion_radius, separation_radius):
 		N = positions.shape[0]
 		cohesion_scores = np.zeros(N, dtype=np.float64)
@@ -153,11 +154,15 @@ if _HAS_NUMBA:
 					continue
 				dx = positions[j, 0] - xi
 				dy = positions[j, 1] - yi
-				dist = (dx * dx + dy * dy) ** 0.5
+				dist = math.hypot(dx, dy)
 				if dist <= cohesion_radius:
 					cnt += 1
-					coh_sum += max(0.0, 1.0 - dist / cohesion_radius)
-					align_sum += np.cos(headings[j] - hi)
+					# cohesion contribution
+					tmp = 1.0 - dist / cohesion_radius
+					if tmp > 0.0:
+						coh_sum += tmp
+					# alignment using scalar cos
+					align_sum += math.cos(headings[j] - hi)
 					if dist < separation_radius:
 						sep_sum += (separation_radius - dist) / separation_radius
 			if cnt > 0:
@@ -178,7 +183,7 @@ if _HAS_NUMBA:
 		return coh, align, sep, overall
 
 
-	@njit(parallel=True)
+	@njit(parallel=True, fastmath=True)
 	def _drafting_numba_core(positions, headings, forward_radius, angle_tol_rad, drag_red_single, drag_red_dual):
 		N = positions.shape[0]
 		reductions = np.zeros(N, dtype=np.float64)
@@ -187,22 +192,23 @@ if _HAS_NUMBA:
 			xi = positions[i, 0]
 			yi = positions[i, 1]
 			hi = headings[i]
-			hvx = np.cos(hi)
-			hvy = np.sin(hi)
+			hvx = math.cos(hi)
+			hvy = math.sin(hi)
 			for j in range(N):
 				if i == j:
 					continue
 				dx = positions[j, 0] - xi
 				dy = positions[j, 1] - yi
-				dist = (dx * dx + dy * dy) ** 0.5
+				dist = math.hypot(dx, dy)
 				if dist == 0.0 or dist > forward_radius:
 					continue
-				dot = (hvx * (dx / dist) + hvy * (dy / dist))
+				invd = 1.0 / dist
+				dot = hvx * (dx * invd) + hvy * (dy * invd)
 				if dot > 1.0:
 					dot = 1.0
 				if dot < -1.0:
 					dot = -1.0
-				angle = np.arccos(dot)
+				angle = math.acos(dot)
 				if angle <= angle_tol_rad:
 					cnt += 1
 			if cnt == 1:
@@ -210,4 +216,17 @@ if _HAS_NUMBA:
 			elif cnt > 1:
 				reductions[i] = drag_red_dual
 		return reductions
+
+
+	def compile_numba_kernels():
+		"""Force Numba to compile the inner kernels using tiny dummy inputs.
+
+		Call this once at startup to pay the JIT cost early (tests/benchmarks).
+		"""
+		# small deterministic arrays
+		pos = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64)
+		headings = np.array([0.0, 0.0], dtype=np.float64)
+		# call once to trigger compilation
+		_ = _schooling_numba_core(pos, headings, 2.0, 1.0)
+		_ = _drafting_numba_core(pos, headings, 2.0, 0.5, 0.15, 0.25)
 
