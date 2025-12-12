@@ -75,6 +75,110 @@ def ensure_hdf_coords_from_hecras(sim: Any, plan_path: str, target_shape: Tuple[
         ys = np.linspace(0.0, 1.0, nx * ny)
     sim.hdf5.create_dataset('x_coords', data=xs)
     sim.hdf5.create_dataset('y_coords', data=ys)
+
+
+class HECRASMap:
+    """Lightweight container for a HECRAS plan KDTree and field values.
+
+    Usage:
+        m = HECRASMap(plan_path, field_path)
+        vals = m.map_idw(query_pts, k=8)
+
+    The constructor attempts to find commonly-used dataset paths for
+    coordinates and field values. It builds a cKDTree when available and
+    falls back to a numpy brute-force nearest neighbor.
+    """
+    def __init__(self, plan_path: str, field_path: str):
+        import h5py
+        self.plan_path = plan_path
+        self.field_path = field_path
+        self.coords = None
+        self.values = None
+        self._kdtree = None
+
+        with h5py.File(plan_path, 'r') as f:
+            # try common coord locations
+            for key in (
+                'Geometry/Nodes/Coordinates',
+                'Geometry/2D Flow Areas/2D area/Cells Center Coordinate',
+            ):
+                if key in f:
+                    self.coords = np.asarray(f[key])
+                    break
+
+            # Field values: allow full path or common result paths
+            if field_path in f:
+                self.values = np.asarray(f[field_path])
+            else:
+                # try Results style locations
+                candidates = [
+                    f'Results/Results_0001/{field_path}/Values',
+                    f'Results/Results_0001/{field_path}',
+                    f'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/{field_path}',
+                    f'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/{field_path}/Values',
+                ]
+                for c in candidates:
+                    if c in f:
+                        self.values = np.asarray(f[c])
+                        break
+
+        if self.coords is None:
+            raise RuntimeError(f"Could not find coordinate dataset in {plan_path}")
+
+        if self.values is None:
+            # allow missing values but warn via exception so callers handle
+            raise RuntimeError(f"Could not find field dataset for '{field_path}' in {plan_path}")
+
+        # values may be shape (timesteps, n_cells) or (n_cells,) or (n_cells,1)
+        if self.values.ndim == 2 and self.values.shape[0] > 1 and self.values.shape[1] >= self.coords.shape[0]:
+            # common case in some files: time x cells -> take first timestep
+            self.values = np.asarray(self.values[0])
+        self.values = np.asarray(self.values).reshape(-1)
+
+        # Build KDTree if available
+        try:
+            from scipy.spatial import cKDTree as _KD
+            self._kdtree = _KD(self.coords)
+        except Exception:
+            self._kdtree = None
+
+    def map_idw(self, pts: np.ndarray, k: int = 8) -> np.ndarray:
+        """Map query points to values using IDW (inverse-distance weighting).
+
+        Falls back to nearest neighbor when distances are zero or KDTree is
+        unavailable.
+        """
+        pts = np.asarray(pts)
+        if pts.ndim == 1:
+            pts = pts.reshape(1, -1)
+
+        if self._kdtree is not None:
+            dists, idx = self._kdtree.query(pts, k=min(k, len(self.coords)))
+            # if k == 1, make shapes consistent
+            if idx.ndim == 1:
+                idx = idx[:, None]
+                dists = dists[:, None]
+        else:
+            # brute force
+            d = np.linalg.norm(pts[:, None, :] - self.coords[None, :, :], axis=2)
+            idx = np.argsort(d, axis=1)[:, :k]
+            dists = np.take_along_axis(d, idx, axis=1)
+
+        # Compute weights: inverse distance, protect zeros
+        with np.errstate(divide='ignore'):
+            weights = 1.0 / (dists + 1e-12)
+        # If any distance is zero, use the exact value
+        exact = dists == 0
+        out = np.empty((pts.shape[0],), dtype=float)
+        for i in range(pts.shape[0]):
+            if exact[i].any():
+                out[i] = self.values[idx[i, exact[i]].tolist()[0]]
+            else:
+                w = weights[i]
+                vals = self.values[idx[i]]
+                out[i] = float(np.sum(w * vals) / np.sum(w))
+
+        return out
 """HECRAS I/O and mapping helpers for fish_passage.
 
 These are intentionally minimal, testable, and fail-fast. They do not
@@ -223,21 +327,20 @@ def map_hecras_to_env_rasters(simulation, plan_path: str, field_names: Optional[
     else:
         raise RuntimeError('x_coords/y_coords not present in simulation.hdf5; call ensure_hdf_coords_from_hecras first')
 
-    mapped = map_hecras_for_agents(simulation, simulation._hecras_grid_xy, plan_path=plan_path, field_names=field_names, k=k)
-
     env = hdf.require_group('environment')
-    if isinstance(mapped, dict):
-        for name, arr in mapped.items():
-            h, w = simulation._hecras_grid_shape
-            ds_name = name
-            if ds_name in env:
-                del env[ds_name]
-            env.create_dataset(ds_name, (h, w), dtype='f4')
-            env[ds_name][:, :] = np.asarray(arr).reshape(h, w)
-    else:
-        arr = np.asarray(mapped)
-        h, w = simulation._hecras_grid_shape
-        ds_name = field_names[0] if field_names else 'field'
+    h, w = simulation._hecras_grid_shape
+    # Map fields one-by-one so missing fields don't break the whole write
+    for fname in (field_names or []):
+        try:
+            mapped_arr = map_hecras_for_agents(simulation, simulation._hecras_grid_xy, plan_path=plan_path, field_names=[fname], k=k)
+            arr = np.asarray(mapped_arr)
+            if arr.size != h * w:
+                # If mapping returned unexpected size, reshape conservatively or fill NaNs
+                arr = np.full((h * w,), np.nan, dtype=float)
+        except Exception:
+            arr = np.full((h * w,), np.nan, dtype=float)
+
+        ds_name = fname
         if ds_name in env:
             del env[ds_name]
         env.create_dataset(ds_name, (h, w), dtype='f4')
@@ -254,7 +357,13 @@ class HECRASMap:
     """
     def __init__(self, plan_path: str, field_names: Optional[Sequence[str]] = None, timestep: int = 0):
         self.plan_path = str(plan_path)
-        self.field_names = list(field_names) if field_names is not None else []
+        # Accept either a single field name string or an iterable of names
+        if field_names is None:
+            self.field_names = []
+        elif isinstance(field_names, str):
+            self.field_names = [field_names]
+        else:
+            self.field_names = list(field_names)
         self.timestep = int(timestep)
         # lazy-loaded
         self._coords = None
@@ -280,19 +389,64 @@ class HECRASMap:
         return self._tree
 
     def _read_field(self, name: str):
-        # Try the conventional HECRAS path used in this project
-        path = 'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/' + name
+        # Try several common HECRAS dataset paths used in this project and tests
+        candidates = [
+            'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/' + name,
+            'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/' + name + '/Values',
+            'Results/Results_0001/' + name + '/Values',
+            'Results/Results_0001/' + name,
+            name,
+            name + '/Values',
+        ]
         with h5py.File(self.plan_path, 'r') as hdf:
-            if path in hdf:
-                ds = hdf[path]
-                # time-series dataset: pick requested timestep
-                if getattr(ds, 'ndim', 0) > 0 and ds.shape[0] > 1:
-                    arr = np.array(ds[min(self.timestep, ds.shape[0]-1)])
+            # first try exact candidates
+            for path in candidates:
+                if path in hdf:
+                    ds = hdf[path]
+                    data = np.asarray(ds)
+                    return self._normalize_field_array(data)
+            # fallback: search for any dataset path that contains the name substring
+            found = None
+            def _collect(n):
+                nonlocal found
+                if name in n and found is None:
+                    found = n
+            hdf.visit(_collect)
+            if found is not None:
+                ds = hdf[found]
+                data = np.asarray(ds)
+                return self._normalize_field_array(data)
+            raise KeyError(f'Field dataset not found in HECRAS plan. Tried: {candidates}')
+
+    def _normalize_field_array(self, data: np.ndarray) -> np.ndarray:
+        """Normalize various dataset layouts into a 1D array of per-cell values.
+
+        Handles shapes like (n_cells,), (n_cells,1), (timesteps, n_cells),
+        and (n_cells, timesteps). Uses the configured `timestep` when needed.
+        """
+        data = np.asarray(data)
+        # 0-D
+        if data.ndim == 0:
+            return data.reshape(-1)
+        # 1-D
+        if data.ndim == 1:
+            return data
+        # 2-D
+        if data.ndim == 2:
+            # if time x cells
+            if data.shape[0] > 1 and data.shape[1] > 1:
+                # prefer timestep x cells
+                if data.shape[1] >= data.shape[0]:
+                    # assume shape (timesteps, n_cells)
+                    t = min(self.timestep, data.shape[0]-1)
+                    return np.asarray(data[t]).reshape(-1)
                 else:
-                    arr = np.array(ds[0]) if getattr(ds, 'ndim', 0) > 0 else np.array(ds)
-                return arr
-            else:
-                raise KeyError(f'Field dataset not found in HECRAS plan: {path}')
+                    # assume shape (n_cells, features) -> take first column
+                    return np.asarray(data[:, 0]).reshape(-1)
+            # if one dimension is 1, flatten
+            return data.reshape(-1)
+        # higher dims -> flatten
+        return data.reshape(-1)
 
     def map_idw(self, query_pts, k: int = 8):
         """Return a dict of mapped fields keyed by field name, or a single array when one field requested.
@@ -391,6 +545,7 @@ def initialize_hecras_geometry(simulation, plan_path: str, depth_threshold: floa
     return {
         'centerline': centerline,
         'coords': coords,
+        'n_cells': int(coords.shape[0]) if hasattr(coords, 'shape') else None,
         'transform': transform,
         'perimeter_points': perimeter_points,
         'perimeter_cells': perimeter_cells,

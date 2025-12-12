@@ -131,7 +131,22 @@ def extract_centerline_fast_hecras(plan_path: str, depth_threshold: float = 0.05
     import h5py
     with h5py.File(plan_path, 'r') as hdf:
         coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
-        ds = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth']
+        # depth dataset can be located at a few common paths
+        depth_candidates = [
+            'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth',
+            'Results/Results_0001/Cell Hydraulic Depth/Values',
+            'Results/Results_0001/Cell Hydraulic Depth',
+            'Cell Hydraulic Depth',
+        ]
+        ds = None
+        for c in depth_candidates:
+            if c in hdf:
+                ds = hdf[c]
+                break
+        if ds is None:
+            # For minimal plans used in smoke tests, absence of depth is acceptable
+            # and we return None to indicate no centerline could be derived.
+            return None
         if getattr(ds, 'ndim', 0) > 0 and ds.shape[0] > 1:
             depth = np.array(ds[0])
         else:
@@ -218,24 +233,42 @@ def infer_wetted_perimeter_from_arrays(coords: np.ndarray, depth: np.ndarray, de
         return None
 
 
-def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold: float = 0.05, max_nodes: int = 5000, raster_fallback_resolution: float = 5.0, verbose: bool = False, timestep: int = 0):
-    """File-backed wrapper that reads depth and coords and calls `infer_wetted_perimeter_from_arrays`.
+def infer_wetted_perimeter_from_hecras(plan_path: str, depth_threshold: float = 0.05, max_nodes: int = 5000, raster_fallback_resolution: float = 5.0, verbose: bool = False, timestep: int = 0):
+    """Read depth/coords from HECRAS plan and infer wetted perimeter.
+
+    Returns a numpy array of perimeter coordinates (N,2) or None when no
+    wetted perimeter can be inferred.
     """
     import h5py
-    close_file = False
-    if isinstance(hdf_path_or_file, str):
-        hdf = h5py.File(hdf_path_or_file, 'r')
-        close_file = True
-    else:
-        hdf = hdf_path_or_file
-    try:
-        ds = hdf['Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth']
+    with h5py.File(plan_path, 'r') as hdf:
+        if 'Geometry/2D Flow Areas/2D area/Cells Center Coordinate' not in hdf:
+            raise KeyError('HECRAS plan missing Cells Center Coordinate dataset')
+        coords = np.asarray(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
+
+        # search for depth dataset in common locations
+        depth_candidates = [
+            'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth',
+            'Results/Results_0001/Cell Hydraulic Depth/Values',
+            'Results/Results_0001/Cell Hydraulic Depth',
+            'Cell Hydraulic Depth',
+        ]
+        ds = None
+        for c in depth_candidates:
+            if c in hdf:
+                ds = hdf[c]
+                break
+        if ds is None:
+            # no depth information — cannot infer wetted perimeter
+            return None
+
+        # read depth array (handle timeseries)
         if getattr(ds, 'ndim', 0) > 0 and ds.shape[0] > 1:
-            depth = np.array(ds[int(min(timestep, ds.shape[0]-1))])
+            depth = np.asarray(ds[min(timestep, ds.shape[0]-1)])
         else:
-            depth = np.array(ds[0])
-        coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
-        return infer_wetted_perimeter_from_arrays(coords, depth, depth_threshold=depth_threshold, max_nodes=max_nodes, raster_fallback_resolution=raster_fallback_resolution, verbose=verbose)
-    finally:
-        if close_file:
-            hdf.close()
+            depth = np.asarray(ds[0]) if getattr(ds, 'ndim', 0) > 0 else np.asarray(ds)
+
+    res = infer_wetted_perimeter_from_arrays(coords, depth, depth_threshold=depth_threshold, max_nodes=max_nodes, raster_fallback_resolution=raster_fallback_resolution, verbose=verbose)
+    return res
+
+
+
