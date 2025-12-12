@@ -301,7 +301,7 @@ def map_hecras_for_agents(simulation_or_plan, agent_xy: Iterable[Sequence[float]
     return out
 
 
-def map_hecras_to_env_rasters(simulation, plan_path: str, field_names: Optional[Sequence[str]] = None, k: int = 1):
+def map_hecras_to_env_rasters(simulation, plan_path: str, field_names: Optional[Sequence[str]] = None, k: int = 1, strict_missing_fields: bool = False):
     """Map HECRAS nodal fields onto the simulation raster grid and write into `simulation.hdf5['environment']`.
 
     This function requires `simulation.hdf5` to be present and `x_coords`/`y_coords` datasets created (see `ensure_hdf_coords_from_hecras`).
@@ -331,13 +331,16 @@ def map_hecras_to_env_rasters(simulation, plan_path: str, field_names: Optional[
     h, w = simulation._hecras_grid_shape
     # Map fields one-by-one so missing fields don't break the whole write
     for fname in (field_names or []):
+        mapped_arr = None
         try:
             mapped_arr = map_hecras_for_agents(simulation, simulation._hecras_grid_xy, plan_path=plan_path, field_names=[fname], k=k)
             arr = np.asarray(mapped_arr)
             if arr.size != h * w:
                 # If mapping returned unexpected size, reshape conservatively or fill NaNs
-                arr = np.full((h * w,), np.nan, dtype=float)
+                raise RuntimeError('Mapped array size mismatch')
         except Exception:
+            if strict_missing_fields:
+                raise
             arr = np.full((h * w,), np.nan, dtype=float)
 
         ds_name = fname
@@ -488,7 +491,8 @@ class HECRASMap:
 
 
 def initialize_hecras_geometry(simulation, plan_path: str, depth_threshold: float = 0.05, crs=None,
-                                target_cell_size: Optional[float] = None, create_rasters: bool = True):
+                                target_cell_size: Optional[float] = None, create_rasters: bool = True,
+                                strict_missing_fields: bool = False):
     """Ported initializer: orchestrate HECRAS geometry setup using `fish_passage` helpers.
 
     Behavior:
@@ -540,7 +544,7 @@ def initialize_hecras_geometry(simulation, plan_path: str, depth_threshold: floa
         width = max(1, int(np.ceil((maxx - minx) / cell)))
         height = max(1, int(np.ceil((maxy - miny) / cell)))
         ensure_hdf_coords_from_hecras(simulation, plan_path, target_shape=(height, width), target_transform=transform)
-        map_hecras_to_env_rasters(simulation, plan_path, field_names=fields, k=1)
+        map_hecras_to_env_rasters(simulation, plan_path, field_names=fields, k=1, strict_missing_fields=strict_missing_fields)
 
     return {
         'centerline': centerline,
