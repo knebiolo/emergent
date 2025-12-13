@@ -579,3 +579,70 @@ def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', w
         env.create_dataset(out_name, data=out_arr, dtype='f4')
 
     return out_arr
+
+
+def compute_coarsened_alongstream_raster(simulation, factor=2, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist_coarse'):
+    """Compute along-stream raster on a coarsened grid and upsample back to original resolution.
+
+    This helper creates temporary coarsened `environment` datasets, calls
+    `compute_alongstream_raster` on the smaller grid (using the same simulation
+    object but with adjusted `x_coords`/`y_coords` datasets), then bilinearly
+    resamples the result back to the original shape.
+    """
+    hdf = getattr(simulation, 'hdf5', None)
+    if hdf is None:
+        raise RuntimeError('simulation.hdf5 is required')
+    env = hdf.get('environment')
+    if env is None:
+        raise RuntimeError('environment group missing in HDF')
+
+    if 'x_coords' not in hdf or 'y_coords' not in hdf:
+        raise RuntimeError('x_coords/y_coords required in simulation.hdf5')
+
+    xarr = np.asarray(hdf['x_coords'])
+    yarr = np.asarray(hdf['y_coords'])
+    h, w = xarr.shape
+    # coarsened size
+    ch = max(1, h // factor)
+    cw = max(1, w // factor)
+
+    # compute coarse pixel centers by sampling underlying coords
+    cols = np.linspace(0, w - 1, cw, dtype=int)
+    rows = np.linspace(0, h - 1, ch, dtype=int)
+    col_grid, row_grid = np.meshgrid(cols, rows)
+    xs_coarse = xarr[row_grid, col_grid]
+    ys_coarse = yarr[row_grid, col_grid]
+
+    # backup original coords
+    orig_x = hdf['x_coords'][:]
+    orig_y = hdf['y_coords'][:]
+
+    # replace with coarse coords for computation
+    del hdf['x_coords']
+    del hdf['y_coords']
+    hdf.create_dataset('x_coords', data=xs_coarse)
+    hdf.create_dataset('y_coords', data=ys_coarse)
+
+    try:
+        coarse = compute_alongstream_raster(simulation, outlet_xy=None, depth_name=depth_name, wetted_name=wetted_name, out_name=out_name)
+    finally:
+        # restore original coords
+        del hdf['x_coords']
+        del hdf['y_coords']
+        hdf.create_dataset('x_coords', data=orig_x)
+        hdf.create_dataset('y_coords', data=orig_y)
+
+    # bilinear upsample: simple nearest-neighbor upscale from coarse to original
+    from scipy.ndimage import zoom
+    zoom_h = h / coarse.shape[0]
+    zoom_w = w / coarse.shape[1]
+    up = zoom(coarse, (zoom_h, zoom_w), order=1)
+    # ensure shape matches exactly
+    up = up[:h, :w]
+
+    # write into environment
+    if out_name in env:
+        env[out_name][:] = up
+    else:
+        env.create_dataset(out_name, data=up, dtype='f4')
+    return up

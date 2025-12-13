@@ -310,6 +310,23 @@ def compute_distance_to_bank(coords, wetted_mask, perimeter_indices, median_spac
 
 
 def compute_distance_to_bank_hecras(wetted_info, coords, median_spacing=None):
+    """Compatibility wrapper matching legacy `compute_distance_to_bank_hecras` API.
+
+    Accepts either a `wetted_info` dict-like with keys `'wetted_mask'` and
+    `'perimeter_cells'`, or a (wetted_mask, perimeter_indices) tuple/list.
+    """
+    try:
+        wetted_mask = wetted_info['wetted_mask']
+        perimeter_indices = wetted_info.get('perimeter_cells', [])
+    except Exception:
+        if isinstance(wetted_info, (list, tuple)) and len(wetted_info) >= 2:
+            wetted_mask, perimeter_indices = wetted_info[0], wetted_info[1]
+        else:
+            raise
+    return compute_distance_to_bank(coords, wetted_mask, perimeter_indices, median_spacing=median_spacing)
+
+
+def compute_distance_to_bank_hecras(wetted_info, coords, median_spacing=None):
     """Compatibility wrapper for legacy `compute_distance_to_bank_hecras`.
 
     Accepts `wetted_info` dict-like with keys `'wetted_mask'` and `'perimeter_cells'`
