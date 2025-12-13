@@ -1,0 +1,24 @@
+Set AA_UseDesktopOpenGL
+Set WA_NativeWindow and WA_PaintOnScreen
+QOpenGLContext.currentContext(): <PyQt5.QtGui.QOpenGLContext object at 0x000001C87DE34830>
+Context format: 4 6 2
+GL Vendor: b'Intel'
+GL Renderer: b'Intel(R) Iris(R) Xe Graphics'
+GL Version: b'4.6.0 - Build 32.0.101.7026'
+readQImage ok, size: PyQt5.QtCore.QSize(640, 480)
+Test complete
+
+QWidget::paintEngine: Should no longer be called
+QPainter::begin: Paint device returned engine == 0, type: 1
+QPainter::compositionMode: Painter not active
+QPainter::setCompositionMode: Painter not active
+QPainter::setCompositionMode: Painter not active
+QWidget::paintEngine: Should no longer be called
+QPainter::begin: Paint device returned engine == 0, type: 1
+QWidget::paintEngine: Should no longer be called
+QPainter::begin: Paint device returned engine == 0, type: 1
+QPainter::compositionMode: Painter not active
+QPainter::setCompositionMode: Painter not active
+QPainter::setCompositionMode: Painter not active
+QWidget::paintEngine: Should no longer be called
+QPainter::begin: Paint device returned engine == 0, type: 1

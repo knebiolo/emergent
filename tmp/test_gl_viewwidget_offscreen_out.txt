@@ -1,0 +1,20 @@
+Set AA_UseDesktopOpenGL
+Set WA_NativeWindow and WA_PaintOnScreen
+QOpenGLContext.currentContext(): None
+glGetString failed at test time: GLError(
+	err = 1282,
+	description = b'invalid operation',
+	baseOperation = glGetString,
+	cArguments = (GL_RENDERER,)
+)
+readQImage ok, size: PyQt5.QtCore.QSize()
+Test complete
+
+QOpenGLWidget is not supported on this platform.
+This plugin does not support createPlatformOpenGLContext!
+This plugin does not support createPlatformOpenGLContext!
+QOpenGLWidget: Failed to create context
+This plugin does not support createPlatformOpenGLContext!
+QOpenGLWidget: Failed to create context
+This plugin does not support createPlatformOpenGLContext!
+QOpenGLWidget: Failed to create context
