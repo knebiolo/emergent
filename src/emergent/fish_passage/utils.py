@@ -131,3 +131,18 @@ def get_inv_transform(sim, transform):
 			return ~transform
 		cache[key] = inv
 	return inv
+
+
+def get_arr(use_gpu: bool = False):
+	"""Return the array module: `cupy` when `use_gpu` and available, otherwise `numpy`.
+
+	This helper centralizes runtime choice between `numpy` and `cupy` for optional GPU paths.
+	"""
+	if use_gpu:
+		try:
+			import cupy as cp
+			return cp
+		except Exception:
+			# fall back to numpy if cupy unavailable
+			pass
+	return np
