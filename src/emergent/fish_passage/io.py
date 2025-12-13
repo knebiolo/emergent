@@ -463,3 +463,119 @@ def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, m
     if close_file:
         hdf.close()
     return out_rings
+
+
+def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist'):
+    """Compute along-stream distance raster (Dijkstra on 8-neighbor graph).
+
+    Simplified, deterministic port of legacy function. Writes result to
+    `simulation.hdf5['environment'][out_name]` and returns the 2D array.
+    """
+    hdf = getattr(simulation, 'hdf5', None)
+    if hdf is None:
+        raise RuntimeError('simulation.hdf5 is required')
+    env = hdf.get('environment')
+    if env is None:
+        raise RuntimeError('environment group missing in HDF')
+
+    if depth_name in env:
+        depth = np.asarray(env[depth_name][:], dtype=np.float32)
+        mask = np.isfinite(depth) & (depth > 0.0)
+    elif wetted_name in env:
+        wett = np.asarray(env[wetted_name][:])
+        mask = (wett != 0)
+    else:
+        raise RuntimeError('Neither depth nor wetted raster found')
+
+    # pixel spacing
+    t = getattr(simulation, 'depth_rast_transform', None) or getattr(simulation, 'vel_mag_rast_transform', None)
+    if t is None:
+        px = py = 1.0
+    else:
+        px = abs(t.a)
+        py = abs(t.e)
+
+    h, w = mask.shape
+    idx_flat = -np.ones(h * w, dtype=np.int32)
+    mask_flat = mask.ravel()
+    node_ids = np.nonzero(mask_flat)[0]
+    if node_ids.size == 0:
+        arr = np.full(mask.shape, np.nan, dtype=np.float32)
+        env.create_dataset(out_name, data=arr, dtype='f4')
+        return arr
+
+    idx_flat[node_ids] = np.arange(node_ids.size, dtype=np.int32)
+    idx = idx_flat.reshape(h, w)
+
+    nbrs = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+    rows = []
+    cols = []
+    data = []
+    for r in range(h):
+        for c in range(w):
+            nid = idx[r, c]
+            if nid < 0:
+                continue
+            for dr, dc in nbrs:
+                rr = r + dr
+                cc = c + dc
+                if rr < 0 or rr >= h or cc < 0 or cc >= w:
+                    continue
+                nid2 = idx[rr, cc]
+                if nid2 < 0:
+                    continue
+                dist = np.hypot(dr * py, dc * px)
+                rows.append(nid)
+                cols.append(nid2)
+                data.append(dist)
+
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import dijkstra
+    n_nodes = node_ids.size
+    graph = csr_matrix((data, (rows, cols)), shape=(n_nodes, n_nodes))
+
+    # determine outlet node(s)
+    if outlet_xy is not None:
+        ox, oy = outlet_xy
+        try:
+            orow, ocol = geo_to_pixel(simulation.depth_rast_transform, [oy], [ox])
+            orow = int(orow[0]); ocol = int(ocol[0])
+        except Exception:
+            orow = None
+        if orow is None or orow < 0 or orow >= h or ocol < 0 or ocol >= w or idx[orow, ocol] < 0:
+            flat_xy = np.column_stack((env['x_coords'][:].ravel(), env['y_coords'][:].ravel()))
+            dists = np.hypot(flat_xy[:,0] - ox, flat_xy[:,1] - oy)
+            cand = np.argmin(dists)
+            if mask_flat[cand]:
+                outlet_nodes = [int(idx_flat[cand])]
+            else:
+                wett_inds = np.nonzero(mask_flat)[0]
+                nearest = wett_inds[np.argmin(dists[wett_inds])]
+                outlet_nodes = [int(idx_flat[nearest])]
+        else:
+            outlet_nodes = [int(idx[orow, ocol])]
+    else:
+        flat_y = env['y_coords'][:].ravel()
+        wett_inds = np.nonzero(mask_flat)[0]
+        if wett_inds.size == 0:
+            outlet_nodes = [0]
+        else:
+            out_ind = wett_inds[np.argmin(flat_y[wett_inds])]
+            outlet_nodes = [int(idx_flat[out_ind])]
+
+    dist_matrix = dijkstra(csgraph=graph, directed=False, indices=outlet_nodes)
+    if dist_matrix.ndim == 2:
+        dist = dist_matrix.min(axis=0)
+    else:
+        dist = dist_matrix
+
+    out_arr = np.full(h * w, np.nan, dtype=np.float32)
+    out_arr[node_ids] = dist.astype(np.float32)
+    out_arr = out_arr.reshape(h, w)
+
+    if out_name in env:
+        env[out_name][:] = out_arr
+    else:
+        env.create_dataset(out_name, data=out_arr, dtype='f4')
+
+    return out_arr
