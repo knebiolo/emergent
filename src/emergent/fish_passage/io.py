@@ -378,8 +378,10 @@ def map_hecras_to_env_rasters(sim: Any, plan_path: str, field_names: Sequence[st
 
 
 def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, max_nodes=5000, raster_fallback_resolution=5.0, verbose=False, timestep=0):
-    # Vector-only implementation: read facepoints/perimeter/face-info and
-    # extract ordered rings. No try/except blocks — errors will propagate.
+    """Vector-first wetted perimeter extraction with raster fallback.
+
+    Returns a list of rings (each ring is an Nx2 numpy array of coordinates).
+    """
     close_file = False
     if isinstance(hdf_path_or_file, str):
         hdf = h5py.File(hdf_path_or_file, 'r')
@@ -387,82 +389,133 @@ def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, m
     else:
         hdf = hdf_path_or_file
 
-    # Read depth dataset (expecting the standard long path)
-    ds_path = '/Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'
-    ds = hdf[ds_path]
-    data = np.asarray(ds[:])
-    if data.ndim > 1 and data.shape[0] > 1:
-        t = int(min(timestep, data.shape[0] - 1))
-        depth = np.asarray(data[t])
-    else:
-        depth = np.asarray(data).reshape(-1)
-
-    # read geometry datasets required by vector method
-    facepoints = np.asarray(hdf['Geometry/2D Flow Areas/2D area/FacePoints Coordinate'])
-    is_perim = np.asarray(hdf['Geometry/2D Flow Areas/2D area/FacePoints Is Perimeter'])
-    face_info = np.asarray(hdf['Geometry/2D Flow Areas/2D area/Cells Face and Orientation Info']).astype(int)
-
-    wetted_mask = depth > float(depth_threshold)
-    wetted_idx = np.nonzero(wetted_mask)[0]
-
-    perim_mask = (is_perim == -1)
-    perim_touch = np.zeros(len(facepoints), dtype=bool)
-
-    for i in wetted_idx:
-        start, count = face_info[i]
-        idxs = np.arange(start, start + count)
-        idxs = idxs[idxs < len(perim_mask)]
-        perim_touch[idxs] |= perim_mask[idxs]
-
-    if not perim_touch.any():
-        raise RuntimeError('No perimeter facepoints touched by wetted cells — vector method cannot proceed')
-
-    perim_coords = np.asarray(hdf['Geometry/2D Flow Areas/2D area/Perimeter'])
-
-    # Map perimeter coords to facepoints by nearest neighbor
-    tree = _safe_build_kdtree(facepoints, name='facepoints_tree')
-    if tree is not None:
-        dists, idxs = tree.query(perim_coords, k=1)
-    else:
-        dif = perim_coords[:, None, :] - facepoints[None, :, :]
-        dists = np.sqrt(np.sum(dif * dif, axis=2))
-        idxs = np.argmin(dists, axis=1)
-
-    touched = perim_touch[idxs]
-    if not np.any(touched):
-        raise RuntimeError('Perimeter points mapping found no touched points — vector method cannot proceed')
-
-    # Extract contiguous runs of True in touched to form rings
-    rings = []
-    cur = []
-    for flag, coord in zip(touched, perim_coords):
-        if flag:
-            cur.append(tuple(coord))
+    try:
+        # Read depth dataset (long-form path used in tests/fixtures)
+        ds_path = '/Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth'
+        ds = hdf[ds_path]
+        data = np.asarray(ds[:])
+        if data.ndim > 1 and data.shape[0] > 1:
+            t = int(min(timestep, data.shape[0] - 1))
+            depth = np.asarray(data[t])
         else:
+            depth = np.asarray(data).reshape(-1)
+
+        wetted_mask = depth > float(depth_threshold)
+
+        # Attempt vector workflow
+        vector_failed = False
+        try:
+            facepoints = np.asarray(hdf['Geometry/2D Flow Areas/2D area/FacePoints Coordinate'])
+            is_perim = np.asarray(hdf['Geometry/2D Flow Areas/2D area/FacePoints Is Perimeter'])
+            face_info = np.asarray(hdf['Geometry/2D Flow Areas/2D area/Cells Face and Orientation Info']).astype(int)
+            perim_coords = np.asarray(hdf['Geometry/2D Flow Areas/2D area/Perimeter'])
+
+            perim_mask = (is_perim == -1)
+            perim_touch = np.zeros(len(facepoints), dtype=bool)
+            wetted_idx = np.nonzero(wetted_mask)[0]
+            for i in wetted_idx:
+                start, count = face_info[i]
+                idxs = np.arange(start, start + count)
+                idxs = idxs[idxs < len(perim_mask)]
+                perim_touch[idxs] |= perim_mask[idxs]
+
+            if not perim_touch.any():
+                raise RuntimeError('No perimeter facepoints touched by wetted cells')
+
+            tree = _safe_build_kdtree(facepoints, name='facepoints_tree')
+            if tree is not None:
+                _, idxs = tree.query(perim_coords, k=1)
+            else:
+                dif = perim_coords[:, None, :] - facepoints[None, :, :]
+                dists = np.sqrt(np.sum(dif * dif, axis=2))
+                idxs = np.argmin(dists, axis=1)
+
+            touched = perim_touch[idxs]
+            if not np.any(touched):
+                raise RuntimeError('Perimeter points mapping found no touched points')
+
+            # Extract contiguous runs of True in touched to form rings
+            rings = []
+            cur = []
+            for flag, coord in zip(touched, perim_coords):
+                if flag:
+                    cur.append(tuple(coord))
+                else:
+                    if cur:
+                        rings.append(cur)
+                        cur = []
             if cur:
                 rings.append(cur)
-                cur = []
-    if cur:
-        rings.append(cur)
 
-    # Convert rings to polygons and union them
-    from shapely.geometry import Polygon
-    from shapely.ops import unary_union
+            from shapely.geometry import Polygon
+            from shapely.ops import unary_union
 
-    polys = [Polygon(r) for r in rings if len(r) >= 3]
-    if not polys:
-        raise RuntimeError('No valid perimeter polygons from vector method')
-    merged = unary_union(polys)
+            polys = [Polygon(r) for r in rings if len(r) >= 3]
+            if not polys:
+                raise RuntimeError('No valid perimeter polygons from vector method')
 
-    out_rings = []
-    if merged.geom_type == 'Polygon':
-        out_rings = [np.asarray(merged.exterior.coords)]
-    else:
-        out_rings = [np.asarray(g.exterior.coords) for g in merged.geoms]
+            merged = unary_union(polys)
+            out_rings = []
+            if merged.geom_type == 'Polygon':
+                out_rings = [np.asarray(merged.exterior.coords)]
+            else:
+                out_rings = [np.asarray(g.exterior.coords) for g in merged.geoms]
 
-    if close_file:
-        hdf.close()
-    return out_rings
+            return out_rings
+
+        except Exception:
+            vector_failed = True
+
+        # Raster fallback
+        if vector_failed:
+            coords = np.asarray(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
+            x = coords[:, 0]
+            y = coords[:, 1]
+            xmin, xmax = float(x.min()), float(x.max())
+            ymin, ymax = float(y.min()), float(y.max())
+            res = float(raster_fallback_resolution)
+            # avoid zero division
+            span_x = max(1e-6, xmax - xmin)
+            span_y = max(1e-6, ymax - ymin)
+            nx = max(3, int(np.ceil(span_x / res)))
+            ny = max(3, int(np.ceil(span_y / res)))
+
+            gx = np.clip(((x - xmin) / span_x * (nx - 1)).astype(int), 0, nx - 1)
+            gy = np.clip(((y - ymin) / span_y * (ny - 1)).astype(int), 0, ny - 1)
+            grid = np.zeros((ny, nx), dtype=np.uint8)
+            # assign by iterating to avoid shape/broadcast surprises
+            for i_val, (gy_i, gx_i) in enumerate(zip(gy, gx)):
+                if wetted_mask[i_val]:
+                    grid[gy_i, gx_i] = 1
+
+            dx = span_x / (nx - 1) if nx > 1 else span_x
+            dy = span_y / (ny - 1) if ny > 1 else span_y
+            from shapely.geometry import box
+            from shapely.ops import unary_union
+
+            polys = []
+            ys_idx, xs_idx = np.where(grid == 1)
+            for gy_i, gx_i in zip(ys_idx, xs_idx):
+                x0 = xmin + gx_i * dx
+                x1 = xmin + (gx_i + 1) * dx
+                y0 = ymin + gy_i * dy
+                y1 = ymin + (gy_i + 1) * dy
+                polys.append(box(x0, y0, x1, y1))
+
+            if not polys:
+                raise RuntimeError('Raster fallback produced no polygons')
+
+            merged = unary_union(polys)
+            if merged.geom_type == 'Polygon':
+                rings = [np.asarray(merged.exterior.coords)]
+            else:
+                rings = [np.asarray(g.exterior.coords) for g in merged.geoms]
+
+            return rings
+
+    finally:
+        if close_file:
+            hdf.close()
 
 
 def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', wetted_name='wetted', out_name='along_stream_dist'):
