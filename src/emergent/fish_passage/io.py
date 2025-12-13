@@ -596,11 +596,17 @@ def compute_coarsened_alongstream_raster(simulation, factor=2, depth_name='depth
     if env is None:
         raise RuntimeError('environment group missing in HDF')
 
-    if 'x_coords' not in hdf or 'y_coords' not in hdf:
+    # locate x_coords/y_coords either under environment group or at root
+    target_group = None
+    if 'x_coords' in env and 'y_coords' in env:
+        target_group = env
+    elif 'x_coords' in hdf and 'y_coords' in hdf:
+        target_group = hdf
+    else:
         raise RuntimeError('x_coords/y_coords required in simulation.hdf5')
 
-    xarr = np.asarray(hdf['x_coords'])
-    yarr = np.asarray(hdf['y_coords'])
+    xarr = np.asarray(target_group['x_coords'])
+    yarr = np.asarray(target_group['y_coords'])
     h, w = xarr.shape
     # coarsened size
     ch = max(1, h // factor)
@@ -613,24 +619,68 @@ def compute_coarsened_alongstream_raster(simulation, factor=2, depth_name='depth
     xs_coarse = xarr[row_grid, col_grid]
     ys_coarse = yarr[row_grid, col_grid]
 
-    # backup original coords
-    orig_x = hdf['x_coords'][:]
-    orig_y = hdf['y_coords'][:]
 
-    # replace with coarse coords for computation
-    del hdf['x_coords']
-    del hdf['y_coords']
-    hdf.create_dataset('x_coords', data=xs_coarse)
-    hdf.create_dataset('y_coords', data=ys_coarse)
+    # backup original coords from the same group and replace with coarse coords
+    orig_x = target_group['x_coords'][:]  # read copy
+    orig_y = target_group['y_coords'][:]
+    del target_group['x_coords']
+    del target_group['y_coords']
+    target_group.create_dataset('x_coords', data=xs_coarse)
+    target_group.create_dataset('y_coords', data=ys_coarse)
+
+    # If original coords lived at root but compute_alongstream_raster expects
+    # coords under `environment`, create temporary copies under env so the
+    # callee can find them. Track whether we created them so we can remove later.
+    created_env_coords = False
+    env_had = ('x_coords' in env and 'y_coords' in env)
+    if target_group is hdf and not env_had:
+        env.create_dataset('x_coords', data=target_group['x_coords'][:])
+        env.create_dataset('y_coords', data=target_group['y_coords'][:])
+        created_env_coords = True
+
+    # create coarse depth/wetted rasters in env so compute_alongstream_raster sees matching shapes
+    created_coarse_depth = False
+    orig_depth = None
+    orig_wetted = None
+    if depth_name in env:
+        orig_depth = env[depth_name][:]
+        # simple block-mean downsample
+        depth_arr = orig_depth
+        block_h = max(1, int(np.ceil(h / ch)))
+        block_w = max(1, int(np.ceil(w / cw)))
+        # sample indices grid already computed (row_grid, col_grid)
+        coarse_depth = depth_arr[row_grid, col_grid]
+        if depth_name in env:
+            del env[depth_name]
+        env.create_dataset(depth_name, data=coarse_depth)
+        created_coarse_depth = True
+    elif wetted_name in env:
+        orig_wetted = env[wetted_name][:]
+        wett_arr = orig_wetted
+        coarse_wett = wett_arr[row_grid, col_grid]
+        if wetted_name in env:
+            del env[wetted_name]
+        env.create_dataset(wetted_name, data=coarse_wett)
 
     try:
         coarse = compute_alongstream_raster(simulation, outlet_xy=None, depth_name=depth_name, wetted_name=wetted_name, out_name=out_name)
     finally:
-        # restore original coords
-        del hdf['x_coords']
-        del hdf['y_coords']
-        hdf.create_dataset('x_coords', data=orig_x)
-        hdf.create_dataset('y_coords', data=orig_y)
+        # restore original coords in the same group
+        del target_group['x_coords']
+        del target_group['y_coords']
+        target_group.create_dataset('x_coords', data=orig_x)
+        target_group.create_dataset('y_coords', data=orig_y)
+        # remove any temporary env copies we created
+        if created_env_coords:
+            del env['x_coords']
+            del env['y_coords']
+        # restore any coarse depth/wetted datasets
+        if created_coarse_depth:
+            del env[depth_name]
+            env.create_dataset(depth_name, data=orig_depth)
+        if orig_wetted is not None:
+            del env[wetted_name]
+            env.create_dataset(wetted_name, data=orig_wetted)
 
     # bilinear upsample: simple nearest-neighbor upscale from coarse to original
     from scipy.ndimage import zoom
@@ -640,9 +690,8 @@ def compute_coarsened_alongstream_raster(simulation, factor=2, depth_name='depth
     # ensure shape matches exactly
     up = up[:h, :w]
 
-    # write into environment
+    # write into environment (ensure dataset shape matches upsampled array)
     if out_name in env:
-        env[out_name][:] = up
-    else:
-        env.create_dataset(out_name, data=up, dtype='f4')
+        del env[out_name]
+    env.create_dataset(out_name, data=up, dtype='f4')
     return up

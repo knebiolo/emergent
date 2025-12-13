@@ -1,3 +1,104 @@
+import numpy as np
+from shapely.geometry import LineString
+from scipy.spatial import cKDTree
+from scipy.ndimage import gaussian_filter1d
+
+
+def derive_centerline_from_hecras_distance(coords, distances, wetted_mask, crs=None, min_distance_threshold=None, min_length=50):
+    """Derive centerline from distance-to-bank field on irregular HECRAS mesh.
+
+    Strategy:
+    1. Find wetted cells with valid distances
+    2. Select ridge (cells above threshold)
+    3. Order ridge points by nearest-neighbor traversal
+    4. Smooth and return LineString if long enough
+    """
+    coords = np.asarray(coords, dtype=float)
+    distances = np.asarray(distances, dtype=float)
+    wetted_mask = np.asarray(wetted_mask, dtype=bool)
+    valid_mask = wetted_mask & np.isfinite(distances)
+    valid_coords = coords[valid_mask]
+    valid_distances = distances[valid_mask]
+    if len(valid_coords) == 0:
+        return None
+    if min_distance_threshold is None:
+        min_distance_threshold = np.percentile(valid_distances, 75)
+    ridge_mask = valid_distances >= min_distance_threshold
+    ridge_coords = valid_coords[ridge_mask]
+    ridge_distances = valid_distances[ridge_mask]
+    if len(ridge_coords) == 0:
+        return None
+    if len(ridge_coords) < 10:
+        return None
+
+    try:
+        tree = cKDTree(ridge_coords)
+    except Exception:
+        return None
+
+    # build ordered path by greedy nearest neighbor
+    start_idx = int(np.argmax(ridge_distances))
+    order = [start_idx]
+    remaining = set(range(len(ridge_coords))) - {start_idx}
+    while remaining:
+        cur = order[-1]
+        dists, idxs = tree.query(ridge_coords[cur], k=len(ridge_coords))
+        next_idx = None
+        for cand in np.atleast_1d(idxs):
+            if int(cand) in remaining:
+                next_idx = int(cand)
+                break
+        if next_idx is None:
+            break
+        order.append(next_idx)
+        remaining.remove(next_idx)
+
+    ordered_coords = ridge_coords[order]
+    if len(ordered_coords) > 5:
+        sigma = max(1, len(ordered_coords) // 20)
+        smoothed_x = gaussian_filter1d(ordered_coords[:, 0], sigma=sigma)
+        smoothed_y = gaussian_filter1d(ordered_coords[:, 1], sigma=sigma)
+        ordered_coords = np.column_stack((smoothed_x, smoothed_y))
+
+    centerline = LineString(ordered_coords)
+    if centerline.length < min_length:
+        return None
+    return centerline
+
+
+def extract_centerline_fast_hecras(plan_coords, depth_arr, depth_threshold=0.05, sample_fraction=0.1, min_length=50):
+    """Fast centerline extraction by sampling wetted cells and ordering by PCA projection.
+
+    Returns a LineString or None.
+    """
+    coords = np.asarray(plan_coords, dtype=float)
+    depth = np.asarray(depth_arr, dtype=float)
+    wetted_mask = depth > depth_threshold
+    coords_wet = coords[wetted_mask]
+    if len(coords_wet) < 10:
+        return None
+    n_sample = max(50, int(len(coords_wet) * sample_fraction))
+    idx = np.random.choice(len(coords_wet), size=n_sample, replace=False)
+    sample = coords_wet[idx]
+    # PCA
+    mean = sample.mean(axis=0)
+    X = sample - mean
+    cov = np.dot(X.T, X) / max(1, X.shape[0] - 1)
+    vals, vecs = np.linalg.eigh(cov)
+    principal = vecs[:, np.argmax(vals)]
+    proj = (sample - mean).dot(principal)
+    order = np.argsort(proj)
+    ordered = sample[order]
+    if len(ordered) > 5:
+        from scipy.ndimage import gaussian_filter1d as _gf
+        sigma = max(1, len(ordered) // 20)
+        ox = _gf(ordered[:, 0], sigma=sigma)
+        oy = _gf(ordered[:, 1], sigma=sigma)
+        ordered = np.column_stack((ox, oy))
+    line = LineString(ordered)
+    if line.length < min_length:
+        return None
+    return line
 """Centerline extraction helpers ported from legacy hecras_helpers.
 
 This module provides `derive_centerline_from_hecras_distance` which finds
