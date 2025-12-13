@@ -1,0 +1,2 @@
+Running: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest --basetemp=tmp\pytest_basetemp -q
+Exit code: 3221226505

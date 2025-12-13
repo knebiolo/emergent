@@ -1,0 +1,44 @@
+ds.shape (4, 100) ndim 2
+depth len 100 min/max 0.0 0.2 sum> 20
+nx,ny 5 5
+gx unique [0 1 2 3 4]
+gy unique [0 1 2 3 4]
+wetted_mask sum 20
+assign 0 gy,gx 0 0 val 1
+assign 1 gy,gx 0 0 val 1
+assign 2 gy,gx 0 0 val 1
+assign 3 gy,gx 1 0 val 1
+assign 4 gy,gx 1 0 val 1
+assign 5 gy,gx 2 0 val 1
+assign 6 gy,gx 2 0 val 1
+assign 7 gy,gx 3 0 val 1
+assign 8 gy,gx 3 0 val 1
+assign 9 gy,gx 4 0 val 1
+assign 10 gy,gx 0 0 val 1
+assign 11 gy,gx 0 0 val 1
+assign 12 gy,gx 0 0 val 1
+assign 13 gy,gx 1 0 val 1
+assign 14 gy,gx 1 0 val 1
+assign 15 gy,gx 2 0 val 1
+assign 16 gy,gx 2 0 val 1
+assign 17 gy,gx 3 0 val 1
+assign 18 gy,gx 3 0 val 1
+assign 19 gy,gx 4 0 val 1
+assign 20 gy,gx 0 0 val 0
+assign 21 gy,gx 0 0 val 0
+assign 22 gy,gx 0 0 val 0
+assign 23 gy,gx 1 0 val 0
+assign 24 gy,gx 1 0 val 0
+assign 25 gy,gx 2 0 val 0
+assign 26 gy,gx 2 0 val 0
+assign 27 gy,gx 3 0 val 0
+assign 28 gy,gx 3 0 val 0
+assign 29 gy,gx 4 0 val 0
+grid sum 0
+grid array:
+ [[0 0 0 0 0]
+ [0 0 0 0 0]
+ [0 0 0 0 0]
+ [0 0 0 0 0]
+ [0 0 0 0 0]]
+labels n 0

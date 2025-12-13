@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\tools\debug_hecras_raster.py", line 1, in <module>
+    from emergent.salmon_abm.hecras_helpers import make_synthetic_hecras_hdf, infer_wetted_perimeter_from_hecras
+ImportError: cannot import name 'make_synthetic_hecras_hdf' from 'emergent.salmon_abm.hecras_helpers' (C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\src\emergent\salmon_abm\hecras_helpers.py)

@@ -1,13 +1,13 @@
 # Quick test: create a GLViewWidget and print OpenGL context/strings
 import sys, time
+import pytest
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt
-try:
-    import pyqtgraph.opengl as gl
-except Exception:
-    gl = None
 
-print('pyqtgraph.opengl available:', gl is not None)
+# Skip the test entirely if pyqtgraph.opengl isn't available in this environment
+pytest.importorskip('pyqtgraph.opengl')
+import pyqtgraph.opengl as gl
+
 # Prefer desktop GL at app level
 try:
     from PyQt5.QtCore import QCoreApplication
@@ -17,9 +17,6 @@ except Exception as e:
     print('Failed to set AA_UseDesktopOpenGL:', e)
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-if gl is None:
-    print('pyqtgraph.opengl not available — abort')
-    sys.exit(1)
 
 w = gl.GLViewWidget()
 w.setWindowTitle('GLViewWidget Test')

@@ -434,22 +434,13 @@ def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, m
                     print('No valid perimeter polygons from vector method')
                 raise RuntimeError('No valid perimeter polygons from vector method')
             merged = unary_union(polys)
-            # Build a consistent dict return value
+            # Build a list of ring arrays to return
             rings = []
             if merged.geom_type == 'Polygon':
-                rings = [list(merged.exterior.coords)]
+                rings = [np.asarray(merged.exterior.coords)]
             else:
-                rings = [list(g.exterior.coords) for g in merged.geoms]
-            # choose largest ring as primary
-            primary = max(rings, key=lambda r: len(r) if hasattr(r, '__len__') else 0)
-            pts = np.asarray(primary)
-            # perimeter_cells and wetted_mask are not available here; return placeholders
-            return {
-                'perimeter_points': pts,
-                'perimeter_cells': np.zeros((pts.shape[0],), dtype=int),
-                'wetted_mask': None,
-                'median_spacing': None
-            }
+                rings = [np.asarray(g.exterior.coords) for g in merged.geoms]
+            return rings
 
         except Exception as e:
             # Vector method failed — log and fall back to raster
@@ -486,38 +477,52 @@ def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, m
             from shapely.geometry import shape, mapping
             from shapely.geometry import Polygon as ShPolygon
             polys = []
-            # brute-force: find connected components and make bounding polygons (coarse)
+            # Build box polygons for each wetted grid cell then union them. This is
+            # more robust than attempting to convex-hull scattered center points.
+            # cell width/height based on grid spacing
+            dx = (xmax - xmin) / (nx - 1) if nx > 1 else (xmax - xmin)
+            dy = (ymax - ymin) / (ny - 1) if ny > 1 else (ymax - ymin)
+            from shapely.geometry import box
             for i in range(1, n+1):
-                if np.sum(lbl==i) == 0:
+                if np.sum(lbl == i) == 0:
                     continue
-                inds = np.column_stack(np.where(lbl==i))
-                # convert grid indices back to coords for polygon approx
-                pts = []
+                inds = np.column_stack(np.where(lbl == i))
+                # create a box for each cell index and append
                 for gy_i, gx_i in inds:
-                    px = xmin + (gx_i + 0.5) * (xmax - xmin) / (nx-1)
-                    py = ymin + (gy_i + 0.5) * (ymax - ymin) / (ny-1)
-                    pts.append((px, py))
-                if len(pts) >= 3:
-                    polys.append(ShPolygon(pts).convex_hull)
+                    x0 = xmin + gx_i * dx
+                    x1 = xmin + (gx_i + 1) * dx
+                    y0 = ymin + gy_i * dy
+                    y1 = ymin + (gy_i + 1) * dy
+                    polys.append(box(x0, y0, x1, y1))
             if not polys:
                 if verbose:
                     print('Raster fallback produced no polygons')
                 raise RuntimeError('Raster fallback produced no polygons')
             merged = unary_union(polys)
             if merged.geom_type == 'Polygon':
-                rings = [list(merged.exterior.coords)]
+                rings = [np.asarray(merged.exterior.coords)]
             else:
-                rings = [list(g.exterior.coords) for g in merged.geoms]
-            primary = max(rings, key=lambda r: len(r) if hasattr(r, '__len__') else 0)
-            pts = np.asarray(primary)
-            return {
-                'perimeter_points': pts,
-                'perimeter_cells': np.zeros((pts.shape[0],), dtype=int),
-                'wetted_mask': None,
-                'median_spacing': None
-            }
+                rings = [np.asarray(g.exterior.coords) for g in merged.geoms]
+            # Return a list of numpy arrays (rings) to match vector method output
+            return rings
         except Exception as e:
-            # both methods failed
+            # both methods failed — try a robust convex-hull fallback on wetted cell centers
+            try:
+                coords = np.array(hdf['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
+                wetted_coords = coords[wetted_mask]
+                if len(wetted_coords) >= 3:
+                    from shapely.geometry import MultiPoint
+                    hull = MultiPoint(wetted_coords).convex_hull
+                    if hull.is_empty:
+                        raise RuntimeError('Convex-hull fallback empty')
+                    if hull.geom_type == 'Polygon':
+                        pts = np.asarray(hull.exterior.coords)
+                    else:
+                        pts = np.asarray(hull.coords)
+                    return [pts]
+            except Exception:
+                pass
+            # If hull fallback failed, raise original error
             raise RuntimeError('Both vector and raster wetted-perimeter inference failed: ' + str(e))
 
     finally:

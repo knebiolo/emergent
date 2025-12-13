@@ -1,0 +1,80 @@
+Discovered 34 test files
+
+Trying range 0:17 -> 17 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmpfbpzevs6.txt'
+Exit code 0
+--- output (first 2000 chars) ---
+................................                                         [100%]
+32 passed in 2.39s
+
+--- end output ---
+
+Trying range 17:25 -> 8 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmpd5zktl_j.txt'
+Exit code 0
+--- output (first 2000 chars) ---
+..........................                                               [100%]
+26 passed in 0.69s
+
+--- end output ---
+
+Trying range 25:29 -> 4 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmpccq47wks.txt'
+Exit code 1
+--- output (first 2000 chars) ---
+...F.                                                                    [100%]
+================================== FAILURES ===================================
+______________________ test_infer_wetted_perimeter_basic ______________________
+
+tmp_path = WindowsPath('C:/Users/Kevin.Nebiolo/OneDrive - Kleinschmidt Associates/Software/emergent/tmp/pytest_run_16036_d8b59a1d/test_infer_wetted_perimeter_ba0')
+
+    def test_infer_wetted_perimeter_basic(tmp_path):
+        p = tmp_path / 'synthetic_hecras.h5'
+        make_synthetic_hecras_hdf(str(p), n_cells=100, times=4)
+    
+        # timestep 0
+        perims0 = infer_wetted_perimeter_from_hecras(str(p), depth_threshold=0.1, raster_fallback_resolution=2.0, verbose=False, timestep=0)
+        assert isinstance(perims0, list)
+        assert len(perims0) >= 1
+    
+        # later timestep (more flooded)
+        perims2 = infer_wetted_perimeter_from_hecras(str(p), depth_threshold=0.1, raster_fallback_resolution=2.0, verbose=False, timestep=2)
+>       assert isinstance(perims2, list)
+E       AssertionError: assert False
+E        +  where False = isinstance({'median_spacing': None, 'perimeter_cells': array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 'perimeter_points': ...  ],\n       [ 2.25,  0.  ],\n       [ 0.  ,  0.  ],\n       [ 0.  ,  2.25],\n       [ 0.  ,  4.5 ]]), 'wetted_mask': None}, list)
+
+tests\test_hecras_helpers.py:42: AssertionError
+============================== warnings summary ===============================
+tests\test_collision.py:3
+  C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\tests\test_collision.py:3: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.slow
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info
+--- end output ---
+
+Trying range 25:27 -> 2 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmpugm060mr.txt'
+Exit code 0
+--- output (first 2000 chars) ---
+.                                                                        [100%]
+============================== warnings summary ===============================
+tests\test_collision.py:3
+  C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\tests\test_collision.py:3: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.slow
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 2.16s
+
+--- end output ---
+
+Trying range 27:28 -> 1 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmp1ylegmtr.txt'
+Exit code 0
+--- output (first 2000 chars) ---
+..                                                                       [100%]
+2 passed in 0.15s
+
+--- end output ---
+
+Offending file: tests\test_hecras_helpers.py

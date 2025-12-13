@@ -1,0 +1,12 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.9, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent
+configfile: pyproject.toml
+collecting ... collected 3 items
+
+src/emergent/fish_passage/tests/test_distance_to_bank.py::test_distance_to_bank_simple_square PASSED [ 33%]
+src/emergent/fish_passage/tests/test_extract_centerline_hecras_wrapper.py::test_extract_centerline_hecras_returns_none_for_small_plan PASSED [ 66%]
+src/emergent/fish_passage/tests/test_extract_centerline_hecras_wrapper.py::test_extract_centerline_hecras_raises_on_missing_datasets PASSED [100%]
+
+============================== 3 passed in 6.26s ==============================

@@ -1,0 +1,11 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.9, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent
+configfile: pyproject.toml
+collecting ... collected 2 items
+
+src/emergent/fish_passage/tests/test_extract_centerline_hecras_wrapper.py::test_extract_centerline_hecras_returns_none_for_small_plan PASSED [ 50%]
+src/emergent/fish_passage/tests/test_extract_centerline_hecras_wrapper.py::test_extract_centerline_hecras_raises_on_missing_datasets PASSED [100%]
+
+============================== 2 passed in 0.46s ==============================

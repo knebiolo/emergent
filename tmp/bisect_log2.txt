@@ -1,0 +1,89 @@
+Discovered 34 test files
+
+Trying range 0:17 -> 17 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmp8a7sbgdf.txt'
+Exit code 0
+--- output (first 2000 chars) ---
+................................                                         [100%]
+32 passed in 1.85s
+
+--- end output ---
+
+Trying range 17:25 -> 8 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmpbro_22zs.txt'
+Exit code 0
+--- output (first 2000 chars) ---
+..........................                                               [100%]
+26 passed in 0.73s
+
+--- end output ---
+
+Trying range 25:29 -> 4 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmp6k609zez.txt'
+Exit code 1
+--- output (first 2000 chars) ---
+...F.                                                                    [100%]
+================================== FAILURES ===================================
+______________________ test_infer_wetted_perimeter_basic ______________________
+
+hdf_path_or_file = 'C:\\Users\\Kevin.Nebiolo\\OneDrive - Kleinschmidt Associates\\Software\\emergent\\tmp\\pytest_run_3208_e45cc51c\\test_infer_wetted_perimeter_ba0\\synthetic_hecras.h5'
+depth_threshold = 0.1, max_nodes = 5000, raster_fallback_resolution = 2.0
+verbose = False, timestep = 0
+
+    def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, max_nodes=5000, raster_fallback_resolution=5.0, verbose=False, timestep=0):
+        """Infer wetted perimeter using HECRAS vector geometry if possible.
+    
+        Returns a list of (x,y) points representing the wetted perimeter polygon(s) in order.
+    
+        Parameters
+        ----------
+        hdf_path_or_file : str or h5py.File
+            Path to HEC-RAS HDF5 plan or an open h5py.File object.
+        depth_threshold : float
+            Threshold for hydraulic depth to consider a cell wetted.
+        max_nodes : int
+            If number of wetted cells >> max_nodes, this function still computes perimeter but
+            caller may wish to thin before building Delaunay.
+        raster_fallback_resolution : float
+            Cell size (in model units) for coarse raster fallback when vector method is too costly.
+    
+        Notes
+        -----
+        This function favors a vector method that inspects facepoints and cell-face mappings to
+        extract the exact wetted boundary. If that fails or is too expensive for the input size,
+        it falls back to a coarse rasterization + polygonize approach.
+        """
+        close_file = False
+        if isinstance(hdf_path_or_file, str):
+            hdf = h5py.File(hdf_path_or_file, 'r')
+            close_file = True
+        else:
+            hdf = hdf_path_or_file
+    
+--- end output ---
+
+Trying range 25:27 -> 2 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmpt_r19r8s.txt'
+Exit code 0
+--- output (first 2000 chars) ---
+.                                                                        [100%]
+============================== warnings summary ===============================
+tests\test_collision.py:3
+  C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\tests\test_collision.py:3: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.slow
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 1 warning in 6.23s
+
+--- end output ---
+
+Trying range 27:28 -> 1 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmps3okptwp.txt'
+Exit code 0
+--- output (first 2000 chars) ---
+..                                                                       [100%]
+2 passed in 0.27s
+
+--- end output ---
+
+Offending file: tests\test_hecras_helpers.py

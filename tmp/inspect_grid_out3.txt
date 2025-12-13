@@ -1,0 +1,8 @@
+ds.shape (4, 100) ndim 2
+depth len 100 min/max 0.0 0.2 sum> 20
+nx,ny 5 5
+gx unique [0 1 2 3 4]
+gy unique [0 1 2 3 4]
+wetted_mask sum 20
+grid sum 0
+labels n 0

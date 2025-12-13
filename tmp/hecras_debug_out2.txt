@@ -1,0 +1,15 @@
+vector perimeter method failed: "Unable to synchronously open object (object 'FacePoints Coordinate' doesn't exist)"
+Raster fallback produced no polygons
+Traceback (most recent call last):
+  File "C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\src\emergent\salmon_abm\hecras_helpers.py", line 509, in infer_wetted_perimeter_from_hecras
+    raise RuntimeError('Raster fallback produced no polygons')
+RuntimeError: Raster fallback produced no polygons
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\tools\debug_hecras_raster.py", line 19, in <module>
+    res = infer_wetted_perimeter_from_hecras(str(p), depth_threshold=0.1, raster_fallback_resolution=2.0, verbose=True, timestep=0)
+  File "C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\src\emergent\salmon_abm\hecras_helpers.py", line 525, in infer_wetted_perimeter_from_hecras
+    raise RuntimeError('Both vector and raster wetted-perimeter inference failed: ' + str(e))
+RuntimeError: Both vector and raster wetted-perimeter inference failed: Raster fallback produced no polygons

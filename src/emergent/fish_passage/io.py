@@ -13,6 +13,27 @@ import logging
 from emergent.fish_passage.utils import safe_build_kdtree as _safe_build_kdtree, safe_log_exception as _safe_log_exception
 
 logger = logging.getLogger(__name__)
+"""HECRAS IO helpers for fish_passage.
+
+This module provides a compact, test-focused set of helpers for reading
+HECRAS HDF5 plan files, building a KDTree of cell centers, and mapping
+query points to HECRAS fields using inverse-distance weighting (IDW).
+
+The implementations aim for parity with legacy helpers in
+`emergent.salmon_abm.sockeye` but remain small and deterministic so
+unit tests can validate behavior during migration.
+"""
+
+from typing import List, Dict, Any, Optional, Tuple, Sequence
+import h5py
+import numpy as np
+import logging
+
+from emergent.fish_passage.utils import safe_build_kdtree as _safe_build_kdtree, safe_log_exception as _safe_log_exception
+from emergent.fish_passage.geometry import compute_affine_from_hecras, pixel_to_geo
+from scipy.spatial import cKDTree
+
+logger = logging.getLogger(__name__)
 
 
 class HECRASMap:
@@ -26,12 +47,18 @@ class HECRASMap:
     - KDTree built via `_safe_build_kdtree`
     - `map_idw` returns dict[field_name] -> (N,) ndarray
     """
-    def __init__(self, plan_path: str, field_names: List[str] = None, timestep: int = 0):
-        self.plan_path = plan_path
+
+    def __init__(self, plan_path: str, field_names: Optional[Sequence[str]] = None, timestep: int = 0):
+        self.plan_path = str(plan_path)
         self.timestep = int(timestep) if timestep is not None else 0
+        # Preserve whether the caller passed a single-string for legacy behavior
+        was_string = isinstance(field_names, str)
         if field_names is None:
             field_names = ['Cells Minimum Elevation']
+        elif was_string:
+            field_names = [field_names]
         self.field_names = list(field_names)
+        self._return_single = was_string
         self._load_plan()
 
     def _find_dataset_by_name(self, hdf: h5py.File, name_pattern: str) -> Optional[str]:
@@ -61,26 +88,56 @@ class HECRASMap:
         with h5py.File(self.plan_path, 'r') as h:
             coords = h['/Geometry/2D Flow Areas/2D area/Cells Center Coordinate'][:]
 
+            n_coords = coords.shape[0]
+
             fields = {}
             for fname in self.field_names:
                 geom_path = f'/Geometry/2D Flow Areas/2D area/{fname}'
                 if geom_path in h:
-                    arr = h[geom_path][:]
+                    node = h[geom_path]
+                    # If the path points to a dataset, take it. If it's a group, try common child names.
+                    if isinstance(node, h5py.Dataset):
+                        arr = node[:]
+                    else:
+                        # prefer 'Values' child dataset
+                        if 'Values' in node:
+                            arr = node['Values'][:]
+                        else:
+                            # fall back to first dataset inside the group
+                            found = None
+                            for name, obj in node.items():
+                                if isinstance(obj, h5py.Dataset):
+                                    found = obj
+                                    break
+                            if found is not None:
+                                arr = found[:]
+                            else:
+                                arr = np.array([])
                 else:
                     ds_path = self._find_dataset_by_name(h, fname)
                     if ds_path is not None:
                         ds = h[ds_path]
-                        if ds.ndim > 1:
-                            t = min(self.timestep, ds.shape[0] - 1)
-                            arr = ds[t]
+                        # read full dataset and let heuristics pick the right slice
+                        data = np.asarray(ds[:])
+                        if data.ndim == 2:
+                            # Prefer interpretation where one axis matches n_coords
+                            if data.shape[1] == n_coords and data.shape[0] > 1:
+                                # likely (timesteps, n_cells)
+                                t = min(self.timestep, data.shape[0] - 1)
+                                arr = data[t]
+                            elif data.shape[0] == n_coords and data.shape[1] >= 1:
+                                # likely (n_cells, features)
+                                arr = data[:, 0]
+                            else:
+                                # fallback: attempt to flatten conservatively
+                                arr = data.reshape(-1)
                         else:
-                            arr = ds[:]
+                            arr = data
                     else:
                         raise KeyError(f"Field '{fname}' not found in HECRAS HDF: {self.plan_path}")
                 fields[fname] = np.asarray(arr)
 
         # normalize field arrays to align with coords length
-        n_coords = coords.shape[0]
 
         def normalize_field_array(arr):
             arr = np.asarray(arr)
@@ -130,15 +187,51 @@ class HECRASMap:
             vals = arr[inds]
             mapped = np.sum(vals * w, axis=1)
             out[fname] = mapped
+        # Legacy behavior: if caller passed a single-string, return ndarray
+        if getattr(self, '_return_single', False) and len(self.field_names) == 1:
+            return out[self.field_names[0]]
+        if len(self.field_names) == 1:
+            return out
         return out
 
 
-def map_hecras_for_agents(plan_path: str, points: np.ndarray, field_names: List[str] = None, k: int = 8) -> Dict[str, np.ndarray]:
-    m = HECRASMap(plan_path, field_names=field_names)
-    return m.map_idw(points, k=k)
+def map_hecras_for_agents(simulation_or_plan, pts: np.ndarray, plan_path: Optional[str] = None, field_names: List[str] = None, k: int = 8):
+    """Wrapper supporting two calling patterns:
+
+    - Legacy: map_hecras_for_agents(simulation, agent_xy, plan_path, field_names=..., k=...)
+    - Simple: map_hecras_for_agents(plan_path, agent_xy, field_names=..., k=...)
+    """
+    # If first arg is a string, treat as (plan_path, pts, ...)
+    if isinstance(simulation_or_plan, str):
+        plan = simulation_or_plan
+        points = pts
+        m = HECRASMap(plan, field_names=field_names)
+        return m.map_idw(points, k=k)
+
+    # Otherwise expect a simulation-like object with _hecras_maps registered
+    sim = simulation_or_plan
+    # plan_path may be provided as third positional arg
+    plan = str(plan_path) if plan_path is not None else getattr(sim, 'hecras_plan_path', '')
+    key = (plan, tuple(field_names) if field_names is not None else None)
+    maps = getattr(sim, '_hecras_maps', None)
+    if not maps or key not in maps:
+        raise KeyError(f"No adapter registered for plan {plan} and fields {field_names}")
+    adapter = maps[key]
+    return adapter.map_idw(pts, k=k)
 
 
 def initialize_hecras_geometry(sim: Any, plan_path: str, depth_threshold: float = 0.05, create_rasters: bool = False) -> Dict[str, Any]:
+    """Minimal initializer used by tests. Reads basic datasets from an
+    HDF5-like plan (duck-typed) and registers coordinates on `sim.hdf5`.
+
+    Parameters
+    - sim: simulation object with `hdf5` attribute (h5py.File-like)
+    - plan_path: path to an on-disk HECRAS plan HDF5 file
+    - depth_threshold: threshold used to decide wetted cells (unused in skeleton)
+    - create_rasters: whether to create rasters in `sim.hdf5` (basic behavior)
+
+    Returns a dict containing `coords` and simple metadata.
+    """
     with h5py.File(plan_path, 'r') as f:
         key = 'Geometry/2D Flow Areas/2D area/Cells Center Coordinate'
         if key in f:
@@ -148,59 +241,137 @@ def initialize_hecras_geometry(sim: Any, plan_path: str, depth_threshold: float 
 
     xs = coords[:, 0]
     ys = coords[:, 1]
+    # create or replace lightweight x/y coord datasets on sim.hdf5
+    try:
+        if 'x_coords' in sim.hdf5:
+            del sim.hdf5['x_coords']
+    except Exception:
+        pass
+    try:
+        if 'y_coords' in sim.hdf5:
+            del sim.hdf5['y_coords']
+    except Exception:
+        pass
     sim.hdf5.create_dataset('x_coords', data=xs)
     sim.hdf5.create_dataset('y_coords', data=ys)
     return {'coords': coords, 'n_cells': coords.shape[0]}
 
 
 def ensure_hdf_coords_from_hecras(sim: Any, plan_path: str, target_shape: Optional[Tuple[int, int]] = None) -> None:
+    """Populate `sim.hdf5` with x/y coordinate datasets derived from HECRAS plan.
+
+    This implementation follows legacy behavior: if the plan provides cell
+    centers, use them; otherwise create a simple regular grid of requested
+    `target_shape` (or 10x10 default). It does not overwrite existing
+    datasets.
+    """
+    # If already present, nothing to do
     if 'x_coords' in sim.hdf5 and 'y_coords' in sim.hdf5:
         return
+
+    coords = None
     try:
         with h5py.File(str(plan_path), 'r') as ph:
             coords = np.asarray(ph['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
-    except Exception:
+    except KeyError:
+        coords = None
+    except Exception as e:
+        _safe_log_exception('Failed opening HECRAS plan in ensure_hdf_coords_from_hecras', e, file='io.py')
         coords = None
 
     if coords is None:
+        # fallback: build a simple grid
         if target_shape is None:
             nx, ny = 10, 10
         else:
             ny, nx = target_shape
-        xs = np.linspace(0.0, 1.0, nx * ny)
-        ys = np.linspace(0.0, 1.0, nx * ny)
+        xs = np.linspace(0.0, 1.0, nx * ny).reshape((ny, nx))
+        ys = np.linspace(0.0, 1.0, nx * ny).reshape((ny, nx))
     else:
-        xs = coords[:, 0]
-        ys = coords[:, 1]
+        # If a target_shape is provided, rasterize coords into a regular grid
+        if target_shape is not None:
+            height, width = target_shape
+            aff = compute_affine_from_hecras(coords)
+            cols = np.arange(width, dtype=np.float64)
+            rows = np.arange(height, dtype=np.float64)
+            col_grid, row_grid = np.meshgrid(cols, rows)
+            xs_grid, ys_grid = pixel_to_geo(aff, row_grid, col_grid)
+            xs = np.asarray(xs_grid)
+            ys = np.asarray(ys_grid)
+        else:
+            # If coords are a perfect square number, reshape to (side, side)
+            n = coords.shape[0]
+            side = int(np.round(np.sqrt(n)))
+            if side * side == n:
+                try:
+                    xs = coords[:, 0].reshape((side, side))
+                    ys = coords[:, 1].reshape((side, side))
+                except Exception:
+                    xs = coords[:, 0]
+                    ys = coords[:, 1]
+            else:
+                xs = coords[:, 0]
+                ys = coords[:, 1]
 
-    sim.hdf5.create_dataset('x_coords', data=xs)
-    sim.hdf5.create_dataset('y_coords', data=ys)
+    # create datasets; if already exist, leave them
+    if 'x_coords' not in sim.hdf5:
+        sim.hdf5.create_dataset('x_coords', data=xs)
+    if 'y_coords' not in sim.hdf5:
+        sim.hdf5.create_dataset('y_coords', data=ys)
 
 
 def map_hecras_to_env_rasters(sim: Any, plan_path: str, field_names: Sequence[str], k: int = 1) -> bool:
-    key_candidates = [(plan_path, tuple(field_names)), ('', tuple(field_names))]
+    """Map HECRAS fields onto the simulation raster grid and write into `simulation.hdf5['environment']`.
+
+    Expects a mapping adapter registered on `sim._hecras_maps[(plan_path, tuple(field_names))]`
+    which implements `.map_idw(pts, k=...)`.
+    """
+    maps = getattr(sim, '_hecras_maps', None)
+    plan_key = str(plan_path)
+    key_candidates = [(plan_key, tuple(field_names)), ('', tuple(field_names))]
     adapter = None
-    for key in key_candidates:
-        adapter = sim._hecras_maps.get(key)
-        if adapter is not None:
-            break
+    if maps is not None:
+        for k in key_candidates:
+            if k in maps:
+                adapter = maps[k]
+                break
     if adapter is None:
         raise KeyError(f"No adapter registered for plan {plan_path} and fields {field_names}")
 
-    pts = np.zeros((1, 2))
-    vals = adapter.map_idw(pts, k=k)
-    arr = np.asarray(vals)
-    grid_shape = getattr(adapter, 'grid_shape', None)
-    if grid_shape is None:
-        n = arr.size
-        side = int(np.sqrt(n))
-        grid_shape = (side, side) if side * side == n else (n,)
+    # Ensure simulation raster grid xy is prepared
+    if 'x_coords' in sim.hdf5 and 'y_coords' in sim.hdf5:
+        xarr = np.asarray(sim.hdf5['x_coords'])
+        yarr = np.asarray(sim.hdf5['y_coords'])
+        h, w = xarr.shape
+        XX = xarr.flatten()
+        YY = yarr.flatten()
+        grid_xy = np.column_stack((XX, YY))
+        sim._hecras_grid_shape = (h, w)
+        sim._hecras_grid_xy = grid_xy
+    else:
+        raise RuntimeError('x_coords/y_coords not present in simulation.hdf5; call ensure_hdf_coords_from_hecras first')
 
     env = sim.hdf5.require_group('environment')
-    for idx, fname in enumerate(field_names):
-        data = arr
-        if data.size == 0:
-            data = np.zeros(int(np.prod(grid_shape)))
-        env.create_dataset(fname, data=np.asarray(data).reshape(grid_shape))
+    h, w = sim._hecras_grid_shape
+    for fname in (field_names or []):
+        try:
+            # prefer using the adapter directly
+            mapped = adapter.map_idw(sim._hecras_grid_xy, k=k)
+            # adapter may return an ndarray for single-field adapters or a dict
+            if isinstance(mapped, dict):
+                arr = np.asarray(mapped.get(fname))
+            else:
+                arr = np.asarray(mapped)
+            if arr is None:
+                raise RuntimeError('Adapter returned no data')
+            if arr.size != h * w:
+                raise RuntimeError('Mapped array size mismatch')
+        except Exception:
+            arr = np.full((h * w,), np.nan, dtype=float)
+
+        if fname in env:
+            del env[fname]
+        env.create_dataset(fname, (h, w), dtype='f4')
+        env[fname][:, :] = arr.reshape(h, w)
 
     return True

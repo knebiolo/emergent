@@ -84,8 +84,12 @@ BUCKETS: tuple[str, ...] = ("noaa-nos-ofs-pds",)  # Only check primary bucket
 CYCLES:  tuple[int, ...] = (18, 12, 6, 3, 0)       # Common OFS cycles (18z, 12z, 6z, 3z, 0z)
 LAYERS:  tuple[str, ...] = ("n000",)#, "f000")     # nowcast | 0‑h fcst
 
-# Anonymous read‑only S3 filesystem
-fs = fsspec.filesystem("s3", anon=True, requester_pays=True)
+# Anonymous read‑only S3 filesystem (created lazily)
+try:
+    fs = fsspec.filesystem("s3", anon=True, requester_pays=True)
+except Exception:
+    # Avoid raising at import time when optional deps (s3fs/aiobotocore) are missing.
+    fs = None
 
 
 # ----------------------------------------------------------------------
@@ -128,6 +132,9 @@ def candidate_urls(model: str, day: date) -> List[str]:
 
 def first_existing_url(urls: List[str]) -> str | None:
     """Check URLs in order, return first that exists."""
+    # If S3 filesystem couldn't be created (missing optional deps), skip checks.
+    if fs is None:
+        return None
     for url in urls:
         try:
             bucket, key = url[5:].split("/", 1)

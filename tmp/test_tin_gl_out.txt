@@ -1,0 +1,16 @@
+
+=================================== ERRORS ====================================
+____________________ ERROR collecting tools/test_tin_gl.py ____________________
+ImportError while importing test module 'C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\tools\test_tin_gl.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\.conda\envs\emergent\Lib\importlib\__init__.py:88: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tools\test_tin_gl.py:10: in <module>
+    from emergent.salmon_abm.salmon_viewer import SalmonViewer
+E   ImportError: cannot import name 'SalmonViewer' from 'emergent.salmon_abm.salmon_viewer' (C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\src\emergent\salmon_abm\salmon_viewer.py)
+=========================== short test summary info ===========================
+ERROR tools/test_tin_gl.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.97s

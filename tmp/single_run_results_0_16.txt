@@ -1,0 +1,153 @@
+--- FILE 0 src\emergent\fish_passage\tests\test_behavior.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_0 src\emergent\fish_passage\tests\test_behavior.py
+RC: 0
+STDOUT:
+.                                                                        [100%]
+1 passed in 0.06s
+
+STDERR:
+
+--- FILE 1 src\emergent\fish_passage\tests\test_centerline.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_1 src\emergent\fish_passage\tests\test_centerline.py
+RC: 0
+STDOUT:
+...                                                                      [100%]
+3 passed in 1.04s
+
+STDERR:
+
+--- FILE 2 src\emergent\fish_passage\tests\test_compute_affine.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_2 src\emergent\fish_passage\tests\test_compute_affine.py
+RC: 0
+STDOUT:
+..                                                                       [100%]
+2 passed in 0.72s
+
+STDERR:
+
+--- FILE 3 src\emergent\fish_passage\tests\test_core.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_3 src\emergent\fish_passage\tests\test_core.py
+RC: 0
+STDOUT:
+..                                                                       [100%]
+2 passed in 0.05s
+
+STDERR:
+
+--- FILE 4 src\emergent\fish_passage\tests\test_distance_to_bank.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_4 src\emergent\fish_passage\tests\test_distance_to_bank.py
+RC: 0
+STDOUT:
+.                                                                        [100%]
+1 passed in 0.78s
+
+STDERR:
+
+--- FILE 5 src\emergent\fish_passage\tests\test_extract_centerline_hecras_wrapper.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_5 src\emergent\fish_passage\tests\test_extract_centerline_hecras_wrapper.py
+RC: 0
+STDOUT:
+..                                                                       [100%]
+2 passed in 0.80s
+
+STDERR:
+
+--- FILE 6 src\emergent\fish_passage\tests\test_geometry.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_6 src\emergent\fish_passage\tests\test_geometry.py
+RC: 0
+STDOUT:
+...                                                                      [100%]
+3 passed in 0.26s
+
+STDERR:
+
+--- FILE 7 src\emergent\fish_passage\tests\test_hecras_map.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_7 src\emergent\fish_passage\tests\test_hecras_map.py
+RC: 0
+STDOUT:
+..                                                                       [100%]
+2 passed in 1.05s
+
+STDERR:
+
+--- FILE 8 src\emergent\fish_passage\tests\test_infer_wetted_perimeter_raster.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_8 src\emergent\fish_passage\tests\test_infer_wetted_perimeter_raster.py
+RC: 0
+STDOUT:
+.                                                                        [100%]
+1 passed in 0.97s
+
+STDERR:
+
+--- FILE 9 src\emergent\fish_passage\tests\test_infer_wetted_perimeter_vector.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_9 src\emergent\fish_passage\tests\test_infer_wetted_perimeter_vector.py
+RC: 0
+STDOUT:
+..                                                                       [100%]
+2 passed in 1.22s
+
+STDERR:
+
+--- FILE 10 src\emergent\fish_passage\tests\test_io.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_10 src\emergent\fish_passage\tests\test_io.py
+RC: 0
+STDOUT:
+..                                                                       [100%]
+2 passed in 1.24s
+
+STDERR:
+
+--- FILE 11 src\emergent\fish_passage\tests\test_io_adapter.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_11 src\emergent\fish_passage\tests\test_io_adapter.py
+RC: 0
+STDOUT:
+..                                                                       [100%]
+2 passed in 1.20s
+
+STDERR:
+
+--- FILE 12 src\emergent\fish_passage\tests\test_io_hecras.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_12 src\emergent\fish_passage\tests\test_io_hecras.py
+RC: 0
+STDOUT:
+..                                                                       [100%]
+2 passed in 0.91s
+
+STDERR:
+
+--- FILE 13 src\emergent\fish_passage\tests\test_io_missing_field_strict.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_13 src\emergent\fish_passage\tests\test_io_missing_field_strict.py
+RC: 0
+STDOUT:
+.                                                                        [100%]
+1 passed in 1.20s
+
+STDERR:
+
+--- FILE 14 src\emergent\fish_passage\tests\test_io_skeleton.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_14 src\emergent\fish_passage\tests\test_io_skeleton.py
+RC: 0
+STDOUT:
+.                                                                        [100%]
+1 passed in 0.73s
+
+STDERR:
+
+--- FILE 15 src\emergent\fish_passage\tests\test_metrics.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_15 src\emergent\fish_passage\tests\test_metrics.py
+RC: 0
+STDOUT:
+...                                                                      [100%]
+3 passed in 2.12s
+
+STDERR:
+
+--- FILE 16 src\emergent\fish_passage\tests\test_pca_order.py ---
+CMD: C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe -X faulthandler -m pytest -q --basetemp tmp/pytest_single_16 src\emergent\fish_passage\tests\test_pca_order.py
+RC: 0
+STDOUT:
+..                                                                       [100%]
+2 passed in 0.24s
+
+STDERR:
+

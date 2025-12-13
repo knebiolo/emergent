@@ -1,0 +1,165 @@
+Discovered 34 test files
+
+Trying range 0:17 -> 17 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmpk2ugfr02.txt'
+Exit code 1
+--- output (first 2000 chars) ---
+.........EE...EEEEEEEEEEEEE.....                                         [100%]
+=================================== ERRORS ====================================
+_ ERROR at setup of test_extract_centerline_hecras_returns_none_for_small_plan _
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x000001DCBED71E40>
+when = 'setup'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+..\..\..\.conda\envs\emergent\Lib\site-packages\_pytest\runner.py:353: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+..\..\..\.conda\envs\emergent\Lib\site-packages\_pytest\runner.py:245: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\.conda\envs\emergent\Lib\site-packages\pluggy\_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\.conda\envs\emergent\Lib\site-packages\pluggy\_manager.py:120:
+--- end output ---
+
+Trying range 0:8 -> 8 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmp9jqqbjge.txt'
+Exit code 1
+--- output (first 2000 chars) ---
+.........EE...EE                                                         [100%]
+=================================== ERRORS ====================================
+_ ERROR at setup of test_extract_centerline_hecras_returns_none_for_small_plan _
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x000002226AC70D60>
+when = 'setup'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+..\..\..\.conda\envs\emergent\Lib\site-packages\_pytest\runner.py:353: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+..\..\..\.conda\envs\emergent\Lib\site-packages\_pytest\runner.py:245: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\.conda\envs\emergent\Lib\site-packages\pluggy\_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\.conda\envs\emergent\Lib\site-packages\pluggy\_manager.py:120:
+--- end output ---
+
+Trying range 0:4 -> 4 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmpzuciqjz9.txt'
+Exit code 0
+--- output (first 2000 chars) ---
+........                                                                 [100%]
+8 passed in 0.74s
+
+--- end output ---
+
+Trying range 4:6 -> 2 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmpakgl1nf1.txt'
+Exit code 1
+--- output (first 2000 chars) ---
+.EE                                                                      [100%]
+=================================== ERRORS ====================================
+_ ERROR at setup of test_extract_centerline_hecras_returns_none_for_small_plan _
+
+cls = <class '_pytest.runner.CallInfo'>
+func = <function call_and_report.<locals>.<lambda> at 0x000001F546565E40>
+when = 'setup'
+reraise = (<class '_pytest.outcomes.Exit'>, <class 'KeyboardInterrupt'>)
+
+    @classmethod
+    def from_call(
+        cls,
+        func: Callable[[], TResult],
+        when: Literal["collect", "setup", "call", "teardown"],
+        reraise: type[BaseException] | tuple[type[BaseException], ...] | None = None,
+    ) -> CallInfo[TResult]:
+        """Call func, wrapping the result in a CallInfo.
+    
+        :param func:
+            The function to call. Called without arguments.
+        :type func: Callable[[], _pytest.runner.TResult]
+        :param when:
+            The phase in which the function is called.
+        :param reraise:
+            Exception or exceptions that shall propagate if raised by the
+            function, instead of being wrapped in the CallInfo.
+        """
+        excinfo = None
+        instant = timing.Instant()
+        try:
+>           result: TResult | None = func()
+                                     ^^^^^^
+
+..\..\..\.conda\envs\emergent\Lib\site-packages\_pytest\runner.py:353: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+..\..\..\.conda\envs\emergent\Lib\site-packages\_pytest\runner.py:245: in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\.conda\envs\emergent\Lib\site-packages\pluggy\_hooks.py:512: in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\.conda\envs\emergent\Lib\site-packages\pluggy\_manager.py:120:
+--- end output ---
+
+Trying range 4:5 -> 1 files
+Running via runner: 'C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe' -X faulthandler tools/pytest_runner.py 'C:\Users\KEVIN~1.NEB\AppData\Local\Temp\tmp1ukgtic1.txt'
+Exit code 0
+--- output (first 2000 chars) ---
+.                                                                        [100%]
+1 passed in 0.58s
+
+--- end output ---
+
+Offending file: src\emergent\fish_passage\tests\test_extract_centerline_hecras_wrapper.py

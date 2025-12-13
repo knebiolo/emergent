@@ -1,0 +1,6 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.9, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\Kevin.Nebiolo\.conda\envs\emergent\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent
+configfile: pyproject.toml
+collecting ... 
