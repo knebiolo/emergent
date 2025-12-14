@@ -8,6 +8,9 @@ This file demonstrates the project's coding guidelines:
 """
 
 from typing import List, Tuple
+from types import SimpleNamespace
+from typing import Optional
+import importlib
 
 # Example: startup-only allocation
 _INITIAL_BUFFER_SIZE = 1024
@@ -53,3 +56,50 @@ def summarize_times(times: List[float]) -> Tuple[float, float]:
         if t > mx:
             mx = t
     return mn, mx
+
+
+def get_arr(use_cupy: Optional[bool] = None):
+    """Return the array module to use: numpy by default, cupy if available and requested.
+
+    Args:
+        use_cupy: If True, prefer cupy. If False, force numpy. If None, autodetect based on
+            whether cupy is importable.
+
+    Returns:
+        module: the array module (numpy or cupy-like API).
+    """
+    if use_cupy is False:
+        import numpy as _np
+        return _np
+    try:
+        if use_cupy is True:
+            cupy = importlib.import_module("cupy")
+            return cupy
+        # autodetect
+        cupy = importlib.import_module("cupy")
+        return cupy
+    except Exception:
+        import numpy as _np
+        return _np
+
+
+class Simulation:
+    """Minimal Simulation stub to act as an interim home for the sockeye monolith.
+
+    This placeholder provides only the attributes and methods needed for import-time
+    compatibility during the migration. Full behavior will be implemented by
+    decomposing the original `sockeye.simulation` into smaller pieces.
+    """
+    def __init__(self, config: Optional[dict] = None):
+        self.config = config or {}
+        self.hdf5 = None
+
+    def initialize(self):
+        """Initialize simulation resources (stub)."""
+        return True
+
+    def step(self):
+        """Advance simulation by one timestep (stub)."""
+        raise NotImplementedError("Simulation.step is a migration stub")
+
+
