@@ -126,15 +126,7 @@ def drag_and_battery(sog, heading, x_vel, y_vel, mask, density, surface_areas, d
     """
     from emergent.fish_passage import fatigue
 
-    # For exact parity during migration, if the legacy sockeye implementation
-    # is importable, delegate to it. This keeps behavior identical until the
-    # ported version is fully validated and can replace the legacy call-sites.
-    try:
-        from emergent.salmon_abm import sockeye as _sock
-        return _sock._drag_and_battery_numba(sog, heading, x_vel, y_vel, mask, float(density), surface_areas, drag_coeffs, wave_drag, swim_behav, battery.copy(), per_rec, ttf, float(dt), update_battery)
-    except Exception:
-        pass
-
+    # Use the pure fish_passage implementation (no delegation to legacy code).
     n = sog.size
     if swim_speeds_buf is None:
         swim_speeds_buf = np.zeros((n, 4), dtype=np.float64)
@@ -151,6 +143,9 @@ def drag_and_battery(sog, heading, x_vel, y_vel, mask, density, surface_areas, d
         n = battery.size
         new_batt = battery.copy().astype(np.float64)
         for i in range(n):
+            # Legacy loop skips inactive agents entirely
+            if not bool(mask[i]):
+                continue
             b = float(new_batt[i])
             if per_rec_arr.size == n and per_rec_arr[i] > 0.0:
                 b = b + float(per_rec_arr[i])
