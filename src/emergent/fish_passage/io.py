@@ -176,6 +176,13 @@ class HECRASMap:
             query = query.reshape(1, 2)
         if getattr(self, 'tree', None) is None:
             raise RuntimeError('IDW mapping requested but KDTree is unavailable (HECRAS plan tree build failed)')
+        # clamp k so we never request more neighbors than exist
+        try:
+            n_coords = self.coords.shape[0]
+        except Exception:
+            n_coords = None
+        if n_coords is not None and k is not None:
+            k = max(1, min(int(k), int(n_coords)))
         dists, inds = self.tree.query(query, k=k)
         if k == 1:
             dists = dists[:, None]
