@@ -78,3 +78,42 @@ def test_merged_battery_parity():
 
     got = fatigue.merged_battery(battery, per_rec, ttf, mask_sustained, dt)
     assert np.allclose(expected, got)
+
+
+def test_time_to_fatigue_basic():
+    s = np.array([0.5, 1.0, 2.0, 3.0])
+    mask_prolonged = np.array([True, False, True, False])
+    mask_sprint = np.array([False, True, False, True])
+    a_p, b_p = 0.1, -0.2
+    a_s, b_s = 0.2, -0.1
+
+    expected = None
+    try:
+        from emergent.salmon_abm.sockeye import _time_to_fatigue_numba as legacy_ttf
+        expected = legacy_ttf(s, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s)
+    except Exception:
+        expected = np.full_like(s, np.nan, dtype=float)
+        expected = np.where(mask_prolonged, np.exp(a_p + s * b_p), expected)
+        expected = np.where(mask_sprint, np.exp(a_s + s * b_s), expected)
+
+    got = fatigue.time_to_fatigue(s, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s)
+    assert np.allclose(expected, got, equal_nan=True)
+
+
+def test_bout_distance_basic():
+    prev_X = np.array([0.0, 1.0, -1.0])
+    X = np.array([1.0, 1.0, -2.0])
+    prev_Y = np.array([0.0, 0.0, 1.0])
+    Y = np.array([1.0, 2.0, 1.0])
+
+    expected = None
+    try:
+        from emergent.salmon_abm.sockeye import _bout_distance_numba as legacy_bd
+        expected = legacy_bd(prev_X, X, prev_Y, Y)
+    except Exception:
+        dx = prev_X - X
+        dy = prev_Y - Y
+        expected = np.sqrt(dx * dx + dy * dy)
+
+    got = fatigue.bout_distance(prev_X, X, prev_Y, Y)
+    assert np.allclose(expected, got)

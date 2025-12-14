@@ -112,3 +112,56 @@ if _HAS_NUMBA:
                 b = 1.0
             battery[i] = b
         return battery
+
+
+    def time_to_fatigue(swim_speeds: Sequence[float], mask_prolonged: Sequence[bool], mask_sprint: Sequence[bool], a_p: float, b_p: float, a_s: float, b_s: float) -> np.ndarray:
+        """Numpy fallback for `_time_to_fatigue_numba`.
+
+        Computes `ttf` using the legacy logic: ttf = exp(a + s*b) where the
+        prolonged mask uses (a_p, b_p) and the sprint mask uses (a_s, b_s).
+        If both masks are False, result is NaN for that index.
+        """
+        swim_speeds = np.asarray(swim_speeds, dtype=np.float64)
+        mask_prolonged = np.asarray(mask_prolonged, dtype=np.bool_)
+        mask_sprint = np.asarray(mask_sprint, dtype=np.bool_)
+
+        ttf = np.full_like(swim_speeds, np.nan, dtype=np.float64)
+        if np.any(mask_prolonged):
+            ttf = np.where(mask_prolonged, np.exp(a_p + swim_speeds * b_p), ttf)
+        if np.any(mask_sprint):
+            ttf = np.where(mask_sprint, np.exp(a_s + swim_speeds * b_s), ttf)
+        return ttf
+
+    if _HAS_NUMBA:
+        @njit(parallel=True, cache=True)
+        def time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s):
+            n = swim_speeds.shape[0]
+            ttf = np.empty(n, dtype=np.float64)
+            for i in prange(n):
+                ttf[i] = np.nan
+                s = swim_speeds[i]
+                if mask_prolonged[i]:
+                    ttf[i] = math.exp(a_p + s * b_p)
+                if mask_sprint[i]:
+                    ttf[i] = math.exp(a_s + s * b_s)
+            return ttf
+
+
+    def bout_distance(prev_X: Sequence[float], X: Sequence[float], prev_Y: Sequence[float], Y: Sequence[float]) -> np.ndarray:
+        """Vectorized distance between previous and current positions per agent."""
+        prev_X = np.asarray(prev_X, dtype=np.float64)
+        X = np.asarray(X, dtype=np.float64)
+        prev_Y = np.asarray(prev_Y, dtype=np.float64)
+        Y = np.asarray(Y, dtype=np.float64)
+        return np.sqrt((prev_X - X) ** 2 + (prev_Y - Y) ** 2)
+
+    if _HAS_NUMBA:
+        @njit(parallel=True, cache=True)
+        def bout_distance_numba(prev_X, X, prev_Y, Y):
+            n = prev_X.shape[0]
+            dist = np.empty(n, dtype=np.float64)
+            for i in prange(n):
+                dx = prev_X[i] - X[i]
+                dy = prev_Y[i] - Y[i]
+                dist[i] = math.sqrt(dx * dx + dy * dy)
+            return dist
