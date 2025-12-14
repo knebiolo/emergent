@@ -62,6 +62,79 @@ if _HAS_NUMBA:
             drags[i, 1] = dy
         return swim_speeds, bl_s, prolonged, sprint, sustained, drags
 
+    @njit(parallel=True, cache=True)
+    def _drag_and_battery_numba(sog, heading, x_vel, y_vel, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, max_s_U, max_p_U, battery, per_rec, ttf, dt, update_battery):
+        n = sog.size
+        swim_speeds = np.empty(n, dtype=np.float64)
+        bl_s = np.empty(n, dtype=np.float64)
+        prolonged = np.empty(n, dtype=np.bool_)
+        sprint = np.empty(n, dtype=np.bool_)
+        sustained = np.empty(n, dtype=np.bool_)
+        drags = np.zeros((n, 2), dtype=np.float64)
+        # compute swim/drag
+        for i in prange(n):
+            if not mask[i]:
+                swim_speeds[i] = 0.0
+                bl_s[i] = 0.0
+                prolonged[i] = False
+                sprint[i] = False
+                sustained[i] = False
+                drags[i, 0] = 0.0
+                drags[i, 1] = 0.0
+                continue
+            fx = sog[i] * np.cos(heading[i])
+            fy = sog[i] * np.sin(heading[i])
+            relx = fx - x_vel[i]
+            rely = fy - y_vel[i]
+            rel = np.hypot(relx, rely)
+            if rel < 1e-12:
+                rel = 1e-12
+            swim_speeds[i] = rel
+            bl_s[i] = rel
+            unitx = relx / rel
+            unity = rely / rel
+            relsq = rel * rel
+            pref = -0.5 * (density * 1000.0) * (surface_areas[i] / (100.0 ** 2)) * drag_coeffs[i] * relsq * wave_drag[i]
+            dx = pref * unitx
+            dy = pref * unity
+            if swim_behav[i] == 3:
+                mag = np.hypot(dx, dy)
+                if mag > 5.0:
+                    scale = 5.0 / mag
+                    dx *= scale
+                    dy *= scale
+            drags[i, 0] = dx
+            drags[i, 1] = dy
+        # battery update (in place)
+        batt = battery.copy()
+        if update_battery:
+            for i in prange(n):
+                if not mask[i]:
+                    continue
+                b = float(batt[i])
+                if per_rec is not None and per_rec.size == n and per_rec[i] > 0.0:
+                    b = b + float(per_rec[i])
+                else:
+                    t0 = float(ttf[i]) * b
+                    if t0 <= 0.0:
+                        b = 0.0
+                    else:
+                        t1 = t0 - dt
+                        ratio = t1 / t0
+                        if ratio < 0.0:
+                            ratio = 0.0
+                        b = b * ratio
+                if b < 0.0:
+                    b = 0.0
+                elif b > 1.0:
+                    b = 1.0
+                batt[i] = b
+        # legacy returns False for prolonged/sprint/sustained
+        prolonged = np.zeros(n, dtype=np.bool_)
+        sprint = np.zeros(n, dtype=np.bool_)
+        sustained = np.zeros(n, dtype=np.bool_)
+        return swim_speeds, bl_s, prolonged, sprint, sustained, drags, batt
+
 
 def merged_swim_drag_fatigue(sog, heading, x_vel, y_vel, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, max_s_U, max_p_U, battery, swim_speeds_buf):
     """Numpy fallback implementing merged swim/drag/fatigue logic.
@@ -135,37 +208,41 @@ def drag_and_battery(sog, heading, x_vel, y_vel, mask, density, surface_areas, d
         sog, heading, x_vel, y_vel, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, max_s_U, max_p_U, battery, swim_speeds_buf
     )
 
-    if update_battery:
-        # To ensure bit-for-bit parity with legacy `_drag_and_battery_numba`,
-        # perform the battery update in an explicit per-element loop using
-        # the same ordering of operations and branching.
-        per_rec_arr = np.asarray(per_rec) if per_rec is not None else np.zeros_like(battery)
-        n = battery.size
-        new_batt = battery.copy().astype(np.float64)
-        for i in range(n):
-            # Legacy loop skips inactive agents entirely
-            if not bool(mask[i]):
-                continue
-            b = float(new_batt[i])
-            if per_rec_arr.size == n and per_rec_arr[i] > 0.0:
-                b = b + float(per_rec_arr[i])
-            else:
-                t0 = float(ttf[i]) * b
-                if t0 <= 0.0:
-                    b = 0.0
-                else:
-                    t1 = t0 - float(dt)
-                    ratio = t1 / t0
-                    if ratio < 0.0:
-                        ratio = 0.0
-                    b = b * ratio
-            if b < 0.0:
-                b = 0.0
-            elif b > 1.0:
-                b = 1.0
-            new_batt[i] = b
+    if _HAS_NUMBA:
+        # Use the numba-accelerated single-pass implementation for speed.
+        ss, bl_s, prolonged, sprint, sustained, drags, new_batt = _drag_and_battery_numba(
+            sog, heading, x_vel, y_vel, np.asarray(mask, dtype=np.bool_), float(density), np.asarray(surface_areas, dtype=np.float64), np.asarray(drag_coeffs, dtype=np.float64), np.asarray(wave_drag, dtype=np.float64), np.asarray(swim_behav, dtype=np.int64), np.asarray(max_s_U, dtype=np.float64), np.asarray(max_p_U, dtype=np.float64), np.asarray(battery, dtype=np.float64), np.asarray(per_rec, dtype=np.float64) if per_rec is not None else np.zeros_like(battery), np.asarray(ttf, dtype=np.float64), float(dt), bool(update_battery)
+        )
     else:
-        new_batt = battery.copy()
+        if update_battery:
+            # Python fallback: explicit per-element loop matching legacy semantics
+            per_rec_arr = np.asarray(per_rec) if per_rec is not None else np.zeros_like(battery)
+            n = battery.size
+            new_batt = battery.copy().astype(np.float64)
+            for i in range(n):
+                # Legacy loop skips inactive agents entirely
+                if not bool(mask[i]):
+                    continue
+                b = float(new_batt[i])
+                if per_rec_arr.size == n and per_rec_arr[i] > 0.0:
+                    b = b + float(per_rec_arr[i])
+                else:
+                    t0 = float(ttf[i]) * b
+                    if t0 <= 0.0:
+                        b = 0.0
+                    else:
+                        t1 = t0 - float(dt)
+                        ratio = t1 / t0
+                        if ratio < 0.0:
+                            ratio = 0.0
+                        b = b * ratio
+                if b < 0.0:
+                    b = 0.0
+                elif b > 1.0:
+                    b = 1.0
+                new_batt[i] = b
+        else:
+            new_batt = battery.copy()
 
     # Legacy `_drag_and_battery_numba` returned False for prolonged/sprint/sustained
     # (caller computed thresholds externally). Ensure we match that interface.
