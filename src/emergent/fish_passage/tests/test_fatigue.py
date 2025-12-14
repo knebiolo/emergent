@@ -46,3 +46,35 @@ def test_calc_battery_edge_cases():
     expected = _legacy_calc(battery, per_rec, ttf, mask_sustained, dt)
     got = fatigue.calc_battery(battery, per_rec, ttf, mask_sustained, dt)
     assert np.allclose(expected, got)
+
+
+def test_merged_battery_parity():
+    battery = np.array([0.2, 0.9, 0.0, 0.5, 1.0])
+    per_rec = np.array([0.01, 0.1, 0.05, 0.02, 0.0])
+    ttf = np.array([1.0, 2.0, 0.0, 5.0, 10.0])
+    mask_sustained = np.array([False, True, False, False, False])
+    dt = 0.5
+
+    try:
+        from emergent.salmon_abm.sockeye import _merged_battery_numba as legacy_merged
+        expected = legacy_merged(battery.copy(), per_rec.copy(), ttf.copy(), mask_sustained.copy(), dt)
+    except Exception:
+        # fallback compute same as legacy numpy fallback
+        expected = battery.copy()
+        for i in range(expected.size):
+            if mask_sustained[i]:
+                expected[i] = expected[i] + per_rec[i]
+            else:
+                t0 = ttf[i] * expected[i]
+                if t0 <= 0.0:
+                    expected[i] = 0.0
+                else:
+                    t1 = t0 - dt
+                    ratio = t1 / t0
+                    if ratio < 0.0:
+                        ratio = 0.0
+                    expected[i] = expected[i] * ratio
+        np.clip(expected, 0.0, 1.0, out=expected)
+
+    got = fatigue.merged_battery(battery, per_rec, ttf, mask_sustained, dt)
+    assert np.allclose(expected, got)
