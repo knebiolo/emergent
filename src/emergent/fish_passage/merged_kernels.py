@@ -105,3 +105,78 @@ def merged_swim_drag_fatigue(sog, heading, x_vel, y_vel, mask, density, surface_
     # zero drags for inactive agents
     drags[~mask_arr] = 0.0
     return swim_speeds_masked, bl_s, prolonged, sprint, sustained, drags
+
+
+def wrap_merged_battery(battery, per_rec, ttf, mask_sustained, dt):
+    """Compatibility shim matching sockeye's `_wrap_merged_battery_numba` naming.
+
+    Delegates to `fatigue.merged_battery` to keep legacy call sites working.
+    """
+    from emergent.fish_passage import fatigue
+    return fatigue.merged_battery(battery, per_rec, ttf, mask_sustained, dt)
+
+
+def drag_and_battery(sog, heading, x_vel, y_vel, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, max_s_U, max_p_U, battery, per_rec, ttf, dt, update_battery=True, swim_speeds_buf=None):
+    """Public wrapper that computes swim speeds, drags and optionally updates battery.
+
+    This composes `merged_swim_drag_fatigue` and `fatigue.merged_battery` to provide
+    the single-pass API used by some legacy code paths.
+
+    Returns: (swim_speeds, bl_s, prolonged, sprint, sustained, drags, battery)
+    """
+    from emergent.fish_passage import fatigue
+
+    # For exact parity during migration, if the legacy sockeye implementation
+    # is importable, delegate to it. This keeps behavior identical until the
+    # ported version is fully validated and can replace the legacy call-sites.
+    try:
+        from emergent.salmon_abm import sockeye as _sock
+        return _sock._drag_and_battery_numba(sog, heading, x_vel, y_vel, mask, float(density), surface_areas, drag_coeffs, wave_drag, swim_behav, battery.copy(), per_rec, ttf, float(dt), update_battery)
+    except Exception:
+        pass
+
+    n = sog.size
+    if swim_speeds_buf is None:
+        swim_speeds_buf = np.zeros((n, 4), dtype=np.float64)
+
+    ss, bl_s, prolonged, sprint, sustained, drags = merged_swim_drag_fatigue(
+        sog, heading, x_vel, y_vel, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, max_s_U, max_p_U, battery, swim_speeds_buf
+    )
+
+    if update_battery:
+        # To ensure bit-for-bit parity with legacy `_drag_and_battery_numba`,
+        # perform the battery update in an explicit per-element loop using
+        # the same ordering of operations and branching.
+        per_rec_arr = np.asarray(per_rec) if per_rec is not None else np.zeros_like(battery)
+        n = battery.size
+        new_batt = battery.copy().astype(np.float64)
+        for i in range(n):
+            b = float(new_batt[i])
+            if per_rec_arr.size == n and per_rec_arr[i] > 0.0:
+                b = b + float(per_rec_arr[i])
+            else:
+                t0 = float(ttf[i]) * b
+                if t0 <= 0.0:
+                    b = 0.0
+                else:
+                    t1 = t0 - float(dt)
+                    ratio = t1 / t0
+                    if ratio < 0.0:
+                        ratio = 0.0
+                    b = b * ratio
+            if b < 0.0:
+                b = 0.0
+            elif b > 1.0:
+                b = 1.0
+            new_batt[i] = b
+    else:
+        new_batt = battery.copy()
+
+    # Legacy `_drag_and_battery_numba` returned False for prolonged/sprint/sustained
+    # (caller computed thresholds externally). Ensure we match that interface.
+    n = sog.size
+    prolonged = np.zeros(n, dtype=bool)
+    sprint = np.zeros(n, dtype=bool)
+    sustained = np.zeros(n, dtype=bool)
+
+    return ss, bl_s, prolonged, sprint, sustained, drags, new_batt
