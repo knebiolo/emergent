@@ -452,6 +452,101 @@ def initialize_hdf5(sim: Any, num_agents: int, num_timesteps: int, model_name: s
         pass
 
 
+def initialize_mental_map(sim: Any, avoid_cell_size: float = 5.0) -> None:
+    """Create per-agent memory maps under `memory/` in sim.hdf5.
+
+    The legacy implementation created one dataset per agent under 'memory',
+    sized according to the simulation `height`/`width` and `avoid_cell_size`.
+    This compact version computes a grid size, creates datasets, and zeroes them.
+    """
+    h5 = getattr(sim, 'hdf5', None)
+    if h5 is None:
+        raise RuntimeError('Simulation object must have an open `hdf5` file')
+
+    # determine map sizes
+    height = getattr(sim, 'height', None)
+    width = getattr(sim, 'width', None)
+    if height is None or width is None:
+        raise RuntimeError('Simulation must have `height` and `width` attributes for mental map initialization')
+
+    avoid_h = int(np.round(height / avoid_cell_size)) + 1
+    avoid_w = int(np.round(width / avoid_cell_size)) + 1
+
+    if 'memory' not in h5:
+        mem = h5.create_group('memory')
+    else:
+        mem = h5['memory']
+
+    num_agents = getattr(sim, 'num_agents', None)
+    if num_agents is None:
+        raise RuntimeError('Simulation must have `num_agents` attribute')
+
+    for i in range(int(num_agents)):
+        name = f"{i}"
+        if name not in mem:
+            mem.create_dataset(name, (avoid_h, avoid_w), dtype='f4')
+            mem[name][:, :] = np.zeros((avoid_h, avoid_w), dtype='f4')
+
+    # store transform metadata similar to legacy
+    try:
+        from affine import Affine
+        depth_aff = getattr(sim, 'depth_rast_transform', None)
+        if depth_aff is not None:
+            # store a simple representation
+            h5.attrs['mental_map_transform'] = str(depth_aff)
+    except Exception:
+        pass
+
+    try:
+        h5.flush()
+    except Exception:
+        pass
+
+
+def initialize_refugia_map(sim: Any, refugia_cell_size: float = 5.0) -> None:
+    """Create per-agent refugia rasters under `refugia/` in sim.hdf5.
+
+    Mirrors the legacy behavior: datasets per agent sized from simulation
+    dimensions and `refugia_cell_size`, initialized to zeros.
+    """
+    h5 = getattr(sim, 'hdf5', None)
+    if h5 is None:
+        raise RuntimeError('Simulation object must have an open `hdf5` file')
+
+    height = getattr(sim, 'height', None)
+    width = getattr(sim, 'width', None)
+    if height is None or width is None:
+        raise RuntimeError('Simulation must have `height` and `width` attributes for refugia map initialization')
+
+    refug_h = int(np.round(height / refugia_cell_size)) + 1
+    refug_w = int(np.round(width / refugia_cell_size)) + 1
+
+    if 'refugia' not in h5:
+        mem = h5.create_group('refugia')
+    else:
+        mem = h5['refugia']
+
+    num_agents = getattr(sim, 'num_agents', None)
+    if num_agents is None:
+        raise RuntimeError('Simulation must have `num_agents` attribute')
+
+    for i in range(int(num_agents)):
+        name = f"{i}"
+        if name not in mem:
+            mem.create_dataset(name, (refug_h, refug_w), dtype='f4')
+            mem[name][:, :] = np.zeros((refug_h, refug_w), dtype='f4')
+
+    try:
+        h5.attrs['refugia_map_transform'] = str(getattr(sim, 'depth_rast_transform', None))
+    except Exception:
+        pass
+
+    try:
+        h5.flush()
+    except Exception:
+        pass
+
+
 def timestep_flush(sim: Any, timestep: int, flush_interval: int = 100) -> None:
     """Write the current timestep slice of agent arrays from simulation into HDF5.
 

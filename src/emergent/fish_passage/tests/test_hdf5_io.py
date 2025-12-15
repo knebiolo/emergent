@@ -67,3 +67,32 @@ def test_enviro_import_with_array(tmp_path):
     assert np.allclose(read, arr)
 
     sim.hdf5.close()
+
+
+def test_initialize_mental_and_refugia_maps(tmp_path):
+    from emergent.fish_passage.io import initialize_mental_map, initialize_refugia_map
+
+    sim_file = tmp_path / 'sim_maps.h5'
+    class S:
+        pass
+
+    sim = S()
+    sim.hdf5 = h5py.File(str(sim_file), 'w')
+    sim.height = 40
+    sim.width = 60
+    sim.num_agents = 3
+    sim.depth_rast_transform = None
+
+    initialize_mental_map(sim, avoid_cell_size=10.0)
+    assert 'memory' in sim.hdf5
+    mem = sim.hdf5['memory']
+    assert '0' in mem
+    assert mem['0'].shape[0] > 0
+
+    initialize_refugia_map(sim, refugia_cell_size=15.0)
+    assert 'refugia' in sim.hdf5
+    ref = sim.hdf5['refugia']
+    assert '0' in ref
+    assert ref['0'].shape[0] > 0
+
+    sim.hdf5.close()
