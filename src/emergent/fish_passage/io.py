@@ -741,67 +741,6 @@ def initial_heading(sim: Any, default_heading: Optional[float] = None) -> np.nda
     """
     num_agents = int(getattr(sim, 'num_agents', 0))
     headings = None
-    def get_agent_flow_components(simulation: Any, k: int = None) -> Tuple[np.ndarray, np.ndarray]:
-        """Return per-agent flow components (vel_x, vel_y) preferring HECRAS mapping.
-
-        Strategy:
-        - If `simulation.use_hecras` and `hecras_plan_path` available, attempt to map
-          nodal `Velocity X`/`Velocity Y` fields to agent XY positions.
-        - Else, sample `environment/vel_x` and `environment/vel_y` rasters if present.
-        - Else, if only `vel_dir` raster exists, return unit vectors from direction.
-        - If none available, return zeros arrays.
-        """
-        n = int(getattr(simulation, 'num_agents', 0))
-        # try HECRAS mapping first
-        if getattr(simulation, 'use_hecras', False) and getattr(simulation, 'hecras_plan_path', None):
-            try:
-                pts = np.column_stack((simulation.X, simulation.Y))
-                k_ = getattr(simulation, 'hecras_k', 8) if k is None else k
-                vx = map_hecras_for_agents(simulation, pts, simulation.hecras_plan_path, field_names=['Velocity X'], k=k_)
-                vy = map_hecras_for_agents(simulation, pts, simulation.hecras_plan_path, field_names=['Velocity Y'], k=k_)
-                if isinstance(vx, dict):
-                    vx = np.asarray(vx.get('Velocity X'))
-                else:
-                    vx = np.asarray(vx)
-                if isinstance(vy, dict):
-                    vy = np.asarray(vy.get('Velocity Y'))
-                else:
-                    vy = np.asarray(vy)
-                if vx is not None and vy is not None and vx.size == n and vy.size == n:
-                    return np.asarray(vx, dtype=float), np.asarray(vy, dtype=float)
-            except Exception:
-                # fall through to raster sampling
-                pass
-
-        # raster fallback: try vel_x/vel_y datasets
-        env = getattr(simulation, 'hdf5', None)
-        if env is not None and 'environment' in env:
-            env_grp = env['environment']
-            if 'vel_x' in env_grp and 'vel_y' in env_grp:
-                try:
-                    # use sample_environment helper with transforms if present
-                    t_x = getattr(simulation, 'vel_x_rast_transform', getattr(simulation, 'depth_rast_transform', None))
-                    t_y = getattr(simulation, 'vel_y_rast_transform', getattr(simulation, 'depth_rast_transform', None))
-                    vx = sample_environment(simulation, t_x, 'vel_x')
-                    vy = sample_environment(simulation, t_y, 'vel_y')
-                    return np.asarray(vx, dtype=float), np.asarray(vy, dtype=float)
-                except Exception:
-                    pass
-
-            # if only vel_dir available, return unit vectors
-            if 'vel_dir' in env_grp:
-                try:
-                    t = getattr(simulation, 'vel_dir_rast_transform', getattr(simulation, 'depth_rast_transform', None))
-                    dirs = sample_environment(simulation, t, 'vel_dir')
-                    dirs = np.asarray(dirs, dtype=float)
-                    vx = np.cos(dirs)
-                    vy = np.sin(dirs)
-                    return vx, vy
-                except Exception:
-                    pass
-
-        # nothing available — return NaNs so callers can detect missing flow
-        return np.full(n, np.nan, dtype=float), np.full(n, np.nan, dtype=float)
 
     # If HECRAS mapping or raster sampling produced flow components, compute headings
     try:
