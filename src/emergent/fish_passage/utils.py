@@ -146,3 +146,55 @@ def get_arr(use_gpu: bool = False):
 			# fall back to numpy if cupy unavailable
 			pass
 	return np
+
+
+def precompute_pixel_indices(sim, mapping_keys: dict = None):
+	"""Precompute and cache row/col indices for common raster transforms on `sim`.
+
+	mapping_keys: optional dict mapping cache keys -> attribute name for transform
+	  e.g. {'depth': 'depth_rast_transform', 'vel': 'vel_mag_rast_transform'}
+
+	Stores result on `sim._pixel_index_cache` as dict[key] -> (rows, cols)
+	where rows/cols are int32 arrays matching `sim.X`/`sim.Y` shape.
+	"""
+	if mapping_keys is None:
+		mapping_keys = {
+			'depth': 'depth_rast_transform',
+			'vel': 'vel_mag_rast_transform',
+			'vel_dir': 'vel_dir_rast_transform',
+			'refugia': 'refugia_map_transform',
+			'mental_map': 'mental_map_transform',
+		}
+
+	cache = {}
+	X = getattr(sim, 'X', None)
+	Y = getattr(sim, 'Y', None)
+	if X is None or Y is None:
+		raise RuntimeError('Simulation object must provide X and Y arrays for precompute')
+
+	for key, attr in mapping_keys.items():
+		transform = getattr(sim, attr, None)
+		if transform is None:
+			cache[key] = (np.full_like(X, -1, dtype=np.int32), np.full_like(Y, -1, dtype=np.int32))
+			continue
+		try:
+			from emergent.fish_passage.geometry import geo_to_pixel_from_inv
+			from emergent.fish_passage.utils import get_inv_transform
+			inv = get_inv_transform(sim, transform)
+			rows, cols = geo_to_pixel_from_inv(inv, X, Y)
+		except (ValueError, TypeError, KeyError, IndexError, OSError) as e:
+			try:
+				# fallback to on-demand geo_to_pixel with transform
+				from emergent.fish_passage.geometry import geo_to_pixel
+				rows, cols = geo_to_pixel(transform, X, Y)
+			except Exception:
+				rows = np.full_like(X, -1, dtype=np.int32)
+				cols = np.full_like(Y, -1, dtype=np.int32)
+		cache[key] = (np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32))
+
+	try:
+		setattr(sim, '_pixel_index_cache', cache)
+	except Exception:
+		# best-effort: if sim not writable, return cache instead
+		return cache
+	return cache
