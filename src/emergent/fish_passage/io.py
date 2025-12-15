@@ -1241,10 +1241,18 @@ def compute_alongstream_raster(simulation, outlet_xy=None, depth_name='depth', w
     if outlet_xy is not None:
         ox, oy = outlet_xy
         try:
-            orow, ocol = geo_to_pixel(simulation.depth_rast_transform, [oy], [ox])
+            from emergent.fish_passage.geometry import geo_to_pixel_from_inv
+            from emergent.fish_passage.utils import get_inv_transform
+
+            inv = get_inv_transform(getattr(simulation, '__self__', None) or getattr(simulation, 'sim', None), simulation.depth_rast_transform)
+            orow, ocol = geo_to_pixel_from_inv(inv, [oy], [ox])
             orow = int(orow[0]); ocol = int(ocol[0])
         except Exception:
-            orow = None
+            try:
+                orow, ocol = geo_to_pixel(simulation.depth_rast_transform, [oy], [ox])
+                orow = int(orow[0]); ocol = int(ocol[0])
+            except Exception:
+                orow = None
         if orow is None or orow < 0 or orow >= h or ocol < 0 or ocol >= w or idx[orow, ocol] < 0:
             flat_xy = np.column_stack((env['x_coords'][:].ravel(), env['y_coords'][:].ravel()))
             dists = np.hypot(flat_xy[:,0] - ox, flat_xy[:,1] - oy)

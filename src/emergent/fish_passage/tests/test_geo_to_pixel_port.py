@@ -1,6 +1,8 @@
 import numpy as np
 from affine import Affine
 from emergent.fish_passage.geometry import geo_to_pixel
+from emergent.fish_passage.geometry import geo_to_pixel_from_inv
+from emergent.fish_passage.utils import get_inv_transform
 
 
 def test_geo_to_pixel_basic():
@@ -11,6 +13,10 @@ def test_geo_to_pixel_basic():
     rows, cols = geo_to_pixel(aff, xs, ys)
     assert np.array_equal(rows, np.array([0, 2, 5]))
     assert np.array_equal(cols, np.array([0, 2, 5]))
+    inv = get_inv_transform(None, aff)
+    r2, c2 = geo_to_pixel_from_inv(inv, xs, ys)
+    assert np.array_equal(rows, r2)
+    assert np.array_equal(cols, c2)
 
 
 def test_geo_to_pixel_scalar():
@@ -18,3 +24,7 @@ def test_geo_to_pixel_scalar():
     r, c = geo_to_pixel(aff, 3.0, 5.0)
     assert isinstance(r, (int, np.integer))
     assert isinstance(c, (int, np.integer))
+    inv = get_inv_transform(None, aff)
+    r2, c2 = geo_to_pixel_from_inv(inv, 3.0, 5.0)
+    assert r == int(r2)
+    assert c == int(c2)

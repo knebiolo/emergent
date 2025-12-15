@@ -4,6 +4,8 @@ import tempfile
 import os
 from emergent.fish_passage.io import enviro_import, sample_environment, initialize_hdf5
 from emergent.fish_passage.geometry import geo_to_pixel
+from emergent.fish_passage.geometry import geo_to_pixel_from_inv
+from emergent.fish_passage.utils import get_inv_transform
 
 
 class DummySim:
@@ -34,6 +36,11 @@ def test_sample_environment_array():
         assert vals.shape[0] == sim.num_agents
         # sample via geo_to_pixel to compare
         rows, cols = geo_to_pixel(sim.depth_rast_transform, sim.X, sim.Y)
+        # parity: cached inverse path should match direct geo_to_pixel
+        inv = get_inv_transform(None, sim.depth_rast_transform)
+        r2, c2 = geo_to_pixel_from_inv(inv, sim.X, sim.Y)
+        assert np.array_equal(rows, r2)
+        assert np.array_equal(cols, c2)
         expected = arr[np.clip(rows, 0, arr.shape[0]-1), np.clip(cols, 0, arr.shape[1]-1)].flatten()
         assert np.allclose(vals, expected)
     finally:
