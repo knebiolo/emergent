@@ -384,6 +384,219 @@ def map_hecras_to_env_rasters(sim: Any, plan_path: str, field_names: Sequence[st
     return True
 
 
+def initialize_hdf5(sim: Any, num_agents: int, num_timesteps: int, model_name: str = 'model') -> None:
+    """Create the `agent_data` group and expected datasets on `sim.hdf5`.
+
+    This is a compact, test-first implementation matching the legacy
+    dataset names and shapes. It will not overwrite existing datasets
+    unless they are missing.
+    """
+    if getattr(sim, 'hdf5', None) is None:
+        raise RuntimeError('Simulation object must have a writable `hdf5` attribute (h5py.File)')
+
+    h5 = sim.hdf5
+    if 'agent_data' not in h5:
+        agent_data = h5.create_group('agent_data')
+    else:
+        agent_data = h5['agent_data']
+
+    # helper to create dataset if missing
+    def _ensure(name, shape, dtype='f4'):
+        if name not in agent_data:
+            agent_data.create_dataset(name, shape, dtype=dtype)
+
+    _ensure('sex', (num_agents,))
+    _ensure('length', (num_agents,))
+    _ensure('ucrit', (num_agents,))
+    _ensure('weight', (num_agents,))
+    _ensure('body_depth', (num_agents,))
+    _ensure('too_shallow', (num_agents,))
+    _ensure('opt_wat_depth', (num_agents,))
+
+    tshape = (num_agents, num_timesteps)
+    _ensure('X', tshape)
+    _ensure('Y', tshape)
+    _ensure('Z', tshape)
+    _ensure('prev_X', tshape)
+    _ensure('prev_Y', tshape)
+    _ensure('heading', tshape)
+    _ensure('sog', tshape)
+    _ensure('ideal_sog', tshape)
+    _ensure('swim_speed', tshape)
+    _ensure('battery', tshape)
+    _ensure('swim_behav', tshape)
+    _ensure('swim_mode', tshape)
+    _ensure('recover_stopwatch', tshape)
+    _ensure('ttfr', tshape)
+    _ensure('time_out_of_water', tshape)
+    _ensure('drag', tshape)
+    _ensure('thrust', tshape)
+    _ensure('Hz', tshape)
+    _ensure('bout_no', tshape)
+    _ensure('dist_per_bout', tshape)
+    _ensure('bout_dur', tshape)
+    _ensure('time_of_jump', tshape)
+    _ensure('kcal', tshape)
+
+    # metadata attrs
+    try:
+        h5.attrs['simulation_name'] = f"{model_name} Fish Passage Simulation"
+        h5.attrs['num_agents'] = num_agents
+        h5.attrs['num_timesteps'] = num_timesteps
+    except Exception:
+        pass
+
+    try:
+        h5.flush()
+    except Exception:
+        pass
+
+
+def timestep_flush(sim: Any, timestep: int, flush_interval: int = 100) -> None:
+    """Write the current timestep slice of agent arrays from simulation into HDF5.
+
+    Expects that `sim` has attributes corresponding to agent arrays (e.g.
+    `X`, `Y`, `battery`, etc.) and that `sim.hdf5['agent_data']` exists with
+    matching datasets. Only datasets present are written. Periodically flushes
+    according to `flush_interval`.
+    """
+    h5 = getattr(sim, 'hdf5', None)
+    if h5 is None:
+        raise RuntimeError('Simulation object must have an open `hdf5` file')
+
+    if 'agent_data' not in h5:
+        raise RuntimeError('HDF5 file missing `agent_data` group; call initialize_hdf5 first')
+
+    ag = h5['agent_data']
+
+    # map of attribute name -> dataset name (here they match)
+    for name in list(ag.keys()):
+        try:
+            ds = ag[name]
+        except Exception:
+            continue
+        # skip static datasets (1D)
+        if ds.ndim != 2:
+            continue
+        # get array attribute
+        arr = getattr(sim, name, None)
+        if arr is None:
+            # allow some derived writes (e.g., drag computed as norm); skip if absent
+            continue
+        a = np.asarray(arr)
+        # If sim attribute is 2D (num_agents, num_timesteps), write the column
+        if a.ndim == 2 and a.shape[0] == ds.shape[0]:
+            if a.shape[1] > timestep:
+                try:
+                    ds[:, timestep] = a[:, timestep].astype('float32')
+                    continue
+                except Exception:
+                    pass
+        # If sim attribute is 1D (num_agents,), write whole column
+        if a.ndim == 1 and a.shape[0] == ds.shape[0]:
+            try:
+                ds[:, timestep] = a.astype('float32')
+                continue
+            except Exception:
+                pass
+        # fallback: try to flatten and broadcast
+        try:
+            ds[:, timestep] = a.reshape(ds.shape[0], -1)[:, 0].astype('float32')
+        except Exception:
+            continue
+
+    if flush_interval and (timestep % flush_interval == 0):
+        try:
+            h5.flush()
+        except Exception:
+            pass
+
+
+def enviro_import(sim: Any, data, surface_type: str, transform: Optional[Any] = None, no_data_value: Optional[float] = None) -> None:
+    """Import an environmental raster into `sim.hdf5['environment']`.
+
+    This compact implementation accepts either a NumPy array `data` (height, width)
+    or a path to a raster file (will attempt to use rasterio). It will create
+    `x_coords`/`y_coords` if missing when provided a transform or when `data` is a
+    grid and `transform` is provided.
+    """
+    h5 = getattr(sim, 'hdf5', None)
+    if h5 is None:
+        raise RuntimeError('Simulation object must have an open `hdf5` file')
+
+    # Ensure environment group
+    if 'environment' not in h5:
+        env = h5.create_group('environment')
+    else:
+        env = h5['environment']
+
+    arr = None
+    height = width = None
+    # If caller provided a numpy array
+    if isinstance(data, (list, tuple)) or hasattr(data, 'ndim'):
+        arr = np.asarray(data)
+        if arr.ndim != 2:
+            raise ValueError('Numeric environment data must be 2D (height, width)')
+        height, width = arr.shape
+    else:
+        # data is likely a path; attempt to use rasterio if available
+        try:
+            import rasterio
+        except Exception:
+            raise RuntimeError('rasterio required to read raster file paths')
+        with rasterio.open(str(data)) as src:
+            arr = src.read(1)
+            height, width = arr.shape
+            if transform is None:
+                transform = src.transform
+            if no_data_value is None:
+                no_data_value = src.nodatavals[0] if src.nodatavals else None
+
+    # create x/y coords if missing and a transform is available
+    if 'x_coords' not in h5 or 'y_coords' not in h5:
+        if transform is not None and height is not None and width is not None:
+            # build simple x/y grids using affine if provided
+            try:
+                from emergent.fish_passage.geometry import pixel_to_geo
+                cols = np.arange(width, dtype=np.float64)
+                rows = np.arange(height, dtype=np.float64)
+                col_grid, row_grid = np.meshgrid(cols, rows)
+                xs, ys = pixel_to_geo(transform, row_grid, col_grid)
+                h5.create_dataset('x_coords', data=xs.astype('float32'))
+                h5.create_dataset('y_coords', data=ys.astype('float32'))
+            except Exception:
+                # fallback: simple index grid
+                xs = np.tile(np.arange(width, dtype=np.float32), (height, 1))
+                ys = np.tile(np.arange(height, dtype=np.float32).reshape((height, 1)), (1, width))
+                h5.create_dataset('x_coords', data=xs)
+                h5.create_dataset('y_coords', data=ys)
+
+    # write the raster into environment group
+    name = surface_type
+    if name in env:
+        del env[name]
+    env.create_dataset(name, (height, width), dtype='f4')
+    env[name][:, :] = np.asarray(arr).astype('float32')
+
+    # record transforms if provided
+    if transform is not None:
+        try:
+            h5.attrs[f'{surface_type}_transform'] = str(transform)
+        except Exception:
+            pass
+
+    if no_data_value is not None:
+        try:
+            h5.attrs['no_data_value'] = float(no_data_value)
+        except Exception:
+            pass
+
+    try:
+        h5.flush()
+    except Exception:
+        pass
+
+
 def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, max_nodes=5000, raster_fallback_resolution=5.0, verbose=False, timestep=0):
     """Vector-first wetted perimeter extraction with raster fallback.
 
