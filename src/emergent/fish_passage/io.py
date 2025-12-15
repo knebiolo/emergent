@@ -452,6 +452,68 @@ def initialize_hdf5(sim: Any, num_agents: int, num_timesteps: int, model_name: s
         pass
 
 
+def sample_environment(sim: Any, transform, raster_name: str):
+    """Sample raster values at agent X/Y positions.
+
+    Parity-focused port of legacy `sample_environment`.
+    Accepts `sim` (object with `hdf5`, `X`, `Y`, `num_agents`) and an
+    affine `transform` and raster dataset name. Returns a flattened array
+    of length `sim.num_agents` of sampled values.
+    """
+    from emergent.fish_passage.geometry import geo_to_pixel
+
+    rows, cols = geo_to_pixel(transform, sim.X, sim.Y)
+
+    # prefer cache if present
+    cache = getattr(sim, '_env_cache', None)
+    if cache is not None and raster_name in cache and cache[raster_name] is not None:
+        data = cache[raster_name]
+        rows = np.clip(np.round(rows).astype(int), 0, data.shape[0] - 1)
+        cols = np.clip(np.round(cols).astype(int), 0, data.shape[1] - 1)
+
+        rmin, rmax = rows.min(), rows.max()
+        cmin, cmax = cols.min(), cols.max()
+        if (rmax - rmin + 1) * (cmax - cmin + 1) <= max(4 * sim.num_agents, 256):
+            block = data[rmin:rmax+1, cmin:cmax+1]
+            vals = block[rows - rmin, cols - cmin]
+            return np.asarray(vals).flatten()
+
+        vals = data[rows, cols]
+        return np.asarray(vals).flatten()
+
+    # fallback to hdf5 reads
+    env = sim.hdf5.get('environment', None)
+    if env is None:
+        return np.full(getattr(sim, 'num_agents', rows.size), np.nan, dtype=float)
+
+    # allow dataset to be specified as 'depth' or full path
+    raster_dataset = env[raster_name] if raster_name in env else sim.hdf5.get(f'environment/{raster_name}')
+
+    rows = np.clip(np.round(rows).astype(int), 0, raster_dataset.shape[0] - 1)
+    cols = np.clip(np.round(cols).astype(int), 0, raster_dataset.shape[1] - 1)
+
+    rmin, rmax = rows.min(), rows.max()
+    cmin, cmax = cols.min(), cols.max()
+    if (rmax - rmin + 1) * (cmax - cmin + 1) <= max(4 * getattr(sim, 'num_agents', rows.size), 256):
+        block = raster_dataset[rmin:rmax+1, cmin:cmax+1]
+        vals = block[rows - rmin, cols - cmin]
+        return np.asarray(vals).flatten()
+
+    # grouped-row efficient indexing fallback: read by rows
+    try:
+        h5idx = getattr(sim, '_h5_advanced_index', None)
+        if h5idx is not None:
+            return np.asarray(h5idx(raster_dataset, rows, cols)).flatten()
+    except Exception:
+        pass
+
+    # final fallback: iterate
+    out = np.empty(rows.shape[0], dtype=float)
+    for i in range(rows.shape[0]):
+        out[i] = raster_dataset[int(rows[i]), int(cols[i])]
+    return out
+
+
 def initialize_mental_map(sim: Any, avoid_cell_size: float = 5.0) -> None:
     """Create per-agent memory maps under `memory/` in sim.hdf5.
 
