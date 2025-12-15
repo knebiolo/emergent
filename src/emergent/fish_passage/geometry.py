@@ -84,6 +84,21 @@ def geo_to_pixel(transform, X, Y) -> Tuple[np.ndarray, np.ndarray]:
     return rows, cols
 
 
+def geo_to_pixel_from_inv(inv, X, Y):
+    """Convert coordinates to pixel indices using precomputed inverse affine `inv`.
+
+    This is a vectorized helper matching the legacy implementation used across
+    the codebase. It expects `inv` to be an Affine-like object with numeric
+    attributes `a,b,c,d,e,f` and returns integer row, col arrays rounded to
+    nearest integers.
+    """
+    xs = np.asarray(X, dtype=float)
+    ys = np.asarray(Y, dtype=float)
+    cols = inv.c + inv.a * (xs + 0.0) + inv.b * (ys + 0.0)
+    rows = inv.f + inv.d * (xs + 0.0) + inv.e * (ys + 0.0)
+    return np.rint(rows).astype(int), np.rint(cols).astype(int)
+
+
 def compute_affine_from_hecras(coords, target_cell_size=None):
     """Compute a conservative Affine transform from irregular HECRAS cell centers.
 

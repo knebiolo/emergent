@@ -1,6 +1,13 @@
 """fish_passage module
 
-Minimal scaffold following project coding policies.
+Public helpers re-exported to simplify incremental porting from legacy modules.
 """
 
-__all__ = ["core"]
+from .geometry import geo_to_pixel, pixel_to_geo, geo_to_pixel_from_inv, compute_affine_from_hecras
+
+__all__ = [
+	"geo_to_pixel",
+	"pixel_to_geo",
+	"geo_to_pixel_from_inv",
+	"compute_affine_from_hecras",
+]
