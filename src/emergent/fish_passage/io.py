@@ -499,9 +499,11 @@ def sample_environment(sim: Any, transform, raster_name: str):
     affine `transform` and raster dataset name. Returns a flattened array
     of length `sim.num_agents` of sampled values.
     """
-    from emergent.fish_passage.geometry import geo_to_pixel
+    from emergent.fish_passage.geometry import geo_to_pixel_from_inv
+    from emergent.fish_passage.utils import get_inv_transform
 
-    rows, cols = geo_to_pixel(transform, sim.X, sim.Y)
+    inv = get_inv_transform(getattr(transform, '__self__', None) or getattr(sim, 'sim', None), transform)
+    rows, cols = geo_to_pixel_from_inv(inv, sim.X, sim.Y)
 
     # prefer cache if present
     cache = getattr(sim, '_env_cache', None)
@@ -647,8 +649,10 @@ def update_mental_map(sim: Any, current_timestep: int, raster_name: str = 'depth
         values = np.full(int(num_agents), np.nan, dtype=float)
 
     # compute mental map indices using geo_to_pixel
-    from emergent.fish_passage.geometry import geo_to_pixel
-    rows, cols = geo_to_pixel(transform, sim.X, sim.Y)
+    from emergent.fish_passage.geometry import geo_to_pixel_from_inv
+    from emergent.fish_passage.utils import get_inv_transform
+    inv = get_inv_transform(getattr(transform, '__self__', None) or getattr(sim, 'sim', None), transform)
+    rows, cols = geo_to_pixel_from_inv(inv, sim.X, sim.Y)
 
     # per-agent writes
     for i in range(int(num_agents)):
@@ -706,8 +710,10 @@ def update_refugia_map(sim: Any, current_velocity: float = None, raster_name: st
     except Exception:
         values = np.full(int(num_agents), np.nan, dtype=float)
 
-    from emergent.fish_passage.geometry import geo_to_pixel
-    rows, cols = geo_to_pixel(transform, sim.X, sim.Y)
+    from emergent.fish_passage.geometry import geo_to_pixel_from_inv
+    from emergent.fish_passage.utils import get_inv_transform
+    inv = get_inv_transform(getattr(transform, '__self__', None) or getattr(sim, 'sim', None), transform)
+    rows, cols = geo_to_pixel_from_inv(inv, sim.X, sim.Y)
 
     for i in range(int(num_agents)):
         name = f"{i}"
