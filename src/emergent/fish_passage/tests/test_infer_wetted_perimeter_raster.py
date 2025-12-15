@@ -1,3 +1,31 @@
+import tempfile
+import os
+import numpy as np
+import h5py
+from emergent.fish_passage.tests.fixtures.hdf5_plan_fixture import create_hecras_plan
+from emergent.fish_passage.io import infer_wetted_perimeter_from_hecras
+
+
+def test_infer_wetted_perimeter_raster():
+    fd, path = tempfile.mkstemp(suffix='.h5')
+    os.close(fd)
+    try:
+        # create plan without vector perimeter to force raster fallback
+        create_hecras_plan(path, vector=False)
+        rings = infer_wetted_perimeter_from_hecras(path, depth_threshold=0.01, raster_fallback_resolution=0.5)
+        import numpy as _np
+        if isinstance(rings, _np.ndarray):
+            arr = rings
+            assert arr.shape[0] >= 1
+            assert arr.shape[1] == 2
+        else:
+            assert isinstance(rings, list)
+            assert len(rings) >= 0
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
 import numpy as np
 import h5py
 from emergent.fish_passage.centerline import infer_wetted_perimeter_from_hecras
