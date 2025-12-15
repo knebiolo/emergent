@@ -17,31 +17,29 @@ Notes:
 - Avoid dynamic allocations at runtime where possible; allocate buffers during initialization.
 """
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
-import numpy as np
+"""
+This module forwards HECRAS-specific responsibilities to the centralized
+implementation in `emergent.fish_passage.io` to avoid duplicated logic.
 
+The original `HECRASMap` lived in multiple places; prefer the tested
+implementation in `io.HECRASMap` and adapter helpers like
+`map_hecras_for_agents`.
+"""
 
-@dataclass
-class HECRASMap:
-  """Lightweight container caching coordinates and field arrays for HECRAS mapping.
+from typing import Any
+from emergent.fish_passage.io import HECRASMap as IO_HECRASMap, map_hecras_for_agents
 
-  This is a minimal stub to allow imports and will be filled in during the full port.
-  """
-  coords: Optional[np.ndarray] = None
-  fields: Dict[str, np.ndarray] = None
+# Thin wrapper for compatibility with older imports. Use IO_HECRASMap directly
+# in new code; this module remains to avoid wide import churn.
 
-  def map_point(self, x: float, y: float) -> Dict[str, Any]:
-    """Return a dictionary of mapped field values for a point (x,y).
+def HECRASMap(*args, **kwargs) -> IO_HECRASMap:
+    """Return an instance of the canonical HECRASMap implementation.
 
-    Stub implementation: returns empty dict if no fields available.
+    This wrapper preserves the simple constructor signature used by callers
+    while ensuring only one canonical implementation exists.
     """
-    if not self.fields:
-      return {}
-    # naive nearest neighbor using simple euclidean distance over coords
-    if self.coords is None or len(self.coords) == 0:
-      return {}
-    dists = np.sum((self.coords - np.array([x, y])) ** 2, axis=1)
-    idx = int(np.argmin(dists))
-    return {k: v[idx] for k, v in self.fields.items()}
+    return IO_HECRASMap(*args, **kwargs)
+
+
+__all__ = ['HECRASMap', 'map_hecras_for_agents']
 
