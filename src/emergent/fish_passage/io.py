@@ -514,6 +514,258 @@ def sample_environment(sim: Any, transform, raster_name: str):
     return out
 
 
+def boundary_surface(sim: Any, wetted_name: str = 'wetted', distance_name: str = 'distance_to') -> None:
+    """Compute distance-to-boundary raster from a binary `wetted` raster and store in environment.
+
+    This is a compact parity implementation: where `wetted` is True, compute
+    distance to the nearest non-wetted cell along raster connectivity using
+    Euclidean distance on the raster grid; non-wetted cells get NaN.
+    """
+    h5 = getattr(sim, 'hdf5', None)
+    if h5 is None:
+        raise RuntimeError('Simulation object must have an open `hdf5` file')
+
+    env = h5.get('environment', None)
+    if env is None or wetted_name not in env:
+        raise RuntimeError(f"Environment raster '{wetted_name}' missing")
+
+    wetted = np.asarray(env[wetted_name])
+    # create boolean mask of wetted cells
+    mask = np.asarray(wetted, dtype=bool)
+
+    # compute distance transform on inverted mask (distance to nearest False)
+    try:
+        from scipy.ndimage import distance_transform_edt
+        # distance in pixels from wetted cells to nearest non-wetted cell
+        dist = distance_transform_edt(mask).astype('f4')
+    except Exception:
+        # fallback: naive per-pixel loop (O(n^3) worst-case) for tiny rasters
+        h, w = mask.shape
+        dist = np.full((h, w), np.inf, dtype='f4')
+        false_idxs = np.argwhere(~mask)
+        true_idxs = np.argwhere(mask)
+        if false_idxs.size == 0:
+            # no boundary -> distances are inf; represent as NaN
+            dist = np.full((h, w), np.nan, dtype='f4')
+        else:
+            for r, c in true_idxs:
+                dif = false_idxs - np.array([r, c])
+                d2 = np.sum(dif * dif, axis=1)
+                d = np.sqrt(d2).min()
+                dist[r, c] = float(d)
+
+    # Make non-wetted cells NaN to mirror legacy semantics
+    out = np.full_like(dist, np.nan, dtype='f4')
+    out[mask] = dist[mask]
+
+    if 'environment' not in h5:
+        env = h5.create_group('environment')
+    else:
+        env = h5['environment']
+
+    if distance_name in env:
+        del env[distance_name]
+    env.create_dataset(distance_name, data=out, dtype='f4')
+    try:
+        h5.flush()
+    except Exception:
+        pass
+
+
+def update_mental_map(sim: Any, current_timestep: int, raster_name: str = 'depth') -> None:
+    """Update per-agent mental maps stored under `memory/` in sim.hdf5.
+
+    Behavior mirrors legacy semantics at a compact level:
+    - Ensure `memory/<agent>` datasets exist (created by `initialize_mental_map`).
+    - Use `sim.mental_map_transform` or `sim.depth_rast_transform` to map agent
+      geographic positions into mental-map cell indices.
+    - For each agent, sample the requested raster (using `sample_environment`) and
+      write that scalar into the agent's memory cell.
+    """
+    h5 = getattr(sim, 'hdf5', None)
+    if h5 is None:
+        raise RuntimeError('Simulation object must have an open `hdf5` file')
+
+    # prepare memory group
+    if 'memory' not in h5:
+        raise RuntimeError('Memory maps not initialized; call initialize_mental_map first')
+    mem = h5['memory']
+
+    num_agents = getattr(sim, 'num_agents', None)
+    if num_agents is None:
+        raise RuntimeError('Simulation must have `num_agents` attribute')
+
+    # choose transform for mental map indexing
+    transform = getattr(sim, 'mental_map_transform', getattr(sim, 'depth_rast_transform', None))
+    if transform is None:
+        raise RuntimeError('No affine transform available for mental map sampling')
+
+    # sample requested raster values at agent positions using existing helper
+    try:
+        values = sample_environment(sim, transform, raster_name)
+    except Exception:
+        # If sampling fails, set NaNs
+        values = np.full(int(num_agents), np.nan, dtype=float)
+
+    # compute mental map indices using geo_to_pixel
+    from emergent.fish_passage.geometry import geo_to_pixel
+    rows, cols = geo_to_pixel(transform, sim.X, sim.Y)
+
+    # per-agent writes
+    for i in range(int(num_agents)):
+        name = f"{i}"
+        if name not in mem:
+            # create a small default memory if missing
+            h, w = max(3, int(np.round(getattr(sim, 'height', 10) / 5))), max(3, int(np.round(getattr(sim, 'width', 10) / 5)))
+            mem.create_dataset(name, (h, w), dtype='f4')
+            mem[name][:, :] = np.zeros((h, w), dtype='f4')
+
+        ds = mem[name]
+        # map row/col into ds bounds
+        r = int(np.clip(int(round(rows[i])), 0, ds.shape[0] - 1))
+        c = int(np.clip(int(round(cols[i])), 0, ds.shape[1] - 1))
+        try:
+            ds[r, c] = float(values[i])
+        except Exception:
+            # skip write if value not scalar
+            continue
+
+    try:
+        h5.flush()
+    except Exception:
+        pass
+
+
+def update_refugia_map(sim: Any, current_velocity: float = None, raster_name: str = 'depth') -> None:
+    """Update per-agent refugia maps stored under `refugia/` in sim.hdf5.
+
+    Compact parity implementation:
+    - Ensures `refugia/<agent>` datasets exist (created by `initialize_refugia_map`).
+    - Uses `sim.refugia_map_transform` or `sim.depth_rast_transform` to map agent
+      positions into refugia-map cell indices.
+    - Samples `raster_name` via `sample_environment` and writes scalar into
+      refugia per-agent dataset at the computed cell.
+    """
+    h5 = getattr(sim, 'hdf5', None)
+    if h5 is None:
+        raise RuntimeError('Simulation object must have an open `hdf5` file')
+
+    if 'refugia' not in h5:
+        raise RuntimeError('Refugia maps not initialized; call initialize_refugia_map first')
+    ref = h5['refugia']
+
+    num_agents = getattr(sim, 'num_agents', None)
+    if num_agents is None:
+        raise RuntimeError('Simulation must have `num_agents` attribute')
+
+    transform = getattr(sim, 'refugia_map_transform', getattr(sim, 'depth_rast_transform', None))
+    if transform is None:
+        raise RuntimeError('No affine transform available for refugia map sampling')
+
+    try:
+        values = sample_environment(sim, transform, raster_name)
+    except Exception:
+        values = np.full(int(num_agents), np.nan, dtype=float)
+
+    from emergent.fish_passage.geometry import geo_to_pixel
+    rows, cols = geo_to_pixel(transform, sim.X, sim.Y)
+
+    for i in range(int(num_agents)):
+        name = f"{i}"
+        if name not in ref:
+            h, w = max(3, int(np.round(getattr(sim, 'height', 10) / 5))), max(3, int(np.round(getattr(sim, 'width', 10) / 5)))
+            ref.create_dataset(name, (h, w), dtype='f4')
+            ref[name][:, :] = np.zeros((h, w), dtype='f4')
+        ds = ref[name]
+        r = int(np.clip(int(round(rows[i])), 0, ds.shape[0] - 1))
+        c = int(np.clip(int(round(cols[i])), 0, ds.shape[1] - 1))
+        try:
+            ds[r, c] = float(values[i])
+        except Exception:
+            continue
+
+    try:
+        h5.flush()
+    except Exception:
+        pass
+
+
+def initial_heading(sim: Any, default_heading: Optional[float] = None) -> np.ndarray:
+    """Initialize agent headings.
+
+    Strategy:
+    - If `environment/vel_dir` raster exists, sample it with `sample_environment`.
+    - Else if HECRAS is enabled and a hecras adapter is registered, map `vel_x` and `vel_y` to agents and compute `atan2`.
+    - Else, use `default_heading` if provided, otherwise NaN.
+
+    Writes into `agent_data/heading` first column if present and returns heading array.
+    """
+    num_agents = int(getattr(sim, 'num_agents', 0))
+    headings = None
+
+    # HECRAS-first: try mapping vel_x/vel_y to agents
+    if getattr(sim, 'use_hecras', False) and getattr(sim, 'hecras_plan_path', None):
+        try:
+            pts = np.column_stack((sim.X, sim.Y))
+            vx = map_hecras_for_agents(sim, pts, sim.hecras_plan_path, field_names=['Velocity X'], k=getattr(sim, 'hecras_k', 8))
+            vy = map_hecras_for_agents(sim, pts, sim.hecras_plan_path, field_names=['Velocity Y'], k=getattr(sim, 'hecras_k', 8))
+            if isinstance(vx, dict):
+                vx = np.asarray(vx.get('Velocity X'))
+            else:
+                vx = np.asarray(vx)
+            if isinstance(vy, dict):
+                vy = np.asarray(vy.get('Velocity Y'))
+            else:
+                vy = np.asarray(vy)
+            headings = np.mod(np.arctan2(vy, vx), 2 * np.pi)
+        except Exception:
+            headings = None
+
+    # raster fallback
+    if headings is None or np.any(np.isnan(headings)):
+        env = getattr(sim, 'hdf5', None)
+        has_raster = False
+        if env is not None and 'environment' in env and 'vel_dir' in env['environment']:
+            has_raster = True
+        if has_raster:
+            try:
+                transform = getattr(sim, 'vel_dir_rast_transform', getattr(sim, 'depth_rast_transform', None))
+                vals = sample_environment(sim, transform, 'vel_dir')
+                headings = np.mod(np.asarray(vals, dtype=float), 2 * np.pi)
+            except Exception:
+                headings = None
+
+    # last resort: default or NaN
+    if headings is None:
+        if default_heading is not None:
+            headings = np.full(num_agents, float(default_heading), dtype=float)
+        else:
+            headings = np.full(num_agents, np.nan, dtype=float)
+
+    # Write to agent_data if present
+    try:
+        h5 = sim.hdf5
+        if 'agent_data' in h5 and 'heading' in h5['agent_data']:
+            ds = h5['agent_data/heading']
+            # write first column if ds has timesteps
+            if ds.ndim == 2:
+                ds[:, 0] = np.asarray(headings, dtype='f4')
+            else:
+                ds[:] = np.asarray(headings, dtype='f4')
+    except Exception:
+        pass
+
+    try:
+        if getattr(sim, 'hdf5', None) is not None:
+            sim.hdf5.flush()
+    except Exception:
+        pass
+
+    return headings
+
+
+
+
 def initialize_mental_map(sim: Any, avoid_cell_size: float = 5.0) -> None:
     """Create per-agent memory maps under `memory/` in sim.hdf5.
 
