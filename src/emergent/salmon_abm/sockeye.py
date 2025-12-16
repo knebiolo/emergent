@@ -2480,6 +2480,23 @@ def _wrap_time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b
             # As a last resort, re-raise to surface the error
             raise
 
+
+def _wrap_bout_distance_numba(prev_X, X, prev_Y, Y):
+    """Wrapper delegating to `fish_passage.fatigue.bout_distance`.
+
+    Maintains the legacy function name while forwarding to the canonical
+    implementation in `fish_passage`.
+    """
+    try:
+        from emergent.fish_passage.fatigue import bout_distance as _bout
+        return _bout(prev_X, X, prev_Y, Y)
+    except Exception:
+        # Fallback to warmed numba variant if available
+        try:
+            return _bout_distance_numba(prev_X, X, prev_Y, Y)
+        except Exception:
+            raise
+
 # Optional merged drag + battery kernel (single-pass). Not wired automatically; available for experiments.
 if _HAS_NUMBA:
     @njit(parallel=True, cache=True)

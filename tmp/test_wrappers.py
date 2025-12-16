@@ -36,3 +36,14 @@ try:
     print('ttf:', ttf)
 except Exception as e:
     print('time_to_fatigue wrapper raised:', repr(e))
+
+print('\nTesting _wrap_bout_distance_numba...')
+try:
+    prev_X = np.array([0.0, 1.0, 2.0])
+    X = np.array([0.1, 1.2, 1.8])
+    prev_Y = np.array([0.0, 0.0, 0.0])
+    Y = np.array([0.0, 0.5, 0.0])
+    d = sockeye._wrap_bout_distance_numba(prev_X, X, prev_Y, Y)
+    print('bout distances:', d)
+except Exception as e:
+    print('bout_distance wrapper raised:', repr(e))
