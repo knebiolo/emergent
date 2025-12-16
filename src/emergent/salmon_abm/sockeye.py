@@ -374,73 +374,9 @@ def compute_schooling_metrics_biological(positions, headings, body_lengths, beha
             'separation_penalty': -1 to 0 (crowding penalty)
             'overall_schooling': combined score
     """
-    if alive_mask is not None:
-        positions = positions[alive_mask]
-        headings = headings[alive_mask]
-        body_lengths = body_lengths[alive_mask]
-    
-    N = len(positions)
-    if N == 0:
-        return {'cohesion_score': 0, 'alignment_score': 0, 'separation_penalty': 0, 'overall_schooling': 0}
-    
-    # Dynamic cohesion radius based on threat level
-    threat = behavioral_weights.threat_level
-    cohesion_radius_BL = (
-        behavioral_weights.cohesion_radius_relaxed * (1 - threat) +
-        behavioral_weights.cohesion_radius_threatened * threat
-    )
-    
-    # Build KDTree for efficient neighbor queries
-    from scipy.spatial import cKDTree
-    tree = _safe_build_kdtree(positions, name='neighbor_tree')
-    
-    # Fixed 1-meter radius for all agents (performance optimization)
-    search_radius = 1.0
-    
-    # Get all neighbors for all agents at once
-    neighbor_lists = tree.query_ball_point(positions, r=search_radius)
-    
-    # Preallocate arrays
-    cohesion_scores = np.zeros(N)
-    alignment_scores = np.full(N, -0.5)  # Default to isolation penalty
-    separation_penalties = np.zeros(N)
-    
-    # Vectorized separation: find nearest neighbor for all agents at once
-    nearest_dists, nearest_indices = tree.query(positions, k=2)  # k=2 includes self
-    if N > 1:
-        nearest_dists = nearest_dists[:, 1]  # Exclude self (index 0)
-        mean_BL = np.mean(body_lengths)
-        separation_mask = nearest_dists < mean_BL
-        separation_penalties[separation_mask] = -(mean_BL - nearest_dists[separation_mask]) / mean_BL
-        
-        ideal_dist = 2.0 * mean_BL * (1 - 0.5 * threat)
-        
-        # Convert neighbor_lists to flattened arrays for numba
-        neighbor_data = []
-        neighbor_offsets = [0]
-        for neighbors in neighbor_lists:
-            neighbor_data.extend(neighbors)
-            neighbor_offsets.append(len(neighbor_data))
-        neighbor_data = np.array(neighbor_data, dtype=np.int32)
-        neighbor_offsets = np.array(neighbor_offsets, dtype=np.int32)
-        
-        # Numba-compiled parallel loop for cohesion and alignment
-        _compute_schooling_loop(positions, headings, neighbor_data, neighbor_offsets, ideal_dist, mean_BL, 
-                                cohesion_scores, alignment_scores, N)
-    
-    # Average across all agents
-    mean_cohesion = float(np.mean(cohesion_scores))
-    mean_alignment = float(np.mean(alignment_scores))
-    mean_separation = float(np.mean(separation_penalties))
-    
-    overall = mean_cohesion + mean_alignment + mean_separation
-    
-    return {
-        'cohesion_score': mean_cohesion,
-        'alignment_score': mean_alignment,
-        'separation_penalty': mean_separation,
-        'overall_schooling': overall
-    }
+    # Delegate to canonical implementation in fish_passage.metrics
+    from emergent.fish_passage.metrics import compute_schooling_metrics_biological as _fp
+    return _fp(positions, headings, body_lengths, behavioral_weights, alive_mask=alive_mask)
 
 
 def compute_drafting_benefits(positions, headings, velocities, body_lengths, behavioral_weights, alive_mask=None):
@@ -461,47 +397,9 @@ def compute_drafting_benefits(positions, headings, velocities, body_lengths, beh
     Returns:
         (N,) array of drag reduction factors (0.0 to 0.25)
     """
-    if not behavioral_weights.drafting_enabled:
-        return np.zeros(len(positions))
-    
-    if alive_mask is not None:
-        positions = positions[alive_mask]
-        headings = headings[alive_mask]
-        velocities = velocities[alive_mask]
-        body_lengths = body_lengths[alive_mask]
-    
-    N = len(positions)
-    drag_reductions = np.zeros(N)
-    
-    if N < 2:
-        return drag_reductions
-    
-    from scipy.spatial import cKDTree
-    tree = _safe_build_kdtree(positions, name='drafting_tree')
-    
-    # Fixed 1-meter drafting radius (performance optimization)
-    drafting_radius = 1.0
-    angle_tol_rad = np.radians(behavioral_weights.drafting_angle_tolerance)
-    
-    # Vectorized: query all agents at once with fixed radius
-    neighbor_lists = tree.query_ball_point(positions, r=drafting_radius)
-    
-    # Convert neighbor_lists to flattened arrays for numba
-    neighbor_data = []
-    neighbor_offsets = [0]
-    for neighbors in neighbor_lists:
-        neighbor_data.extend(neighbors)
-        neighbor_offsets.append(len(neighbor_data))
-    neighbor_data = np.array(neighbor_data, dtype=np.int32)
-    neighbor_offsets = np.array(neighbor_offsets, dtype=np.int32)
-    
-    # Numba-compiled parallel loop for drafting calculations
-    drag_reduction_single = behavioral_weights.drag_reduction_single
-    drag_reduction_dual = behavioral_weights.drag_reduction_dual
-    _compute_drafting_loop(positions, headings, neighbor_data, neighbor_offsets, angle_tol_rad,
-                          drag_reduction_single, drag_reduction_dual, drag_reductions, N)
-    
-    return drag_reductions
+    # Delegate to canonical implementation in fish_passage.metrics
+    from emergent.fish_passage.metrics import compute_drafting_benefits as _fp
+    return _fp(positions, headings, velocities, body_lengths, behavioral_weights, alive_mask=alive_mask)
 
 
 class RLTrainer:
