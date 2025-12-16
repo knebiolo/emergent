@@ -1050,7 +1050,16 @@ def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, m
         else:
             depth = np.asarray(data).reshape(-1)
 
-        wetted_mask = depth > float(depth_threshold)
+            wetted_mask = depth > float(depth_threshold)
+
+            # If no cells exceed the depth threshold, return None early.
+            if not np.any(wetted_mask):
+                if close_file:
+                    try:
+                        hdf.close()
+                    except Exception:
+                        pass
+                return None
 
         # Attempt vector workflow
         vector_failed = False

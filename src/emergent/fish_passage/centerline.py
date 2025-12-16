@@ -266,6 +266,7 @@ def infer_wetted_perimeter_from_arrays(coords: np.ndarray, depth: np.ndarray, de
     from scipy.spatial import cKDTree
 
     wetted_mask = depth > depth_threshold
+    # If no cells are wetted, return None early to avoid empty polygonization.
     if not np.any(wetted_mask):
         return None
     # Vector approach: if HECRAS-style facepoints/perimeter mapping isn't available,
