@@ -1,6 +1,6 @@
 import numpy as np
-from emergent.fish_passage.io import HECRASMap
-from emergent.fish_passage.tests.fixtures.hdf5_plan_fixture import make_minimal_plan
+from emergent.fish_passage.hecras import HECRASMap
+from emergent.fish_passage.tests.fixtures.hdf5_plan_fixture import make_minimal_plan, create_minimal_plan
 
 
 def test_hecras_map_nearest(tmp_path):
