@@ -402,6 +402,33 @@ def compute_drafting_benefits(positions, headings, velocities, body_lengths, beh
     return _fp(positions, headings, velocities, body_lengths, behavioral_weights, alive_mask=alive_mask)
 
 
+    def _wrap_merged_battery_numba(battery, per_rec, ttf, mask_sustained, dt):
+        """Backward-compatible wrapper that delegates to fish_passage.fatigue.merged_battery.
+
+        Keeps the legacy function name available while centralizing the implementation.
+        """
+        try:
+            from emergent.fish_passage.fatigue import merged_battery as _merged
+            return _merged(battery, per_rec, ttf, mask_sustained, dt)
+        except Exception:
+            # Fallback to legacy behaviour if import fails
+            return merged_battery(battery, per_rec, ttf, mask_sustained, dt)
+
+
+    def _wrap_project_points_onto_line_numba(points, line_start, line_end):
+        """Wrapper delegating projection utility to fish_passage.projection.
+
+        Accepts legacy signature and forwards to canonical `project_points_onto_line`.
+        """
+        try:
+            from emergent.fish_passage.projection import project_points_onto_line as _proj
+            return _proj(points, line_start, line_end)
+        except Exception:
+            # If fish_passage projection unavailable, fall back to legacy implementation
+            # (legacy implementation lives below as `_project_points_onto_line_numba` or similar)
+            return _project_points_onto_line_numba(points, line_start, line_end)
+
+
 class RLTrainer:
     """Reinforcement learning trainer for behavioral weight optimization.
     
@@ -2372,12 +2399,29 @@ def pixel_to_geo(transform, rows, cols):
     return xs, ys
 
 # --- Safety wrappers to ensure stable Numba specializations ---
-def _wrap_project_points_onto_line_numba(xs_line, ys_line, px, py):
-    xs = np.ascontiguousarray(xs_line, dtype=np.float64)
-    ys = np.ascontiguousarray(ys_line, dtype=np.float64)
-    pxx = np.ascontiguousarray(px, dtype=np.float64)
-    pyy = np.ascontiguousarray(py, dtype=np.float64)
-    return _project_points_onto_line_numba(xs, ys, pxx, pyy)
+def _wrap_project_points_onto_line_numba(xs_line, ys_line, px, py=None):
+    """Flexible wrapper supporting legacy signatures:
+    - (_xs, _ys, px, py)
+    - (points (N,2), line_start (2,), line_end (2,)) -> projects points onto the straight line segment
+    """
+    if py is not None:
+        xs = np.ascontiguousarray(xs_line, dtype=np.float64)
+        ys = np.ascontiguousarray(ys_line, dtype=np.float64)
+        pxx = np.ascontiguousarray(px, dtype=np.float64)
+        pyy = np.ascontiguousarray(py, dtype=np.float64)
+        return _project_points_onto_line_numba(xs, ys, pxx, pyy)
+
+    # Interpret as (points, line_start, line_end)
+    pts = np.asarray(xs_line, dtype=np.float64)
+    start = np.asarray(ys_line, dtype=np.float64)
+    end = np.asarray(px, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] != 2:
+        raise ValueError('points must be (N,2)')
+    xs_line = np.array([start[0], end[0]], dtype=np.float64)
+    ys_line = np.array([start[1], end[1]], dtype=np.float64)
+    pxs = pts[:, 0]
+    pys = pts[:, 1]
+    return _project_points_onto_line_numba(xs_line, ys_line, pxs, pys)
 
 def _wrap_drag_fun_numba(fx, fy, wx, wy, mask, density, surface_areas, drag_coeffs, wave_drag, swim_behav, out=None):
     fx_a = np.ascontiguousarray(fx, dtype=np.float64)
@@ -2400,6 +2444,41 @@ def _wrap_merged_battery_numba(battery, per_rec, ttf, mask_sustained, dt):
     ttf_a = np.ascontiguousarray(ttf, dtype=np.float64)
     mask_a = np.ascontiguousarray(np.asarray(mask_sustained, dtype=np.bool_), dtype=np.bool_)
     return _merged_battery_numba(batt, perr, ttf_a, mask_a, float(dt))
+
+
+def calc_battery(battery, per_rec, ttf, mask_sustained, dt):
+    """Legacy-compatible calc_battery wrapper delegating to fish_passage.fatigue.calc_battery."""
+    try:
+        from emergent.fish_passage.fatigue import calc_battery as _calc
+        return _calc(battery, per_rec, ttf, mask_sustained, dt)
+    except Exception:
+        # fallback to legacy implementation if canonical import fails
+        if _HAS_NUMBA:
+            return _calc_battery_numba(battery, per_rec, ttf, mask_sustained, dt)
+        else:
+            # best-effort fallback: call merged_battery or raise
+            try:
+                return merged_battery(battery, per_rec, ttf, mask_sustained, dt)
+            except Exception:
+                raise
+
+
+def _wrap_time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s):
+    """Wrapper delegating to `fish_passage.fatigue.time_to_fatigue`.
+
+    Keeps the legacy name `_time_to_fatigue_numba` available while centralizing
+    the implementation in `fish_passage`.
+    """
+    try:
+        from emergent.fish_passage.fatigue import time_to_fatigue as _ttf
+        return _ttf(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s)
+    except Exception:
+        # Fallback to legacy warmed numba function if available
+        try:
+            return _time_to_fatigue_numba(swim_speeds, mask_prolonged, mask_sprint, a_p, b_p, a_s, b_s)
+        except Exception:
+            # As a last resort, re-raise to surface the error
+            raise
 
 # Optional merged drag + battery kernel (single-pass). Not wired automatically; available for experiments.
 if _HAS_NUMBA:
