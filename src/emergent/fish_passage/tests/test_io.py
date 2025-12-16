@@ -1,3 +1,34 @@
+import os
+import tempfile
+
+from emergent.fish_passage.io import safe_flush
+
+
+def test_safe_flush_h5py_file(tmp_path):
+    try:
+        import h5py
+    except Exception:
+        # If h5py not installed, skip this test by asserting no-op behavior
+        safe_flush(object())
+        return
+
+    fp = tmp_path / 'test.h5'
+    with h5py.File(str(fp), 'w') as f:
+        f.create_dataset('a', data=[1, 2, 3])
+        # calling safe_flush should not raise
+        safe_flush(f)
+
+    # reopen and ensure dataset exists
+    with h5py.File(str(fp), 'r') as f:
+        assert 'a' in f
+
+
+def test_safe_flush_dummy_object():
+    class NoFlush:
+        pass
+
+    # Should not raise
+    safe_flush(NoFlush())
 import h5py
 import numpy as np
 

@@ -1,3 +1,93 @@
+"""I/O helpers for fish_passage.
+
+Lightweight, defensive helpers extracted from legacy sockeye.
+"""
+from typing import Any
+
+try:
+    import h5py
+except Exception:
+    h5py = None
+
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except Exception:
+    logger = None
+
+
+def safe_flush(hdf: Any) -> None:
+    """Safely flush an h5py file, group, or file-like object.
+
+    Attempts multiple strategies and swallows IO errors so callers
+    are not interrupted by flush failures. Unexpected exceptions are
+    logged and re-raised.
+    """
+    try:
+        if hasattr(hdf, 'flush'):
+            try:
+                hdf.flush()
+                return
+            except (OSError, IOError) as e:
+                if logger is not None:
+                    try:
+                        logger.exception('hdf.flush() failed (runtime): %s', e)
+                    except Exception:
+                        pass
+            except Exception:
+                if logger is not None:
+                    logger.exception('Unexpected error while calling hdf.flush(); re-raising')
+                raise
+
+        fobj = getattr(hdf, 'file', None)
+        if fobj is not None and hasattr(fobj, 'flush'):
+            try:
+                fobj.flush()
+                return
+            except (OSError, IOError) as e:
+                if logger is not None:
+                    try:
+                        logger.exception('hdf.file.flush() failed (runtime): %s', e)
+                    except Exception:
+                        pass
+            except Exception:
+                if logger is not None:
+                    logger.exception('Unexpected error while calling hdf.file.flush(); re-raising')
+                raise
+
+        fname = getattr(hdf, 'filename', None) or getattr(hdf, 'name', None)
+        if fname and h5py is not None:
+            try:
+                with h5py.File(fname, 'r+') as hw:
+                    try:
+                        hw.flush()
+                    except (OSError, IOError) as e:
+                        if logger is not None:
+                            try:
+                                logger.exception('h5py.File(%s).flush() failed (runtime): %s', fname, e)
+                            except Exception:
+                                pass
+                    except Exception:
+                        if logger is not None:
+                            logger.exception('Unexpected error while flushing reopened HDF file; re-raising')
+                        raise
+            except (OSError, IOError) as e:
+                if logger is not None:
+                    try:
+                        logger.exception('Failed to reopen HDF file %s for flush (runtime): %s', fname, e)
+                    except Exception:
+                        pass
+            except Exception:
+                if logger is not None:
+                    logger.exception('Unexpected error while reopening HDF file %s for flush; re-raising', fname)
+                raise
+    except Exception:
+        if logger is not None:
+            try:
+                logger.exception('safe_flush encountered unexpected error; re-raising')
+            except Exception:
+                pass
+        raise
 """Minimal HECRAS IO helpers for fish_passage.
 
 Compact, test-focused implementations used during migration. Keep
