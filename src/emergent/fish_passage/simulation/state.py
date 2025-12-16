@@ -18,6 +18,22 @@ class SimulationState:
     battery: np.ndarray
     dead: np.ndarray
 
+    # Expanded physiological / dynamic fields
+    length: np.ndarray
+    weight: np.ndarray
+    body_depth: np.ndarray
+    sex: np.ndarray
+    x_vel: np.ndarray
+    y_vel: np.ndarray
+    ax: np.ndarray
+    ay: np.ndarray
+    swim_behav: np.ndarray
+    ucrit: np.ndarray
+    surface_area: np.ndarray
+    drag_coeffs: np.ndarray
+    wave_drag: np.ndarray
+    swim_speeds_buf: np.ndarray
+
     @classmethod
     def allocate(cls, n_agents: int, init_X: Optional[float] = 0.0, init_Y: Optional[float] = 0.0) -> 'SimulationState':
         X = np.full((n_agents,), float(init_X), dtype=np.float64)
@@ -28,7 +44,34 @@ class SimulationState:
         sog = np.zeros((n_agents,), dtype=np.float64)
         battery = np.ones((n_agents,), dtype=np.float64)
         dead = np.zeros((n_agents,), dtype=np.int8)
-        return cls(n_agents=n_agents, X=X, Y=Y, prev_X=prev_X, prev_Y=prev_Y, heading=heading, sog=sog, battery=battery, dead=dead)
+
+        # physiological defaults
+        length = np.full((n_agents,), 0.25, dtype=np.float64)  # meters
+        weight = np.full((n_agents,), 1.0, dtype=np.float64)   # kg (placeholder)
+        body_depth = np.full((n_agents,), 0.05, dtype=np.float64)
+        sex = np.zeros((n_agents,), dtype=np.int8)  # 0=unknown,1=M,2=F
+
+        # dynamics
+        x_vel = np.zeros((n_agents,), dtype=np.float64)
+        y_vel = np.zeros((n_agents,), dtype=np.float64)
+        ax = np.zeros((n_agents,), dtype=np.float64)
+        ay = np.zeros((n_agents,), dtype=np.float64)
+        swim_behav = np.zeros((n_agents,), dtype=np.int8)
+        ucrit = np.full((n_agents,), 1.0, dtype=np.float64)
+
+        # hydrodynamic parameters
+        surface_area = (length * body_depth)  # crude proxy, vectorized
+        drag_coeffs = np.full((n_agents,), 1.0, dtype=np.float64)
+        wave_drag = np.ones((n_agents,), dtype=np.float64)
+
+        # circular buffer for swim speeds (small depth 5)
+        swim_speeds_buf = np.zeros((n_agents, 5), dtype=np.float64)
+
+        return cls(n_agents=n_agents, X=X, Y=Y, prev_X=prev_X, prev_Y=prev_Y, heading=heading, sog=sog, battery=battery, dead=dead,
+                   length=length, weight=weight, body_depth=body_depth, sex=sex,
+                   x_vel=x_vel, y_vel=y_vel, ax=ax, ay=ay, swim_behav=swim_behav, ucrit=ucrit,
+                   surface_area=surface_area, drag_coeffs=drag_coeffs, wave_drag=wave_drag,
+                   swim_speeds_buf=swim_speeds_buf)
 
     def as_dict(self):
         return {
@@ -40,6 +83,22 @@ class SimulationState:
             'sog': self.sog,
             'battery': self.battery,
             'dead': self.dead,
+        }
+
+    def update_prev_positions(self):
+        self.prev_X[:] = self.X
+        self.prev_Y[:] = self.Y
+
+    def set_random_lengths(self, mean=0.25, std=0.02, seed: Optional[int] = None):
+        rng = np.random.default_rng(seed)
+        self.length[:] = rng.normal(mean, std, size=self.n_agents)
+
+    def summary(self):
+        return {
+            'n_agents': int(self.n_agents),
+            'mean_length': float(np.mean(self.length)),
+            'mean_battery': float(np.mean(self.battery)),
+            'alive_count': int(np.sum(self.dead == 0)),
         }
 """Agent state initialization helpers extracted from sockeye.simulation.
 
