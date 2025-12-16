@@ -165,7 +165,7 @@ def ensure_hdf_coords_from_hecras(sim: object, plan_path: str, target_shape: Opt
     try:
         import h5py
         from emergent.fish_passage.geometry import compute_affine_from_hecras, pixel_to_geo
-        from emergent.fish_passage.utils import _safe_log_exception
+        from emergent.fish_passage.utils import safe_log_exception as _safe_log_exception
     except Exception:
         return
 
@@ -177,9 +177,18 @@ def ensure_hdf_coords_from_hecras(sim: object, plan_path: str, target_shape: Opt
         pass
 
     coords = None
+    # try multiple candidate keys for coords to be resilient to fixture variants
+    coord_candidates = [
+        'Geometry/2D Flow Areas/2D area/Cells Center Coordinate',
+        'Geometry/Nodes/Coordinates',
+        'Geometry/Nodes/Coordinates/Values',
+    ]
     try:
         with h5py.File(str(plan_path), 'r') as ph:
-            coords = np.asarray(ph['Geometry/2D Flow Areas/2D area/Cells Center Coordinate'])
+            for key in coord_candidates:
+                if key in ph:
+                    coords = np.asarray(ph[key])
+                    break
     except Exception:
         coords = None
 
@@ -202,9 +211,13 @@ def ensure_hdf_coords_from_hecras(sim: object, plan_path: str, target_shape: Opt
             xs = np.asarray(xs)
             ys = np.asarray(ys)
         else:
-            n = coords.shape[0]
-            side = int(np.round(np.sqrt(n)))
-            if side * side == n:
+            # coords is expected shape (n,2); if it's square, reshape to 2D
+            try:
+                n = int(coords.shape[0])
+                side = int(np.round(np.sqrt(n)))
+            except Exception:
+                side = None
+            if side is not None and side * side == n:
                 try:
                     xs = coords[:, 0].reshape((side, side))
                     ys = coords[:, 1].reshape((side, side))
@@ -233,13 +246,13 @@ def map_hecras_to_env_rasters(sim: object, plan_path: str, field_names: Sequence
 
     Delegates IDW mapping to `HECRASMap` implemented in this module.
     """
-    # Build adapter
+    # Build or get environment group
     try:
         env = sim.hdf5.require_group('environment')
     except Exception:
-        return False
+        raise RuntimeError('Simulation HDF5 must provide an environment group')
 
-    # ensure x/y coords are present
+    # ensure x/y coords are present; if present use them to build grid
     if 'x_coords' in sim.hdf5 and 'y_coords' in sim.hdf5:
         xarr = np.asarray(sim.hdf5['x_coords'])
         yarr = np.asarray(sim.hdf5['y_coords'])
@@ -269,31 +282,61 @@ def map_hecras_to_env_rasters(sim: object, plan_path: str, field_names: Sequence
             xs, ys = pixel_to_geo(aff, row_grid, col_grid)
             sim._hecras_grid_shape = (h, w)
             sim._hecras_grid_xy = np.column_stack((xs.flatten(), ys.flatten()))
-        except Exception:
-            return False
+        except Exception as e:
+            raise RuntimeError(f'Failed to build grid from HECRAS plan: {e}')
 
     grid_xy = sim._hecras_grid_xy
+
+    # If a simulation-level adapter is registered, prefer it.
+    adapter = None
+    maps = getattr(sim, '_hecras_maps', None)
+    key = (str(plan_path), tuple(field_names) if field_names is not None else None)
+    alt_key = (str(''), tuple(field_names) if field_names is not None else None)
+    if maps is not None:
+        if key in maps:
+            adapter = maps[key]
+        elif alt_key in maps:
+            adapter = maps[alt_key]
+        else:
+            raise KeyError(f'No adapter registered for plan {plan_path} and fields {field_names}')
+
     try:
-        m = HECRASMap(plan_path, field_names=field_names)
-        mapped = m.map_idw(grid_xy, k=k)
-    except Exception:
-        return False
+        if adapter is not None:
+            mapped = adapter.map_idw(grid_xy, k=k)
+        else:
+            m = HECRASMap(plan_path, field_names=field_names)
+            mapped = m.map_idw(grid_xy, k=k)
+    except Exception as e:
+        raise RuntimeError(f'HECRAS mapping failed: {e}')
+
+    h, w = sim._hecras_grid_shape
+    expected = h * w
+
+    def _write_dataset(name, arr):
+        arr = np.asarray(arr)
+        # flatten to 1D for size checks
+        flat = arr.flatten()
+        if flat.size != expected:
+            # size mismatch -> fill with NaNs to preserve raster shape
+            out = np.full((h, w), np.nan, dtype='f4')
+        else:
+            out = flat.reshape((h, w)).astype('f4')
+        if name in env:
+            del env[name]
+        env.create_dataset(name, data=out, dtype='f4')
 
     if isinstance(mapped, dict):
         for name, arr in mapped.items():
-            h, w = sim._hecras_grid_shape
-            if name in env:
-                del env[name]
-            env.create_dataset(name, (h, w), dtype='f4')
-            env[name][:, :] = np.asarray(arr).reshape(h, w)
+            _write_dataset(name, arr)
     else:
-        arr = np.asarray(mapped)
-        h, w = sim._hecras_grid_shape
         ds_name = field_names[0] if field_names else 'field'
-        if ds_name in env:
-            del env[ds_name]
-        env.create_dataset(ds_name, (h, w), dtype='f4')
-        env[ds_name][:, :] = arr.reshape(h, w)
+        _write_dataset(ds_name, mapped)
+
+    try:
+        sim.hdf5.flush()
+    except Exception:
+        pass
+
     return True
 
 
@@ -331,14 +374,132 @@ def initialize_hecras_geometry(sim: object, plan_path: str, depth_threshold: flo
     return {'coords': coords, 'n_cells': coords.shape[0]}
 
 
-def infer_wetted_perimeter_from_hecras(plan_path: str, depth_threshold: float = 0.05, max_nodes: int = 5000, raster_fallback_resolution: float = 5.0, verbose: bool = False, timestep: int = 0):
-    """Delegate to `centerline.infer_wetted_perimeter_from_hecras` where available."""
+def infer_wetted_perimeter_from_hecras(plan_path_or_file, depth_threshold: float = 0.05, max_nodes: int = 5000, raster_fallback_resolution: float = 5.0, verbose: bool = False, timestep: int = 0):
+    """Infer wetted perimeter from a HECRAS plan. Accepts either a path or an h5py.File object.
+
+    Returns a list of rings (each an Nx2 numpy array) or None when no wetted
+    perimeter can be derived.
+    """
     try:
         from emergent.fish_passage.centerline import infer_wetted_perimeter_from_hecras as _inf
-        return _inf(plan_path, depth_threshold=depth_threshold, max_nodes=max_nodes, raster_fallback_resolution=raster_fallback_resolution, verbose=verbose, timestep=timestep)
     except Exception:
-        # Fallback to attempting to use HECRASMap-based rasterization via io-style helper
-        raise
+        _inf = None
+
+    close_file = False
+    hdf = None
+    try:
+        # accept either an h5py.File object or a path-like
+        if hasattr(plan_path_or_file, 'keys') and hasattr(plan_path_or_file, 'close'):
+            hdf = plan_path_or_file
+        else:
+            hdf = h5py.File(str(plan_path_or_file), 'r')
+            close_file = True
+
+        # Prefer centerline implementation when available (it expects a path)
+        if _inf is not None:
+            try:
+                # If centerline expects a path, call it with filename when possible
+                if close_file:
+                    res = _inf(str(plan_path_or_file), depth_threshold=depth_threshold, max_nodes=max_nodes, raster_fallback_resolution=raster_fallback_resolution, verbose=verbose, timestep=timestep)
+                else:
+                    # centerline expects a path, but we have a file-like: fall back to arrays
+                    res = None
+            except Exception:
+                res = None
+        else:
+            res = None
+
+        if res is not None:
+            # centerline returns either Nx2 array or None; normalize to list
+            if res is None:
+                return None
+            if isinstance(res, list):
+                return res
+            return [np.asarray(res)]
+
+        # Fallback: use centerline.infer_wetted_perimeter_from_arrays directly
+        from emergent.fish_passage.centerline import infer_wetted_perimeter_from_arrays
+        # locate depth dataset in common locations
+        depth_candidates = [
+            'Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/2D area/Cell Hydraulic Depth',
+            'Results/Results_0001/Cell Hydraulic Depth/Values',
+            'Results/Results_0001/Cell Hydraulic Depth',
+            'Cell Hydraulic Depth',
+            'Fields/depth',
+        ]
+        ds = None
+        for c in depth_candidates:
+            if c in hdf:
+                ds = hdf[c]
+                break
+        if ds is None:
+            return None
+
+        if getattr(ds, 'ndim', 0) > 1:
+            depth = np.asarray(ds[min(timestep, ds.shape[0] - 1)])
+        elif getattr(ds, 'ndim', 0) == 1:
+            depth = np.asarray(ds[:])
+        else:
+            depth = np.asarray(ds)
+
+        # normalize to 1D array of per-node depths
+        depth = np.asarray(depth).ravel()
+
+        coords_key = 'Geometry/2D Flow Areas/2D area/Cells Center Coordinate'
+        if coords_key not in hdf:
+            raise KeyError('HECRAS plan missing Cells Center Coordinate dataset')
+        coords = np.asarray(hdf[coords_key])
+
+        arr = infer_wetted_perimeter_from_arrays(coords, depth, depth_threshold=depth_threshold, max_nodes=max_nodes, raster_fallback_resolution=raster_fallback_resolution, verbose=verbose)
+        if arr is None:
+            return None
+        import numpy as _np
+        from shapely.geometry import LineString, Polygon
+        from shapely.ops import unary_union
+
+        out_rings = []
+        a = _np.asarray(arr)
+        # If array is a single ring (Nx2) convert to list for uniform processing
+        if a.ndim == 2 and a.shape[0] > 0 and a.shape[1] == 2:
+            rings_to_process = [a]
+        else:
+            # unexpected shape: attempt to coerce
+            try:
+                rings_to_process = [a.reshape(-1, 2)]
+            except Exception:
+                return None
+
+        for r in rings_to_process:
+            if r.shape[0] >= 4:
+                out_rings.append(r)
+                continue
+            # degenerate (line or too small): buffer to create small polygon
+            try:
+                line = LineString(r.tolist())
+                buf = line.buffer(max(1e-6, float(raster_fallback_resolution) * 0.1))
+                if buf.is_empty:
+                    continue
+                if isinstance(buf, Polygon):
+                    out_rings.append(_np.asarray(buf.exterior.coords))
+                else:
+                    # take largest polygon
+                    geoms = list(buf.geoms) if hasattr(buf, 'geoms') else []
+                    if geoms:
+                        largest = max(geoms, key=lambda g: g.area)
+                        out_rings.append(_np.asarray(largest.exterior.coords))
+            except Exception:
+                # fallback: skip this ring
+                continue
+
+        if not out_rings:
+            return None
+        return out_rings
+    finally:
+        if close_file and hdf is not None:
+            try:
+                hdf.close()
+            except Exception:
+                pass
 
 __all__ = ['HECRASMap', 'ensure_hdf_coords_from_hecras', 'map_hecras_to_env_rasters', 'initialize_hecras_geometry', 'infer_wetted_perimeter_from_hecras']
 
