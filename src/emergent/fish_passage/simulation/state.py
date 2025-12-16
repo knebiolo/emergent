@@ -1,3 +1,46 @@
+"""Agent state allocation and helpers for the refactored Simulation."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import numpy as np
+from typing import Optional
+
+
+@dataclass
+class SimulationState:
+    n_agents: int
+    X: np.ndarray
+    Y: np.ndarray
+    prev_X: np.ndarray
+    prev_Y: np.ndarray
+    heading: np.ndarray
+    sog: np.ndarray
+    battery: np.ndarray
+    dead: np.ndarray
+
+    @classmethod
+    def allocate(cls, n_agents: int, init_X: Optional[float] = 0.0, init_Y: Optional[float] = 0.0) -> 'SimulationState':
+        X = np.full((n_agents,), float(init_X), dtype=np.float64)
+        Y = np.full((n_agents,), float(init_Y), dtype=np.float64)
+        prev_X = X.copy()
+        prev_Y = Y.copy()
+        heading = np.zeros((n_agents,), dtype=np.float64)
+        sog = np.zeros((n_agents,), dtype=np.float64)
+        battery = np.ones((n_agents,), dtype=np.float64)
+        dead = np.zeros((n_agents,), dtype=np.int8)
+        return cls(n_agents=n_agents, X=X, Y=Y, prev_X=prev_X, prev_Y=prev_Y, heading=heading, sog=sog, battery=battery, dead=dead)
+
+    def as_dict(self):
+        return {
+            'X': self.X,
+            'Y': self.Y,
+            'prev_X': self.prev_X,
+            'prev_Y': self.prev_Y,
+            'heading': self.heading,
+            'sog': self.sog,
+            'battery': self.battery,
+            'dead': self.dead,
+        }
 """Agent state initialization helpers extracted from sockeye.simulation.
 
 Provide deterministic, testable implementations for: sim_sex, sim_length,
