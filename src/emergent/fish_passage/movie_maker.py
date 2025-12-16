@@ -31,19 +31,28 @@ def movie_maker(directory: str, model_name: str, crs: Any, dt: float, depth_rast
     """
     model_directory = os.path.join(directory, f"{model_name}.h5")
 
-    if h5py is None:
-        # No h5py: try to read pre-supplied numpy arrays in directory
-        # Expect files: X.npy, Y.npy
-        x_path = os.path.join(directory, 'X.npy')
-        y_path = os.path.join(directory, 'Y.npy')
-        if not (os.path.exists(x_path) and os.path.exists(y_path)):
-            raise RuntimeError('h5py not available and no X.npy/Y.npy found')
-        X_arr = np.load(x_path)
-        Y_arr = np.load(y_path)
-    else:
-        with h5py.File(model_directory, 'r') as hdf5:
-            X_arr = hdf5['agent_data/X'][:]
-            Y_arr = hdf5['agent_data/Y'][:]
+    # Prefer HDF5 if available and the model file exists, otherwise fall back
+    # to X.npy/Y.npy which tests and some workflows may provide.
+    x_path = os.path.join(directory, 'X.npy')
+    y_path = os.path.join(directory, 'Y.npy')
+    X_arr = None
+    Y_arr = None
+    if h5py is not None and os.path.exists(model_directory):
+        try:
+            with h5py.File(model_directory, 'r') as hdf5:
+                X_arr = hdf5['agent_data/X'][:]
+                Y_arr = hdf5['agent_data/Y'][:]
+        except Exception:
+            # Fall back to numpy arrays below
+            X_arr = None
+            Y_arr = None
+
+    if X_arr is None or Y_arr is None:
+        if os.path.exists(x_path) and os.path.exists(y_path):
+            X_arr = np.load(x_path)
+            Y_arr = np.load(y_path)
+        else:
+            raise RuntimeError('No agent data available: missing HDF5 and X.npy/Y.npy')
 
     num_columns = int(X_arr.shape[1])
 
