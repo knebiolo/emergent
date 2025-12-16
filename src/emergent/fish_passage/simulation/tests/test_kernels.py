@@ -23,3 +23,16 @@ def test_compute_step_basic():
     # battery should remain within [0,1]
     assert np.all(out['battery'] >= 0.0)
     assert np.all(out['battery'] <= 1.0)
+
+    # positions and velocities should update when thrust is present
+    s2 = SimulationState.allocate(2)
+    s2.heading[:] = 0.0
+    s2.sog[:] = np.array([0.5, 0.5])
+    prev_X = s2.X.copy()
+    prev_Y = s2.Y.copy()
+    env2 = {'wx': np.zeros(2), 'wy': np.zeros(2), 'density': 1.0}
+    out2 = kernels.compute_step(s2, env2, dt=0.5)
+    # positions should have changed in at least one axis
+    changed_x = not np.allclose(prev_X, s2.X)
+    changed_y = not np.allclose(prev_Y, s2.Y)
+    assert changed_x or changed_y

@@ -10,6 +10,8 @@ from typing import Dict, Any
 
 from emergent.fish_passage import drags as _drags
 from emergent.fish_passage import fatigue as _fatigue
+from emergent.fish_passage import control as _control
+from emergent.fish_passage import physiology as _physiology
 
 
 def compute_step(state, env: Dict[str, Any], dt: float) -> Dict[str, Any]:
@@ -65,4 +67,40 @@ def compute_step(state, env: Dict[str, Any], dt: float) -> Dict[str, Any]:
     battery_new = _fatigue.merged_battery(state.battery, per_rec, ttf, mask_sustained, dt)
     state.battery[:] = battery_new
 
-    return {'drags': dr, 'swim_speeds': swim_speeds, 'battery': battery_new}
+    # --- Motion integration: compute net force and update velocities/positions ---
+    # Thrust: can be provided by a PID controller in env or default proportional thrust
+    pid: _control.PID_controller = env.get('pid', None)
+    if pid is not None:
+        # desired heading error (simple placeholder): zero error -> no corrective thrust
+        # Here we compute a small upstream error vector if provided in env
+        error = env.get('error', np.zeros((state.n_agents, 2)))
+        ctrl_out = pid.update(error, dt, state.swim_behav)
+        # map control output magnitude to per-agent thrust scalar
+        thrust = np.linalg.norm(ctrl_out, axis=1)
+    else:
+        # default thrust proportional to battery and swim_behav (mode)
+        thrust = 0.5 * state.battery
+
+    # Simple mass per agent (based on weight), compute acceleration: a = (thrust_vector - drag) / mass
+    mass = np.maximum(state.weight, 0.001)
+
+    # thrust vector aligned with heading
+    thrust_x = thrust * np.cos(state.heading)
+    thrust_y = thrust * np.sin(state.heading)
+
+    # compute net force (thrust minus drag components)
+    net_fx = thrust_x - dr[:, 0]
+    net_fy = thrust_y - dr[:, 1]
+
+    # acceleration
+    ax = net_fx / mass
+    ay = net_fy / mass
+    # update velocities
+    state.x_vel += ax * dt
+    state.y_vel += ay * dt
+
+    # integrate positions (simple Euler)
+    state.X += state.x_vel * dt
+    state.Y += state.y_vel * dt
+
+    return {'drags': dr, 'swim_speeds': swim_speeds, 'battery': battery_new, 'thrust': thrust}
