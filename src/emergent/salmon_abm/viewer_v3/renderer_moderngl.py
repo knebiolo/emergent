@@ -95,6 +95,14 @@ class ModernglViewerWidget(QOpenGLWidget):
             return
         self.ctx.enable(moderngl.DEPTH_TEST)
         self._vao.render(moderngl.TRIANGLES)
+        # render agents if present
+        try:
+            if getattr(self, '_agent_vao', None) is not None:
+                self.ctx.disable(moderngl.DEPTH_TEST)
+                self._agent_vao.render(moderngl.POINTS)
+                self.ctx.enable(moderngl.DEPTH_TEST)
+        except Exception:
+            pass
 
     def set_mesh(self, verts: np.ndarray, faces: np.ndarray, colors: np.ndarray):
         """Upload mesh buffers to GPU and update projection.
@@ -214,6 +222,47 @@ class ModernglViewerWidget(QOpenGLWidget):
 
         # reuse existing set_mesh upload path
         self.set_mesh(verts, faces, colors)
+
+    def set_agents(self, positions: np.ndarray, colors: np.ndarray | None = None, size: float = 4.0):
+        """Upload agent positions (Nx3) and optional colors (Nx4) as GL points.
+
+        positions: Nx3 float32
+        colors: Nx4 float32 or None
+        """
+        if self.ctx is None:
+            # store for later
+            self._pending_agents = (np.asarray(positions, dtype='f4'), None if colors is None else np.asarray(colors, dtype='f4'))
+            return
+        pos = np.asarray(positions, dtype='f4')
+        if colors is None:
+            cols = np.tile(np.array([1.0, 0.2, 0.2, 1.0], dtype='f4'), (pos.shape[0], 1))
+        else:
+            cols = np.asarray(colors, dtype='f4')
+
+        # release old buffers
+        try:
+            if getattr(self, '_agent_vbo', None) is not None:
+                self._agent_vbo.release()
+            if getattr(self, '_agent_cbo', None) is not None:
+                self._agent_cbo.release()
+            if getattr(self, '_agent_vao', None) is not None:
+                try:
+                    self._agent_vao.release()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        self._agent_vbo = self.ctx.buffer(pos.tobytes())
+        self._agent_cbo = self.ctx.buffer(cols.tobytes())
+        # create a simple vao reusing the same program inputs
+        try:
+            self._agent_vao = self.ctx.vertex_array(self.prog, [(self._agent_vbo, '3f', 'in_position'), (self._agent_cbo, '4f', 'in_color')])
+        except Exception:
+            # fallback: create minimal vao mapping
+            self._agent_vao = None
+        # set gl point size via program uniform if available (not in this simple shader)
+        self.update()
 
     def _update_mvp(self):
         # Compute orthographic projection that fits mesh extents
