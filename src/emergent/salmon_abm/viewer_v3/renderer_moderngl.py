@@ -14,6 +14,10 @@ try:
     import moderngl
 except Exception:
     moderngl = None
+try:
+    import matplotlib.cm as cm
+except Exception:
+    cm = None
 
 
 def _ortho_matrix(left, right, bottom, top, near, far, dtype='f4'):
@@ -143,6 +147,73 @@ class ModernglViewerWidget(QOpenGLWidget):
         # Update MVP using mesh extents
         self._update_mvp()
         self.update()
+
+    def set_heightmap(self, depth_grid: np.ndarray, bbox: tuple | None = None, max_res: int = 256, colormap: str = 'viridis', vert_exag: float = 1.0):
+        """Create a regular-grid mesh from a 2D depth raster and upload to GPU.
+
+        Args:
+            depth_grid: HxW 2D array of depths.
+            bbox: (minx, miny, maxx, maxy) in world coordinates for the grid. If None, uses unit coords.
+            max_res: maximum grid dimension (either axis) to downsample to for performance.
+            colormap: matplotlib colormap name for coloring.
+            vert_exag: vertical exaggeration multiplier for Z values.
+        """
+        if depth_grid is None or depth_grid.size == 0:
+            return
+        arr = np.asarray(depth_grid, dtype=float)
+        h, w = arr.shape
+        # downsample to max_res for max dimension
+        scale = max(1, int(max(h, w) / max_res))
+        if scale > 1:
+            arr = arr[::scale, ::scale]
+            h, w = arr.shape
+
+        if bbox is None:
+            minx, miny, maxx, maxy = 0.0, 0.0, float(w - 1), float(h - 1)
+        else:
+            minx, miny, maxx, maxy = bbox
+
+        xs = np.linspace(minx, maxx, w, dtype=float)
+        ys = np.linspace(miny, maxy, h, dtype=float)
+        xv, yv = np.meshgrid(xs, ys)
+
+        zs = np.nan_to_num(arr, nan=0.0) * float(vert_exag)
+
+        # create vertices (flattened)
+        verts = np.column_stack([xv.ravel().astype('f4'), yv.ravel().astype('f4'), zs.ravel().astype('f4')])
+
+        # create faces (two triangles per grid cell)
+        # indices: (i,j) -> idx = i*w + j
+        idxs = []
+        for i in range(h - 1):
+            for j in range(w - 1):
+                a = i * w + j
+                b = a + 1
+                c = a + w
+                d = c + 1
+                # triangle 1: a, b, d
+                idxs.append((a, b, d))
+                # triangle 2: a, d, c
+                idxs.append((a, d, c))
+        faces = np.array(idxs, dtype='i4') if len(idxs) > 0 else np.zeros((0, 3), dtype='i4')
+
+        # color mapping
+        if cm is not None:
+            try:
+                cmap = cm.get_cmap(colormap)
+                vmin = float(np.nanmin(zs))
+                vmax = float(np.nanmax(zs))
+                denom = vmax - vmin if (vmax - vmin) != 0 else 1.0
+                normed = ((zs.ravel() - vmin) / denom).clip(0.0, 1.0)
+                rgba = cmap(normed)
+                colors = np.asarray(rgba, dtype='f4')
+            except Exception:
+                colors = np.tile(np.array([0.7, 0.7, 0.7, 1.0], dtype='f4'), (verts.shape[0], 1))
+        else:
+            colors = np.tile(np.array([0.7, 0.7, 0.7, 1.0], dtype='f4'), (verts.shape[0], 1))
+
+        # reuse existing set_mesh upload path
+        self.set_mesh(verts, faces, colors)
 
     def _update_mvp(self):
         # Compute orthographic projection that fits mesh extents
