@@ -1,5 +1,29 @@
 name: CI
 
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        numba: [false, true]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt || true
+          if [ "${{ matrix.numba }}" = "true" ]; then pip install numba; fi
+      - name: Run tests
+        run: |
+          pytest -q --basetemp=tmp/pytest_tmp
+name: CI
+
 on:
   push:
     branches: [ main ]
