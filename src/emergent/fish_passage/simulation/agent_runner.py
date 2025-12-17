@@ -41,4 +41,10 @@ class AgentRunner:
         # commit positions and speeds
         self.positions = new_pos
         self.speeds = new_speeds
-        return self.positions, self.speeds, self.battery
+        return {
+            'positions': self.positions,
+            'speeds': self.speeds,
+            'battery': self.battery,
+            'desired_heading_vec': desired_heading_vec,
+            'desired_speed': desired_speed,
+        }
