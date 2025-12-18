@@ -15,9 +15,14 @@ try:
 except Exception:
     moderngl = None
 try:
-    import matplotlib.cm as cm
+    import pyqtgraph as pg
+    try:
+        _pg_colormap = getattr(pg, 'colormap', None) or getattr(pg, 'ColorMap', None)
+    except Exception:
+        _pg_colormap = None
 except Exception:
-    cm = None
+    pg = None
+    _pg_colormap = None
 
 
 def _ortho_matrix(left, right, bottom, top, near, far, dtype='f4'):
@@ -420,19 +425,40 @@ class ModernglViewerWidget(QOpenGLWidget):
                 idxs.append((a, d, c))
         faces = np.array(idxs, dtype='i4') if len(idxs) > 0 else np.zeros((0, 3), dtype='i4')
 
-        # color mapping
-        if cm is not None:
-            try:
-                cmap = cm.get_cmap(colormap)
-                vmin = float(np.nanmin(zs))
-                vmax = float(np.nanmax(zs))
-                denom = vmax - vmin if (vmax - vmin) != 0 else 1.0
-                normed = ((zs.ravel() - vmin) / denom).clip(0.0, 1.0)
-                rgba = cmap(normed)
-                colors = np.asarray(rgba, dtype='f4')
-            except Exception:
-                colors = np.tile(np.array([0.7, 0.7, 0.7, 1.0], dtype='f4'), (verts.shape[0], 1))
-        else:
+        # color mapping: prefer pyqtgraph colormap, otherwise simple viridis-like fallback
+        try:
+            vmin = float(np.nanmin(zs))
+            vmax = float(np.nanmax(zs))
+            denom = vmax - vmin if (vmax - vmin) != 0 else 1.0
+            normed = ((zs.ravel() - vmin) / denom).clip(0.0, 1.0)
+            if pg is not None and hasattr(pg, 'colormap'):
+                try:
+                    cmap = pg.colormap(colormap)
+                    lut = cmap.getLookupTable(0.0, 1.0, 256)
+                    # lut is Nx3 or Nx4; interpolate
+                    idx = (normed * (lut.shape[0] - 1)).astype(int)
+                    rgba = lut[idx]
+                    if rgba.shape[1] == 3:
+                        alphas = np.ones((rgba.shape[0], 1), dtype=rgba.dtype)
+                        rgba = np.concatenate([rgba, alphas], axis=1)
+                    colors = np.asarray(rgba, dtype='f4')
+                except Exception:
+                    colors = np.tile(np.array([0.7, 0.7, 0.7, 1.0], dtype='f4'), (verts.shape[0], 1))
+            else:
+                # simple viridis-like fallback using a small hardcoded palette
+                try:
+                    # create a simple gradient from blue->green->yellow
+                    def _simple_viridis(v):
+                        # v in [0,1]
+                        r = np.clip(4.0 * (v - 0.75), 0.0, 1.0) + np.clip(4.0 * (v - 0.5), 0.0, 1.0) * 0.0
+                        g = np.clip(4.0 * (v - 0.25), 0.0, 1.0)
+                        b = np.clip(4.0 * (0.5 - v), 0.0, 1.0)
+                        return np.stack([r, g, b, np.ones_like(r)], axis=1)
+                    colors = _simple_viridis(normed)
+                    colors = np.asarray(colors, dtype='f4')
+                except Exception:
+                    colors = np.tile(np.array([0.7, 0.7, 0.7, 1.0], dtype='f4'), (verts.shape[0], 1))
+        except Exception:
             colors = np.tile(np.array([0.7, 0.7, 0.7, 1.0], dtype='f4'), (verts.shape[0], 1))
 
         # reuse existing set_mesh upload path

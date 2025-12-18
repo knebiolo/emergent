@@ -46,19 +46,40 @@ def build_mesh(pts: np.ndarray, vals: np.ndarray, vert_exag: float = 1.0) -> Tup
     z = (np.nan_to_num(vals, nan=0.0) * float(vert_exag)).astype(np.float32)
     verts = np.column_stack([pts[:, 0].astype(np.float32), pts[:, 1].astype(np.float32), z])
 
-    # color mapping (viridis) normalized to vals
+    # color mapping (viridis-like) normalized to vals
     try:
-        import matplotlib.cm as cm
-        import matplotlib.colors as mcolors
         vmin = float(np.nanmin(vals))
         vmax = float(np.nanmax(vals))
         denom = vmax - vmin if (vmax - vmin) != 0 else 1.0
-        normed = (vals - vmin) / denom
-        cmap = cm.get_cmap('viridis')
-        rgba = cmap(normed)  # returns Nx4 in 0-1
-        colors = np.asarray(rgba, dtype=np.float32)
+        normed = ((vals - vmin) / denom).clip(0.0, 1.0)
+        try:
+            import pyqtgraph as pg
+            cmap = pg.colormap('viridis') if hasattr(pg, 'colormap') else None
+            if cmap is not None:
+                lut = cmap.getLookupTable(0.0, 1.0, 256)
+                idx = (normed * (lut.shape[0] - 1)).astype(int)
+                rgba = lut[idx]
+                if rgba.shape[1] == 3:
+                    rgba = np.concatenate([rgba, np.ones((rgba.shape[0], 1))], axis=1)
+                colors = np.asarray(rgba, dtype=np.float32)
+            else:
+                # simple viridis-like gradient fallback
+                def _simple_viridis(v):
+                    r = np.clip(4.0 * (v - 0.75), 0.0, 1.0)
+                    g = np.clip(4.0 * (v - 0.25), 0.0, 1.0)
+                    b = np.clip(4.0 * (0.5 - v), 0.0, 1.0)
+                    return np.stack([r, g, b, np.ones_like(r)], axis=1)
+                colors = _simple_viridis(normed)
+        except Exception:
+            # fallback if pyqtgraph unavailable
+            def _simple_viridis(v):
+                r = np.clip(4.0 * (v - 0.75), 0.0, 1.0)
+                g = np.clip(4.0 * (v - 0.25), 0.0, 1.0)
+                b = np.clip(4.0 * (0.5 - v), 0.0, 1.0)
+                return np.stack([r, g, b, np.ones_like(r)], axis=1)
+            colors = _simple_viridis(normed)
     except Exception:
-        # If matplotlib isn't available for some reason, fallback to gray
+        # generic fallback to gray
         colors = np.tile(np.array([0.7, 0.7, 0.7, 1.0], dtype=np.float32), (pts.shape[0], 1))
 
     return verts, faces, colors
