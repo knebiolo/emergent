@@ -51,8 +51,6 @@ class SalmonViewer(QtWidgets.QWidget):
             self.rebuild_btn = QPushButton('Rebuild Background')
             self.rebuild_btn.clicked.connect(self.setup_background)
 
-            self.load_last_mesh_btn = QPushButton('Load Last Mesh')
-            self.load_last_mesh_btn.clicked.connect(self.load_last_mesh)
 
             self.ve_label = QLabel('Z Exag: 1.00x')
             self.ve_slider = QSlider(Qt.Horizontal)
@@ -129,6 +127,32 @@ class SalmonViewer(QtWidgets.QWidget):
         if self.gl_widget is not None:
             self.gl_widget.set_mesh(verts, faces, colors)
         return True
+
+    # Compatibility API with original salmon_viewer
+    def load_tin_payload(self, payload: dict):
+        """Accept a TIN payload dict with keys 'verts','faces','colors' and upload to GL widget."""
+        try:
+            verts = payload.get('verts')
+            faces = payload.get('faces')
+            colors = payload.get('colors')
+            if verts is None or faces is None or colors is None:
+                return False
+            if self.gl_widget is not None:
+                self.gl_widget.set_mesh(verts, faces, colors)
+            else:
+                self.last_mesh_payload = {'verts': verts, 'faces': faces, 'colors': colors}
+            # store payload for tests/inspection
+            try:
+                self.last_mesh_payload = payload
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    def load_tin_payload_dict(self, d: dict):
+        """Alias for load_tin_payload to match legacy API used by tests."""
+        return self.load_tin_payload(d)
 
     def load_hecras_mesh(self, hdf_path_or_file, timestep: int = 0, depth_thresh: float | None = 0.05, max_nodes: int | None = 5000, vert_exag: float = 1.0):
         """Extract depth points from a HECRAS HDF5 and upload a mesh to the GL widget.
@@ -302,13 +326,16 @@ class SalmonViewer(QtWidgets.QWidget):
             pass
 
     def run(self):
-        # arrange a three-column layout: left (metrics) | center (gl) | right (controls)
-        main = QHBoxLayout()
-        # left metrics placeholder
-        left = QGroupBox('Metrics')
-        left_layout = QVBoxLayout()
-        self.mean_speed_label = QLabel('Mean Speed: --')
-        left_layout.addWidget(self.mean_speed_label)
+        # Recreate original three-column layout using a QSplitter
+        try:
+            from PyQt5.QtWidgets import QSplitter, QSizePolicy
+            main_splitter = QSplitter(Qt.Horizontal)
+
+            # Left panel: Training & Metrics
+            left_panel = QGroupBox('Training & Metrics')
+            left_layout = QVBoxLayout()
+            self.mean_speed_label = QLabel('Mean Speed: --')
+            left_layout.addWidget(self.mean_speed_label)
         # per-episode metric tracking checkboxes
         self._available_episode_metrics = [
             'collision_count', 'mean_upstream_progress', 'mean_upstream_velocity',
@@ -362,14 +389,18 @@ class SalmonViewer(QtWidgets.QWidget):
             left_layout.addWidget(self.per_episode_plot)
         except Exception:
             self.per_episode_plot = None
-        left.setLayout(left_layout)
+            left_panel.setLayout(left_layout)
 
-        center_layout = QVBoxLayout()
-        if self.gl_widget is not None:
-            center_layout.addWidget(self.gl_widget)
+            # Center panel: GL widget or placeholder
+            center_container = QtWidgets.QWidget()
+            center_layout = QVBoxLayout()
+            if self.gl_widget is not None:
+                center_layout.addWidget(self.gl_widget)
+            center_container.setLayout(center_layout)
 
-        right = QGroupBox('Controls')
-        right_layout = QVBoxLayout()
+            # Right panel: Controls & Weights
+            right_panel = QGroupBox('Controls & Weights')
+            right_layout = QVBoxLayout()
         try:
             right_layout.addWidget(self.play_btn)
             right_layout.addWidget(self.pause_btn)
@@ -378,7 +409,6 @@ class SalmonViewer(QtWidgets.QWidget):
             right_layout.addWidget(self.save_best_btn)
             right_layout.addWidget(self.save_weights_btn)
             right_layout.addWidget(self.load_weights_btn)
-            right_layout.addWidget(self.load_last_mesh_btn)
             right_layout.addWidget(self.ve_label)
             right_layout.addWidget(self.ve_slider)
             right_layout.addWidget(self.show_dead_cb)
@@ -393,14 +423,41 @@ class SalmonViewer(QtWidgets.QWidget):
             # per-episode metric checkboxes will be created on demand
         except Exception:
             pass
-        right.setLayout(right_layout)
+        # RL status labels (episode/reward) and small reward plot
+        try:
+            self.episode_label = QLabel('Episode: 0 | Timestep: 0')
+            self.reward_label = QLabel('Reward: 0.00')
+            self.best_reward_label = QLabel('Best: 0.00')
+            right_layout.addWidget(self.episode_label)
+            right_layout.addWidget(self.reward_label)
+            right_layout.addWidget(self.best_reward_label)
+            try:
+                if pg is not None:
+                    self.reward_plot = pg.PlotWidget(title='Episode Rewards')
+                    self.reward_plot.setMaximumHeight(160)
+                    right_layout.addWidget(self.reward_plot)
+                else:
+                    self.reward_plot = None
+            except Exception:
+                self.reward_plot = None
+        except Exception:
+            pass
+        right_panel.setLayout(right_layout)
 
-        main.addWidget(left, 1)
-        main.addLayout(center_layout, 4)
-        main.addWidget(right, 1)
-        self.setLayout(main)
+            # assemble splitter
+            main_splitter.addWidget(left_panel)
+            main_splitter.addWidget(center_container)
+            main_splitter.addWidget(right_panel)
+            try:
+                main_splitter.setSizes([300, 900, 300])
+            except Exception:
+                pass
 
-        self.show()
+            main_layout = QHBoxLayout()
+            main_layout.addWidget(main_splitter)
+            self.setLayout(main_layout)
+
+            self.show()
         # connect extra callbacks
         try:
             self.show_trails_cb.stateChanged.connect(self._on_toggle_trails)
@@ -511,29 +568,6 @@ class SalmonViewer(QtWidgets.QWidget):
                 self.gl_widget.set_show_directions(val)
         except Exception:
             pass
-
-    def load_last_mesh(self):
-        """Load the most recent mesh saved to outputs/*_mesh.npz and upload to GL widget."""
-        import glob, os, numpy as _np
-        outdir = os.path.join(os.getcwd(), 'outputs')
-        if not os.path.isdir(outdir):
-            return False
-        files = glob.glob(os.path.join(outdir, '*_mesh.npz'))
-        if not files:
-            return False
-        latest = max(files, key=os.path.getmtime)
-        try:
-            d = _np.load(latest)
-            verts = d['verts']
-            faces = d['faces']
-            colors = d['colors']
-            if self.gl_widget is not None:
-                self.gl_widget.set_mesh(verts, faces, colors)
-            else:
-                self.last_mesh_payload = {'verts': verts, 'faces': faces, 'colors': colors}
-            return True
-        except Exception:
-            return False
 
 
 def launch_viewer(simulation, dt=0.1, T=600, rl_trainer=None, **kwargs):

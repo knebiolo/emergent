@@ -77,25 +77,78 @@ class ModernglViewerWidget(QOpenGLWidget):
             raise RuntimeError('moderngl is not available')
         # Create moderngl context from current OpenGL context
         self.ctx = moderngl.create_context(require=330)
-
         vs = """#version 330
         in vec3 in_position;
         in vec4 in_color;
         out vec4 v_color;
+        out float v_value;
         uniform mat4 mvp;
+        uniform float vmin;
+        uniform float vmax;
         void main() {
             gl_Position = mvp * vec4(in_position, 1.0);
             v_color = in_color;
+            float denom = vmax - vmin;
+            if (denom == 0.0) denom = 1.0;
+            v_value = (in_position.z - vmin) / denom;
         }
         """
         fs = """#version 330
         in vec4 v_color;
+        in float v_value;
         out vec4 f_color;
+        uniform sampler2D colormap;
+        uniform int use_colormap;
         void main() {
-            f_color = v_color;
+            if (use_colormap == 1) {
+                vec2 uv = vec2(clamp(v_value, 0.0, 1.0), 0.5);
+                vec4 cm = texture(colormap, uv);
+                f_color = cm;
+            } else {
+                f_color = v_color;
+            }
         }
         """
         self.prog = self.ctx.program(vertex_shader=vs, fragment_shader=fs)
+
+        # create a default colormap LUT (256x1 RGBA). Prefer matplotlib if available.
+        try:
+            import matplotlib
+            from matplotlib import cm
+            cmap = cm.get_cmap('viridis')
+            lut = (cmap(range(256)) * 255).astype('u1')
+            # lut is Nx4 RGBA float in [0,1] -> convert to u1
+            lut_bytes = lut.tobytes()
+        except Exception:
+            # fallback: simple blue->green->yellow->red ramp
+            import numpy as _np
+            lut_vals = _np.linspace(0.0, 1.0, 256)
+            lut = _np.zeros((256, 4), dtype=_np.uint8)
+            lut[:, 0] = (_np.clip(4.0 * (lut_vals - 0.75), 0.0, 1.0) * 255).astype(_np.uint8)
+            lut[:, 1] = (_np.clip(4.0 * (lut_vals - 0.25), 0.0, 1.0) * 255).astype(_np.uint8)
+            lut[:, 2] = (_np.clip(4.0 * (0.5 - lut_vals), 0.0, 1.0) * 255).astype(_np.uint8)
+            lut[:, 3] = 255
+            lut_bytes = lut.tobytes()
+
+        try:
+            # create 2D texture 256x1 storing RGBA u8
+            self._colormap_tex = self.ctx.texture((256, 1), 4, data=lut_bytes)
+            self._colormap_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            self._colormap_tex.repeat_x = False
+            # bind sampler to texture unit 0 by default at render time
+        except Exception:
+            self._colormap_tex = None
+
+        # If a mesh was provided before the GL context was ready, upload it now.
+        try:
+            if getattr(self, 'verts', None) is not None and getattr(self, 'faces', None) is not None and getattr(self, 'colors', None) is not None:
+                try:
+                    # call set_mesh to create GPU buffers now that ctx exists
+                    self.set_mesh(self.verts, self.faces, self.colors)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # simple program for line/points (reuse same shaders but allow draw mode switches)
 
     def resizeGL(self, w: int, h: int):
@@ -182,10 +235,49 @@ class ModernglViewerWidget(QOpenGLWidget):
             (self.vbo, '3f', 'in_position'),
             (self.cbo, '4f', 'in_color'),
         ]
-        self._vao = self.ctx.vertex_array(self.prog, vao_content, index_buffer=self.ibo)
+        try:
+            self._vao = self.ctx.vertex_array(self.prog, vao_content, index_buffer=self.ibo)
+        except Exception:
+            # fallback: create VAO without color (should rarely happen)
+            vao_content = [(self.vbo, '3f', 'in_position')]
+            try:
+                self._vao = self.ctx.vertex_array(self.prog, vao_content, index_buffer=self.ibo)
+            except Exception:
+                self._vao = None
 
         # Update MVP using mesh extents
         self._update_mvp()
+        # update colormap uniforms
+        try:
+            vmin = float(np.min(self.verts[:, 2]))
+            vmax = float(np.max(self.verts[:, 2]))
+            # write uniforms
+            try:
+                self.prog['vmin'].value = vmin
+                self.prog['vmax'].value = vmax
+            except Exception:
+                pass
+            # bind colormap texture to unit 0 and set uniform
+            if getattr(self, '_colormap_tex', None) is not None:
+                try:
+                    self._colormap_tex.use(location=0)
+                    try:
+                        self.prog['colormap'].value = 0
+                        self.prog['use_colormap'].value = 1
+                    except Exception:
+                        pass
+                except Exception:
+                    try:
+                        self.prog['use_colormap'].value = 0
+                    except Exception:
+                        pass
+            else:
+                try:
+                    self.prog['use_colormap'].value = 0
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self.update()
 
     # Agent and trajectory helpers
