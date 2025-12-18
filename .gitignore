@@ -63,9 +63,7 @@ htmlcov/
 *.tiff
 
 # Keep small example data
-!data/**/*.csv
-!data/**/*.xlsx
-
+data/ 
 # Logs
 *.log
 simulation_debug.log

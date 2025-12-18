@@ -11,7 +11,7 @@ import h5py
 from emergent.salmon_abm.tin_helpers import sample_evenly
 
 
-def extract_depth_points(hdf_path_or_file, timestep: int = 0, depth_thresh: float | None = None, max_nodes: int | None = None) -> Tuple[np.ndarray, np.ndarray]:
+def extract_depth_points(hdf_path_or_file, timestep: int = 0, depth_thresh: float | None = None, max_nodes: int | None = None, use_wetted_perimeter: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     """Extract point coordinates and depth values from a HECRAS HDF5 plan.
 
     Args:
@@ -67,6 +67,44 @@ def extract_depth_points(hdf_path_or_file, timestep: int = 0, depth_thresh: floa
         else:
             mask = np.isfinite(depth)
 
+        # optionally refine mask via connectivity (keep largest connected wetted region)
+        if use_wetted_perimeter and np.any(mask):
+            try:
+                from scipy.spatial import cKDTree
+                from scipy.sparse import csr_matrix
+                from scipy.sparse.csgraph import connected_components
+                # coords of candidate wetted cells
+                cand_idx = np.nonzero(mask)[0]
+                cand_coords = coords[cand_idx][:, :2]
+                if len(cand_coords) > 1:
+                    # connectivity radius: median neighbor spacing * 1.5 (heuristic)
+                    tree = cKDTree(cand_coords)
+                    dists, inds = tree.query(cand_coords, k=2)
+                    median_spacing = float(np.median(dists[:, 1])) if dists.shape[1] > 1 else float(np.median(dists))
+                    radius = max(median_spacing * 1.5, median_spacing + 1e-6)
+                    pairs = tree.query_pairs(r=radius, output_type='ndarray')
+                    if pairs.size > 0:
+                        row = pairs[:, 0]
+                        col = pairs[:, 1]
+                        data = np.ones(len(row), dtype=np.int8)
+                        # undirected graph
+                        row_sym = np.concatenate([row, col])
+                        col_sym = np.concatenate([col, row])
+                        data_sym = np.concatenate([data, data])
+                        graph = csr_matrix((data_sym, (row_sym, col_sym)), shape=(len(cand_coords), len(cand_coords)))
+                        ncomp, labels = connected_components(csgraph=graph, directed=False)
+                        # find largest component
+                        counts = np.bincount(labels)
+                        largest = int(np.argmax(counts))
+                        keep_local = (labels == largest)
+                        # build global mask
+                        new_mask = np.zeros_like(mask, dtype=bool)
+                        new_mask[cand_idx[keep_local]] = True
+                        mask = new_mask
+            except Exception:
+                # on any error fallback to depth-only mask
+                pass
+
         if not np.any(mask):
             # return empty arrays rather than raise
             return np.zeros((0, 2), dtype=float), np.zeros((0,), dtype=float)
@@ -88,3 +126,24 @@ def extract_depth_points(hdf_path_or_file, timestep: int = 0, depth_thresh: floa
     finally:
         if close:
             hdf.close()
+
+
+def build_mesh_from_hecras(hdf_path_or_file, timestep: int = 0, depth_thresh: float | None = 0.05, max_nodes: int | None = 5000, vert_exag: float = 1.0, use_wetted_perimeter: bool = False, alpha: float | None = None):
+    """Convenience helper: extract depth points and build a TIN mesh.
+
+    Returns (verts, faces, colors) suitable for ModernglViewerWidget.set_mesh.
+    If no valid points are found, returns empty arrays with the expected shapes.
+    """
+    from emergent.salmon_abm.viewer_v3 import mesh_builder
+
+    pts, vals = extract_depth_points(hdf_path_or_file, timestep=timestep, depth_thresh=depth_thresh, max_nodes=max_nodes, use_wetted_perimeter=use_wetted_perimeter)
+    if pts is None or pts.size == 0:
+        import numpy as _np
+        return _np.zeros((0, 3), dtype='f4'), _np.zeros((0, 3), dtype='i4'), _np.zeros((0, 4), dtype='f4')
+
+    verts, faces, colors = mesh_builder.build_mesh(pts, vals, vert_exag=float(vert_exag), alpha=alpha)
+    # ensure types expected by renderer
+    verts = verts.astype('f4')
+    faces = faces.astype('i4')
+    colors = colors.astype('f4')
+    return verts, faces, colors

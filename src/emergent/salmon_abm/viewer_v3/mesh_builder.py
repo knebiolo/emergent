@@ -12,7 +12,7 @@ import numpy as np
 from scipy.spatial import Delaunay
 
 
-def build_mesh(pts: np.ndarray, vals: np.ndarray, vert_exag: float = 1.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def build_mesh(pts: np.ndarray, vals: np.ndarray, vert_exag: float = 1.0, alpha: float | None = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build a mesh from 2D points and scalar values.
 
     Args:
@@ -41,6 +41,27 @@ def build_mesh(pts: np.ndarray, vals: np.ndarray, vert_exag: float = 1.0) -> Tup
     # Delaunay triangulation in XY plane
     tri = Delaunay(pts[:, :2])
     faces = tri.simplices.astype(np.int32)
+
+    # optional alpha filtering: remove triangles with circumradius > alpha
+    if alpha is not None:
+        # compute circumradius for each triangle
+        a_pts = pts[faces[:, 0], :2]
+        b_pts = pts[faces[:, 1], :2]
+        c_pts = pts[faces[:, 2], :2]
+        # edge lengths
+        ab = np.linalg.norm(a_pts - b_pts, axis=1)
+        bc = np.linalg.norm(b_pts - c_pts, axis=1)
+        ca = np.linalg.norm(c_pts - a_pts, axis=1)
+        s = 0.5 * (ab + bc + ca)
+        # triangle area via Heron's formula, guard small/degenerate
+        area = np.sqrt(np.clip(s * (s - ab) * (s - bc) * (s - ca), 0.0, None))
+        # avoid division by zero
+        with np.errstate(divide='ignore', invalid='ignore'):
+            circum_r = (ab * bc * ca) / (4.0 * area)
+        # if area==0 set circum_r to inf
+        circum_r = np.where(area > 0, circum_r, np.inf)
+        keep = circum_r <= float(alpha)
+        faces = faces[keep]
 
     # vertices with Z from vals
     z = (np.nan_to_num(vals, nan=0.0) * float(vert_exag)).astype(np.float32)

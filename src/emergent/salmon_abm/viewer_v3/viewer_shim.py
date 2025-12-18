@@ -127,6 +127,30 @@ class SalmonViewer(QtWidgets.QWidget):
             self.gl_widget.set_mesh(verts, faces, colors)
         return True
 
+    def load_hecras_mesh(self, hdf_path_or_file, timestep: int = 0, depth_thresh: float | None = 0.05, max_nodes: int | None = 5000, vert_exag: float = 1.0):
+        """Extract depth points from a HECRAS HDF5 and upload a mesh to the GL widget.
+
+        This is a convenience method that wraps `hecras_adapter.build_mesh_from_hecras`.
+        Returns True on success, False on no-data or failure.
+        """
+        try:
+            from emergent.salmon_abm.viewer_v3.hecras_adapter import build_mesh_from_hecras
+            verts, faces, colors = build_mesh_from_hecras(hdf_path_or_file, timestep=timestep, depth_thresh=depth_thresh, max_nodes=max_nodes, vert_exag=vert_exag)
+            if verts is None or verts.size == 0:
+                return False
+            if self.gl_widget is not None:
+                try:
+                    self.gl_widget.set_mesh(verts, faces, colors)
+                except Exception:
+                    # GL may not be initialized yet; store for later
+                    self._pending_mesh = (verts, faces, colors)
+            else:
+                # no GL widget available; still store last payload
+                self.last_mesh_payload = {'verts': verts, 'faces': faces, 'colors': colors}
+            return True
+        except Exception:
+            return False
+
     def start_realtime(self, target_fps: int = 30):
         if self._rt_solver is not None:
             return

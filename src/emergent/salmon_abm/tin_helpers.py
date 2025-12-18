@@ -34,14 +34,14 @@ def sample_evenly(pts, vals, max_nodes=5000, grid_dim=100):
 
     selected = []
     per_bucket = max(1, int(np.ceil(max_nodes / (grid_dim*grid_dim))))
-    # first pass: sample up to per_bucket from each non-empty bucket
+    # first pass: sample up to per_bucket from each non-empty bucket using true randomness
+    rng = np.random.default_rng()
     for b in buckets:
         if len(b) == 0:
             continue
         if len(b) <= per_bucket:
             selected.extend(b)
         else:
-            rng = np.random.default_rng(0)
             selected.extend(rng.choice(b, size=per_bucket, replace=False).tolist())
 
     # if too many selected, downsample uniformly
@@ -49,8 +49,18 @@ def sample_evenly(pts, vals, max_nodes=5000, grid_dim=100):
         rng = np.random.default_rng(1)
         selected = rng.choice(selected, size=max_nodes, replace=False).tolist()
 
-    sampled_pts = pts[selected]
+    sampled_pts = pts[selected].copy()
     sampled_vals = vals[selected]
+    # add tiny jitter proportional to median spacing to avoid grid banding
+    if sampled_pts.shape[0] > 1:
+        try:
+            tree = cKDTree(sampled_pts)
+            d, _ = tree.query(sampled_pts, k=2)
+            median_spacing = float(np.median(d[:, 1]))
+        except Exception:
+            median_spacing = 1e-6
+        jitter = (rng.random(sampled_pts.shape) - 0.5) * (median_spacing * 0.01)
+        sampled_pts += jitter
     return sampled_pts, sampled_vals
 
 
