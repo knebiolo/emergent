@@ -85,6 +85,10 @@ class SalmonViewer(QtWidgets.QWidget):
             # explicit Save Best Weights button
             self.save_best_btn = QPushButton('Save Best Weights')
             self.save_best_btn.clicked.connect(self._on_save_best)
+            self.save_weights_btn = QPushButton('Save Weights...')
+            self.save_weights_btn.clicked.connect(self._on_save_weights)
+            self.load_weights_btn = QPushButton('Load Weights...')
+            self.load_weights_btn.clicked.connect(self._on_load_weights)
         except Exception:
             pass
         # RL / episode bookkeeping
@@ -362,6 +366,8 @@ class SalmonViewer(QtWidgets.QWidget):
             right_layout.addWidget(self.reset_btn)
             right_layout.addWidget(self.rebuild_btn)
             right_layout.addWidget(self.save_best_btn)
+            right_layout.addWidget(self.save_weights_btn)
+            right_layout.addWidget(self.load_weights_btn)
             right_layout.addWidget(self.ve_label)
             right_layout.addWidget(self.ve_slider)
             right_layout.addWidget(self.show_dead_cb)
@@ -420,6 +426,46 @@ class SalmonViewer(QtWidgets.QWidget):
             os.makedirs(save_dir, exist_ok=True)
             save_path = os.path.join(save_dir, 'best_weights.json')
             json.dump(self.rl_trainer.behavioral_weights.to_dict(), open(save_path, 'w'), indent=2)
+        except Exception:
+            pass
+
+    def _on_save_weights(self):
+        try:
+            if self.rl_trainer is None:
+                return
+            from PyQt5.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getSaveFileName(self, 'Save Weights', 'weights.json', 'JSON Files (*.json)')
+            if not path:
+                return
+            import json
+            json.dump(self.rl_trainer.behavioral_weights.to_dict(), open(path, 'w'), indent=2)
+        except Exception:
+            pass
+
+    def _on_load_weights(self):
+        try:
+            from PyQt5.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getOpenFileName(self, 'Load Weights', '', 'JSON Files (*.json)')
+            if not path:
+                return
+            import json, os
+            data = json.load(open(path, 'r'))
+            # try to apply via rl_trainer.behavioral_weights.from_dict if available
+            if self.rl_trainer is not None and hasattr(self.rl_trainer, 'behavioral_weights'):
+                try:
+                    self.rl_trainer.behavioral_weights.from_dict(data)
+                    if hasattr(self.sim, 'apply_behavioral_weights'):
+                        self.sim.apply_behavioral_weights(self.rl_trainer.behavioral_weights)
+                    return
+                except Exception:
+                    pass
+            # fallback: if sim supports load_behavioral_weights or similar
+            if hasattr(self.sim, 'load_behavioral_weights'):
+                try:
+                    self.sim.load_behavioral_weights(path)
+                    return
+                except Exception:
+                    pass
         except Exception:
             pass
 
