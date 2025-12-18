@@ -14,6 +14,12 @@ from emergent.salmon_abm.viewer_v3.renderer_moderngl import ModernglViewerWidget
 from emergent.salmon_abm.viewer_v3.realtime import RealTimeSolver
 from PyQt5.QtWidgets import QPushButton, QLabel, QSlider, QGroupBox, QCheckBox, QHBoxLayout, QVBoxLayout
 from PyQt5.QtCore import Qt
+try:
+    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+    import matplotlib.pyplot as plt
+except Exception:
+    FigureCanvas = None
+    plt = None
 
 
 class SalmonViewer(QtWidgets.QWidget):
@@ -58,8 +64,38 @@ class SalmonViewer(QtWidgets.QWidget):
             self.show_dead_cb.setChecked(False)
             self.show_direction_cb = QCheckBox('Show Direction')
             self.show_direction_cb.setChecked(False)
+            # agent visualization controls
+            self.show_trails_cb = QCheckBox('Show Trails')
+            self.show_trails_cb.setChecked(False)
+            self.trail_length_label = QLabel('Trail Len: 10')
+            self.trail_length_slider = QSlider(Qt.Horizontal)
+            self.trail_length_slider.setMinimum(1)
+            self.trail_length_slider.setMaximum(200)
+            self.trail_length_slider.setValue(10)
+            self.agent_size_label = QLabel('Agent Size: 4')
+            self.agent_size_slider = QSlider(Qt.Horizontal)
+            self.agent_size_slider.setMinimum(1)
+            self.agent_size_slider.setMaximum(20)
+            self.agent_size_slider.setValue(4)
+            # persistence and RL controls
+            self.save_previews_cb = QCheckBox('Save Previews')
+            self.save_previews_cb.setChecked(False)
+            self.auto_mutate_cb = QCheckBox('Auto Mutate Weights')
+            self.auto_mutate_cb.setChecked(True)
+            # explicit Save Best Weights button
+            self.save_best_btn = QPushButton('Save Best Weights')
+            self.save_best_btn.clicked.connect(self._on_save_best)
         except Exception:
             pass
+        # RL / episode bookkeeping
+        self._current_episode = 0
+        self._current_timestep = 0
+        self._episode_reward = 0.0
+        self._best_reward = float('-inf')
+        self.rewards_history = []
+        self.episode_metric_accumulators = {}
+        self.per_episode_series = {}
+        self.per_episode_handles = {}
 
     def setup_background(self):
         """Example usage of mesh_builder to create a mesh for preview/testing.
@@ -113,8 +149,103 @@ class SalmonViewer(QtWidgets.QWidget):
             if pos is not None and self.gl_widget is not None:
                 # use default color and upload
                 self.gl_widget.set_agents(pos)
+            # accumulate metrics for RL training if available
+            if self.rl_trainer is not None:
+                try:
+                    # collect state metrics and accumulate selected metrics
+                    current_metrics = self.rl_trainer.extract_state_metrics()
+                    # update display labels if present
+                    try:
+                        if 'mean_speed' in current_metrics and hasattr(self, 'mean_speed_label'):
+                            self.mean_speed_label.setText(f"Mean Speed: {current_metrics['mean_speed']:.2f}")
+                    except Exception:
+                        pass
+                    # accumulate selected metrics
+                    for m, cb in getattr(self, 'track_metric_cbs', {}).items():
+                        try:
+                            if cb.isChecked():
+                                self.episode_metric_accumulators.setdefault(m, []).append(float(current_metrics.get(m, 0.0)))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            # RL training update if present
+            if self.rl_trainer is not None:
+                try:
+                    self._update_rl_training()
+                except Exception:
+                    pass
         except Exception:
             pass
+
+    def _update_rl_training(self):
+        # Extract current metrics from rl_trainer
+        try:
+            current_metrics = self.rl_trainer.extract_state_metrics()
+        except Exception:
+            current_metrics = {}
+
+        # Compute reward increment
+        try:
+            prev = getattr(self, '_prev_metrics', None)
+            if prev is not None:
+                reward = self.rl_trainer.compute_reward(prev, current_metrics)
+                self._episode_reward = getattr(self, '_episode_reward', 0.0) + float(reward)
+            else:
+                self._episode_reward = getattr(self, '_episode_reward', 0.0)
+        except Exception:
+            pass
+        self._prev_metrics = current_metrics
+
+        # advance timestep tracking if available
+        self._current_timestep = getattr(self.sim, 'current_timestep', getattr(self, '_current_timestep', 0))
+        n_timesteps = getattr(self, 'T', getattr(self.sim, 'T', 600))
+        if self._current_timestep >= n_timesteps:
+            # episode complete
+            ep = getattr(self, '_current_episode', 0)
+            # save best weights if beat
+            try:
+                best_reward = getattr(self, '_best_reward', float('-inf'))
+                if self._episode_reward > best_reward:
+                    self._best_reward = self._episode_reward
+                    # save weights
+                    import json, os
+                    save_dir = getattr(self.sim, 'model_dir', None) or os.getcwd()
+                    save_dir = os.path.join(save_dir, 'outputs', 'rl_training')
+                    os.makedirs(save_dir, exist_ok=True)
+                    save_path = os.path.join(save_dir, 'best_weights.json')
+                    try:
+                        json.dump(self.rl_trainer.behavioral_weights.to_dict(), open(save_path, 'w'), indent=2)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # mutate weights if auto_mutate enabled
+            try:
+                if getattr(self, 'auto_mutate_cb', None) and self.auto_mutate_cb.isChecked():
+                    try:
+                        self.rl_trainer.behavioral_weights.mutate(scale=0.1)
+                        self.sim.apply_behavioral_weights(self.rl_trainer.behavioral_weights)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # reset sim spatial state
+            try:
+                self.sim.reset_spatial_state(reset_positions=True)
+            except Exception:
+                try:
+                    self.sim.reset_spatial_state()
+                except Exception:
+                    pass
+
+            # advance episode
+            self._current_episode = getattr(self, '_current_episode', 0) + 1
+            self._current_timestep = 0
+            self._episode_reward = 0.0
+            self._prev_metrics = None
 
     def _on_play(self):
         # start realtime solver
@@ -149,6 +280,74 @@ class SalmonViewer(QtWidgets.QWidget):
         left_layout = QVBoxLayout()
         self.mean_speed_label = QLabel('Mean Speed: --')
         left_layout.addWidget(self.mean_speed_label)
+        # per-episode metric tracking checkboxes
+        self._available_episode_metrics = [
+            'collision_count', 'mean_upstream_progress', 'mean_upstream_velocity',
+            'energy_efficiency', 'mean_passage_delay'
+        ]
+        self.track_metric_cbs = {}
+        def add_label_with_cb(label_widget, metric_key, default_checked=False):
+            h = QHBoxLayout()
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            h.addWidget(label_widget)
+            cb = QCheckBox()
+            cb.setChecked(default_checked)
+            cb.setFixedWidth(22)
+            h.addWidget(cb)
+            left_layout.addLayout(h)
+            self.track_metric_cbs[metric_key] = cb
+
+        # create labels and checkboxes mapping
+        try:
+            self.collision_count_label = QLabel('Collision Count: --')
+            add_label_with_cb(self.collision_count_label, 'collision_count')
+            self.mean_upstream_velocity_label = QLabel('Mean Upstream Velocity: --')
+            add_label_with_cb(self.mean_upstream_velocity_label, 'mean_upstream_velocity')
+            add_label_with_cb(QLabel('Mean Energy: --'), 'energy_efficiency')
+            add_label_with_cb(QLabel('Mean Passage Delay: --'), 'mean_passage_delay')
+        except Exception:
+            pass
+        # plotting canvas (reward over episodes)
+        if FigureCanvas is not None and plt is not None:
+            try:
+                self._fig = plt.Figure(figsize=(4, 3)) if hasattr(plt, 'Figure') else plt.figure()
+            except Exception:
+                self._fig = None
+        else:
+            self._fig = None
+        if self._fig is not None:
+            self._canvas = FigureCanvas(self._fig)
+            self._ax_reward = self._fig.add_subplot(211)
+            self._ax_reward.set_title('Episode Reward')
+            self._ax_reward.set_xlabel('Episode')
+            self._ax_reward.set_ylabel('Reward')
+            self._ax_mean = self._fig.add_subplot(212)
+            self._ax_mean.set_title('Mean Speed')
+            self._ax_mean.set_xlabel('Timestep')
+            self._ax_mean.set_ylabel('Speed')
+            self._rewards = []
+            try:
+                self._reward_line, = self._ax_reward.plot([], [], '-o')
+            except Exception:
+                self._reward_line = None
+            try:
+                self._mean_line, = self._ax_mean.plot([], [])
+            except Exception:
+                self._mean_line = None
+            left_layout.addWidget(self._canvas)
+        else:
+            self._canvas = None
+        # small per-episode plot using pyqtgraph as fallback
+        try:
+            import pyqtgraph as pg
+            self.per_episode_plot = pg.PlotWidget(title='Per-Episode Metrics')
+            self.per_episode_plot.setLabel('bottom', 'Episode')
+            self.per_episode_plot.setLabel('left', 'Metric Value')
+            self.per_episode_plot.setMaximumHeight(220)
+            left_layout.addWidget(self.per_episode_plot)
+        except Exception:
+            self.per_episode_plot = None
         left.setLayout(left_layout)
 
         center_layout = QVBoxLayout()
@@ -162,10 +361,19 @@ class SalmonViewer(QtWidgets.QWidget):
             right_layout.addWidget(self.pause_btn)
             right_layout.addWidget(self.reset_btn)
             right_layout.addWidget(self.rebuild_btn)
+            right_layout.addWidget(self.save_best_btn)
             right_layout.addWidget(self.ve_label)
             right_layout.addWidget(self.ve_slider)
             right_layout.addWidget(self.show_dead_cb)
             right_layout.addWidget(self.show_direction_cb)
+            right_layout.addWidget(self.show_trails_cb)
+            right_layout.addWidget(self.trail_length_label)
+            right_layout.addWidget(self.trail_length_slider)
+            right_layout.addWidget(self.agent_size_label)
+            right_layout.addWidget(self.agent_size_slider)
+            right_layout.addWidget(self.save_previews_cb)
+            right_layout.addWidget(self.auto_mutate_cb)
+            # per-episode metric checkboxes will be created on demand
         except Exception:
             pass
         right.setLayout(right_layout)
@@ -176,7 +384,76 @@ class SalmonViewer(QtWidgets.QWidget):
         self.setLayout(main)
 
         self.show()
+        # connect extra callbacks
+        try:
+            self.show_trails_cb.stateChanged.connect(self._on_toggle_trails)
+            self.trail_length_slider.valueChanged.connect(self._on_trail_length_changed)
+            self.agent_size_slider.valueChanged.connect(self._on_agent_size_changed)
+            self.show_direction_cb.stateChanged.connect(self._on_toggle_direction)
+            # wire save previews and save best
+            try:
+                self.save_previews_cb.stateChanged.connect(self._on_toggle_save_previews)
+            except Exception:
+                pass
+            try:
+                self.save_best_btn.clicked.connect(self._on_save_best)
+            except Exception:
+                pass
+        except Exception:
+            pass
         return QtWidgets.QApplication.instance().exec_()
+
+    def _on_toggle_save_previews(self, state: int):
+        # placeholder: toggle whether frames are written to disk during episodes
+        try:
+            self._save_previews = bool(state)
+        except Exception:
+            self._save_previews = False
+
+    def _on_save_best(self):
+        try:
+            if self.rl_trainer is None:
+                return
+            import json, os
+            save_dir = getattr(self.sim, 'model_dir', None) or os.getcwd()
+            save_dir = os.path.join(save_dir, 'outputs', 'rl_training')
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, 'best_weights.json')
+            json.dump(self.rl_trainer.behavioral_weights.to_dict(), open(save_path, 'w'), indent=2)
+        except Exception:
+            pass
+
+    def _on_toggle_trails(self, state: int):
+        try:
+            val = bool(state)
+            if self.gl_widget is not None:
+                self.gl_widget.set_show_trails(val)
+        except Exception:
+            pass
+
+    def _on_trail_length_changed(self, v: int):
+        try:
+            self.trail_length_label.setText(f'Trail Len: {v}')
+            if self.gl_widget is not None:
+                self.gl_widget.set_trail_length(int(v))
+        except Exception:
+            pass
+
+    def _on_agent_size_changed(self, v: int):
+        try:
+            self.agent_size_label.setText(f'Agent Size: {v}')
+            if self.gl_widget is not None:
+                self.gl_widget.set_point_size(float(v))
+        except Exception:
+            pass
+
+    def _on_toggle_direction(self, state: int):
+        try:
+            val = bool(state)
+            if self.gl_widget is not None:
+                self.gl_widget.set_show_directions(val)
+        except Exception:
+            pass
 
 
 def launch_viewer(simulation, dt=0.1, T=600, rl_trainer=None, **kwargs):

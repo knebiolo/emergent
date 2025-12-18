@@ -53,6 +53,18 @@ class ModernglViewerWidget(QOpenGLWidget):
         self.verts = None
         self.faces = None
         self.colors = None
+        # agent rendering state
+        self._agent_vbo = None
+        self._agent_cbo = None
+        self._agent_vao = None
+        self._agent_positions = None
+        self._agent_colors = None
+        # trails/trajectories
+        self._show_trails = False
+        self._trail_length = 10
+        self._trajectories = None  # list/array of shape (n_agents, history, 3)
+        self._show_directions = False
+        self._point_size = 4.0
         self.setMinimumSize(480, 360)
 
     def initializeGL(self):
@@ -79,6 +91,7 @@ class ModernglViewerWidget(QOpenGLWidget):
         }
         """
         self.prog = self.ctx.program(vertex_shader=vs, fragment_shader=fs)
+        # simple program for line/points (reuse same shaders but allow draw mode switches)
 
     def resizeGL(self, w: int, h: int):
         if self.ctx is not None:
@@ -99,7 +112,20 @@ class ModernglViewerWidget(QOpenGLWidget):
         try:
             if getattr(self, '_agent_vao', None) is not None:
                 self.ctx.disable(moderngl.DEPTH_TEST)
+                # set point size via gl_PointSize in shader is not used; use built-in where available
                 self._agent_vao.render(moderngl.POINTS)
+                # render trails as line strips if available
+                if self._show_trails and getattr(self, '_traj_vao', None) is not None:
+                    try:
+                        self._traj_vao.render(moderngl.LINES)
+                    except Exception:
+                        pass
+                # optional direction arrows (rendered as lines)
+                if self._show_directions and getattr(self, '_dir_vao', None) is not None:
+                    try:
+                        self._dir_vao.render(moderngl.LINES)
+                    except Exception:
+                        pass
                 self.ctx.enable(moderngl.DEPTH_TEST)
         except Exception:
             pass
@@ -155,6 +181,195 @@ class ModernglViewerWidget(QOpenGLWidget):
         # Update MVP using mesh extents
         self._update_mvp()
         self.update()
+
+    # Agent and trajectory helpers
+    def set_point_size(self, size: float):
+        self._point_size = float(size)
+        self.update()
+
+    def set_show_trails(self, show: bool):
+        self._show_trails = bool(show)
+        self.update()
+
+    def set_trail_length(self, length: int):
+        self._trail_length = int(length)
+        # trim existing trajectories if necessary
+        if self._trajectories is not None and self._trajectories.shape[1] > self._trail_length:
+            self._trajectories = self._trajectories[:, -self._trail_length:, :]
+        self._update_traj_buffers()
+        self.update()
+
+    def set_show_directions(self, show: bool):
+        self._show_directions = bool(show)
+        self.update()
+
+    def _update_agent_buffers(self):
+        # create or update buffers for agent positions/colors
+        if self._agent_positions is None:
+            return
+        pos = np.asarray(self._agent_positions, dtype='f4')
+        cols = np.asarray(self._agent_colors, dtype='f4') if self._agent_colors is not None else np.tile(np.array([1.0, 0.2, 0.2, 1.0], dtype='f4'), (pos.shape[0], 1))
+        try:
+            if getattr(self, '_agent_vbo', None) is None:
+                self._agent_vbo = self.ctx.buffer(pos.tobytes())
+            else:
+                # partial update via write
+                try:
+                    self._agent_vbo.write(pos.tobytes())
+                except Exception:
+                    self._agent_vbo.release()
+                    self._agent_vbo = self.ctx.buffer(pos.tobytes())
+            if getattr(self, '_agent_cbo', None) is None:
+                self._agent_cbo = self.ctx.buffer(cols.tobytes())
+            else:
+                try:
+                    self._agent_cbo.write(cols.tobytes())
+                except Exception:
+                    self._agent_cbo.release()
+                    self._agent_cbo = self.ctx.buffer(cols.tobytes())
+            if getattr(self, '_agent_vao', None) is not None:
+                try:
+                    self._agent_vao.release()
+                except Exception:
+                    pass
+            self._agent_vao = self.ctx.vertex_array(self.prog, [(self._agent_vbo, '3f', 'in_position'), (self._agent_cbo, '4f', 'in_color')])
+        except Exception:
+            pass
+
+    def set_agents(self, positions: np.ndarray, colors: np.ndarray | None = None, size: float = 4.0):
+        # store and update buffers
+        self._agent_positions = np.asarray(positions, dtype='f4')
+        self._agent_colors = None if colors is None else np.asarray(colors, dtype='f4')
+        if self.ctx is None:
+            return
+        self._update_agent_buffers()
+        # also append to trajectories history
+        try:
+            n = self._agent_positions.shape[0]
+            if self._trajectories is None:
+                self._trajectories = np.zeros((n, 1, 3), dtype='f4')
+                self._trajectories[:, 0, :] = self._agent_positions
+            else:
+                # ensure same agent count
+                if self._trajectories.shape[0] != n:
+                    # reset trajectories
+                    self._trajectories = np.zeros((n, 1, 3), dtype='f4')
+                    self._trajectories[:, 0, :] = self._agent_positions
+                else:
+                    self._trajectories = np.concatenate([self._trajectories, self._agent_positions[:, None, :]], axis=1)
+                    # trim
+                    if self._trajectories.shape[1] > self._trail_length:
+                        self._trajectories = self._trajectories[:, -self._trail_length:, :]
+        except Exception:
+            pass
+        # update trajectory buffers for rendering
+        self._update_traj_buffers()
+        self.update()
+
+    def _update_traj_buffers(self):
+        # build line segments from trajectories
+        try:
+            if self._trajectories is None or not self._show_trails:
+                # release traj vao if exists
+                if getattr(self, '_traj_vao', None) is not None:
+                    try:
+                        self._traj_vao.release()
+                    except Exception:
+                        pass
+                    self._traj_vao = None
+                return
+            # flatten trajectories into segments (pairs of points -> lines)
+            n, h, _ = self._trajectories.shape
+            if h < 2:
+                return
+            segs = []
+            cols = []
+            for i in range(n):
+                traj = self._trajectories[i]
+                for j in range(h - 1):
+                    a = traj[j]
+                    b = traj[j + 1]
+                    segs.append(tuple(a.tolist()))
+                    segs.append(tuple(b.tolist()))
+                    cols.append((1.0, 0.2, 0.2, 0.8))
+                    cols.append((1.0, 0.2, 0.2, 0.8))
+            segs = np.array(segs, dtype='f4')
+            cols = np.array(cols, dtype='f4')
+            # create buffers
+            try:
+                if getattr(self, '_traj_vbo', None) is not None:
+                    self._traj_vbo.release()
+                if getattr(self, '_traj_cbo', None) is not None:
+                    self._traj_cbo.release()
+                if getattr(self, '_traj_vao', None) is not None:
+                    try:
+                        self._traj_vao.release()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            self._traj_vbo = self.ctx.buffer(segs.tobytes())
+            self._traj_cbo = self.ctx.buffer(cols.tobytes())
+            try:
+                self._traj_vao = self.ctx.vertex_array(self.prog, [(self._traj_vbo, '3f', 'in_position'), (self._traj_cbo, '4f', 'in_color')])
+            except Exception:
+                self._traj_vao = None
+        except Exception:
+            pass
+
+    def set_agent_trajectories(self, trajectories: np.ndarray):
+        # accept shape (n_agents, history, 3)
+        try:
+            self._trajectories = np.asarray(trajectories, dtype='f4')
+            # enforce trail_length
+            if self._trajectories.shape[1] > self._trail_length:
+                self._trajectories = self._trajectories[:, -self._trail_length:, :]
+            self._update_traj_buffers()
+            self.update()
+        except Exception:
+            pass
+
+    def set_agent_directions(self, directions: np.ndarray):
+        # accept shape (n_agents, 3) or (n_agents, 2); build line segments to render arrows
+        try:
+            dirs = np.asarray(directions, dtype='f4')
+            pos = self._agent_positions
+            if pos is None or dirs.shape[0] != pos.shape[0]:
+                return
+            segs = []
+            cols = []
+            for i in range(pos.shape[0]):
+                a = pos[i]
+                d = dirs[i]
+                b = a + d
+                segs.append(tuple(a.tolist()))
+                segs.append(tuple(b.tolist()))
+                cols.append((0.2, 0.2, 1.0, 0.9))
+                cols.append((0.2, 0.2, 1.0, 0.9))
+            segs = np.array(segs, dtype='f4')
+            cols = np.array(cols, dtype='f4')
+            # release old
+            try:
+                if getattr(self, '_dir_vbo', None) is not None:
+                    self._dir_vbo.release()
+                if getattr(self, '_dir_cbo', None) is not None:
+                    self._dir_cbo.release()
+                if getattr(self, '_dir_vao', None) is not None:
+                    try:
+                        self._dir_vao.release()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            self._dir_vbo = self.ctx.buffer(segs.tobytes())
+            self._dir_cbo = self.ctx.buffer(cols.tobytes())
+            try:
+                self._dir_vao = self.ctx.vertex_array(self.prog, [(self._dir_vbo, '3f', 'in_position'), (self._dir_cbo, '4f', 'in_color')])
+            except Exception:
+                self._dir_vao = None
+            self.update()
+        except Exception:
+            pass
 
     def set_heightmap(self, depth_grid: np.ndarray, bbox: tuple | None = None, max_res: int = 256, colormap: str = 'viridis', vert_exag: float = 1.0):
         """Create a regular-grid mesh from a 2D depth raster and upload to GPU.
@@ -289,4 +504,4 @@ class ModernglViewerWidget(QOpenGLWidget):
         except Exception:
             pass
 
-*** End Patch
+ 

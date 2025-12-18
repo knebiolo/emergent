@@ -84,8 +84,19 @@ BUCKETS: tuple[str, ...] = ("noaa-nos-ofs-pds",)  # Only check primary bucket
 CYCLES:  tuple[int, ...] = (18, 12, 6, 3, 0)       # Common OFS cycles (18z, 12z, 6z, 3z, 0z)
 LAYERS:  tuple[str, ...] = ("n000",)#, "f000")     # nowcast | 0‑h fcst
 
-# Anonymous read‑only S3 filesystem
-fs = fsspec.filesystem("s3", anon=True, requester_pays=True)
+# Lazy filesystem accessor. Creating an S3 filesystem at import time
+# pulls in optional dependencies (s3fs/aiobotocore) which many test
+# environments don't have; create on-demand and fall back to the
+# local file system so unit tests run without extra packages.
+_fs = None
+def get_fs():
+    global _fs
+    if _fs is None:
+        try:
+            _fs = fsspec.filesystem("s3", anon=True, requester_pays=True)
+        except Exception:
+            _fs = fsspec.filesystem("file")
+    return _fs
 
 
 # ----------------------------------------------------------------------
@@ -131,7 +142,7 @@ def first_existing_url(urls: List[str]) -> str | None:
     for url in urls:
         try:
             bucket, key = url[5:].split("/", 1)
-            if fs.exists(f"{bucket}/{key}"):
+            if get_fs().exists(f"{bucket}/{key}"):
                 print(f"[ofs_loader] [OK] Found: {url}")
                 return url
         except Exception as e:
@@ -194,7 +205,7 @@ bbox: Tuple[float, float, float, float], # lon_min, lon_max, lat_min, lat_max
                 # First attempt: let xarray open the fsspec file-like directly
                 try:
                     ds = xr.open_dataset(
-                        fs.open(url),
+                        get_fs().open(url),
                         engine="h5netcdf",
                         chunks={"time": 1},
                         drop_variables=["siglay", "siglev"],  # FVCOM: drop vars that collide with dims

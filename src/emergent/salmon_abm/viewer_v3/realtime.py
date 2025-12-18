@@ -22,6 +22,9 @@ class RealTimeSolver(QtCore.QThread):
         self.target_fps = int(target_fps)
         self._running = False
         self._pause = False
+        # trajectory history buffer
+        self._history_len = 20
+        self._history = None
 
     def run(self):
         import time
@@ -62,13 +65,37 @@ class RealTimeSolver(QtCore.QThread):
                     y = getattr(self.sim, 'Y', None)
                     if x is not None and y is not None:
                         # stack X,Y,0
-                        pos = np.column_stack([np.asarray(x).astype('f4'), np.asarray(y).astype('f4'), np.zeros(len(x), dtype='f4')])
-                        positions = pos
+                            pos = np.column_stack([np.asarray(x).astype('f4'), np.asarray(y).astype('f4'), np.zeros(len(x), dtype='f4')])
+                            positions = pos
+                            # maintain history
+                            try:
+                                if self._history is None:
+                                    # shape (n_agents, history, 3)
+                                    self._history = np.zeros((pos.shape[0], 0, 3), dtype='f4')
+                                if self._history.shape[0] != pos.shape[0]:
+                                    self._history = np.zeros((pos.shape[0], 0, 3), dtype='f4')
+                                self._history = np.concatenate([self._history, pos[:, None, :]], axis=1)
+                                if self._history.shape[1] > self._history_len:
+                                    self._history = self._history[:, -self._history_len:, :]
+                            except Exception:
+                                pass
                 except Exception:
                     positions = None
-                payload = {'positions': positions}
-                # emit frame
-                self.frame_ready.emit(payload)
+                    # build approximate directions from recent history
+                    directions = None
+                    trajectories = None
+                    try:
+                        if self._history is not None and self._history.shape[1] >= 2:
+                            trajectories = self._history.copy()
+                            # direction = last - previous
+                            directions = (self._history[:, -1, :] - self._history[:, -2, :])
+                    except Exception:
+                        directions = None
+                        trajectories = None
+
+                    payload = {'positions': positions, 'directions': directions, 'trajectories': trajectories}
+                    # emit frame
+                    self.frame_ready.emit(payload)
             except Exception:
                 # if simulation throws, pause and emit no frames
                 self._pause = True

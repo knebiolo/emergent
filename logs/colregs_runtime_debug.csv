@@ -1,0 +1,1 @@
+sim_time,agent,role,flagged_give_way,crossing_lock,crossing_heading_deg,crossing_speed_mps,crossing_linger_s,post_avoid_s,integrator_flushed

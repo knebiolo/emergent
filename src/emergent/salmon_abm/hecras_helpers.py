@@ -434,22 +434,14 @@ def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, m
                     print('No valid perimeter polygons from vector method')
                 raise RuntimeError('No valid perimeter polygons from vector method')
             merged = unary_union(polys)
-            # Build a consistent dict return value
+            # Convert merged geometry into a list of perimeter coordinate arrays
             rings = []
             if merged.geom_type == 'Polygon':
-                rings = [list(merged.exterior.coords)]
+                rings = [np.asarray(list(merged.exterior.coords))]
             else:
-                rings = [list(g.exterior.coords) for g in merged.geoms]
-            # choose largest ring as primary
-            primary = max(rings, key=lambda r: len(r) if hasattr(r, '__len__') else 0)
-            pts = np.asarray(primary)
-            # perimeter_cells and wetted_mask are not available here; return placeholders
-            return {
-                'perimeter_points': pts,
-                'perimeter_cells': np.zeros((pts.shape[0],), dtype=int),
-                'wetted_mask': None,
-                'median_spacing': None
-            }
+                rings = [np.asarray(list(g.exterior.coords)) for g in merged.geoms]
+            # return list of rings (numpy arrays) to match legacy callers/tests
+            return rings
 
         except Exception as e:
             # Vector method failed — log and fall back to raster
@@ -500,22 +492,34 @@ def infer_wetted_perimeter_from_hecras(hdf_path_or_file, depth_threshold=0.05, m
                 if len(pts) >= 3:
                     polys.append(ShPolygon(pts).convex_hull)
             if not polys:
+                # If polygonization failed, attempt a convex-hull of wetted centers
                 if verbose:
-                    print('Raster fallback produced no polygons')
-                raise RuntimeError('Raster fallback produced no polygons')
-            merged = unary_union(polys)
-            if merged.geom_type == 'Polygon':
-                rings = [list(merged.exterior.coords)]
+                    print('Raster fallback produced no polygons; using convex hull of wetted centers')
+                wetted_centers = coords[wetted_mask]
+                if wetted_centers.shape[0] >= 3:
+                    try:
+                        from shapely.geometry import MultiPoint
+                        merged = MultiPoint(list(map(tuple, wetted_centers))).convex_hull
+                    except Exception:
+                        # shapely not available — use scipy ConvexHull
+                        try:
+                            from scipy.spatial import ConvexHull
+                            ch = ConvexHull(wetted_centers)
+                            hull_pts = wetted_centers[ch.vertices]
+                            merged = Polygon(hull_pts)
+                        except Exception:
+                            raise RuntimeError('Raster fallback produced no polygons and convex-hull fallback failed')
+                else:
+                    raise RuntimeError('Raster fallback produced no polygons and not enough wetted centers for convex hull')
             else:
-                rings = [list(g.exterior.coords) for g in merged.geoms]
-            primary = max(rings, key=lambda r: len(r) if hasattr(r, '__len__') else 0)
-            pts = np.asarray(primary)
-            return {
-                'perimeter_points': pts,
-                'perimeter_cells': np.zeros((pts.shape[0],), dtype=int),
-                'wetted_mask': None,
-                'median_spacing': None
-            }
+                merged = unary_union(polys)
+
+            # Convert merged geometry into a list of perimeter coordinate arrays
+            if merged.geom_type == 'Polygon':
+                rings = [np.asarray(list(merged.exterior.coords))]
+            else:
+                rings = [np.asarray(list(g.exterior.coords)) for g in merged.geoms]
+            return rings
         except Exception as e:
             # both methods failed
             raise RuntimeError('Both vector and raster wetted-perimeter inference failed: ' + str(e))
