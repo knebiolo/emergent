@@ -108,7 +108,8 @@ class ModernglViewerWidget(QOpenGLWidget):
     def paintGL(self):
         if self.ctx is None:
             return
-        self.ctx.clear(0.94, 0.94, 0.94, 1.0)
+        # darker neutral background to let viridis colormap stand out
+        self.ctx.clear(0.08, 0.08, 0.12, 1.0)
         if self._vao is None:
             return
         self.ctx.enable(moderngl.DEPTH_TEST)

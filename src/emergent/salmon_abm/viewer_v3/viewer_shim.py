@@ -51,6 +51,9 @@ class SalmonViewer(QtWidgets.QWidget):
             self.rebuild_btn = QPushButton('Rebuild Background')
             self.rebuild_btn.clicked.connect(self.setup_background)
 
+            self.load_last_mesh_btn = QPushButton('Load Last Mesh')
+            self.load_last_mesh_btn.clicked.connect(self.load_last_mesh)
+
             self.ve_label = QLabel('Z Exag: 1.00x')
             self.ve_slider = QSlider(Qt.Horizontal)
             self.ve_slider.setMinimum(1)
@@ -375,6 +378,7 @@ class SalmonViewer(QtWidgets.QWidget):
             right_layout.addWidget(self.save_best_btn)
             right_layout.addWidget(self.save_weights_btn)
             right_layout.addWidget(self.load_weights_btn)
+            right_layout.addWidget(self.load_last_mesh_btn)
             right_layout.addWidget(self.ve_label)
             right_layout.addWidget(self.ve_slider)
             right_layout.addWidget(self.show_dead_cb)
@@ -507,6 +511,29 @@ class SalmonViewer(QtWidgets.QWidget):
                 self.gl_widget.set_show_directions(val)
         except Exception:
             pass
+
+    def load_last_mesh(self):
+        """Load the most recent mesh saved to outputs/*_mesh.npz and upload to GL widget."""
+        import glob, os, numpy as _np
+        outdir = os.path.join(os.getcwd(), 'outputs')
+        if not os.path.isdir(outdir):
+            return False
+        files = glob.glob(os.path.join(outdir, '*_mesh.npz'))
+        if not files:
+            return False
+        latest = max(files, key=os.path.getmtime)
+        try:
+            d = _np.load(latest)
+            verts = d['verts']
+            faces = d['faces']
+            colors = d['colors']
+            if self.gl_widget is not None:
+                self.gl_widget.set_mesh(verts, faces, colors)
+            else:
+                self.last_mesh_payload = {'verts': verts, 'faces': faces, 'colors': colors}
+            return True
+        except Exception:
+            return False
 
 
 def launch_viewer(simulation, dt=0.1, T=600, rl_trainer=None, **kwargs):

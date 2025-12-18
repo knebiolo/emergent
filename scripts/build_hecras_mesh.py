@@ -128,22 +128,38 @@ if __name__ == '__main__':
             print('Qt Offscreen renderer unavailable; falling back to 2D scatter preview')
             try:
                 import matplotlib.pyplot as plt
-                if verts is not None and verts.shape[0] > 0:
+                if verts is not None and verts.shape[0] > 0 and faces is not None and faces.shape[0] > 0:
                     x = verts[:,0]
                     y = verts[:,1]
-                    c = colors if colors is not None and colors.shape[0]==verts.shape[0] else None
-                    plt.figure(figsize=(8,6))
-                    if c is not None:
-                        plt.scatter(x,y,c=c[:,:3],s=1)
-                    else:
-                        plt.scatter(x,y,s=1)
+                    z = verts[:,2]
+                    plt.figure(figsize=(10,8))
+                    try:
+                        # use tricontourf for a smooth viridis background from the mesh z values
+                        plt.tricontourf(x, y, faces, z, levels=256, cmap='viridis')
+                    except Exception:
+                        # fallback to scatter colored by z
+                        plt.scatter(x, y, c=z, cmap='viridis', s=1)
+                    # overlay mesh edges subtly to show triangulation
+                    try:
+                        plt.triplot(x, y, faces, linewidth=0.2, color='k', alpha=0.2)
+                    except Exception:
+                        pass
                     plt.axis('equal')
+                    plt.axis('off')
                     p = outdir / f'{base}_preview_matplotlib.png'
-                    plt.savefig(p, dpi=150)
+                    plt.savefig(p, dpi=200, bbox_inches='tight', pad_inches=0)
                     plt.close()
                     print('Saved matplotlib preview to', p)
+                else:
+                    print('Not enough verts/faces for matplotlib preview')
             except Exception as e:
                 print('Matplotlib preview failed:', e)
+
+        from emergent.salmon_abm.viewer_v3.viewer_shim import launch_viewer, SalmonViewer
+        # create or load simulation object `sim` then:
+        viewer = SalmonViewer(sim)
+        viewer.load_last_mesh()   # loads outputs/*_mesh.npz into GL widget
+        viewer.run()
 
         print('Done')
     except Exception as exc:
