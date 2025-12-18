@@ -15,11 +15,9 @@ from emergent.salmon_abm.viewer_v3.realtime import RealTimeSolver
 from PyQt5.QtWidgets import QPushButton, QLabel, QSlider, QGroupBox, QCheckBox, QHBoxLayout, QVBoxLayout
 from PyQt5.QtCore import Qt
 try:
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-    import matplotlib.pyplot as plt
+    import pyqtgraph as pg
 except Exception:
-    FigureCanvas = None
-    plt = None
+    pg = None
 
 
 class SalmonViewer(QtWidgets.QWidget):
@@ -312,36 +310,21 @@ class SalmonViewer(QtWidgets.QWidget):
             add_label_with_cb(QLabel('Mean Passage Delay: --'), 'mean_passage_delay')
         except Exception:
             pass
-        # plotting canvas (reward over episodes)
-        if FigureCanvas is not None and plt is not None:
-            try:
-                self._fig = plt.Figure(figsize=(4, 3)) if hasattr(plt, 'Figure') else plt.figure()
-            except Exception:
-                self._fig = None
-        else:
-            self._fig = None
-        if self._fig is not None:
-            self._canvas = FigureCanvas(self._fig)
-            self._ax_reward = self._fig.add_subplot(211)
-            self._ax_reward.set_title('Episode Reward')
-            self._ax_reward.set_xlabel('Episode')
-            self._ax_reward.set_ylabel('Reward')
-            self._ax_mean = self._fig.add_subplot(212)
-            self._ax_mean.set_title('Mean Speed')
-            self._ax_mean.set_xlabel('Timestep')
-            self._ax_mean.set_ylabel('Speed')
-            self._rewards = []
-            try:
-                self._reward_line, = self._ax_reward.plot([], [], '-o')
-            except Exception:
-                self._reward_line = None
-            try:
-                self._mean_line, = self._ax_mean.plot([], [])
-            except Exception:
-                self._mean_line = None
-            left_layout.addWidget(self._canvas)
-        else:
-            self._canvas = None
+        # plotting canvas: prefer pyqtgraph (OpenGL-accelerated) for speed
+        try:
+            if pg is not None:
+                self._reward_plot = pg.PlotWidget(title='Episode Reward')
+                self._reward_plot.setMaximumHeight(160)
+                self._reward_plot.setLabel('bottom', 'Episode')
+                self._reward_plot.setLabel('left', 'Reward')
+                self._reward_curve = self._reward_plot.plot([], [], pen=pg.mkPen('g', width=2))
+                left_layout.addWidget(self._reward_plot)
+            else:
+                self._reward_plot = None
+                self._reward_curve = None
+        except Exception:
+            self._reward_plot = None
+            self._reward_curve = None
         # small per-episode plot using pyqtgraph as fallback
         try:
             import pyqtgraph as pg
