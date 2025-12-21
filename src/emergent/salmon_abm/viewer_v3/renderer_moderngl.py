@@ -8,7 +8,37 @@ visual quality. It can be extended with camera controls, lighting, and
 performance optimizations (VBO reuse, frustum culling) later.
 """
 from PyQt5.QtWidgets import QOpenGLWidget
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5 import QtGui
 import numpy as np
+
+
+def _ortho_matrix(left, right, bottom, top, near, far):
+    """Return a 4x4 orthographic projection matrix (column-major).
+
+    Matches GLSL column-major ordering for direct upload to uniform mat4.
+    """
+    rl = (right - left)
+    tb = (top - bottom)
+    fn = (far - near)
+    # avoid division by zero
+    if rl == 0:
+        rl = 1.0
+    if tb == 0:
+        tb = 1.0
+    if fn == 0:
+        fn = 1.0
+    tx = -(right + left) / rl
+    ty = -(top + bottom) / tb
+    tz = -(far + near) / fn
+    # column-major matrix
+    m = np.array([
+        [2.0 / rl, 0.0, 0.0, 0.0],
+        [0.0, 2.0 / tb, 0.0, 0.0],
+        [0.0, 0.0, -2.0 / fn, 0.0],
+        [tx, ty, tz, 1.0]
+    ], dtype='f4')
+    return m
 
 try:
     import moderngl
@@ -21,33 +51,15 @@ try:
     except Exception:
         _pg_colormap = None
 except Exception:
-    pg = None
     _pg_colormap = None
 
 
-def _ortho_matrix(left, right, bottom, top, near, far, dtype='f4'):
-    """Return column-major orthographic projection matrix as float32."""
-    rl = right - left
-    tb = top - bottom
-    fn = far - near
-    if rl == 0: rl = 1.0
-    if tb == 0: tb = 1.0
-    if fn == 0: fn = 1.0
-    tx = -(right + left) / rl
-    ty = -(top + bottom) / tb
-    tz = -(far + near) / fn
-    m = np.array([
-        [2.0 / rl, 0.0, 0.0, tx],
-        [0.0, 2.0 / tb, 0.0, ty],
-        [0.0, 0.0, -2.0 / fn, tz],
-        [0.0, 0.0, 0.0, 1.0],
-    ], dtype=dtype)
-    return m
-
-
 class ModernglViewerWidget(QOpenGLWidget):
+    # Emitted when an off-screen FBO preview QImage is ready (QImage object)
+    fbo_preview_ready = pyqtSignal(object)
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super(ModernglViewerWidget, self).__init__(parent)
+        # ModernGL context will be created in initializeGL
         self.ctx = None
         self.prog = None
         self.vbo = None
@@ -71,12 +83,32 @@ class ModernglViewerWidget(QOpenGLWidget):
         self._show_directions = False
         self._point_size = 4.0
         self.setMinimumSize(480, 360)
+        # Prefer opaque painting to avoid transparent composition issues
+        try:
+            self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+            self.setAttribute(Qt.WA_NoSystemBackground, False)
+        except Exception:
+            pass
 
     def initializeGL(self):
         if moderngl is None:
             raise RuntimeError('moderngl is not available')
         # Create moderngl context from current OpenGL context
-        self.ctx = moderngl.create_context(require=330)
+        print('ModernglViewerWidget: initializeGL called')
+        try:
+            # try to create a core 3.3 context
+            print('Moderngl: attempting to create context with require=330')
+            self.ctx = moderngl.create_context(require=330)
+        except Exception as e:
+            print('Moderngl: failed to create 3.3 context:', e)
+            try:
+                print('Moderngl: attempting permissive context creation')
+                self.ctx = moderngl.create_context()
+            except Exception as e2:
+                print('Moderngl: permissive context creation failed:', e2)
+                raise
+            else:
+                print('Moderngl: context created:', type(self.ctx))
         vs = """#version 330
         in vec3 in_position;
         in vec4 in_color;
@@ -144,7 +176,103 @@ class ModernglViewerWidget(QOpenGLWidget):
             if getattr(self, 'verts', None) is not None and getattr(self, 'faces', None) is not None and getattr(self, 'colors', None) is not None:
                 try:
                     # call set_mesh to create GPU buffers now that ctx exists
+                    print('Moderngl: uploading pending mesh (verts,fcs,cols)')
                     self.set_mesh(self.verts, self.faces, self.colors)
+                except Exception:
+                    pass
+                # Try to force the window system to present the default framebuffer
+                try:
+                    try:
+                        import OpenGL.GL as gl
+                        try:
+                            gl.glFlush()
+                        except Exception:
+                            pass
+                        try:
+                            gl.glFinish()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    try:
+                        # if Qt exposes a swapBuffers via current context, call it
+                        from PyQt5.QtGui import QOpenGLContext
+                        ctx = QOpenGLContext.currentContext()
+                        if ctx is not None:
+                            try:
+                                # some Qt builds expose swapBuffers via the surface
+                                surf = ctx.surface()
+                                if surf is not None:
+                                    try:
+                                        ctx.swapBuffers(surf)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                # Low-level GL diagnostics: query bindings and explicit glReadPixels after blit
+                try:
+                    import OpenGL.GL as gl
+                    try:
+                        fb_draw = gl.glGetIntegerv(gl.GL_DRAW_FRAMEBUFFER_BINDING)
+                        fb_read = gl.glGetIntegerv(gl.GL_READ_FRAMEBUFFER_BINDING)
+                        vp = gl.glGetIntegerv(gl.GL_VIEWPORT)
+                        print('GL low-level state: DRAW_FB=', int(fb_draw), 'READ_FB=', int(fb_read), 'VIEWPORT=', tuple(vp))
+                    except Exception as e:
+                        print('Moderngl: failed to query GL bindings:', e)
+
+                    # If we have a scene FBO, attempt an explicit bind+blit and then glReadPixels
+                    if getattr(self, '_scene_fbo', None) is not None:
+                        try:
+                            src_id = getattr(self._scene_fbo, 'glo', None) or getattr(self._scene_fbo, 'framebuffer', None)
+                            if src_id is not None:
+                                try:
+                                    src_id = int(src_id)
+                                except Exception:
+                                    pass
+                                try:
+                                    # bind read framebuffer to source and draw to 0 (default)
+                                    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_id)
+                                    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
+                                    gl.glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.GL_COLOR_BUFFER_BIT, gl.GL_NEAREST)
+                                    gl.glFlush()
+                                except Exception as e:
+                                    print('Moderngl: explicit raw glBlitFramebuffer failed:', e)
+                                try:
+                                    # read default framebuffer pixels directly
+                                    data = gl.glReadPixels(0, 0, w, h, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE)
+                                    import numpy as _np
+                                    from PIL import Image
+                                    arr = _np.frombuffer(data, dtype=_np.uint8)
+                                    expected = w * h * 4
+                                    if arr.size == expected:
+                                        arr = arr.reshape((h, w, 4))
+                                        arr = _np.flipud(arr)
+                                        Image.fromarray(arr, 'RGBA').save('outputs/diag_snapshot_glread.png')
+                                        print('Moderngl: saved explicit glReadPixels snapshot to outputs/diag_snapshot_glread.png')
+                                    else:
+                                        # handle padded rows
+                                        row_bytes = arr.size // h
+                                        if row_bytes >= w * 4:
+                                            usable = arr[:row_bytes * h]
+                                            tmp = usable.reshape((h, row_bytes))[:, :w*4].reshape((h, w, 4))
+                                            tmp = _np.flipud(tmp)
+                                            Image.fromarray(tmp, 'RGBA').save('outputs/diag_snapshot_glread.png')
+                                            print('Moderngl: saved padded explicit glReadPixels snapshot to outputs/diag_snapshot_glread.png')
+                                        else:
+                                            print('Moderngl: explicit glReadPixels returned unexpected size')
+                                except Exception as e:
+                                    print('Moderngl: failed to glReadPixels from default framebuffer:', e)
+                                finally:
+                                    try:
+                                        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
+                                    except Exception:
+                                        pass
+                        except Exception as e:
+                            print('Moderngl: low-level FBO->FB diagnostic failed:', e)
                 except Exception:
                     pass
         except Exception:
@@ -162,11 +290,72 @@ class ModernglViewerWidget(QOpenGLWidget):
         if self.ctx is None:
             return
         # darker neutral background to let viridis colormap stand out
-        self.ctx.clear(0.08, 0.08, 0.12, 1.0)
-        if self._vao is None:
-            return
-        self.ctx.enable(moderngl.DEPTH_TEST)
-        self._vao.render(moderngl.TRIANGLES)
+        try:
+            print(f'ModernglViewerWidget: paintGL viewport={self.ctx.viewport} vao_present={self._vao is not None}')
+        except Exception:
+            pass
+
+        w, h = max(1, self.width()), max(1, self.height())
+        # account for high-DPI scaling: framebuffer size may be widget size * devicePixelRatioF
+        try:
+            dpr = float(self.devicePixelRatioF())
+        except Exception:
+            try:
+                dpr = float(self.devicePixelRatio())
+            except Exception:
+                dpr = 1.0
+        fb_w = max(1, int(round(w * dpr)))
+        fb_h = max(1, int(round(h * dpr)))
+
+        # ensure a scene FBO exists with matching size
+        try:
+            if not hasattr(self, '_scene_fbo') or getattr(self, '_scene_fbo_size', (0, 0)) != (w, h):
+                try:
+                    if getattr(self, '_scene_fbo', None) is not None:
+                        try:
+                            self._scene_fbo.release()
+                        except Exception:
+                            pass
+                    if getattr(self, '_scene_tex', None) is not None:
+                        try:
+                            self._scene_tex.release()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    self._scene_tex = self.ctx.texture((fb_w, fb_h), 4)
+                    self._scene_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                    self._scene_fbo = self.ctx.framebuffer(color_attachments=[self._scene_tex])
+                    self._scene_fbo_size = (w, h)
+                except Exception as e:
+                    print('Moderngl: failed to create scene FBO:', e)
+        except Exception:
+            pass
+
+        # render into the scene FBO (or default if FBO creation failed)
+        try:
+            if getattr(self, '_scene_fbo', None) is not None:
+                self._scene_fbo.use()
+            else:
+                try:
+                    self.ctx.screen.use()
+                except Exception:
+                    pass
+            self.ctx.viewport = (0, 0, fb_w, fb_h)
+            self.ctx.clear(0.08, 0.08, 0.12, 1.0)
+            if self._vao is None:
+                # nothing to draw
+                try:
+                    # ensure default framebuffer is bound afterwards
+                    self.ctx.screen.use()
+                except Exception:
+                    pass
+                return
+            self.ctx.enable(moderngl.DEPTH_TEST)
+            self._vao.render(moderngl.TRIANGLES)
+        except Exception as e:
+            print('Moderngl: scene render failed:', e)
         # render agents if present
         try:
             if getattr(self, '_agent_vao', None) is not None:
@@ -188,6 +377,225 @@ class ModernglViewerWidget(QOpenGLWidget):
                 self.ctx.enable(moderngl.DEPTH_TEST)
         except Exception:
             pass
+        # --- Blit scene FBO to default framebuffer so the window compositor sees it ---
+        try:
+            if getattr(self, '_scene_tex', None) is not None:
+                # ensure screen is bound
+                try:
+                    self.ctx.screen.use()
+                except Exception:
+                    pass
+                # create blit shader/vao on demand
+                try:
+                    if not hasattr(self, '_blit_prog') or self._blit_prog is None:
+                        vs_blit = """#version 330
+                        in vec2 in_pos;
+                        in vec2 in_uv;
+                        out vec2 v_uv;
+                        void main() { v_uv = in_uv; gl_Position = vec4(in_pos, 0.0, 1.0); }
+                        """
+                        fs_blit = """#version 330
+                        in vec2 v_uv;
+                        out vec4 f_color;
+                        uniform sampler2D tex;
+                        void main() { f_color = texture(tex, v_uv); }
+                        """
+                        self._blit_prog = self.ctx.program(vertex_shader=vs_blit, fragment_shader=fs_blit)
+                        # fullscreen quad (pos.x,pos.y, u,v)
+                        quad = np.array([
+                            -1.0, -1.0, 0.0, 0.0,
+                             1.0, -1.0, 1.0, 0.0,
+                             1.0,  1.0, 1.0, 1.0,
+                            -1.0,  1.0, 0.0, 1.0,
+                        ], dtype='f4')
+                        idx = np.array([0,1,2, 0,2,3], dtype='i4')
+                        self._blit_vbo = self.ctx.buffer(quad.tobytes())
+                        self._blit_ibo = self.ctx.buffer(idx.tobytes())
+                        self._blit_vao = self.ctx.vertex_array(self._blit_prog, [(self._blit_vbo, '2f 2f', 'in_pos', 'in_uv')], index_buffer=self._blit_ibo)
+                except Exception as e:
+                    print('Moderngl: failed to create blit resources:', e)
+                try:
+                    # bind texture and draw
+                    self._scene_tex.use(location=0)
+                    try:
+                        self._blit_prog['tex'].value = 0
+                    except Exception:
+                        pass
+                    try:
+                        self.ctx.disable(moderngl.DEPTH_TEST)
+                        try:
+                            # Prefer textured-quad blit (coordinates are [-1,1], texture uses normalized UVs)
+                            self._blit_vao.render()
+                        except Exception as e:
+                            print('Moderngl: blit textured-quad failed, attempting raw glBlitFramebuffer:', e)
+                            # fallback: try raw GL blit via PyOpenGL
+                            try:
+                                import OpenGL.GL as gl
+                                # Try to get framebuffer object ids from moderngl Framebuffer
+                                src_fbo = getattr(self, '_scene_fbo', None)
+                                if src_fbo is not None:
+                                    src_id = getattr(src_fbo, 'glo', None) or getattr(src_fbo, 'framebuffer', None)
+                                    # bind read framebuffer to src and draw framebuffer to default (0)
+                                    try:
+                                        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, int(src_id))
+                                        gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
+                                        gl.glBlitFramebuffer(0, 0, fb_w, fb_h, 0, 0, fb_w, fb_h, gl.GL_COLOR_BUFFER_BIT, gl.GL_NEAREST)
+                                    finally:
+                                        try:
+                                            gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
+                                        except Exception:
+                                            pass
+                            except Exception as e2:
+                                print('Moderngl: raw glBlitFramebuffer fallback failed:', e2)
+                    except Exception as e:
+                        print('Moderngl: blit render failed:', e)
+                except Exception as e:
+                    print('Moderngl: blit pass failed:', e)
+        except Exception:
+            pass
+        # diagnostic framebuffer capture (balanced, robust)
+        try:
+            if getattr(self, '_diag_capture', False):
+                # 1) Qt grab (may be transparent)
+                try:
+                    img = self.grabFramebuffer()
+                    out = 'outputs/diag_snapshot.png'
+                    img.save(out)
+                    print('Moderngl: saved diagnostic framebuffer to', out)
+                except Exception as e:
+                    print('Moderngl: failed to save diagnostic framebuffer:', e)
+
+                # prepare sizes (widget px and framebuffer px)
+                w, h = self.width(), self.height()
+                try:
+                    dpr = float(self.devicePixelRatioF())
+                except Exception:
+                    try:
+                        dpr = float(self.devicePixelRatio())
+                    except Exception:
+                        dpr = 1.0
+                fb_w = max(1, int(round(w * dpr)))
+                fb_h = max(1, int(round(h * dpr)))
+
+                # 2) moderngl read (screen or fbo)
+                if getattr(self, 'ctx', None) is not None:
+                    try:
+                        try:
+                            self.ctx.finish()
+                        except Exception:
+                            try:
+                                self.ctx.flush()
+                            except Exception:
+                                pass
+
+                        data = None
+                        try:
+                            data = self.ctx.screen.read(components=4)
+                        except Exception:
+                            try:
+                                data = self.ctx.fbo.read(components=4)
+                            except Exception as e:
+                                print('Moderngl: failed to read via ctx.screen/ctx.fbo:', e)
+
+                        if data is not None:
+                            try:
+                                from PIL import Image
+                                import numpy as _np
+                                arr = _np.frombuffer(data, dtype=_np.uint8)
+                                expected = fb_w * fb_h * 4
+                                if arr.size == expected:
+                                    arr = arr.reshape((fb_h, fb_w, 4))
+                                    arr = _np.flipud(arr)
+                                    # downscale to widget size if needed
+                                    if (fb_w, fb_h) != (w, h):
+                                        import PIL.Image as _PILImage
+                                        pil = _PILImage.fromarray(arr, 'RGBA')
+                                        pil = pil.resize((w, h), resample=_PILImage.NEAREST)
+                                        pil.save('outputs/diag_snapshot_mgl.png')
+                                    else:
+                                        Image.fromarray(arr, 'RGBA').save('outputs/diag_snapshot_mgl.png')
+                                    print('Moderngl: saved moderngl read snapshot to outputs/diag_snapshot_mgl.png')
+                                else:
+                                    print('Moderngl: moderngl read returned unexpected size', arr.size, 'expected', expected)
+                            except Exception as e:
+                                print('Moderngl: failed to write moderngl read snapshot:', e)
+
+                        # 3) Off-screen FBO clear/read (solid red) as robust confirmation
+                        try:
+                            tex = self.ctx.texture((fb_w, fb_h), 4)
+                            tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+                            fbo = self.ctx.framebuffer(color_attachments=[tex])
+                            fbo.use()
+                            self.ctx.clear(1.0, 0.0, 0.0, 1.0)
+                            try:
+                                self.ctx.finish()
+                            except Exception:
+                                try:
+                                    self.ctx.flush()
+                                except Exception:
+                                    pass
+                            try:
+                                data2 = fbo.read(components=4)
+                                import numpy as _np
+                                from PIL import Image
+                                arr2 = _np.frombuffer(data2, dtype=_np.uint8)
+                                expected2 = fb_w * fb_h * 4
+                                if arr2.size == expected2:
+                                    arr2 = arr2.reshape((fb_h, fb_w, 4))
+                                    arr2 = _np.flipud(arr2)
+                                    try:
+                                        # build QImage from numpy array (RGBA)
+                                        h_img, w_img = arr2.shape[0], arr2.shape[1]
+                                        # Qt expects bytes in native order; use frombuffer
+                                        byte_data = arr2.tobytes()
+                                        qimg = QtGui.QImage(byte_data, w_img, h_img, QtGui.QImage.Format_RGBA8888)
+                                        # emit preview signal (downstream widget may scale)
+                                        try:
+                                            self.fbo_preview_ready.emit(qimg)
+                                        except Exception:
+                                            pass
+                                    except Exception:
+                                        qimg = None
+                                    if (fb_w, fb_h) != (w, h):
+                                        import PIL.Image as _PILImage
+                                        pil = _PILImage.fromarray(arr2, 'RGBA')
+                                        pil = pil.resize((w, h), resample=_PILImage.NEAREST)
+                                        pil.save('outputs/diag_snapshot_fbo.png')
+                                    else:
+                                        Image.fromarray(arr2, 'RGBA').save('outputs/diag_snapshot_fbo.png')
+                                    print('Moderngl: saved fbo snapshot to outputs/diag_snapshot_fbo.png')
+                                else:
+                                    print('Moderngl: fbo read unexpected size', arr2.size)
+                            except Exception as e:
+                                print('Moderngl: failed to read fbo:', e)
+                            finally:
+                                try:
+                                    if fbo is not None:
+                                        fbo.unuse()
+                                except Exception:
+                                    pass
+                                try:
+                                    if tex is not None:
+                                        tex.release()
+                                except Exception:
+                                    pass
+                                try:
+                                    if fbo is not None:
+                                        fbo.release()
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            print('Moderngl: FBO diagnostic failed:', e)
+                    except Exception as e:
+                        print('Moderngl: diagnostic capture flow failed:', e)
+
+                # cleanup: clear diag flag so we only capture once
+                try:
+                    self._diag_capture = False
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def set_mesh(self, verts: np.ndarray, faces: np.ndarray, colors: np.ndarray):
         """Upload mesh buffers to GPU and update projection.
@@ -198,6 +606,7 @@ class ModernglViewerWidget(QOpenGLWidget):
         """
         if self.ctx is None:
             # postpone until GL context created
+            print('Moderngl: ctx not ready, storing pending mesh on widget')
             self.verts = np.asarray(verts, dtype='f4')
             self.faces = np.asarray(faces, dtype='i4')
             self.colors = np.asarray(colors, dtype='f4')
@@ -223,6 +632,7 @@ class ModernglViewerWidget(QOpenGLWidget):
             self.ibo = self.ctx.buffer(idx.tobytes())
         except Exception:
             # fallback: keep CPU-side data but don't crash
+            print('Moderngl: failed to create GPU buffers for mesh')
             return
 
         # Create vertex array object
@@ -244,6 +654,7 @@ class ModernglViewerWidget(QOpenGLWidget):
                 self._vao = self.ctx.vertex_array(self.prog, vao_content, index_buffer=self.ibo)
             except Exception:
                 self._vao = None
+        print(f'Moderngl: VAO created={self._vao is not None}, vbo={self.vbo is not None}, ibo={self.ibo is not None}, cbo={self.cbo is not None}')
 
         # Update MVP using mesh extents
         self._update_mvp()

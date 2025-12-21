@@ -32,11 +32,29 @@ class SalmonViewer(QtWidgets.QWidget):
         # create moderngl widget
         try:
             self.gl_widget = ModernglViewerWidget(self)
-            layout = QtWidgets.QVBoxLayout()
-            layout.addWidget(self.gl_widget)
-            self.setLayout(layout)
         except Exception:
             self.gl_widget = None
+        # overlay preview label (hidden by default). This provides a reliable
+        # way to display the off-screen FBO contents when the default
+        # framebuffer composition fails on some platforms.
+        try:
+            from PyQt5 import QtGui, QtCore
+            self._overlay_label = QtWidgets.QLabel(self)
+            self._overlay_label.setVisible(False)
+            self._overlay_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+            self._overlay_label.setStyleSheet('background: rgba(0,0,0,0.5); border: 1px solid #444;')
+            self._overlay_label.setAlignment(QtCore.Qt.AlignCenter)
+            self._overlay_label.setScaledContents(True)
+            self._overlay_label.resize(400, 300)
+            # connect renderer signal if the widget exposes it
+            try:
+                sig = getattr(self.gl_widget, 'fbo_preview_ready', None)
+                if sig is not None:
+                    sig.connect(self._on_fbo_preview)
+            except Exception:
+                pass
+        except Exception:
+            self._overlay_label = None
         # runtime solver (not started by default)
         self._rt_solver = None
         # create control widgets (right panel)
@@ -480,6 +498,13 @@ class SalmonViewer(QtWidgets.QWidget):
         center_layout = QVBoxLayout()
         if self.gl_widget is not None:
             center_layout.addWidget(self.gl_widget)
+        # fallback preview label (shows outputs/diag_snapshot_fbo.png)
+        try:
+            self._fbo_preview_label = QLabel()
+            self._fbo_preview_label.setVisible(False)
+            center_layout.addWidget(self._fbo_preview_label)
+        except Exception:
+            self._fbo_preview_label = None
         center_container.setLayout(center_layout)
 
         # Right panel: Controls & Weights
@@ -538,6 +563,30 @@ class SalmonViewer(QtWidgets.QWidget):
             self.reward_plot = None
 
         right_panel.setLayout(right_layout)
+
+        # helper to show FBO preview into the fallback label
+        def show_fbo_preview(visible: bool = True):
+            if getattr(self, '_fbo_preview_label', None) is None:
+                return
+            if visible:
+                try:
+                    from PyQt5.QtGui import QPixmap
+                    import os
+                    p = os.path.join(os.getcwd(), 'outputs', 'diag_snapshot_fbo.png')
+                    if os.path.exists(p):
+                        pix = QPixmap(p)
+                        self._fbo_preview_label.setPixmap(pix.scaled(640, 480, Qt.KeepAspectRatio))
+                        self._fbo_preview_label.setVisible(True)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._fbo_preview_label.setVisible(False)
+                except Exception:
+                    pass
+
+        # expose helper on instance for tests/quick toggles
+        self.show_fbo_preview = show_fbo_preview
 
         # assemble splitter
         main_splitter.addWidget(left_panel)
