@@ -43,9 +43,9 @@ if _HAS_NUMBA:
         sprint = np.empty(n, dtype=np.bool_)
         sustained = np.empty(n, dtype=np.bool_)
         for i in prange(n):
-            prolonged[i] = (max_s_U < bl_s[i]) and (bl_s[i] <= max_p_U)
-            sprint[i] = bl_s[i] > max_p_U
-            sustained[i] = bl_s[i] <= max_s_U
+            prolonged[i] = (max_s_U[i] < bl_s[i]) and (bl_s[i] <= max_p_U[i])
+            sprint[i] = bl_s[i] > max_p_U[i]
+            sustained[i] = bl_s[i] <= max_s_U[i]
         # write swim speeds into circular buffer last slot
         for i in prange(n):
             swim_speeds_buf[i, -1] = swim_speeds[i]
