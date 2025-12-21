@@ -35,11 +35,8 @@ def print_gl_info():
         print('QSurfaceFormat: version', fmt.majorVersion(), fmt.minorVersion(), 'profile', fmt.profile())
     except Exception:
         print('QSurfaceFormat: unavailable')
-    try:
-        import moderngl
-        print('moderngl available, version:', getattr(moderngl, '__version__', 'unknown'))
-    except Exception:
-        print('moderngl not available')
+    # Note: this launcher prefers the CPU renderer; do not probe ModernGL here.
+    print('Renderer preference: CPU renderer (ModernGL not used)')
 
 
 def main(argv=None):
@@ -82,6 +79,17 @@ def main(argv=None):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     sim = DummySim()
     viewer = SalmonViewer(sim)
+    # force CPU preview unconditionally to avoid any GL widget
+    try:
+        viewer._force_cpu = True
+    except Exception:
+        pass
+    # Also set diag mode if requested (keeps earlier behavior)
+    if diag:
+        try:
+            viewer._diag_mode = True
+        except Exception:
+            pass
     # try to load the latest mesh file directly
     mesh = find_latest_mesh()
     if mesh is not None:
@@ -96,7 +104,7 @@ def main(argv=None):
             except Exception:
                 try:
                     if viewer.gl_widget is not None:
-                        viewer.gl_widget.set_mesh(verts, faces, colors)
+                        viewer.gl_widget.set_mesh(verts, faces, colors, vert_exag=getattr(viewer.sim, 'vert_exag', 1.0))
                     else:
                         viewer.last_mesh_payload = {'verts': verts, 'faces': faces, 'colors': colors}
                 except Exception:
@@ -139,28 +147,14 @@ def main(argv=None):
                         print('gl_widget inspection: exists' if gw is not None else 'gl_widget None')
                         if gw is not None:
                             try:
-                                ctx = getattr(gw, 'ctx', None)
-                                print('  ctx type:', type(ctx))
+                                cls = gw.__class__
+                                print('  widget class:', cls.__name__, 'module:', cls.__module__)
+                                uses_cpu = ('cpu' in cls.__module__.lower()) or ('FastCPU' in cls.__name__) or ('CPUViewerWidget' in cls.__name__)
+                                print('  using_cpu_renderer:', uses_cpu)
                                 try:
-                                    # try common moderngl attributes
-                                    print('  moderngl version_code:', getattr(ctx, 'version_code', None))
+                                    print('  widget size:', gw.width(), gw.height())
                                 except Exception:
                                     pass
-                                try:
-                                    print('  moderngl version:', getattr(ctx, 'version', None))
-                                except Exception:
-                                    pass
-                                try:
-                                    print('  moderngl extensions count:', len(getattr(ctx, 'extensions', [])))
-                                except Exception:
-                                    pass
-                                try:
-                                    # print a short dir for manual inspection
-                                    if ctx is not None:
-                                        print('  ctx dir sample:', [n for n in dir(ctx) if not n.startswith('_')][:40])
-                                except Exception:
-                                    pass
-                                print('  vao present:', getattr(gw, '_vao', None) is not None)
                             except Exception as e:
                                 print('  error reading gl_widget attributes:', e)
                     except Exception as e:
@@ -194,6 +188,29 @@ def main(argv=None):
                             pass
             except Exception:
                 pass
+        except Exception:
+            pass
+        # Load the latest preview image into the UI immediately (CPU-first behavior)
+        try:
+            from PyQt5.QtCore import QTimer
+            from PyQt5.QtGui import QPixmap
+
+            def load_preview_into_ui():
+                try:
+                    p = os.path.join(os.getcwd(), 'outputs', 'latest_preview.png')
+                    if os.path.exists(p) and getattr(viewer, '_fbo_preview_label', None) is not None:
+                        pix = QPixmap(p)
+                        lbl = viewer._fbo_preview_label
+                        try:
+                            pix = pix.scaled(lbl.width(), lbl.height())
+                        except Exception:
+                            pass
+                        lbl.setPixmap(pix)
+                        lbl.setVisible(True)
+                except Exception:
+                    pass
+
+            QTimer.singleShot(200, load_preview_into_ui)
         except Exception:
             pass
         viewer.run()

@@ -10,7 +10,6 @@ import numpy as np
 from PyQt5 import QtWidgets
 
 from emergent.salmon_abm.viewer_v3 import mesh_builder
-from emergent.salmon_abm.viewer_v3.renderer_moderngl import ModernglViewerWidget
 from emergent.salmon_abm.viewer_v3.realtime import RealTimeSolver
 from PyQt5.QtWidgets import QPushButton, QLabel, QSlider, QGroupBox, QCheckBox, QHBoxLayout, QVBoxLayout
 from PyQt5.QtCore import Qt
@@ -29,11 +28,30 @@ class SalmonViewer(QtWidgets.QWidget):
         self.rl_trainer = rl_trainer
         # Minimal UI placeholder to preserve API; full UI will be migrated later.
         self.setWindowTitle('SalmonViewer (v3 shim)')
-        # create moderngl widget
+        # Prefer GPU/OpenGL widget, then pyqtgraph adapter, then CPU fallback.
+        self._using_cpu_fallback = False
         try:
-            self.gl_widget = ModernglViewerWidget(self)
+            from emergent.salmon_abm.viewer_v3.renderer_gl import FastGLViewerWidget
+            self.gl_widget = FastGLViewerWidget(self)
+            self._using_gpu = True
         except Exception:
-            self.gl_widget = None
+            try:
+                from emergent.salmon_abm.viewer_v3.renderer_pyqtgraph import FastPyqtgraphViewerWidget
+                self.gl_widget = FastPyqtgraphViewerWidget(self)
+                self._using_cpu_fallback = True
+            except Exception:
+                try:
+                    from emergent.salmon_abm.viewer_v3.renderer_cpu_fast import FastCPUViewerWidget
+                    self.gl_widget = FastCPUViewerWidget(self)
+                    self._using_cpu_fallback = True
+                except Exception:
+                    try:
+                        from emergent.salmon_abm.viewer_v3.renderer_cpu import CPUViewerWidget
+                        self.gl_widget = CPUViewerWidget(self)
+                        self._using_cpu_fallback = True
+                    except Exception:
+                        self.gl_widget = None
+                        self._using_cpu_fallback = False
         # overlay preview label (hidden by default). This provides a reliable
         # way to display the off-screen FBO contents when the default
         # framebuffer composition fails on some platforms.
@@ -46,17 +64,25 @@ class SalmonViewer(QtWidgets.QWidget):
             self._overlay_label.setAlignment(QtCore.Qt.AlignCenter)
             self._overlay_label.setScaledContents(True)
             self._overlay_label.resize(400, 300)
-            # connect renderer signal if the widget exposes it
+            # connect renderer signals if the widget exposes them
             try:
                 sig = getattr(self.gl_widget, 'fbo_preview_ready', None)
                 if sig is not None:
                     sig.connect(self._on_fbo_preview)
             except Exception:
                 pass
+            try:
+                pres = getattr(self.gl_widget, 'presentation_ok', None)
+                if pres is not None:
+                    pres.connect(self._on_presentation_ok)
+            except Exception:
+                pass
         except Exception:
             self._overlay_label = None
         # runtime solver (not started by default)
         self._rt_solver = None
+        # do not force CPU preview by default; prefer GPU when available
+        self._force_cpu = False
         # create control widgets (right panel)
         try:
             self.play_btn = QPushButton('Play')
@@ -151,7 +177,14 @@ class SalmonViewer(QtWidgets.QWidget):
                     depth = np.asarray(env['depth'])
                     bbox = getattr(self.sim, 'depth_rast_bbox', None)
                     if self.gl_widget is not None:
-                        self.gl_widget.set_heightmap(depth, bbox=bbox, vert_exag=getattr(self.sim, 'vert_exag', 1.0))
+                        try:
+                            self.gl_widget.set_heightmap(depth, bbox=bbox, vert_exag=getattr(self.sim, 'vert_exag', 1.0))
+                        except Exception:
+                            # older CPU widget may not accept vert_exag on set_heightmap
+                            try:
+                                self.gl_widget.set_heightmap(depth, bbox=bbox)
+                            except Exception:
+                                pass
                         return True
         except Exception:
             pass
@@ -163,7 +196,13 @@ class SalmonViewer(QtWidgets.QWidget):
         vals = np.zeros(coords.shape[0], dtype=float)
         verts, faces, colors = mesh_builder.build_mesh(coords, vals, vert_exag=getattr(self.sim, 'vert_exag', 1.0))
         if self.gl_widget is not None:
-            self.gl_widget.set_mesh(verts, faces, colors)
+            try:
+                self.gl_widget.set_mesh(verts, faces, colors, vert_exag=getattr(self.sim, 'vert_exag', 1.0))
+            except Exception:
+                try:
+                    self.gl_widget.set_mesh(verts, faces, colors)
+                except Exception:
+                    pass
         return True
 
     # Compatibility API with original salmon_viewer
@@ -422,6 +461,20 @@ class SalmonViewer(QtWidgets.QWidget):
         # Left panel: Training & Metrics
         left_panel = QGroupBox('Training & Metrics')
         left_layout = QVBoxLayout()
+        # RL control form should be on the left panel (top)
+        try:
+            from emergent.salmon_abm.viewer_v3.rl_control import RLControlWidget
+            self.rl_control_widget = RLControlWidget(self)
+            try:
+                self.rl_control_widget.start_training.connect(lambda: print('RL start requested'))
+                self.rl_control_widget.stop_training.connect(lambda: print('RL stop requested'))
+                self.rl_control_widget.reset_training.connect(lambda: print('RL reset requested'))
+                self.rl_control_widget.params_changed.connect(lambda p: print('RL params', p))
+            except Exception:
+                pass
+            left_layout.insertWidget(0, self.rl_control_widget)
+        except Exception:
+            self.rl_control_widget = None
         self.mean_speed_label = QLabel('Mean Speed: --')
         left_layout.addWidget(self.mean_speed_label)
 
@@ -496,13 +549,27 @@ class SalmonViewer(QtWidgets.QWidget):
         # Center panel: GL widget or placeholder
         center_container = QtWidgets.QWidget()
         center_layout = QVBoxLayout()
-        if self.gl_widget is not None:
+        # If running in diagnostic mode (flag set by launcher), hide GL widget
+        # and show the CPU preview label full-size so the user sees the image.
+        try:
+            diag_mode = bool(getattr(self, '_diag_mode', False))
+        except Exception:
+            diag_mode = False
+
+        # Show GL widget only if not forcing CPU preview and not in diag mode
+        if not diag_mode and not getattr(self, '_force_cpu', False) and self.gl_widget is not None:
             center_layout.addWidget(self.gl_widget)
-        # fallback preview label (shows outputs/diag_snapshot_fbo.png)
+
+        # preview label (used in diag mode or as fallback)
         try:
             self._fbo_preview_label = QLabel()
             self._fbo_preview_label.setVisible(False)
-            center_layout.addWidget(self._fbo_preview_label)
+            if diag_mode:
+                # make it the only child in the center when diag
+                center_layout.addWidget(self._fbo_preview_label)
+            else:
+                # add but keep hidden when not diag
+                center_layout.addWidget(self._fbo_preview_label)
         except Exception:
             self._fbo_preview_label = None
         center_container.setLayout(center_layout)
@@ -545,19 +612,24 @@ class SalmonViewer(QtWidgets.QWidget):
         except Exception:
             pass
 
-        # RL status labels
+        # RL status labels moved to left panel (Training & Metrics)
         try:
-            self.episode_label = QLabel('Episode: 0 | Timestep: 0')
-            self.reward_label = QLabel('Reward: 0.00')
-            self.best_reward_label = QLabel('Best: 0.00')
-            right_layout.addWidget(self.episode_label)
-            right_layout.addWidget(self.reward_label)
-            right_layout.addWidget(self.best_reward_label)
-            if pg is not None:
-                self.reward_plot = pg.PlotWidget(title='Episode Rewards')
-                self.reward_plot.setMaximumHeight(160)
-                right_layout.addWidget(self.reward_plot)
-            else:
+            # ensure these labels exist and are added to the left layout
+            self.episode_label = getattr(self, 'episode_label', QLabel('Episode: 0 | Timestep: 0'))
+            self.reward_label = getattr(self, 'reward_label', QLabel('Reward: 0.00'))
+            self.best_reward_label = getattr(self, 'best_reward_label', QLabel('Best: 0.00'))
+            try:
+                # left_layout is in scope above; add RL widgets there
+                left_layout.addWidget(self.episode_label)
+                left_layout.addWidget(self.reward_label)
+                left_layout.addWidget(self.best_reward_label)
+                if pg is not None:
+                    self.reward_plot = getattr(self, 'reward_plot', pg.PlotWidget(title='Episode Rewards'))
+                    self.reward_plot.setMaximumHeight(160)
+                    left_layout.addWidget(self.reward_plot)
+                else:
+                    self.reward_plot = None
+            except Exception:
                 self.reward_plot = None
         except Exception:
             self.reward_plot = None
@@ -658,6 +730,74 @@ class SalmonViewer(QtWidgets.QWidget):
             return self.perim_visible
         except Exception:
             return False
+
+    def _on_presentation_ok(self, ok: bool):
+        try:
+            if ok and getattr(self, '_overlay_label', None) is not None:
+                self._overlay_label.setVisible(False)
+        except Exception:
+            pass
+
+    def _on_fbo_preview(self, qimg):
+        try:
+            if getattr(self, '_overlay_label', None) is None:
+                return
+            if qimg is None:
+                return
+
+            from PyQt5.QtGui import QPixmap
+            lbl = self._overlay_label
+            pix = QPixmap.fromImage(qimg)
+
+            # ensure overlay is centered over the GL widget area and on top
+            try:
+                g = getattr(self, 'gl_widget', None)
+                if g is not None:
+                    try:
+                        if lbl.parent() is not g:
+                            lbl.setParent(g)
+                    except Exception:
+                        pass
+                    lbl.resize(min(int(g.width() * 0.9), 1200), min(int(g.height() * 0.9), 900))
+                    lbl.move(int((g.width() - lbl.width()) / 2), int((g.height() - lbl.height()) / 2))
+                    try:
+                        lbl.raise_()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            try:
+                pix = pix.scaled(lbl.width(), lbl.height(), Qt.KeepAspectRatio)
+            except Exception:
+                pass
+
+            try:
+                lbl.setPixmap(pix)
+                lbl.setVisible(True)
+            except Exception:
+                pass
+
+            # Save debug preview to disk so we can inspect headlessly
+            try:
+                from PIL import Image
+                data = qimg.bits().asstring(qimg.width() * qimg.height() * 4)
+                img = Image.frombytes('RGBA', (qimg.width(), qimg.height()), data)
+                os.makedirs('outputs', exist_ok=True)
+                img.save('outputs/latest_preview.png')
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def toggle_fbo_preview(self):
+        try:
+            lbl = getattr(self, '_overlay_label', None)
+            if lbl is None:
+                return
+            lbl.setVisible(not lbl.isVisible())
+        except Exception:
+            pass
 
     def rebuild_tin_action(self):
         try:

@@ -6,7 +6,10 @@ import sys
 import numpy as np
 from PyQt5 import QtWidgets, QtCore
 
-from emergent.salmon_abm.viewer_v3.renderer_moderngl import ModernglViewerWidget
+try:
+    from emergent.salmon_abm.viewer_v3.renderer_cpu_fast import FastCPUViewerWidget as ModernglViewerWidget
+except Exception:
+    from emergent.salmon_abm.viewer_v3.renderer_cpu import CPUViewerWidget as ModernglViewerWidget
 from emergent.salmon_abm.viewer_v3.mesh_builder import build_mesh
 
 
@@ -25,7 +28,7 @@ class DemoApp(QtWidgets.QWidget):
         pts = np.column_stack([gx.ravel(), gy.ravel()])
         vals = np.sin(pts[:, 0] * 0.3) * np.cos(pts[:, 1] * 0.25)
         verts, faces, colors = build_mesh(pts, vals, vert_exag=1.0)
-        self.viewer.set_mesh(verts, faces, colors)
+        self.viewer.set_mesh(verts, faces, colors, vert_exag=1.0)
 
     def step(self):
         # simple animation by modifying Z in CPU and re-uploading color/z
@@ -37,7 +40,7 @@ class DemoApp(QtWidgets.QWidget):
         # keep same colors
         colors = self.viewer.colors if getattr(self.viewer, 'colors', None) is not None else np.ones((verts.shape[0], 4), dtype='f4')
         faces = self.viewer.faces if getattr(self.viewer, 'faces', None) is not None else np.zeros((0,3), dtype='i4')
-        self.viewer.set_mesh(verts, faces, colors)
+        self.viewer.set_mesh(verts, faces, colors, vert_exag=1.0)
 
 
 if __name__ == '__main__':
