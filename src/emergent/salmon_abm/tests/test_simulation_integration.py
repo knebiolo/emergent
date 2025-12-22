@@ -7,6 +7,7 @@ from emergent.salmon_abm.simulation import simulation
 
 def test_simulation_creates_hdf5_and_populates_agents(tmp_path):
     # initialize a tiny simulation
+    db_file = tmp_path / "sim_test_db.h5"
     sim = simulation(
         model_dir=str(tmp_path),
         model_name="test",
@@ -21,6 +22,7 @@ def test_simulation_creates_hdf5_and_populates_agents(tmp_path):
         num_agents=5,
         use_gpu=False,
         pid_tuning=False,
+        db_path=str(db_file),
     )
 
     # ensure db file exists
@@ -39,8 +41,10 @@ def test_simulation_creates_hdf5_and_populates_agents(tmp_path):
     assert sim.weight.shape[0] == 5
     assert sim.body_depth.shape[0] == 5
 
-    # cleanup: remove temporary db
+    # cleanup by calling close (will remove file only if simulation created it internally)
+    sim.close()
+    # if caller provided db_path, `close()` won't remove it — remove here
     try:
-        os.remove(sim.db_path)
+        os.remove(str(db_file))
     except Exception:
         pass

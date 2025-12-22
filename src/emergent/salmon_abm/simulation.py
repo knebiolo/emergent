@@ -9,6 +9,7 @@ import os
 import tempfile
 import h5py
 import numpy as np
+from typing import Optional
 from emergent.salmon_abm import utils, io, pid, agents
 
 
@@ -26,7 +27,8 @@ class simulation:
                  num_timesteps = 100, 
                  num_agents = 100,
                  use_gpu = False,
-                 pid_tuning = False):
+                 pid_tuning = False,
+                 db_path: Optional[str] = None):
         self.model_dir = model_dir
         self.model_name = model_name
         self.crs = crs
@@ -58,13 +60,19 @@ class simulation:
         self.body_depth = np.zeros(self.num_agents, dtype=np.float32)
 
         # create or open HDF5 database for simulation outputs (minimal structure)
-        # Place temporary DB in repository `outputs/` to avoid OS temp permission issues
-        repo_outputs = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "outputs"))
-        os.makedirs(repo_outputs, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(prefix="sim_db_", suffix=".h5", dir=repo_outputs)
-        os.close(fd)
-        self.db_path = tmp_path
-        self.db = h5py.File(self.db_path, "w")
+        self._created_db_file = False
+        if db_path:
+            self.db_path = db_path
+            self.db = h5py.File(self.db_path, "w")
+        else:
+            # Place temporary DB in repository `outputs/` to avoid OS temp permission issues
+            repo_outputs = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "outputs"))
+            os.makedirs(repo_outputs, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(prefix="sim_db_", suffix=".h5", dir=repo_outputs)
+            os.close(fd)
+            self.db_path = tmp_path
+            self.db = h5py.File(self.db_path, "w")
+            self._created_db_file = True
 
         # create static per-fish datasets
         sex_ds = self.db.create_dataset("sex", (self.num_agents,), dtype="i1")
@@ -120,8 +128,20 @@ class simulation:
         return True
 
     def close(self):
-        # placeholder for closing hdf5 or other resources
-        return True
+        # close HDF5 and optionally remove temporary DB file if it was created internally
+        try:
+            if hasattr(self, "db") and self.db is not None:
+                try:
+                    self.db.close()
+                except Exception:
+                    pass
+            if getattr(self, "_created_db_file", False):
+                try:
+                    os.remove(self.db_path)
+                except Exception:
+                    pass
+        finally:
+            return True
 
 
 __all__ = ['simulation']
