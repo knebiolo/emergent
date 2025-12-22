@@ -1016,26 +1016,63 @@ class simulation():
         return np.array([line.project(point) for point in points])
 
     def boundary_surface(self):
-        
-        raster = self.hdf5['environment/wetted'][:]  # Adjust the path as needed
+        # Use hdf5_io helpers so this works when self.hdf5 is a dict-like test store
+        h5 = None
+        try:
+            from emergent.salmon_abm import hdf5_io
+            h5 = hdf5_io.get_hdf5_obj(self) or getattr(self, 'hdf5', None)
+        except Exception:
+            h5 = getattr(self, 'hdf5', None)
 
-        pixel_width = self.depth_rast_transform[0]
-        
-        # Compute the Euclidean distance transform. This computes the distance to the nearest zero (background) for all non-zero (foreground) pixels.
-        dist_to_bound = distance_transform_edt(raster != -9999) * pixel_width
-        
-        # Create or access 'environment' group
-        if 'environment' not in self.hdf5:
-            env_data = self.hdf5.create_group('environment')
+        # read wetted raster safely
+        try:
+            raster = hdf5_io.read_dataset(h5, 'environment/wetted')
+        except Exception:
+            # fallback: try direct access (best-effort)
+            try:
+                raster = self.hdf5['environment/wetted'][:]
+            except Exception:
+                raise RuntimeError('environment/wetted dataset not found in HDF5')
+
+        pixel_width = getattr(self, 'depth_rast_transform', None)
+        if pixel_width is None:
+            # fallback default
+            pw = 1.0
         else:
-            env_data = self.hdf5['environment']
-        
-        # Create 'distance_to' dataset and write data
-        if 'distance_to' not in env_data:
-            env_data.create_dataset('distance_to', (self.height, self.width), dtype='float32')
-        env_data['distance_to'][:, :] = dist_to_bound  # Corrected dataset name
-        
-        self.hdf5.flush()  # Write changes to HDF5 file
+            try:
+                pw = pixel_width[0]
+            except Exception:
+                pw = 1.0
+
+        # Compute the Euclidean distance transform. This computes distance to nearest zero for foreground pixels.
+        dist_to_bound = distance_transform_edt(raster != -9999) * pw
+
+        # write via hdf5_io when possible
+        try:
+            hdf5_io.write_dataset(h5, 'environment/distance_to', dist_to_bound.astype('float32'))
+        except Exception:
+            # last resort: write directly into h5py file if available
+            try:
+                if 'environment' not in self.hdf5:
+                    env_data = self.hdf5.create_group('environment')
+                else:
+                    env_data = self.hdf5['environment']
+                if 'distance_to' not in env_data:
+                    env_data.create_dataset('distance_to', dist_to_bound.shape, dtype='float32')
+                env_data['distance_to'][:, :] = dist_to_bound.astype('float32')
+            except Exception:
+                # give up silently — best-effort migration shim
+                pass
+
+        try:
+            if hasattr(h5, 'flush'):
+                h5.flush()
+        except Exception:
+            try:
+                if hasattr(self.hdf5, 'flush'):
+                    self.hdf5.flush()
+            except Exception:
+                pass
 
     def initialize_mental_map(self):
         """

@@ -16,13 +16,13 @@ parts/
 sdist/
 var/
 wheels/
+src/salmon_abm/.ai_journal/
 pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
-src/emergent/salmon_abm/.ai_journal/
 
 # Virtual environments
 venv/
@@ -60,6 +60,7 @@ htmlcov/
 # Keep small example data
 !data/**/*.csv
 !data/**/*.xlsx
+data/salmon_abm
 
 # Logs
 *.log

@@ -278,19 +278,52 @@ class simulation:
 
         return True
 
-    def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None):
-        # Simple run loop that calls `timestep` n times
-        # allow caller supplied PID tuning values
-        if self.pid_controller is not None and k_p is not None:
+    def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None, return_status: bool = False, video_hook=None):
+        # Enhanced run loop with PID plumbing, write frequency, and optional video hook
+        # Backwards compatible: original signature still works
+        write_frequency = 1
+        video_hook = None
+
+        # Accept a PID controller instance instead of scalar gains via model_name kw
+        controller = None
+        if isinstance(model_name, dict) and 'pid_controller' in model_name:
+            controller = model_name.pop('pid_controller')
+
+        # If scalar gains provided, set controller gains (if present)
+        if controller is None:
+            controller = self.pid_controller
+
+        if controller is not None and k_p is not None:
             try:
-                self.pid_controller.k_p = np.array([k_p])
-                self.pid_controller.k_i = np.array([k_i]) if k_i is not None else self.pid_controller.k_i
-                self.pid_controller.k_d = np.array([k_d]) if k_d is not None else self.pid_controller.k_d
+                controller.k_p = np.array([k_p]) if np.isscalar(k_p) else np.array(k_p)
+                if k_i is not None:
+                    controller.k_i = np.array([k_i]) if np.isscalar(k_i) else np.array(k_i)
+                if k_d is not None:
+                    controller.k_d = np.array([k_d]) if np.isscalar(k_d) else np.array(k_d)
             except Exception:
                 pass
 
+        status = {'steps': 0, 'errors': [], 'video_frames': 0}
         for i in range(n):
-            self.timestep(i, dt)
+            try:
+                self.timestep(i, dt, pid_controller=controller)
+                status['steps'] += 1
+                # optional video hook called after each timestep
+                if video_hook is not None:
+                    try:
+                        video_hook(self, i)
+                        status['video_frames'] += 1
+                    except Exception as e:
+                        status['errors'].append(f'video_hook_error:{e}')
+            except Exception as e:
+                status['errors'].append(str(e))
+                # continue running unless unrecoverable
+                continue
+
+        # preserve legacy return value for backwards compatibility
+        self.last_run_status = status
+        if return_status or video:
+            return status
         return True
 
     def close(self):

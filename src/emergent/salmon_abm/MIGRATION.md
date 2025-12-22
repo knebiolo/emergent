@@ -2,6 +2,10 @@ Migration plan and status for splitting sockeye.py
 
 Summary
 -------
+Migration plan and status for splitting sockeye.py
+
+Summary
+-------
 This document summarizes the migration that splits the monolithic `sockeye.py`
 into smaller modules inside `src/emergent/salmon_abm` and tracks what's left to do.
 
@@ -21,6 +25,37 @@ What we implemented
 - Parity test harness (`tests/test_parity.py`) updated and runs green.
 - Tests for the `salmon_abm` package pass locally with `--basetemp=outputs/pytest_tmp`.
 
+Outstanding Migration Items (2025-12-22)
+-------------------------------------
+
+- Goal: finish the migration so the new `simulation` runner compiles and can execute timesteps and HDF5 writes. Postpone summary and Kaplan-Meier work.
+
+- Findings from scan of `sockeye.py`:
+  - Most domain logic (movement, behavior, fatigue, PID, I/O) is already present in the new modules. `sockeye.py` remains a compatibility shim.
+  - `initialize_hdf5()` now delegates to `io.write_sim_initial()` and has robust fallbacks that use `hdf5_io`.
+  - Many functions still use direct `self.hdf5[...]` access; tests and the new `io` layer rely on `hdf5_io.get_hdf5_obj(...)` and `hdf5_io.read_dataset/write_dataset` to support dict-backed tests. A few direct reads can fail when `self.hdf5` is a dict; these should be guarded or replaced.
+  - `kaplan_meier_estimator` usage in `summary.kaplan_curve()` depends on `sksurv` — this is deferred as requested (backburner).
+  - Several TODO items are domain tuning (ucrit, PID scaling, buffer sizes). These are design/QA tasks and do not block compilation.
+
+- Immediate migration tasks I will (or have) prioritize to get simulations runnable:
+  1. Make simple, safe IO fallbacks in `sockeye.py` so any reads use `hdf5_io.get_hdf5_obj(self)` or `hdf5_io.read_dataset` whenever reasonable (not exhaustive; focus on reads used during `timestep()` and `run()` flows). This will ensure dict-backed tests and `simulation` class flow work.
+ 2. Add a small `compat.py` to `src/emergent/salmon_abm/` that re-exports legacy API points (`simulation`, `PID_controller`, `summary`) pointing to the new modules when appropriate. Keep `sockeye.py` as a deprecated shim and prefer new imports.
+ 3. Defer `summary.kaplan_curve()` and related summary-heavy functions until after the sim runs; note in MIGRATION.md that Kaplan-Meier requires `sksurv` and will be re-enabled later.
+
+- Tests & validation:
+  - After the IO guard patches and `compat.py` shim, run `pytest -q src/emergent/salmon_abm/tests --basetemp=outputs/pytest_tmp` to validate that `simulation.run()` compiles and the test harness passes.
+
+- Non-blocking enhancements (later):
+  - Replace magic constants and hard-coded buffers with config-driven parameters.
+  - Tune PID to be a function of length and water velocity (per TODO comments).
+  - Performance: dataset compression, chunking, and memory layout optimization.
+
+What I will do next (unless you direct otherwise):
+- Apply IO guards for the most likely problematic direct `self.hdf5[...]` reads (notably `boundary_surface()` and any HDF reads used in `timestep()` paths). 
+- Add `compat.py` with minimal re-exports.
+- Run the `salmon_abm` tests and report results.
+
+If that sounds good I will proceed now.
 Files created/updated
 ---------------------
 - src/emergent/salmon_abm/hdf5_io.py
@@ -32,39 +67,50 @@ Files created/updated
 - src/emergent/salmon_abm/sockeye.py (deprecation notice)
 - src/emergent/salmon_abm/deprecated/* (selected files patched to use hdf5_io)
 
-Remaining items from the attached plan
---------------------------------------
-From the original plan in the AI journal attachment the following remain:
+Remaining items from the attached plan (updated)
+-----------------------------------------------
+This project has moved past the initial scaffolding stage. The list below
+focuses on active work (deprecated modules are intentionally ignored for now).
 
-1) Create `utils.py` containing pure helpers (geo_to_pixel, pixel_to_geo,
-   standardize_shape, determine_slices_*, calculate_front_masks, interpolation helpers).
-   - Status: NOT CREATED.
+1) `utils.py` — pure helpers (geo_to_pixel, pixel_to_geo, shape/slice helpers,
+  interpolation, front-mask helpers)
+  - Status: IMPLEMENTED and unit-tested.
 
-2) Create `io.py` for environment import, HDF5 helper wrappers (higher-level
-   helpers beyond `hdf5_io`), `movie_maker`, `output_excel`, raster/shapefile helpers.
-   - Status: PARTIAL. `hdf5_io.py` exists; the higher-level IO helpers are NOT CREATED.
+2) `io.py` — environment import, higher-level HDF5 helper wrappers, movie and
+  Excel conveniences
+  - Status: IMPLEMENTED. Added `safe_hdf5_open`, `write_sim_initial`,
+    `enviro_load_many`, `longitudinal_chainage`, and `movie_frames_from_stack`.
 
-3) Create `pid.py` for the PID controller and add unit tests.
-   - Status: NOT CREATED.
+3) `pid.py` — PID controller
+  - Status: IMPLEMENTED and unit-tested (vectorized gains, robust `update`).
 
-4) Expand `simulation.py` into a full simulation runner exposing the public
-   `run()`, `timestep()` API used by the rest of the code.
-   - Status: SMALL SKELETON exists, but not complete.
+4) `simulation.py` — full simulation runner exposing `run()` and `timestep()`
+  APIs and wiring behavior/fatigue/movement and HDF5 writes.
+  - Status: PARTIAL. `simulation` has been expanded and now uses `io.write_sim_initial`
+    for HDF5 setup; `timestep()` orchestration is present. The remaining work is
+    to finalize the public `run()` API (PID plumbing, optional video hooks,
+    clearer lifecycle management) and add focused tests.
 
-5) Create `summary.py` for reporting & summary methods.
-   - Status: NOT CREATED.
+5) `summary.py` — reporting & summary methods
+  - Status: SKIPPED for now (deprioritized).
 
-6) Finalize compatibility wrapper (continue to use `sockeye.py` as shim or
-   create `compat.py`) and add `__all__` lists for new modules.
-   - Status: `sockeye.py` is a shim with a deprecation warning; consider adding
-     a dedicated `compat.py` and sparse tests.
+6) Compatibility shim (`compat.py`) to expose the old `sockeye` API
+  - Status: NOT STARTED. `sockeye.py` currently acts as a deprecation shim.
 
-7) Documentation updates and migration README entry.
-   - Status: PARTIAL. This `MIGRATION.md` file added; a formal `README.md`
-     update and docs pages remain.
+7) Documentation updates and migration README entry
+  - Status: PARTIAL. This `MIGRATION.md` is updated; further README/docs edits
+    remain.
 
-8) Run full repo tests and address non-salmon_abm regressions.
-   - Status: IN-PROGRESS (next step below).
+8) Test sweep: run full repository tests and address regressions
+  - Status: NOT STARTED. Focused package tests for `salmon_abm` pass locally.
+
+Notes
+-----
+- Deprecated modules (`src/emergent/salmon_abm/deprecated/*`) are intentionally
+  excluded from the active migration work at this time.
+- Compression and dataset optimization will be considered later during a
+  dedicated performance pass; the current priority is API clarity and testable
+  behavior.
 
 How to run tests locally (Windows)
 ----------------------------------
@@ -74,13 +120,29 @@ Use a repository-local pytest basetemp to avoid Windows permission issues:
 pytest -q --basetemp=outputs/pytest_tmp
 ```
 
-Next recommended steps
-----------------------
-- Implement `utils.py`, `pid.py`, and the full `simulation.run()` API.
-- Add unit tests for PID and utils.
-- Optionally create `compat.py` and update `sockeye.py` to import from it.
-- Run the full repository test suite and iterate until green.
+Next recommended step
+---------------------
+Finish expanding the `simulation` runner API (task #4). Specifically:
 
-If you want, I will implement `utils.py`, `pid.py`, finish `simulation.py`,
-add their tests, and run the full repo test suite next.  Say "Do all" and I'll
-proceed with those tasks.
+- Finalize `simulation.run()` so callers can:
+  - configure PID tuning or pass a controller instance
+  - select HDF5 write frequency and optional video hooks
+  - receive a stable return value / status and error handling
+
+- Add focused unit/integration tests that exercise `timestep()` and `run()`
+  with small `num_agents` and `num_timesteps` using the dict-like HDF5 store.
+
+Why this next
+-------------
+The core modules (`utils`, `io`, `pid`) are implemented and tested; making the
+simulation runner complete will allow downstream tools and experiments to use
+the new modular code with confidence and minimal duplication. Once the runner
+API is stable we can add `compat.py` and then run a broader test sweep.
+
+Suggested follow-up after `simulation` is complete:
+- Add `compat.py` to centralize the deprecated API surface.
+- Update docs and `MIGRATION.md` with usage examples for the new runner.
+- Run full repository tests and prioritize any regressions exposed.
+
+If you want I will proceed to finish the `simulation.run()` API and add
+tests for it next.
