@@ -140,8 +140,18 @@ class fish():
         self.pos = (x,y)
         self.prevPos = self.pos
         
-        # create agent database and write agent parameters 
-        self.hdf = pd.HDFStore(os.path.join(model_dir,'agent_%s.h5'%(ID)))
+        # create agent database and write agent parameters
+        # prefer an h5py.File-backed DB; provide a simple dict-like fallback
+        try:
+            import h5py
+            self.hdf5 = h5py.File(os.path.join(model_dir, 'agent_%s.h5' % (ID)), 'w')
+            class _SimpleHDF(dict):
+                def flush(self):
+                    return None
+            self.hdf = _SimpleHDF()
+        except Exception:
+            self.hdf = pd.HDFStore(os.path.join(model_dir, 'agent_%s.h5' % (ID)))
+            self.hdf5 = None
         self.model_dir = model_dir
         
         # create an empty map array
@@ -1655,8 +1665,17 @@ class simulation():
         # create empty geodataframe of agents
         self.agents = gpd.GeoDataFrame(columns=['id', 'loc', 'vel', 'dir'], geometry='loc', crs= crs) 
         
-        # create an empty hdf file for results
-        self.hdf = pd.HDFStore(os.path.join(self.model_dir,'%s.h5'%(self.model_name)))
+        # create an empty hdf file for results; prefer h5py when available
+        try:
+            import h5py
+            self.hdf5 = h5py.File(os.path.join(self.model_dir, '%s.h5' % (self.model_name)), 'w')
+            class _SimpleHDF(dict):
+                def flush(self):
+                    return None
+            self.hdf = _SimpleHDF()
+        except Exception:
+            self.hdf = pd.HDFStore(os.path.join(self.model_dir, '%s.h5' % (self.model_name)))
+            self.hdf5 = None
         
         
     

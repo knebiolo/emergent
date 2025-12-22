@@ -1,11 +1,23 @@
 # -*- coding: utf-8 -*-
 
-try:
-	from emergent.sockeye_dynamic_environment import *
-except Exception:
-	# Allow importing this package in test environments where optional
-	# legacy modules may not be available. Tests import submodules
-	# directly by path to avoid side-effects.
-	pass
+"""Top-level exports for salmon_abm submodules.
 
-#from emergent.ship import *
+We export the new modular implementations so callers can do:
+	from emergent.salmon_abm import movement, behavior, fatigue
+
+Legacy modules are imported in try/except blocks to avoid test-time
+side-effects.
+"""
+__all__ = [
+	'movement',
+	'behavior',
+	'fatigue',
+	'simulation',
+	'hdf5_io',
+]
+
+try:
+	from emergent.salmon_abm import movement, behavior, fatigue, simulation, hdf5_io
+except Exception:
+	# Tests and minimal environments may import submodules directly.
+	pass

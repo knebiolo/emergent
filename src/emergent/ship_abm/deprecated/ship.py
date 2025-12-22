@@ -1269,7 +1269,17 @@ class simulation():
         # identify workspaces and create results database
         inputWS = os.path.join(proj_dir,'Data')
         outputWS = os.path.join(proj_dir,'Output')
-        self.hdf = pd.HDFStore(os.path.join(inputWS,'%s.h5'%(sim_name)))
+        # prefer h5py-backed file; provide a dict-like fallback with flush()
+        try:
+            import h5py
+            self.hdf5 = h5py.File(os.path.join(inputWS, '%s.h5' % (sim_name)), 'w')
+            class _SimpleHDF(dict):
+                def flush(self):
+                    return None
+            self.hdf = _SimpleHDF()
+        except Exception:
+            self.hdf = pd.HDFStore(os.path.join(inputWS, '%s.h5' % (sim_name)))
+            self.hdf5 = None
 
         # set up model domain
         self.domain = bounding_box

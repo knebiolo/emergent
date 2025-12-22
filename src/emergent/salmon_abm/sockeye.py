@@ -1,34 +1,24 @@
 
 # -*- coding: utf-8 -*-
+"""Legacy monolith for Sockeye salmon ABM.
+
+This module is deprecated and kept as a compatibility shim while the codebase
+is being split into smaller modules: `movement`, `behavior`, `fatigue`, and
+`simulation`. Prefer importing from `emergent.salmon_abm` submodules:
+
+    from emergent.salmon_abm import movement, behavior, fatigue, simulation
+
+The deprecation is intentional — the new modules offer the same behavior
+but are easier to test and maintain. The monolith will remain available
+until parity is fully verified and downstream users have migrated.
 """
-Created on Wed May 10 20:30:21 2023
 
-@author: KNebiolo, Isha Deo
-
-Python software for an Agent Based Model of migrating adult Sockeye salmon (spp.)  
-with intent of understanding the potential ramifications of river discharge 
-changes on ability of fish to succesffuly pass upstream through a riffle - 
-cascade complex.  
-
-An agent is a goal-directed, autonomous, software-object that interacts with 
-other agents in simulated space.  In the case of a fish passage agent, our fish 
-are motivated to move upstream to spawn, thus their goal is simply to pass the 
-impediment.   Their motivation is clear, they have an overriding instinct to 
-migrate upstream to their natal reach and will do so at the cost of their own 
-mortality.   
-
-Our fish agents are python class objects with initialization methods, and 
-methods for movement, behaviors, and perception.  Movement is continuous in 2d 
-space as our environment is a depth averaged 2d model.  Movement in 
-the Z direction is handled with logic.  We will use velocity distributions and 
-the agent's position within the water column to understand the forces acting on 
-the body of the fish (drag).  To maintain position, the agent must generate 
-enough thrust to counteract drag.  The fish generates thrust by beating its tail.  
-According to Castro-Santos (2006), fish tend to migrate at a specific speed over 
-ground in body lengths per second depending upon the mode of swimming it is in.  
-Therefore their tail beat per minute rate is dependent on the amount of drag 
-and swimming mode.   
-"""
+import warnings
+warnings.warn(
+    "emergent.salmon_abm.sockeye is deprecated. Import movement/behavior/fatigue from emergent.salmon_abm instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 # import dependencies
 #import cupy as cp
 import h5py
