@@ -729,52 +729,63 @@ class simulation():
         self.opt_wat_depth = self.body_depth /100 * 3.0 + self.too_shallow
         
     def initialize_hdf5(self):
-        '''Initialize an HDF5 database for a simulation'''
-        # Create groups for organization (optional)
-        agent_data = self.hdf5.create_group("agent_data")
-        
-        # Create datasets for agent properties that are static
-        agent_data.create_dataset("sex", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("length", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("ucrit", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("weight", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("body_depth", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("too_shallow", (self.num_agents,), dtype='f4')
-        agent_data.create_dataset("opt_wat_depth", (self.num_agents,), dtype='f4')
-      
-        # Create datasets for agent properties that change with time
-        agent_data.create_dataset("X", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("Y", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("Z", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("prev_X", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("prev_Y", (self.num_agents, self.num_timesteps), dtype='f4')            
-        agent_data.create_dataset("heading", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("sog", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("ideal_sog", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("swim_speed", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("battery", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("swim_behav", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("swim_mode", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("recover_stopwatch", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("ttfr", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("time_out_of_water", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("drag", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("thrust", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("Hz", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("bout_no", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("dist_per_bout", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("bout_dur", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("time_of_jump", (self.num_agents, self.num_timesteps), dtype='f4')
-        agent_data.create_dataset("kcal", (self.num_agents, self.num_timesteps), dtype='f4')
-        
-        # Set attributes (metadata) if needed
-        self.hdf5.attrs['simulation_name'] = "%s Sockeye Movement Simulation"%(self.basin)
-        self.hdf5.attrs['num_agents'] = self.num_agents 
-        self.hdf5.attrs['num_timesteps'] = self.num_timesteps
-        self.hdf5.attrs['basin'] = self.basin
-        self.hdf5.attrs['crs'] = self.crs
-        
-        self.hdf5.flush()
+        '''Initialize an HDF5 database for a simulation (delegates to io.write_sim_initial).'''
+        try:
+            sim_state = {
+                'num_agents': self.num_agents,
+                'num_timesteps': self.num_timesteps,
+                'sex': getattr(self, 'sex', None),
+                'length': getattr(self, 'length', None),
+                'weight': getattr(self, 'weight', None),
+                'body_depth': getattr(self, 'body_depth', None),
+                'metadata': {
+                    'simulation_name': f"{self.basin} Sockeye Movement Simulation",
+                    'num_agents': self.num_agents,
+                    'num_timesteps': self.num_timesteps,
+                    'basin': self.basin,
+                    'crs': self.crs,
+                }
+            }
+            # delegate to new IO helper
+            from emergent.salmon_abm import io as _io
+            _io.write_sim_initial(self.hdf5, sim_state)
+
+            # ensure attributes are present on the top-level file-like
+            try:
+                if hasattr(self.hdf5, 'attrs'):
+                    self.hdf5.attrs['simulation_name'] = f"{self.basin} Sockeye Movement Simulation"
+                    self.hdf5.attrs['num_agents'] = self.num_agents
+                    self.hdf5.attrs['num_timesteps'] = self.num_timesteps
+                    self.hdf5.attrs['basin'] = self.basin
+                    self.hdf5.attrs['crs'] = self.crs
+            except Exception:
+                pass
+        except Exception:
+            # fallback to original explicit creation for robustness
+            try:
+                agent_data = self.hdf5.create_group("agent_data")
+                for name in ("sex","length","ucrit","weight","body_depth","too_shallow","opt_wat_depth"):
+                    agent_data.create_dataset(name, (self.num_agents,), dtype='f4')
+                for name in ("X","Y","Z","prev_X","prev_Y","heading","sog","ideal_sog","swim_speed","battery","swim_behav","swim_mode","recover_stopwatch","ttfr","time_out_of_water","drag","thrust","Hz","bout_no","dist_per_bout","bout_dur","time_of_jump","kcal"):
+                    agent_data.create_dataset(name, (self.num_agents, self.num_timesteps), dtype='f4')
+                try:
+                    self.hdf5.attrs['simulation_name'] = "%s Sockeye Movement Simulation"%(self.basin)
+                    self.hdf5.attrs['num_agents'] = self.num_agents
+                    self.hdf5.attrs['num_timesteps'] = self.num_timesteps
+                    self.hdf5.attrs['basin'] = self.basin
+                    self.hdf5.attrs['crs'] = self.crs
+                except Exception:
+                    pass
+                try:
+                    self.hdf5.flush()
+                except Exception:
+                    pass
+            except Exception:
+                # last-resort: create placeholders via hdf5_io helper
+                try:
+                    hdf5_io.create_environment_placeholders(self.hdf5)
+                except Exception:
+                    pass
         
     def timestep_flush(self, timestep):
         if self.pid_tuning == False:
