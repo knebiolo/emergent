@@ -222,6 +222,33 @@ class simulation:
         # that read environment/* will have something to sample in unit tests
         hdf5_io.create_environment_placeholders(self.db)
 
+        # Create x/y coordinate grids and attach simple affine transforms so
+        # behavior and sampling helpers can map geo <-> pixel indices.
+        try:
+            h5 = hdf5_io.get_hdf5_obj(self)
+            depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=np.zeros((1, 1)))
+            nrows, ncols = depth_ds.shape
+            # x_coords: columns index -> x, y_coords: rows index -> y
+            x_coords = np.tile(np.arange(ncols, dtype=float), (nrows, 1))
+            y_coords = np.tile(np.arange(nrows, dtype=float)[:, np.newaxis], (1, ncols))
+            # write both environment/ prefixed and top-level keys for compatibility
+            hdf5_io.write_dataset(h5, 'environment/x_coords', x_coords)
+            hdf5_io.write_dataset(h5, 'environment/y_coords', y_coords)
+            hdf5_io.write_dataset(h5, 'x_coords', x_coords)
+            hdf5_io.write_dataset(h5, 'y_coords', y_coords)
+            # attach simple identity-like affine transforms (a,b,c,d,e,f)
+            # mapping pixel -> geo as x=col, y=row
+            self.depth_rast_transform = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+            self.vel_mag_rast_transform = self.depth_rast_transform
+            self.vel_dir_rast_transform = self.depth_rast_transform
+            self.refugia_map_transform = self.depth_rast_transform
+        except Exception:
+            # tolerate any failures here; behavior will be more limited but simulation can still run
+            self.depth_rast_transform = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+            self.vel_mag_rast_transform = self.depth_rast_transform
+            self.vel_dir_rast_transform = self.depth_rast_transform
+            self.refugia_map_transform = self.depth_rast_transform
+
         # small helpers: construct movement and behavior helpers now
         self._movement = movement_mod.movement(self)
         self._behavior = behavior_mod.behavior(1.0, self)
@@ -360,6 +387,32 @@ class simulation:
                 pass
 
         return True
+
+    def sample_environment(self, transform, raster_name):
+        """Sample `environment/<raster_name>` at agent positions and return array of values.
+
+        This thin wrapper uses `geo_to_pixel` to convert agent `X,Y` into pixel indices
+        using the provided `transform`, then reads the environment dataset via `hdf5_io`.
+        Returns a 1-D numpy array of length `num_agents` filled with np.nan for out-of-bounds.
+        """
+        try:
+            from emergent.salmon_abm.utils import geo_to_pixel
+            h5 = hdf5_io.get_hdf5_obj(self)
+            ds = hdf5_io.read_dataset(h5, f'environment/{raster_name}', default=None)
+            if ds is None:
+                return np.full(self.num_agents, np.nan)
+            # geo_to_pixel accepts arrays and returns (rows, cols)
+            rows, cols = geo_to_pixel(self.X, self.Y, transform)
+            # ensure integer indices and bounds
+            rows = np.asarray(rows, dtype=int)
+            cols = np.asarray(cols, dtype=int)
+            valid = (rows >= 0) & (cols >= 0) & (rows < ds.shape[0]) & (cols < ds.shape[1])
+            out = np.full(self.num_agents, np.nan)
+            if np.any(valid):
+                out[valid] = ds[rows[valid], cols[valid]]
+            return out
+        except Exception:
+            return np.full(self.num_agents, np.nan)
 
     def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None, return_status: bool = False, video_hook=None):
         # Enhanced run loop with PID plumbing, write frequency, and optional video hook

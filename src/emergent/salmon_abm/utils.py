@@ -77,11 +77,32 @@ def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
 
 
 def pixel_to_geo(row: int, col: int, transform) -> Tuple[float, float]:
-    """Convert pixel indices (row, col) to geospatial coordinates (x, y)."""
+    """Convert pixel indices (row, col) to geospatial coordinates (x, y).
+
+    Backwards-compatible: some legacy callers pass arguments as
+    (transform, row, col). This function detects that form and accepts
+    both orders.
+    """
+    # Detect if caller passed (transform, row, col)
+    try:
+        # If `row` looks like a transform (has length 6 or attributes), treat it accordingly
+        _ = _unpack_affine(row)
+        # row is actually transform, shift arguments
+        transform, row, col = row, col, transform
+    except Exception:
+        # `row` was not a transform; assume (row, col, transform) ordering
+        pass
+
     a, b, c, d, e, f = _unpack_affine(transform)
-    x = a * col + b * row + c
-    y = d * col + e * row + f
-    return float(x), float(y)
+    # vectorized handling: accept scalars or arrays for row/col
+    row_arr = np.atleast_1d(np.asarray(row, dtype=float))
+    col_arr = np.atleast_1d(np.asarray(col, dtype=float))
+    x = a * col_arr + b * row_arr + c
+    y = d * col_arr + e * row_arr + f
+    # return scalars when inputs were scalars
+    if x.size == 1:
+        return float(x[0]), float(y[0])
+    return x, y
 
 
 def standardize_shape(arr_or_shape: Union[np.ndarray, Tuple[int, int]], target_shape=None, fill_value=np.nan):
