@@ -99,3 +99,81 @@ class fatigue():
             self.simulation.battery[mask_non_sustained.flatten()] *= ttf1.flatten() / ttf0.flatten()
 
         self.simulation.battery = np.clip(self.simulation.battery, 0, 1)
+
+    def set_swim_behavior(self, battery_state_dict):
+        mask_low_battery = battery_state_dict['low']
+        mask_mid_battery = battery_state_dict['mid']
+        mask_high_battery = battery_state_dict['high']
+
+        self.simulation.swim_behav = np.where(mask_low_battery, 3, self.simulation.swim_behav)
+        self.simulation.swim_behav = np.where(mask_mid_battery, 2, self.simulation.swim_behav)
+        self.simulation.swim_behav = np.where(mask_high_battery, 1, self.simulation.swim_behav)
+
+    def set_ideal_sog(self, mask_dict, battery_state_dict):
+        mask_low_battery = battery_state_dict['low']
+        mask_mid_battery = battery_state_dict['mid']
+        mask_high_battery = battery_state_dict['high']
+
+        # high battery: school_sog when full battery, otherwise scaled opt_sog
+        self.simulation.ideal_sog[mask_high_battery] = np.where(
+            self.simulation.battery[mask_high_battery] == 1.0,
+            self.simulation.school_sog[mask_high_battery],
+            np.round((self.simulation.opt_sog[mask_high_battery] * self.simulation.battery[mask_high_battery]) / 2, 2),
+        )
+
+        # set other bands
+        self.simulation.ideal_sog[mask_low_battery] = 0.0
+        self.simulation.ideal_sog[mask_mid_battery] = 0.1
+
+    def ready_to_move(self):
+        mask_ready_to_move = self.simulation.battery >= 0.85
+        self.simulation.recover_stopwatch[mask_ready_to_move] = 0.0
+        self.simulation.swim_behav[mask_ready_to_move] = 1
+        self.simulation.swim_mode[mask_ready_to_move] = 1
+
+    def PID_checks(self):
+        if getattr(self.simulation, 'pid_tuning', False):
+            # keep lightweight debug behavior similar to original
+            pass
+
+    def assess_fatigue(self):
+        swim_speeds = self.swim_speeds()
+        bl_s = self.bl_s(swim_speeds)
+
+        mask_dict = dict()
+        mask_dict['prolonged'] = np.where((self.simulation.max_s_U < bl_s) & (bl_s <= self.simulation.max_p_U), True, False)
+        mask_dict['sprint'] = np.where(bl_s > self.simulation.max_p_U, True, False)
+        mask_dict['sustained'] = bl_s <= self.simulation.max_s_U
+
+        # record bout distance
+        self.bout_distance()
+
+        # assess time to fatigue
+        ttf = self.time_to_fatigue(bl_s, mask_dict)
+
+        # set swim mode
+        self.set_swim_mode(mask_dict)
+
+        # assess recovery
+        per_rec = self.recovery()
+
+        # update battery
+        self.calc_battery(per_rec, ttf, mask_dict)
+
+        # battery masks
+        battery_dict = dict()
+        battery_dict['low'] = self.simulation.battery <= 0.1
+        battery_dict['mid'] = (self.simulation.battery > 0.1) & (self.simulation.battery <= 0.3)
+        battery_dict['high'] = self.simulation.battery > 0.3
+
+        # set swim behavior
+        self.set_swim_behavior(battery_dict)
+
+        # set ideal sog
+        self.set_ideal_sog(mask_dict, battery_dict)
+
+        # ready to move
+        self.ready_to_move()
+
+        # PID checks
+        self.PID_checks()

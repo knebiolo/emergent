@@ -4,9 +4,12 @@ This includes perception and social cue calculations.
 """
 import os
 import numpy as np
+import pandas as pd
 from scipy.ndimage import distance_transform_edt
+from scipy.interpolate import UnivariateSpline
 
 from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, standardize_shape, calculate_front_masks, determine_slices_from_vectors, determine_slices_from_headings
+from emergent.salmon_abm import hdf5_io
 
 
 class behavior():
@@ -21,9 +24,12 @@ class behavior():
 
         buff = 10
         row_min = np.clip(mental_map_rows - buff, 0, None)
-        row_max = np.clip(mental_map_rows + buff + 1, None, self.simulation.hdf5['memory/0'].shape[0])
+        # use hdf5_io to support both h5py.File and dict-like mocks
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
+        memory0 = hdf5_io.read_dataset(h5, 'memory/0', default=np.zeros((1, 1)))
+        row_max = np.clip(mental_map_rows + buff + 1, None, memory0.shape[0])
         col_min = np.clip(mental_map_cols - buff, 0, None)
-        col_max = np.clip(mental_map_cols + buff + 1, None, self.simulation.hdf5['memory/0'].shape[1])
+        col_max = np.clip(mental_map_cols + buff + 1, None, memory0.shape[1])
 
         repulsive_forces_per_agent = np.array([
             self._calculate_repulsive_force(agent_idx, rmin, rmax, cmin, cmax, weight, t)
@@ -33,7 +39,9 @@ class behavior():
         return repulsive_forces_per_agent
 
     def _calculate_repulsive_force(self, agent_idx, row_min, row_max, col_min, col_max, weight, t):
-        mmap_section = self.simulation.hdf5['memory/%s' % agent_idx][row_min:row_max, col_min:col_max]
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
+        mmap = hdf5_io.read_dataset(h5, f'memory/{agent_idx}', default=np.zeros((1, 1)))
+        mmap_section = mmap[row_min:row_max, col_min:col_max]
         t_since = mmap_section - t
         multiplier = np.where((t_since > 10) & (t_since < 7200), 1 - (t_since - 5) / (7195), 0)
 
@@ -56,10 +64,13 @@ class behavior():
         x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
         refugia_map_rows, refugia_map_cols = geo_to_pixel(x, y, self.simulation.refugia_map_transform)
         buff = 50
+        # use hdf5_io to support both h5py.File and dict-like mocks
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
+        refugia0 = hdf5_io.read_dataset(h5, 'refugia/0', default=np.zeros((1, 1)))
         row_min = np.clip(refugia_map_rows - buff, 0, None)
-        row_max = np.clip(refugia_map_rows + buff + 1, None, self.simulation.hdf5['refugia/0'].shape[0])
+        row_max = np.clip(refugia_map_rows + buff + 1, None, refugia0.shape[0])
         col_min = np.clip(refugia_map_cols - buff, 0, None)
-        col_max = np.clip(refugia_map_cols + buff + 1, None, self.simulation.hdf5['refugia/0'].shape[1])
+        col_max = np.clip(refugia_map_cols + buff + 1, None, refugia0.shape[1])
 
         attractive_forces_per_agent = np.array([
             self._calculate_attractive_force(agent_idx, rmin, rmax, cmin, cmax, weight)
@@ -69,7 +80,8 @@ class behavior():
         return attractive_forces_per_agent
 
     def _calculate_attractive_force(self, agent_idx, row_min, row_max, col_min, col_max, weight):
-        refugia_section = self.simulation.hdf5['refugia/%s' % agent_idx][row_min:row_max, col_min:col_max]
+        refugia = hdf5_io.read_dataset(h5, f'refugia/{agent_idx}', default=np.zeros((1, 1)))
+        refugia_section = refugia[row_min:row_max, col_min:col_max]
         refuge_mask = (refugia_section == 1)
         if np.any(refuge_mask):
             distances = distance_transform_edt(~refuge_mask)
@@ -113,10 +125,15 @@ class behavior():
                                                    xmax.flatten()
                                                    )
                   ]
+        # read datasets via hdf5_io so this works with h5py.File or dict-like mocks
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
+        vel_ds = hdf5_io.read_dataset(h5, 'environment/vel_mag', default=np.zeros((1, 1)))
+        x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
+        y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
 
-        vel3d = np.stack([standardize_shape(self.simulation.hdf5['environment/vel_mag'][sl[-2:]]) for sl in slices])
-        x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]]) for sl in slices])
-        y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]]) for sl in slices])
+        vel3d = np.stack([standardize_shape(vel_ds[sl[-2:]]) for sl in slices])
+        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]]) for sl in slices])
+        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]]) for sl in slices])
 
         vel3d_multiplier = calculate_front_masks(self.simulation.heading.flatten(),
                                                  x_coords,
@@ -172,10 +189,13 @@ class behavior():
         ymin = rows - buff
         ymax = rows + buff + 1
 
-        xmin = np.clip(xmin, 0, self.simulation.hdf5['environment/distance_to'].shape[1] - 1)
-        xmax = np.clip(xmax, 0, self.simulation.hdf5['environment/distance_to'].shape[1])
-        ymin = np.clip(ymin, 0, self.simulation.hdf5['environment/distance_to'].shape[0] - 1)
-        ymax = np.clip(ymax, 0, self.simulation.hdf5['environment/distance_to'].shape[0])
+        # ensure indices within dataset bounds using hdf5_io
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
+        dist_ds = hdf5_io.read_dataset(h5, 'environment/distance_to', default=np.zeros((1, 1)))
+        xmin = np.clip(xmin, 0, dist_ds.shape[1] - 1)
+        xmax = np.clip(xmax, 0, dist_ds.shape[1])
+        ymin = np.clip(ymin, 0, dist_ds.shape[0] - 1)
+        ymax = np.clip(ymax, 0, dist_ds.shape[0])
 
         slices = [(agent, slice(y0, y1), slice(x0, x1))
                   for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),
@@ -186,8 +206,11 @@ class behavior():
                                                    )
                   ]
 
-        x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
-        y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
+        x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
+        y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
+        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
+        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
 
         front_multiplier = calculate_front_masks(self.simulation.heading,
                                                  x_coords,
@@ -195,7 +218,9 @@ class behavior():
                                                  self.simulation.X,
                                                  self.simulation.Y)
 
-        dist3d = np.stack([standardize_shape(self.simulation.hdf5['environment/distance_to'][sl[-2:]]) for sl in slices]) * front_multiplier
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
+        dist_ds = hdf5_io.read_dataset(h5, 'environment/distance_to', default=np.zeros((1, 1)))
+        dist3d = np.stack([standardize_shape(dist_ds[sl[-2:]]) for sl in slices]) * front_multiplier
 
         num_agents, rows, cols = dist3d.shape
         dist3d = dist3d.reshape(num_agents, rows * cols)
@@ -248,9 +273,13 @@ class behavior():
                                                    xmax.flatten())
                   ]
 
-        depths = np.stack([standardize_shape(self.simulation.hdf5['environment/depth'][sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
-        x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
-        y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
+        depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=np.zeros((1, 1)))
+        x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
+        y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
+        depths = np.stack([standardize_shape(depth_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
+        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
+        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
 
         front_multiplier = calculate_front_masks(self.simulation.heading, x_coords, y_coords, self.simulation.X, self.simulation.Y)
 
@@ -308,9 +337,13 @@ class behavior():
                                                    xmax.flatten())
                   ]
 
-        dep3D = np.stack([standardize_shape(self.simulation.hdf5['environment/depth'][sl[-2:]]) for sl in slices])
-        x_coords = np.stack([standardize_shape(self.simulation.hdf5['x_coords'][sl[-2:]]) for sl in slices])
-        y_coords = np.stack([standardize_shape(self.simulation.hdf5['y_coords'][sl[-2:]]) for sl in slices])
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
+        depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=np.zeros((1, 1)))
+        x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
+        y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
+        dep3D = np.stack([standardize_shape(depth_ds[sl[-2:]]) for sl in slices])
+        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]]) for sl in slices])
+        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]]) for sl in slices])
 
         dep3D_multiplier = calculate_front_masks(self.simulation.heading.flatten(), x_coords, y_coords, self.simulation.X.flatten(), self.simulation.Y.flatten(), behind_value=99999.9)
         dep3D = dep3D * dep3D_multiplier

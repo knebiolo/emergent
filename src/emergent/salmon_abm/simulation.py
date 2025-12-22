@@ -10,7 +10,7 @@ import tempfile
 import h5py
 import numpy as np
 from typing import Optional
-from emergent.salmon_abm import utils, io, pid, agents
+from emergent.salmon_abm import utils, io, pid, agents, hdf5_io
 
 
 class simulation:
@@ -74,19 +74,19 @@ class simulation:
             self.db = h5py.File(self.db_path, "w")
             self._created_db_file = True
 
-        # create static per-fish datasets
-        sex_ds = self.db.create_dataset("sex", (self.num_agents,), dtype="i1")
-        length_ds = self.db.create_dataset("length", (self.num_agents,), dtype="f4")
-        weight_ds = self.db.create_dataset("weight", (self.num_agents,), dtype="f4")
-        body_depth_ds = self.db.create_dataset("body_depth", (self.num_agents,), dtype="f4")
+        # create static per-fish datasets via hdf5_io
+        hdf5_io.write_dataset(self.db, "sex", np.zeros((self.num_agents,), dtype=np.int8), dtype="i1")
+        hdf5_io.write_dataset(self.db, "length", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
+        hdf5_io.write_dataset(self.db, "weight", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
+        hdf5_io.write_dataset(self.db, "body_depth", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
 
         # environment masks/metadata placeholders
-        self.db.create_dataset("too_shallow", (1,), dtype="i1")
-        self.db.create_dataset("opt_wat_depth", (1,), dtype="f4")
+        hdf5_io.write_dataset(self.db, "too_shallow", np.zeros((1,), dtype=np.int8), dtype="i1")
+        hdf5_io.write_dataset(self.db, "opt_wat_depth", np.zeros((1,), dtype=np.float32), dtype="f4")
 
         # simple position datasets (time-varying axes would be added by run)
-        self.db.create_dataset("X", (self.num_agents,), dtype="f4")
-        self.db.create_dataset("Y", (self.num_agents,), dtype="f4")
+        hdf5_io.write_dataset(self.db, "X", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
+        hdf5_io.write_dataset(self.db, "Y", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
 
         # populate agent attributes using the agents module
         try:
@@ -115,6 +115,13 @@ class simulation:
                 _ = io.enviro_import(ef)
             except Exception:
                 continue
+
+        # ensure minimal environment placeholders exist so downstream modules
+        # that read environment/* will have something to sample in unit tests
+        try:
+            hdf5_io.create_environment_placeholders(self.db)
+        except Exception:
+            pass
 
     def timestep(self, t, dt, g=None, pid_controller=None):
         # Advance simple odometer and time
