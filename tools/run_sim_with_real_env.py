@@ -4,12 +4,19 @@ from emergent.salmon_abm import io, hdf5_io
 import os
 import numpy as np
 
+import argparse
+
+parser = argparse.ArgumentParser(description='Run instrumented sim with real env rasters')
+parser.add_argument('--nsteps', type=int, default=10, help='number of timesteps to run')
+parser.add_argument('--nagents', type=int, default=100, help='number of agents to simulate')
+args = parser.parse_args()
+
 data_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'salmon_abm')
 # Build env files list: depth, vel_x, vel_y, vel_mag, vel_dir
 env_files = [os.path.join(data_dir, fname) for fname in ['depth.tif', 'vel_x.tif', 'vel_y.tif', 'vel_mag.tif', 'vel_dir.tif']]
 start_poly = os.path.join(data_dir, 'start_loc_river_right.shp')
 
-sim = simulation(model_dir='.', model_name='real_probe', crs=None, basin='test', water_temp=10, start_polygon=start_poly, env_files=env_files, longitudinal_profile=None, fish_length=200.0, num_timesteps=10, num_agents=100)
+sim = simulation(model_dir='.', model_name='real_probe', crs=None, basin='test', water_temp=10, start_polygon=start_poly, env_files=env_files, longitudinal_profile=None, fish_length=200.0, num_timesteps=args.nsteps, num_agents=args.nagents)
 
 # enable debug flags for diagnostics
 sim.debug_env = True
@@ -106,8 +113,8 @@ if depth is not None:
     except Exception as e:
         print('Debug geo_to_pixel failed:', e)
 
-# run for 10 timesteps and print diagnostics per step
-for i in range(10):
+# run for requested timesteps and print diagnostics per step
+for i in range(args.nsteps):
     sim.timestep(i, 1.0)
     mean_Hz = np.nanmean(sim.Hz)
     mean_thrust = np.nanmean(np.linalg.norm(sim.thrust, axis=1))

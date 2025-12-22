@@ -87,10 +87,7 @@ class movement():
                 fish_y_vel = (self.simulation.Y - self.simulation.prev_Y) / dt
                 fish_dir = np.arctan2(fish_y_vel, fish_x_vel)
                 fish_mag = np.linalg.norm(np.stack((fish_x_vel, fish_y_vel)).T, axis=-1)
-
-                fish_velocities = np.stack((self.simulation.ideal_sog * np.cos(self.simulation.heading),
-                                            self.simulation.ideal_sog * np.sin(self.simulation.heading)),
-                                           axis=-1)
+                fish_velocities = np.stack((fish_x_vel, fish_y_vel)).T
 
         ideal_swim_speed = np.linalg.norm(fish_velocities - water_vel, axis=-1)
 
@@ -117,6 +114,16 @@ class movement():
                                  thrust_N * np.sin(self.simulation.heading)), axis=1), 0.0)
 
         self.simulation.thrust = thrust
+
+        # optional debug print for thrust internals
+        try:
+            if getattr(self.simulation, 'debug_freq', False):
+                n_dbg = min(5, thrust_N.size)
+                print('THRUST debug: W[:5]=', (W[:n_dbg] if hasattr(W, '__len__') else W))
+                print('THRUST debug: w[:5]=', (w[:n_dbg] if hasattr(w, '__len__') else w))
+                print('THRUST debug: thrust_N[:5]=', thrust_N[:n_dbg])
+        except Exception:
+            pass
 
     def frequency(self, mask, t, dt, fish_velocities=None, use_sympy=False):
         rho = 1.0
@@ -185,11 +192,16 @@ class movement():
         term3_si = (U_m_s + 2.0 * V_m_s * np.cos(theta_rad) - V_m_s)
         denom_si = term1_si * term2_si * term3_si
 
-        # safe mask and compute Hz in SI
-        safe_si = (denom_si > small_val) & (num_si > 0)
-        Hz_raw = np.full_like(num_si, np.nan, dtype=float)
+        # safe ratio and compute Hz in SI
+        # compute ratio with guarded division to avoid warnings and infinities
+        ratio = np.full_like(num_si, np.nan, dtype=float)
         with np.errstate(divide='ignore', invalid='ignore'):
-            Hz_raw = np.where(safe_si, np.sqrt(num_si / denom_si), Hz_raw)
+            mask_valid_denom = (denom_si != 0) & np.isfinite(denom_si)
+            ratio = np.where(mask_valid_denom, num_si / denom_si, np.nan)
+
+        # only accept positive ratios above a very small threshold
+        safe_ratio = (ratio > small_val)
+        Hz_raw = np.where(safe_ratio, np.sqrt(ratio), np.full_like(ratio, np.nan, dtype=float))
 
         # If requested, and sympy is available, compute Hz using the symbolic lambdified function
         if use_sympy and _SYMPY_AVAILABLE:
@@ -239,12 +251,13 @@ class movement():
                     'denom_si': denom_si[:n_diag].astype(float),
                     'num_si': num_si[:n_diag].astype(float),
                     'Hz_raw': Hz_raw[:n_diag].astype(float),
+                    'ratio_si': (ratio[:n_diag].astype(float)),
                     'Hz': Hz[:n_diag].astype(float),
                     'A_m': (A / 100.0)[:n_diag].astype(float),
                     'B_m': (B / 100.0)[:n_diag].astype(float),
                     'V_m_s': (V / 100.0)[:n_diag].astype(float),
                     'U_m_s': (swim_speeds_cms / 100.0)[:n_diag].astype(float),
-                    'safe_si': safe_si[:n_diag].astype(bool)
+                    'safe_ratio': safe_ratio[:n_diag].astype(bool)
                 }
                 self.simulation.freq_debug = diag
                 # maintain a short history if requested
@@ -275,12 +288,33 @@ class movement():
         f_kinvisc = np.interp(temp, kin_temp, kin_visc)
         return f_kinvisc
 
+    def calc_surface_area(self):
+        """Estimate surface area from length using legacy power-law fit.
+
+        Returns array shaped (n_agents,) matching `self.simulation.length`.
+        """
+        a = -0.143
+        b = 1.881
+        # legacy code used length in cm within the log; convert from mm->cm if length stored as mm
+        # Here self.simulation.length is in mm in this codebase; convert to cm
+        length_cm = (self.simulation.length / 1000.0) * 100.0
+        surface_areas = 10 ** (a + b * np.log10(length_cm))
+        return surface_areas
+
+    def drag_coeff(self, reynolds):
+        """Return drag coefficient interpolated from empirical Reynolds/drag table.
+
+        Accepts scalar or array `reynolds` and returns same-shaped array.
+        """
+        reynolds_data = np.array([2.5e4, 5.0e4, 7.4e4, 9.9e4, 1.2e5, 1.5e5, 1.7e5, 2.0e5])
+        drag_data = np.array([0.23, 0.19, 0.15, 0.14, 0.12, 0.12, 0.11, 0.10])
+        return np.interp(reynolds, reynolds_data, drag_data)
+
     def wat_dens(self, temp):
         dens_temp = np.array([0.1, 1., 4., 10., 15., 20., 25., 30., 35., 40.,
                               45., 50., 55., 60., 65., 70., 75., 80., 85., 90.,
                               95., 100., 110., 120., 140., 160., 180., 200.,
-                              220., 240., 260., 280., 300., 320., 340., 360.,
-                              373.946])
+                              220., 240., 260., 280., 300., 320., 340., 360., 373.946])
         density = np.array([0.9998495, 0.9999017, 0.9999749, 0.9997, 0.9991026,
                             0.9982067, 0.997047, 0.9956488, 0.9940326, 0.9922152,
                             0.99021, 0.98804, 0.98569, 0.9832, 0.98055, 0.97776,
@@ -290,23 +324,6 @@ class movement():
                             0.61067, 0.52759, 0.322])
         f_density = np.interp(temp, dens_temp, density)
         return f_density
-
-    def calc_Reynolds(self, visc, water_vel):
-        length_m = self.simulation.length / 1000.
-        reynolds_numbers = water_vel * length_m / visc
-        return reynolds_numbers
-
-    def calc_surface_area(self):
-        a = -0.143
-        b = 1.881
-        surface_areas = 10 ** (a + b * np.log10(self.simulation.length))
-        return surface_areas
-
-    def drag_coeff(self, reynolds):
-        reynolds_data = np.array([2.5e4, 5.0e4, 7.4e4, 9.9e4, 1.2e5, 1.5e5, 1.7e5, 2.0e5])
-        drag_data = np.array([0.23, 0.19, 0.15, 0.14, 0.12, 0.12, 0.11, 0.10])
-        drag_coefficients = np.interp(reynolds, reynolds_data, drag_data)
-        return drag_coefficients
 
     def drag_fun(self, mask, t, dt, fish_velocities=None):
         tired_mask = np.where(self.simulation.swim_behav == 3, True, False)
