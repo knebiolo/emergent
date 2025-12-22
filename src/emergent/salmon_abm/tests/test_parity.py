@@ -1,6 +1,6 @@
 import numpy as np
 from emergent.salmon_abm import movement as new_movement, behavior as new_behavior, fatigue as new_fatigue
-import emergent.salmon_abm.deprecated.sockeye_deprecated as old_sockeye
+import emergent.salmon_abm.sockeye as old_sockeye
 
 
 def make_dummy_sim(num_agents=2):
@@ -39,9 +39,11 @@ def make_dummy_sim(num_agents=2):
     sim.max_eddy_escape_seconds = 1000
     sim.longitudinal = np.zeros(num_agents)
     sim.opt_wat_depth = np.array([0.5, 0.5])
-    sim.vel_mag_rast_transform = (1,0,0,0,1,0)
-    sim.depth_rast_transform = (1,0,0,0,1,0)
-    sim.refugia_map_transform = (1,0,0,0,1,0)
+    sim.water_temp = np.array([10.0, 10.0])
+    from rasterio.transform import Affine
+    sim.vel_mag_rast_transform = Affine(1,0,0,0,1,0)
+    sim.depth_rast_transform = Affine(1,0,0,0,1,0)
+    sim.refugia_map_transform = Affine(1,0,0,0,1,0)
     # minimal hdf5-like dict
     sim.hdf5 = {}
     sim.hdf5['memory/0'] = np.zeros((10,10))
@@ -60,9 +62,10 @@ def test_parity_basic():
     sim = make_dummy_sim()
 
     # old implementations (call monolithic functions as methods from sockeye's classes if available)
-    old_mov = old_sockeye.movement(sim)
-    old_beh = old_sockeye.behavior(1.0, sim)
-    old_fat = old_sockeye.fatigue(1.0, 1.0, sim)
+    # monolithic sockeye defines these as nested classes under simulation
+    old_mov = old_sockeye.simulation.movement(sim)
+    old_beh = old_sockeye.simulation.behavior(1.0, sim)
+    old_fat = old_sockeye.simulation.fatigue(1.0, 1.0, sim)
 
     # new implementations
     new_mov = new_movement.movement(sim)

@@ -80,6 +80,8 @@ class behavior():
         return attractive_forces_per_agent
 
     def _calculate_attractive_force(self, agent_idx, row_min, row_max, col_min, col_max, weight):
+        # ensure we have the hdf5-like object available (works with h5py.File or dict-like mocks)
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
         refugia = hdf5_io.read_dataset(h5, f'refugia/{agent_idx}', default=np.zeros((1, 1)))
         refugia_section = refugia[row_min:row_max, col_min:col_max]
         refuge_mask = (refugia_section == 1)

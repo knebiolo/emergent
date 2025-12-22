@@ -47,6 +47,16 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import warnings
 warnings.filterwarnings("ignore")
+# Backwards-compatible re-exports: prefer new modular implementations when available
+try:
+    from emergent.salmon_abm.sockeye import movement as _movement, behavior as _behavior, fatigue as _fatigue
+    # expose as module attributes so test harnesses importing this deprecated module can access the classes
+    movement = _movement
+    behavior = _behavior
+    fatigue = _fatigue
+except Exception:
+    # If the new module layout is not importable, keep using definitions in this file
+    pass
     
 # create a sockeye agent 
 class fish():
