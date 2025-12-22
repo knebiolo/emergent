@@ -11,6 +11,7 @@ import h5py
 import numpy as np
 from typing import Optional
 from emergent.salmon_abm import utils, io, pid, agents, hdf5_io
+from emergent.salmon_abm import movement as movement_mod, behavior as behavior_mod, fatigue as fatigue_mod
 
 
 class simulation:
@@ -58,6 +59,41 @@ class simulation:
         self.length = np.zeros(self.num_agents, dtype=np.float32)
         self.weight = np.zeros(self.num_agents, dtype=np.float32)
         self.body_depth = np.zeros(self.num_agents, dtype=np.float32)
+        # runtime state expected by extracted modules (safe defaults)
+        self.prev_X = self.X.copy()
+        self.prev_Y = self.Y.copy()
+        self.x_vel = np.zeros(self.num_agents, dtype=np.float32)
+        self.y_vel = np.zeros(self.num_agents, dtype=np.float32)
+        self.heading = np.zeros(self.num_agents, dtype=np.float32)
+        self.sog = np.zeros(self.num_agents, dtype=np.float32)
+        self.ideal_sog = np.zeros(self.num_agents, dtype=np.float32)
+        self.prev_Hz = np.zeros(self.num_agents, dtype=np.float32)
+        self.Hz = np.zeros(self.num_agents, dtype=np.float32)
+        self.thrust = np.zeros((self.num_agents, 2), dtype=np.float32)
+        self.drag = np.zeros((self.num_agents, 2), dtype=np.float32)
+        self.swim_behav = np.ones(self.num_agents, dtype=np.int8)
+        self.battery = np.ones(self.num_agents, dtype=np.float32)
+        self.recover_stopwatch = np.zeros(self.num_agents, dtype=np.float32)
+        self.swim_speeds = np.zeros((self.num_agents, 5), dtype=np.float32)
+        self.dist_per_bout = np.zeros(self.num_agents, dtype=np.float32)
+        self.bout_dur = np.zeros(self.num_agents, dtype=np.float32)
+        self.swim_mode = np.ones(self.num_agents, dtype=np.int8)
+        self.max_s_U = np.repeat(2.77, self.num_agents)
+        self.max_p_U = np.repeat(4.43, self.num_agents)
+        self.a_p = np.repeat(0.0, self.num_agents)
+        self.b_p = np.repeat(-1.0, self.num_agents)
+        self.a_s = np.repeat(0.0, self.num_agents)
+        self.b_s = np.repeat(-1.0, self.num_agents)
+        self.opt_sog = self.length / 1000.
+        self.school_sog = self.length / 1000.
+        self.ucrit = self.length / 1000. * 1.6
+        self.is_stuck = np.zeros(self.num_agents, dtype=bool)
+        self.agents_within_buffers = [np.array([], dtype=int) for _ in range(self.num_agents)]
+        self.nearest_neighbor_distance = np.full(self.num_agents, np.nan)
+        self.closest_agent = np.full(self.num_agents, np.nan)
+        self.in_eddy = np.zeros(self.num_agents, dtype=bool)
+        self.time_since_eddy_escape = np.zeros(self.num_agents, dtype=float)
+        self.max_eddy_escape_seconds = 1000
 
         # create or open HDF5 database for simulation outputs (minimal structure)
         self._created_db_file = False
@@ -138,13 +174,122 @@ class simulation:
         except Exception:
             pass
 
+        # small helpers: create movement/behavior/fatigue wrapper instances
+        # they will be (re)constructed per-timestep if needed, but create
+        # a lightweight instance now to make attributes available to callers
+        try:
+            self._movement = movement_mod.movement(self)
+            self._behavior = behavior_mod.behavior(1.0, self)
+            # fatigue is constructed per-timestep because it captures t/dt in ctor
+            self._fatigue = None
+        except Exception:
+            self._movement = None
+            self._behavior = None
+            self._fatigue = None
+
     def timestep(self, t, dt, g=None, pid_controller=None):
-        # Advance simple odometer and time
+        # Advance time and run a single simulation timestep integrating
+        # behavior -> fatigue -> movement -> write outputs.
         self.cumulative_time += dt
+
+        # keep previous positions for velocity calculations
+        self.prev_X = self.X.copy()
+        self.prev_Y = self.Y.copy()
+
+        # ensure a pid controller is available
+        pid = pid_controller or self.pid_controller
+
+        # mask of agents able to move
+        mask = np.where(self.dead == 0, True, False)
+
+        # instantiate per-timestep helpers
+        try:
+            behavior = behavior_mod.behavior(dt, self)
+        except Exception:
+            behavior = self._behavior
+
+        try:
+            fatigue = fatigue_mod.fatigue(t, dt, self)
+        except Exception:
+            fatigue = None
+
+        try:
+            movement = movement_mod.movement(self)
+        except Exception:
+            movement = self._movement
+
+        # run fatigue assessment first to update battery / swim modes
+        if fatigue is not None:
+            try:
+                fatigue.assess_fatigue()
+            except Exception:
+                pass
+
+        # behavior arbitration produces desired heading vector
+        try:
+            new_heading = behavior.arbitrate(t)
+            # behavior.arbitrate may return scalar or array
+            self.heading = np.array(new_heading, dtype=np.float32)
+        except Exception:
+            # keep existing heading
+            pass
+
+        # calculate movement-related quantities
+        try:
+            if movement is not None:
+                movement.frequency(mask, t, dt)
+                movement.thrust_fun(mask, t, dt)
+                movement.drag_fun(mask, t, dt)
+                dxdy = movement.swim(t, dt, pid or pid_controller, mask)
+            else:
+                dxdy = np.zeros((self.num_agents, 2), dtype=np.float32)
+        except Exception:
+            dxdy = np.zeros((self.num_agents, 2), dtype=np.float32)
+
+        # apply movement
+        try:
+            self.X = self.X + dxdy[:, 0]
+            self.Y = self.Y + dxdy[:, 1]
+        except Exception:
+            # fallback scalar handling
+            self.X = self.X + dxdy
+            self.Y = self.Y + dxdy
+
+        # update velocities
+        try:
+            self.x_vel = (self.X - self.prev_X) / dt
+            self.y_vel = (self.Y - self.prev_Y) / dt
+        except Exception:
+            pass
+
+        # write minimal outputs back to HDF5 for downstream consumers
+        try:
+            hdf5_io.write_dataset(self.db, 'X', self.X)
+            hdf5_io.write_dataset(self.db, 'Y', self.Y)
+            hdf5_io.write_dataset(self.db, 'prev_X', self.prev_X)
+            hdf5_io.write_dataset(self.db, 'prev_Y', self.prev_Y)
+            # flush when supported
+            try:
+                if hasattr(self.db, 'flush'):
+                    self.db.flush()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         return True
 
     def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None):
         # Simple run loop that calls `timestep` n times
+        # allow caller supplied PID tuning values
+        if self.pid_controller is not None and k_p is not None:
+            try:
+                self.pid_controller.k_p = np.array([k_p])
+                self.pid_controller.k_i = np.array([k_i]) if k_i is not None else self.pid_controller.k_i
+                self.pid_controller.k_d = np.array([k_d]) if k_d is not None else self.pid_controller.k_d
+            except Exception:
+                pass
+
         for i in range(n):
             self.timestep(i, dt)
         return True
