@@ -228,9 +228,28 @@ class simulation:
             h5 = hdf5_io.get_hdf5_obj(self)
             depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=np.zeros((1, 1)))
             nrows, ncols = depth_ds.shape
-            # x_coords: columns index -> x, y_coords: rows index -> y
-            x_coords = np.tile(np.arange(ncols, dtype=float), (nrows, 1))
-            y_coords = np.tile(np.arange(nrows, dtype=float)[:, np.newaxis], (1, ncols))
+            # Prefer to use an attached raster transform to compute real-world
+            # x_coords/y_coords (pixel -> geo). If no transform is available
+            # fall back to simple index-based coordinates so tests still run.
+            try:
+                transform = getattr(self, 'depth_rast_transform', None)
+                if transform is not None and not callable(transform):
+                    # Transform expected as a 6-tuple (a, b, c, d, e, f)
+                    # where (col, row) -> (x, y) via affine: x = a*col + b*row + c
+                    # and y = d*col + e*row + f
+                    cols = np.arange(ncols, dtype=float)
+                    rows = np.arange(nrows, dtype=float)
+                    col_indices, row_indices = np.meshgrid(cols, rows)
+                    a, b, c, d, e, f = transform
+                    x_coords = a * col_indices + b * row_indices + c
+                    y_coords = d * col_indices + e * row_indices + f
+                else:
+                    # fallback to index-based coordinates
+                    x_coords = np.tile(np.arange(ncols, dtype=float), (nrows, 1))
+                    y_coords = np.tile(np.arange(nrows, dtype=float)[:, np.newaxis], (1, ncols))
+            except Exception:
+                x_coords = np.tile(np.arange(ncols, dtype=float), (nrows, 1))
+                y_coords = np.tile(np.arange(nrows, dtype=float)[:, np.newaxis], (1, ncols))
             # write both environment/ prefixed and top-level keys for compatibility
             hdf5_io.write_dataset(h5, 'environment/x_coords', x_coords)
             hdf5_io.write_dataset(h5, 'environment/y_coords', y_coords)

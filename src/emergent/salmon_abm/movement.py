@@ -40,6 +40,25 @@ class movement():
     def __init__(self, simulation_object):
         self.simulation = simulation_object
 
+    # Webb/Empirical spline data (shared between thrust and frequency)
+    LENGTH_DAT = np.array([5., 10., 15., 20., 25., 30., 40., 50., 60.])
+    SPEED_DAT = np.array([37.4, 58., 75.1, 90.1, 104., 116., 140., 161., 181.])
+    AMP_DAT = np.array([1.06, 2.01, 3., 4.02, 4.91, 5.64, 6.78, 7.67, 8.4])
+    WAVE_DAT = np.array([53.4361, 82.863, 107.2632, 131.7, 148.125, 166.278, 199.5652, 230.0044, 258.3])
+    EDGE_DAT = np.array([1., 2., 3., 4., 5., 6., 8., 10., 12.])
+
+    # cached splines
+    _SPLINES = None
+
+    def _get_webb_splines():
+        global _SPLINES
+        if _SPLINES is None:
+            A_spline = UnivariateSpline(LENGTH_DAT, AMP_DAT, k=2, ext=0)
+            V_spline = UnivariateSpline(SPEED_DAT, WAVE_DAT, k=1, ext=0)
+            B_spline = UnivariateSpline(LENGTH_DAT, EDGE_DAT, k=1, ext=0)
+            _SPLINES = (A_spline, V_spline, B_spline)
+        return _SPLINES
+
     def find_z(self):
         """
         Calculate the z-coordinate for an agent based on its depth and body depth.
@@ -77,18 +96,8 @@ class movement():
 
         swim_speed_cms = ideal_swim_speed * 100.
 
-        # Data for interpolation
-        length_dat = np.array([5., 10., 15., 20., 25., 30., 40., 50., 60.])
-        speed_dat = np.array([37.4, 58., 75.1, 90.1, 104., 116., 140., 161., 181.])
-        amp_dat = np.array([1.06, 2.01, 3., 4.02, 4.91, 5.64, 6.78, 7.67, 8.4])
-        wave_dat = np.array([53.4361, 82.863, 107.2632, 131.7, 148.125, 166.278, 199.5652, 230.0044, 258.3])
-        edge_dat = np.array([1., 2., 3., 4., 5., 6., 8., 10., 12.])
-
-        # Interpolation with extrapolation using UnivariateSpline
-        A_spline = UnivariateSpline(length_dat, amp_dat, k=2, ext=0)
-        V_spline = UnivariateSpline(speed_dat, wave_dat, k=1, ext=0)
-        B_spline = UnivariateSpline(length_dat, edge_dat, k=1, ext=0)
-
+        # Interpolation (cached) using Webb empirical data
+        A_spline, V_spline, B_spline = _get_webb_splines()
         A = A_spline(length_cm)
         V = V_spline(swim_speed_cms)
         B = B_spline(length_cm)
@@ -129,16 +138,8 @@ class movement():
 
         swim_speeds_cms = np.linalg.norm(fish_velocities - water_velocities, axis=-1) * 100 + 0.00001
 
-        length_dat = np.array([5., 10., 15., 20., 25., 30., 40., 50., 60.])
-        speed_dat = np.array([37.4, 58., 75.1, 90.1, 104., 116., 140., 161., 181.])
-        amp_dat = np.array([1.06, 2.01, 3., 4.02, 4.91, 5.64, 6.78, 7.67, 8.4])
-        wave_dat = np.array([53.4361, 82.863, 107.2632, 131.7, 148.125, 166.278, 199.5652, 230.0044, 258.3])
-        edge_dat = np.array([1., 2., 3., 4., 5., 6., 8., 10., 12.])
-
-        A_spline = UnivariateSpline(length_dat, amp_dat, k=2, ext=0)
-        V_spline = UnivariateSpline(speed_dat, wave_dat, k=1, ext=0)
-        B_spline = UnivariateSpline(length_dat, edge_dat, k=1, ext=0)
-
+        # Interpolation (cached) using Webb empirical data
+        A_spline, V_spline, B_spline = _get_webb_splines()
         A = A_spline(lengths_cm)
         V = V_spline(swim_speeds_cms)
         B = B_spline(lengths_cm)
@@ -226,6 +227,37 @@ class movement():
         # store prev and current Hz
         self.simulation.prev_Hz = getattr(self.simulation, 'Hz', np.zeros_like(Hz))
         self.simulation.Hz = Hz
+
+        # Optional instrumentation for debugging frequency internals.
+        # If the simulation has attribute `debug_freq` set to True, store
+        # a compact diagnostics dict for the first few agents in `simulation.freq_debug`.
+        try:
+            if getattr(self.simulation, 'debug_freq', False):
+                n_diag = min(5, Hz.size)
+                diag = {
+                    'drags_J_s': drags_J_s[:n_diag].astype(float),
+                    'denom_si': denom_si[:n_diag].astype(float),
+                    'num_si': num_si[:n_diag].astype(float),
+                    'Hz_raw': Hz_raw[:n_diag].astype(float),
+                    'Hz': Hz[:n_diag].astype(float),
+                    'A_m': (A / 100.0)[:n_diag].astype(float),
+                    'B_m': (B / 100.0)[:n_diag].astype(float),
+                    'V_m_s': (V / 100.0)[:n_diag].astype(float),
+                    'U_m_s': (swim_speeds_cms / 100.0)[:n_diag].astype(float),
+                    'safe_si': safe_si[:n_diag].astype(bool)
+                }
+                self.simulation.freq_debug = diag
+                # maintain a short history if requested
+                if getattr(self.simulation, 'freq_debug_history', None) is None:
+                    self.simulation.freq_debug_history = [diag]
+                else:
+                    self.simulation.freq_debug_history.append(diag)
+                    # cap history
+                    if len(self.simulation.freq_debug_history) > 20:
+                        self.simulation.freq_debug_history.pop(0)
+        except Exception:
+            # never raise from instrumentation
+            pass
 
     def kin_visc(self, temp):
         kin_temp = np.array([0.01, 10., 20., 25., 30., 40., 50., 60., 70., 80.,
