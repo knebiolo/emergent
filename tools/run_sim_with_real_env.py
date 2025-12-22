@@ -11,6 +11,10 @@ start_poly = os.path.join(data_dir, 'start_loc_river_right.shp')
 
 sim = simulation(model_dir='.', model_name='real_probe', crs=None, basin='test', water_temp=10, start_polygon=start_poly, env_files=env_files, longitudinal_profile=None, fish_length=200.0, num_timesteps=10, num_agents=100)
 
+# enable debug flags for diagnostics
+sim.debug_env = True
+sim.debug_freq = True
+
 # Import rasters into sim.db using io.enviro_import if available
 for ef in env_files:
     try:
@@ -37,18 +41,41 @@ if depth is not None:
     except Exception:
         depth_transform = getattr(sim, 'depth_rast_transform', None)
 
-    if depth_transform is not None and not callable(depth_transform):
-        a, b, c, d, e, f = depth_transform
+    def _affine_to_tuple(transform):
+        """Return a 6-tuple (a,b,c,d,e,f) from common transform types.
+
+        Supports rasterio Affine objects (attributes a,b,c,d,e,f) or
+        any iterable with at least 6 elements. Returns None if not possible.
+        """
+        if transform is None:
+            return None
+        # rasterio Affine-like objects expose .a .b .c .d .e .f
+        try:
+            return (transform.a, transform.b, transform.c, transform.d, transform.e, transform.f)
+        except Exception:
+            pass
+        # fall back to iterable -> tuple and truncate/pad
+        try:
+            t = tuple(transform)
+            if len(t) >= 6:
+                return t[:6]
+        except Exception:
+            pass
+        return None
+
+    affine = _affine_to_tuple(depth_transform)
+    if affine is not None:
+        a, b, c, d, e, f = affine
         cols = np.arange(ncols, dtype=float)
         rows = np.arange(nrows, dtype=float)
         col_indices, row_indices = np.meshgrid(cols, rows)
         x_coords = a * col_indices + b * row_indices + c
         y_coords = d * col_indices + e * row_indices + f
         # set sim transforms explicitly
-        sim.depth_rast_transform = depth_transform
-        sim.vel_mag_rast_transform = depth_transform
-        sim.vel_dir_rast_transform = depth_transform
-        sim.refugia_map_transform = depth_transform
+        sim.depth_rast_transform = (a, b, c, d, e, f)
+        sim.vel_mag_rast_transform = (a, b, c, d, e, f)
+        sim.vel_dir_rast_transform = (a, b, c, d, e, f)
+        sim.refugia_map_transform = (a, b, c, d, e, f)
     else:
         x_coords = np.tile(np.arange(ncols, dtype=float), (nrows, 1))
         y_coords = np.tile(np.arange(nrows, dtype=float)[:, np.newaxis], (1, ncols))
@@ -59,6 +86,25 @@ if depth is not None:
 
     hdf5_io.write_dataset(sim.db, 'environment/x_coords', x_coords)
     hdf5_io.write_dataset(sim.db, 'environment/y_coords', y_coords)
+
+    # Debug: print transform types and a quick geo->pixel mapping for agents
+    try:
+        from emergent.salmon_abm.utils import geo_to_pixel
+        print('depth_rast_transform type:', type(sim.depth_rast_transform), 'value:', sim.depth_rast_transform)
+        rows, cols = geo_to_pixel(sim.X, sim.Y, sim.depth_rast_transform)
+        rows = rows if hasattr(rows, '__len__') else [rows]
+        cols = cols if hasattr(cols, '__len__') else [cols]
+        print('geo_to_pixel rows (first 10):', np.array(rows)[:10])
+        print('geo_to_pixel cols (first 10):', np.array(cols)[:10])
+        # direct HDF5 read to compare
+        depth_ds = hdf5_io.read_dataset(sim.db, 'environment/depth')
+        valid = (np.array(rows) >= 0) & (np.array(cols) >= 0) & (np.array(rows) < depth_ds.shape[0]) & (np.array(cols) < depth_ds.shape[1])
+        print('direct sampling valid count:', int(np.sum(valid)))
+        if np.any(valid):
+            vals = depth_ds[np.array(rows)[valid], np.array(cols)[valid]]
+            print('direct sample depth (first 10 valid):', vals[:10])
+    except Exception as e:
+        print('Debug geo_to_pixel failed:', e)
 
 # run for 10 timesteps and print diagnostics per step
 for i in range(10):

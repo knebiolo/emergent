@@ -420,6 +420,12 @@ class simulation:
             ds = hdf5_io.read_dataset(h5, f'environment/{raster_name}', default=None)
             if ds is None:
                 return np.full(self.num_agents, np.nan)
+            # ensure ds is a numpy array to avoid h5py advanced-index restrictions
+            try:
+                ds_arr = np.array(ds)
+            except Exception:
+                ds_arr = ds
+
             # geo_to_pixel accepts arrays and returns (rows, cols)
             rows, cols = geo_to_pixel(self.X, self.Y, transform)
             # ensure integer indices and bounds
@@ -428,7 +434,23 @@ class simulation:
             valid = (rows >= 0) & (cols >= 0) & (rows < ds.shape[0]) & (cols < ds.shape[1])
             out = np.full(self.num_agents, np.nan)
             if np.any(valid):
-                out[valid] = ds[rows[valid], cols[valid]]
+                try:
+                    out[valid] = ds_arr[rows[valid], cols[valid]]
+                except Exception:
+                    # fallback: loop assign to avoid advanced indexing issues
+                    for i in np.where(valid)[0]:
+                        try:
+                            out[i] = ds_arr[rows[i], cols[i]]
+                        except Exception:
+                            out[i] = np.nan
+            # optional debug prints
+            if getattr(self, 'debug_env', False):
+                try:
+                    print('sample_environment debug:', raster_name, 'transform=', transform)
+                    print('rows sample (first 5):', rows[:5], 'cols sample (first 5):', cols[:5])
+                    print('valid count:', int(np.sum(valid)))
+                except Exception:
+                    pass
             return out
         except Exception:
             return np.full(self.num_agents, np.nan)

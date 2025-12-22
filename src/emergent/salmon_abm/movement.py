@@ -112,11 +112,11 @@ class movement():
         thrust_Nm = thrust_erg_s / 10000000.
         thrust_N = thrust_Nm / (self.simulation.length / 1000.)
 
-        # Convert thrust to vector
-        thrust = np.where(mask, [thrust_N * np.cos(self.simulation.heading),
-                                 thrust_N * np.sin(self.simulation.heading)], 0)
+        # Convert thrust to vector (shape: n_agents x 2)
+        thrust = np.where(mask[:, np.newaxis], np.stack((thrust_N * np.cos(self.simulation.heading),
+                                 thrust_N * np.sin(self.simulation.heading)), axis=1), 0.0)
 
-        self.simulation.thrust = thrust.T
+        self.simulation.thrust = thrust
 
     def frequency(self, mask, t, dt, fish_velocities=None, use_sympy=False):
         rho = 1.0
@@ -449,6 +449,13 @@ class movement():
         fish_vel_1 = np.where(~tired_mask[:, np.newaxis], fish_vel_0 + acc_ini * dt + pid_adjustment, fish_vel_0 + acc_ini * dt)
 
         fish_vel_1 = np.where(self.simulation.dead[:, np.newaxis] == 1, fish_vel_1 * 0, fish_vel_1)
+
+        # return displacement (dx, dy) over this timestep
+        try:
+            dxdy = fish_vel_1 * dt
+            return dxdy
+        except Exception:
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
         dxdy = np.where(mask[:, np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
         return dxdy
