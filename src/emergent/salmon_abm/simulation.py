@@ -75,10 +75,15 @@ class simulation:
             self._created_db_file = True
 
         # create static per-fish datasets via hdf5_io
+        # create both legacy top-level datasets and namespaced agent_data for compatibility
         hdf5_io.write_dataset(self.db, "sex", np.zeros((self.num_agents,), dtype=np.int8), dtype="i1")
         hdf5_io.write_dataset(self.db, "length", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
         hdf5_io.write_dataset(self.db, "weight", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
         hdf5_io.write_dataset(self.db, "body_depth", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
+        hdf5_io.write_dataset(self.db, "agent_data/sex", np.zeros((self.num_agents,), dtype=np.int8), dtype="i1")
+        hdf5_io.write_dataset(self.db, "agent_data/length", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
+        hdf5_io.write_dataset(self.db, "agent_data/weight", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
+        hdf5_io.write_dataset(self.db, "agent_data/body_depth", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
 
         # environment masks/metadata placeholders
         hdf5_io.write_dataset(self.db, "too_shallow", np.zeros((1,), dtype=np.int8), dtype="i1")
@@ -98,13 +103,23 @@ class simulation:
             # if agents fail, leave zeros but continue
             pass
 
-        # write agent attributes into HDF5 static datasets
+        # write agent attributes into HDF5 static datasets (best-effort)
         try:
-            sex_ds[:] = self.sex
-            length_ds[:] = self.length
-            weight_ds[:] = self.weight
-            body_depth_ds[:] = self.body_depth
-            self.db.flush()
+            hdf5_io.write_dataset(self.db, "agent_data/sex", self.sex)
+            hdf5_io.write_dataset(self.db, "agent_data/length", self.length)
+            hdf5_io.write_dataset(self.db, "agent_data/weight", self.weight)
+            hdf5_io.write_dataset(self.db, "agent_data/body_depth", self.body_depth)
+            # also write legacy top-level datasets for compatibility
+            hdf5_io.write_dataset(self.db, "sex", self.sex)
+            hdf5_io.write_dataset(self.db, "length", self.length)
+            hdf5_io.write_dataset(self.db, "weight", self.weight)
+            hdf5_io.write_dataset(self.db, "body_depth", self.body_depth)
+            try:
+                # ensure changes are persisted for h5py.File
+                if hasattr(self.db, 'flush'):
+                    self.db.flush()
+            except Exception:
+                pass
         except Exception:
             # non-fatal; continue
             pass
