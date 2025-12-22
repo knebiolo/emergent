@@ -28,3 +28,28 @@ def test_pid_update_nonzero():
     # output should be finite and same shape
     assert out1.shape == error.shape
     assert np.isfinite(out1).all()
+
+
+def test_pid_single_agent_proportional():
+    pid = PID_controller(1, k_p=2.0, k_i=0.0, k_d=0.0)
+    err = np.array([[1.0, 0.0]])
+    out = pid.update(err, dt=1.0, status=None)
+    assert out.shape == (1, 2)
+    assert np.allclose(out, np.array([[2.0, 0.0]]))
+
+
+def test_pid_integral_accumulation():
+    pid = PID_controller(1, k_p=0.0, k_i=1.0, k_d=0.0)
+    err = np.array([[1.0, 0.0]])
+    pid.update(err, dt=1.0, status=None)
+    out2 = pid.update(err, dt=1.0, status=None)
+    # integral = 2, so output should reflect that
+    assert np.allclose(out2, np.array([[2.0, 0.0]]))
+
+
+def test_pid_vectorized_agents():
+    pid = PID_controller(3, k_p=[1.0, 2.0, 3.0], k_i=0.0, k_d=0.0)
+    err = np.array([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+    out = pid.update(err, dt=1.0, status=None)
+    assert out.shape == (3, 2)
+    assert np.allclose(out[:, 0], np.array([1.0, 2.0, 3.0]))

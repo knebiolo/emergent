@@ -111,41 +111,24 @@ class simulation:
             self.db = h5py.File(self.db_path, "w")
             self._created_db_file = True
 
-        # create static per-fish datasets via hdf5_io
-        # create both legacy top-level datasets and namespaced agent_data for compatibility
-        hdf5_io.write_dataset(self.db, "sex", np.zeros((self.num_agents,), dtype=np.int8), dtype="i1")
-        hdf5_io.write_dataset(self.db, "length", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
-        hdf5_io.write_dataset(self.db, "weight", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
-        hdf5_io.write_dataset(self.db, "body_depth", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
-        hdf5_io.write_dataset(self.db, "agent_data/sex", np.zeros((self.num_agents,), dtype=np.int8), dtype="i1")
-        hdf5_io.write_dataset(self.db, "agent_data/length", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
-        hdf5_io.write_dataset(self.db, "agent_data/weight", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
-        hdf5_io.write_dataset(self.db, "agent_data/body_depth", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
-
-        # environment masks/metadata placeholders
-        hdf5_io.write_dataset(self.db, "too_shallow", np.zeros((1,), dtype=np.int8), dtype="i1")
-        hdf5_io.write_dataset(self.db, "opt_wat_depth", np.zeros((1,), dtype=np.float32), dtype="f4")
-
-        # simple position datasets (time-varying axes would be added by run)
-        hdf5_io.write_dataset(self.db, "X", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
-        hdf5_io.write_dataset(self.db, "Y", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
-
-        # create time-indexed agent_data datasets (num_agents x num_timesteps)
-        empty_shape = (self.num_agents, int(self.num_timesteps))
-        if h5py is not None and isinstance(self.db, h5py.File):
-            hdf5_io.ensure_group(self.db, 'agent_data')
-            for name, dtype in (('X', 'f4'), ('Y', 'f4'), ('prev_X', 'f4'), ('prev_Y', 'f4'), ('ideal_sog', 'f4'), ('Hz', 'f4')):
-                full = f'agent_data/{name}'
-                if full not in self.db:
-                    self.db.create_dataset(full, shape=empty_shape, dtype=dtype)
-        else:
-            zero = np.zeros(empty_shape, dtype=np.float32)
-            hdf5_io.write_dataset(self.db, "agent_data/X", zero, dtype="f4")
-            hdf5_io.write_dataset(self.db, "agent_data/Y", zero, dtype="f4")
-            hdf5_io.write_dataset(self.db, "agent_data/prev_X", zero, dtype="f4")
-            hdf5_io.write_dataset(self.db, "agent_data/prev_Y", zero, dtype="f4")
-            hdf5_io.write_dataset(self.db, "agent_data/ideal_sog", zero, dtype="f4")
-            hdf5_io.write_dataset(self.db, "agent_data/Hz", zero, dtype="f4")
+        # create standard datasets using io helper to keep logic centralized
+        sim_state = {
+            'num_agents': self.num_agents,
+            'num_timesteps': self.num_timesteps,
+            'sex': self.sex,
+            'length': self.length,
+            'weight': self.weight,
+            'body_depth': self.body_depth,
+            'metadata': {'model_name': self.model_name}
+        }
+        try:
+            io.write_sim_initial(self.db, sim_state)
+        except Exception:
+            # fallback to manual creation if write_sim_initial fails
+            hdf5_io.write_dataset(self.db, "agent_data/sex", np.zeros((self.num_agents,), dtype=np.int8))
+            hdf5_io.write_dataset(self.db, "agent_data/length", np.zeros((self.num_agents,), dtype=np.float32))
+            hdf5_io.write_dataset(self.db, "agent_data/weight", np.zeros((self.num_agents,), dtype=np.float32))
+            hdf5_io.write_dataset(self.db, "agent_data/body_depth", np.zeros((self.num_agents,), dtype=np.float32))
 
         # populate agent attributes using the agents module
         agents.sim_sex(self)

@@ -13,23 +13,43 @@ from scipy.optimize import curve_fit
 
 class PID_controller:
     def __init__(self, n_agents, k_p = 0., k_i = 0., k_d = 0., tau_d = 1):
-        self.k_p = np.array([k_p])
-        self.k_i = np.array([k_i])
-        self.k_d = np.array([k_d])
+        # coerce n_agents to int
+        n = int(np.round(n_agents))
+        # accept scalar or array gains; store as arrays shape (n,)
+        self.k_p = np.asarray(k_p).reshape(-1)
+        if self.k_p.size == 1:
+            self.k_p = np.repeat(self.k_p, n)
+        self.k_i = np.asarray(k_i).reshape(-1)
+        if self.k_i.size == 1:
+            self.k_i = np.repeat(self.k_i, n)
+        self.k_d = np.asarray(k_d).reshape(-1)
+        if self.k_d.size == 1:
+            self.k_d = np.repeat(self.k_d, n)
         self.tau_d = tau_d
-        self.integral = np.zeros((np.round(n_agents,0).astype(np.int32),2))
-        self.previous_error = np.zeros((np.round(n_agents,0).astype(np.int32),2))
-        self.derivative_filtered = np.zeros((np.round(n_agents,0).astype(np.int32),2))
+        self.integral = np.zeros((n, 2), dtype=float)
+        self.previous_error = np.zeros((n, 2), dtype=float)
+        self.derivative_filtered = np.zeros((n, 2), dtype=float)
 
     def update(self, error, dt, status):
-        mask = np.where(status == 3,True,False)
-        self.integral = np.where(~mask, self.integral + error, self.integral)
-        derivative = error - self.previous_error
-        self.previous_error = error
-        p_term = self.k_p[:, np.newaxis] * error
+        # status may be None; treat None as all active
+        if status is None:
+            mask = np.zeros(self.integral.shape[0], dtype=bool)
+        else:
+            mask = np.where(np.asarray(status) == 3, True, False)
+        # ensure error shape is (n,2)
+        err = np.asarray(error)
+        if err.ndim == 1:
+            err = err[:, np.newaxis]
+        # update integral for active agents
+        self.integral = np.where(~mask[:, np.newaxis], self.integral + err, self.integral)
+        derivative = err - self.previous_error
+        self.previous_error = err
+        p_term = self.k_p[:, np.newaxis] * err
         i_term = self.k_i[:, np.newaxis] * self.integral
         d_term = self.k_d[:, np.newaxis] * derivative
-        return np.where(~mask,p_term + i_term + d_term,0.0)
+        out = p_term + i_term + d_term
+        out = np.where(~mask[:, np.newaxis], out, 0.0)
+        return out
 
     def interp_PID(self):
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/pid_optimize_Nushagak.csv')

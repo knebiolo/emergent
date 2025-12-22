@@ -13,6 +13,13 @@ from rasterio.transform import Affine
 from matplotlib import animation as manimation
 from datetime import datetime
 import numpy as np
+from contextlib import contextmanager
+from typing import Dict, Any
+from shapely.geometry import LineString
+from shapely.ops import linemerge
+import math
+
+from emergent.salmon_abm import hdf5_io
 
 
 def output_excel(records, model_dir, model_name):
@@ -99,6 +106,196 @@ def longitudinal_import(shapefile):
     """
     gdf = gpd.read_file(shapefile)
     return gdf
+
+
+@contextmanager
+def safe_hdf5_open(path_or_file, mode='a'):
+    """Context manager that accepts a path, an h5py.File, or a dict-like store.
+
+    - If a string path is supplied, opens an h5py.File with the given `mode`.
+    - If an h5py.File is supplied, yields it unchanged.
+    - If a dict-like store is supplied (for tests), yields it unchanged.
+    """
+    # string path: open via h5py if available
+    try:
+        import h5py as _h5py
+    except Exception:
+        _h5py = None
+
+    # path
+    if isinstance(path_or_file, str):
+        if _h5py is None:
+            raise RuntimeError('h5py is required to open file paths')
+        f = _h5py.File(path_or_file, mode)
+        try:
+            yield f
+        finally:
+            try:
+                f.close()
+            except Exception:
+                pass
+        return
+
+    # file-like or dict-like
+    try:
+        yield path_or_file
+    finally:
+        # do not close dict-like stores
+        try:
+            if hasattr(path_or_file, 'close') and not isinstance(path_or_file, dict):
+                try:
+                    path_or_file.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
+def write_sim_initial(h5obj, sim_state_dict: Dict[str, Any], compress: bool = True, compression_opts=None):
+    """Create standard groups/datasets used by the simulation.
+
+    Parameters
+    - h5obj: an h5py.File-like object or dict-like store
+    - sim_state_dict: dict with keys `num_agents`, `num_timesteps`, optional arrays
+      for `sex`, `length`, `weight`, `body_depth`.
+    """
+    na = int(sim_state_dict.get('num_agents', 0))
+    nt = int(sim_state_dict.get('num_timesteps', 0))
+
+    # static per-agent datasets
+    zeros = np.zeros((na,), dtype=np.float32)
+    # prefer provided arrays
+    sex = sim_state_dict.get('sex', np.zeros((na,), dtype=np.int8))
+    length = sim_state_dict.get('length', np.zeros((na,), dtype=np.float32))
+    weight = sim_state_dict.get('weight', np.zeros((na,), dtype=np.float32))
+    body_depth = sim_state_dict.get('body_depth', np.zeros((na,), dtype=np.float32))
+
+    hdf5_io.write_dataset(h5obj, 'agent_data/sex', np.array(sex))
+    hdf5_io.write_dataset(h5obj, 'agent_data/length', np.array(length))
+    hdf5_io.write_dataset(h5obj, 'agent_data/weight', np.array(weight))
+    hdf5_io.write_dataset(h5obj, 'agent_data/body_depth', np.array(body_depth))
+    hdf5_io.write_dataset(h5obj, 'sex', np.array(sex))
+    hdf5_io.write_dataset(h5obj, 'length', np.array(length))
+    hdf5_io.write_dataset(h5obj, 'weight', np.array(weight))
+    hdf5_io.write_dataset(h5obj, 'body_depth', np.array(body_depth))
+
+    # create time-indexed agent_data arrays (na x nt)
+    empty_shape = (na, nt)
+    zero_stack = np.zeros(empty_shape, dtype=np.float32)
+    for name in ('X', 'Y', 'prev_X', 'prev_Y', 'ideal_sog', 'Hz'):
+        key = f'agent_data/{name}'
+        # write zeros array to create dataset in dict-like stores; for h5py this will create full dataset
+        hdf5_io.write_dataset(h5obj, key, zero_stack)
+
+    # also create legacy top-level position datasets for compatibility
+    try:
+        hdf5_io.write_dataset(h5obj, 'X', np.zeros((na,), dtype=np.float32))
+        hdf5_io.write_dataset(h5obj, 'Y', np.zeros((na,), dtype=np.float32))
+        hdf5_io.write_dataset(h5obj, 'prev_X', np.zeros((na,), dtype=np.float32))
+        hdf5_io.write_dataset(h5obj, 'prev_Y', np.zeros((na,), dtype=np.float32))
+    except Exception:
+        pass
+
+    # environment placeholders
+    try:
+        hdf5_io.create_environment_placeholders(h5obj)
+    except Exception:
+        pass
+
+    # small metadata
+    metadata = sim_state_dict.get('metadata', {})
+    for k, v in metadata.items():
+        try:
+            hdf5_io.write_dataset(h5obj, f'metadata/{k}', np.array(v))
+        except Exception:
+            try:
+                hdf5_io.write_dataset(h5obj, f'metadata/{k}', str(v))
+            except Exception:
+                pass
+
+    return True
+
+
+def enviro_load_many(files_dict: Dict[str, str]):
+    """Load multiple rasters into a dict mapping key -> (array, transform, crs).
+
+    Missing or unreadable files will have value `None`.
+    """
+    out = {}
+    for key, path in (files_dict or {}).items():
+        try:
+            arr, tr, crs = enviro_import(path)
+            out[key] = (arr, tr, crs)
+        except Exception:
+            out[key] = None
+    return out
+
+
+def longitudinal_chainage(gdf):
+    """Compute chainage (cumulative distance) for LineString geometries.
+
+    Adds two columns to the GeoDataFrame:
+    - `geometry_length`: total length of geometry
+    - `chainage_coords`: list of cumulative distances for coordinate vertices
+
+    For multipart geometries the function merges parts before measuring.
+    """
+    if gdf is None or len(gdf) == 0:
+        return gdf
+
+    results = []
+    for geom in gdf.geometry:
+        try:
+            # merge multi-part into single LineString when possible
+            if geom.geom_type == 'MultiLineString':
+                merged = linemerge(geom)
+            else:
+                merged = geom
+            if not isinstance(merged, LineString):
+                results.append({'geometry_length': 0.0, 'chainage_coords': []})
+                continue
+            coords = list(merged.coords)
+            chain = [0.0]
+            for a, b in zip(coords[:-1], coords[1:]):
+                dx = a[0] - b[0]
+                dy = a[1] - b[1]
+                d = math.hypot(dx, dy)
+                chain.append(chain[-1] + d)
+            results.append({'geometry_length': chain[-1], 'chainage_coords': chain})
+        except Exception:
+            results.append({'geometry_length': 0.0, 'chainage_coords': []})
+
+    # append columns
+    gdf = gdf.copy()
+    gdf['geometry_length'] = [r['geometry_length'] for r in results]
+    gdf['chainage_coords'] = [r['chainage_coords'] for r in results]
+    return gdf
+
+
+def movie_frames_from_stack(depth_stack, trajs=None, style_opts=None):
+    """Return a list of frames (numpy arrays) generated from a depth stack.
+
+    - `depth_stack` is expected shape (T, H, W) or (H, W) for single frame.
+    - `trajs` is optional dict {agent_id: [(x_t, y_t), ...]} where positions are
+      in pixel coordinates; function will mark agent positions in the frames by
+      setting the frame value to a highlight value.
+
+    This function is intentionally lightweight and testable without matplotlib
+    or ffmpeg.
+    """
+    arr = np.array(depth_stack)
+    if arr.ndim == 2:
+        arr = arr[None, ...]
+    T, H, W = arr.shape
+    frames = [arr[t].copy() for t in range(T)]
+    if trajs:
+        for aid, points in trajs.items():
+            for t, pt in enumerate(points):
+                if t < T and pt is not None:
+                    x, y = int(round(pt[0])), int(round(pt[1]))
+                    if 0 <= y < H and 0 <= x < W:
+                        frames[t][y, x] = np.nanmax(arr) + 1.0
+    return frames
 
 
 __all__ = [
