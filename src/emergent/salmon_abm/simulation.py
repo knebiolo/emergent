@@ -9,6 +9,7 @@ import os
 import tempfile
 import h5py
 import numpy as np
+import logging
 from typing import Optional
 from emergent.salmon_abm import utils, io, pid, agents, hdf5_io
 from emergent.salmon_abm import movement as movement_mod, behavior as behavior_mod, fatigue as fatigue_mod
@@ -129,63 +130,57 @@ class simulation:
         hdf5_io.write_dataset(self.db, "X", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
         hdf5_io.write_dataset(self.db, "Y", np.zeros((self.num_agents,), dtype=np.float32), dtype="f4")
 
-        # populate agent attributes using the agents module
-        try:
-            agents.sim_sex(self)
-            agents.sim_length(self, fish_length)
-            agents.sim_weight(self)
-            agents.sim_body_depth(self)
-        except Exception:
-            # if agents fail, leave zeros but continue
-            pass
+        # create time-indexed agent_data datasets (num_agents x num_timesteps)
+        empty_shape = (self.num_agents, int(self.num_timesteps))
+        if h5py is not None and isinstance(self.db, h5py.File):
+            hdf5_io.ensure_group(self.db, 'agent_data')
+            for name, dtype in (('X', 'f4'), ('Y', 'f4'), ('prev_X', 'f4'), ('prev_Y', 'f4'), ('ideal_sog', 'f4'), ('Hz', 'f4')):
+                full = f'agent_data/{name}'
+                if full not in self.db:
+                    self.db.create_dataset(full, shape=empty_shape, dtype=dtype)
+        else:
+            zero = np.zeros(empty_shape, dtype=np.float32)
+            hdf5_io.write_dataset(self.db, "agent_data/X", zero, dtype="f4")
+            hdf5_io.write_dataset(self.db, "agent_data/Y", zero, dtype="f4")
+            hdf5_io.write_dataset(self.db, "agent_data/prev_X", zero, dtype="f4")
+            hdf5_io.write_dataset(self.db, "agent_data/prev_Y", zero, dtype="f4")
+            hdf5_io.write_dataset(self.db, "agent_data/ideal_sog", zero, dtype="f4")
+            hdf5_io.write_dataset(self.db, "agent_data/Hz", zero, dtype="f4")
 
-        # write agent attributes into HDF5 static datasets (best-effort)
-        try:
-            hdf5_io.write_dataset(self.db, "agent_data/sex", self.sex)
-            hdf5_io.write_dataset(self.db, "agent_data/length", self.length)
-            hdf5_io.write_dataset(self.db, "agent_data/weight", self.weight)
-            hdf5_io.write_dataset(self.db, "agent_data/body_depth", self.body_depth)
-            # also write legacy top-level datasets for compatibility
-            hdf5_io.write_dataset(self.db, "sex", self.sex)
-            hdf5_io.write_dataset(self.db, "length", self.length)
-            hdf5_io.write_dataset(self.db, "weight", self.weight)
-            hdf5_io.write_dataset(self.db, "body_depth", self.body_depth)
+        # populate agent attributes using the agents module
+        agents.sim_sex(self)
+        agents.sim_length(self, fish_length)
+        agents.sim_weight(self)
+        agents.sim_body_depth(self)
+
+        # write agent attributes into HDF5 static datasets
+        hdf5_io.write_dataset(self.db, "agent_data/sex", self.sex)
+        hdf5_io.write_dataset(self.db, "agent_data/length", self.length)
+        hdf5_io.write_dataset(self.db, "agent_data/weight", self.weight)
+        hdf5_io.write_dataset(self.db, "agent_data/body_depth", self.body_depth)
+        # also write legacy top-level datasets for compatibility
+        hdf5_io.write_dataset(self.db, "sex", self.sex)
+        hdf5_io.write_dataset(self.db, "length", self.length)
+        hdf5_io.write_dataset(self.db, "weight", self.weight)
+        hdf5_io.write_dataset(self.db, "body_depth", self.body_depth)
+        if hasattr(self.db, 'flush'):
             try:
-                # ensure changes are persisted for h5py.File
-                if hasattr(self.db, 'flush'):
-                    self.db.flush()
+                self.db.flush()
             except Exception:
                 pass
-        except Exception:
-            # non-fatal; continue
-            pass
 
-        # if env_files provided, try to import them using io.enviro_import (non-fatal)
+        # import any provided environment files (fail loudly during development)
         for ef in self.env_files:
-            try:
-                _ = io.enviro_import(ef)
-            except Exception:
-                continue
+            _ = io.enviro_import(ef)
 
         # ensure minimal environment placeholders exist so downstream modules
         # that read environment/* will have something to sample in unit tests
-        try:
-            hdf5_io.create_environment_placeholders(self.db)
-        except Exception:
-            pass
+        hdf5_io.create_environment_placeholders(self.db)
 
-        # small helpers: create movement/behavior/fatigue wrapper instances
-        # they will be (re)constructed per-timestep if needed, but create
-        # a lightweight instance now to make attributes available to callers
-        try:
-            self._movement = movement_mod.movement(self)
-            self._behavior = behavior_mod.behavior(1.0, self)
-            # fatigue is constructed per-timestep because it captures t/dt in ctor
-            self._fatigue = None
-        except Exception:
-            self._movement = None
-            self._behavior = None
-            self._fatigue = None
+        # small helpers: construct movement and behavior helpers now
+        self._movement = movement_mod.movement(self)
+        self._behavior = behavior_mod.behavior(1.0, self)
+        self._fatigue = None
 
     def timestep(self, t, dt, g=None, pid_controller=None):
         # Advance time and run a single simulation timestep integrating
@@ -263,19 +258,40 @@ class simulation:
             pass
 
         # write minimal outputs back to HDF5 for downstream consumers
-        try:
-            hdf5_io.write_dataset(self.db, 'X', self.X)
-            hdf5_io.write_dataset(self.db, 'Y', self.Y)
-            hdf5_io.write_dataset(self.db, 'prev_X', self.prev_X)
-            hdf5_io.write_dataset(self.db, 'prev_Y', self.prev_Y)
-            # flush when supported
+        hdf5_io.write_dataset(self.db, 'X', self.X)
+        hdf5_io.write_dataset(self.db, 'Y', self.Y)
+        hdf5_io.write_dataset(self.db, 'prev_X', self.prev_X)
+        hdf5_io.write_dataset(self.db, 'prev_Y', self.prev_Y)
+
+        # write per-timestep slices into time-indexed agent_data arrays
+        h5 = hdf5_io.get_hdf5_obj(self)
+        ts = int(max(0, min(int(self.cumulative_time) - 1, self.num_timesteps - 1)))
+        tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz')
+        for key in tracked:
+            arr = hdf5_io.read_dataset(h5, key, default=None)
+            if arr is None:
+                logging.getLogger(__name__).debug('Dataset %s missing; skipping timestep write', key)
+                continue
+            attr_key = key.split('/')[-1]
+            # try direct attribute, then lowercase, then capitalized
+            if hasattr(self, attr_key):
+                val = getattr(self, attr_key)
+            elif hasattr(self, attr_key.lower()):
+                val = getattr(self, attr_key.lower())
+            elif hasattr(self, attr_key.capitalize()):
+                val = getattr(self, attr_key.capitalize())
+            else:
+                logging.getLogger(__name__).debug('No matching attribute for %s; skipping', attr_key)
+                continue
+            arr[:, ts] = np.array(val)
+            hdf5_io.write_dataset(h5, key, arr)
+
+        # flush when supported (best-effort)
+        if hasattr(self.db, 'flush'):
             try:
-                if hasattr(self.db, 'flush'):
-                    self.db.flush()
+                self.db.flush()
             except Exception:
                 pass
-        except Exception:
-            pass
 
         return True
 
