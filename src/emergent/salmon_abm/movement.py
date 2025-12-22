@@ -50,14 +50,14 @@ class movement():
     # cached splines
     _SPLINES = None
 
-    def _get_webb_splines():
-        global _SPLINES
-        if _SPLINES is None:
-            A_spline = UnivariateSpline(LENGTH_DAT, AMP_DAT, k=2, ext=0)
-            V_spline = UnivariateSpline(SPEED_DAT, WAVE_DAT, k=1, ext=0)
-            B_spline = UnivariateSpline(LENGTH_DAT, EDGE_DAT, k=1, ext=0)
-            _SPLINES = (A_spline, V_spline, B_spline)
-        return _SPLINES
+    @classmethod
+    def _get_webb_splines(cls):
+        if cls._SPLINES is None:
+            A_spline = UnivariateSpline(cls.LENGTH_DAT, cls.AMP_DAT, k=2, ext=0)
+            V_spline = UnivariateSpline(cls.SPEED_DAT, cls.WAVE_DAT, k=1, ext=0)
+            B_spline = UnivariateSpline(cls.LENGTH_DAT, cls.EDGE_DAT, k=1, ext=0)
+            cls._SPLINES = (A_spline, V_spline, B_spline)
+        return cls._SPLINES
 
     def find_z(self):
         """
@@ -97,7 +97,7 @@ class movement():
         swim_speed_cms = ideal_swim_speed * 100.
 
         # Interpolation (cached) using Webb empirical data
-        A_spline, V_spline, B_spline = _get_webb_splines()
+        A_spline, V_spline, B_spline = self._get_webb_splines()
         A = A_spline(length_cm)
         V = V_spline(swim_speed_cms)
         B = B_spline(length_cm)
@@ -139,7 +139,7 @@ class movement():
         swim_speeds_cms = np.linalg.norm(fish_velocities - water_velocities, axis=-1) * 100 + 0.00001
 
         # Interpolation (cached) using Webb empirical data
-        A_spline, V_spline, B_spline = _get_webb_splines()
+        A_spline, V_spline, B_spline = self._get_webb_splines()
         A = A_spline(lengths_cm)
         V = V_spline(swim_speeds_cms)
         B = B_spline(lengths_cm)

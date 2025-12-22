@@ -341,17 +341,57 @@ class simulation:
             # keep existing heading
             pass
 
-        # calculate movement-related quantities
-        try:
-            if movement is not None:
+        # calculate movement-related quantities with finer-grained diagnostics
+        dxdy = np.zeros((self.num_agents, 2), dtype=np.float32)
+        if movement is not None:
+            # frequency
+            try:
                 movement.frequency(mask, t, dt)
+            except Exception as e:
+                if getattr(self, 'debug_freq', False):
+                    import traceback
+                    print('movement.frequency exception:', e)
+                    traceback.print_exc()
+            # thrust
+            try:
                 movement.thrust_fun(mask, t, dt)
+            except Exception as e:
+                if getattr(self, 'debug_freq', False):
+                    import traceback
+                    print('movement.thrust_fun exception:', e)
+                    traceback.print_exc()
+            # drag
+            try:
                 movement.drag_fun(mask, t, dt)
+            except Exception as e:
+                if getattr(self, 'debug_freq', False):
+                    import traceback
+                    print('movement.drag_fun exception:', e)
+                    traceback.print_exc()
+            # swim (returns displacement)
+            try:
                 dxdy = movement.swim(t, dt, pid or pid_controller, mask)
-            else:
-                dxdy = np.zeros((self.num_agents, 2), dtype=np.float32)
-        except Exception:
+            except Exception as e:
+                if getattr(self, 'debug_freq', False):
+                    import traceback
+                    print('movement.swim exception:', e)
+                    traceback.print_exc()
+        else:
             dxdy = np.zeros((self.num_agents, 2), dtype=np.float32)
+
+        # If debugging is enabled, print compact diagnostics to help trace zero-values
+        if getattr(self, 'debug_freq', False):
+            try:
+                print('DEBUG movement: Hz[:10]=', self.Hz[:10])
+                print('DEBUG movement: thrust[:5]=', self.thrust[:5])
+                print('DEBUG movement: drag[:5]=', self.drag[:5])
+                print('DEBUG movement: length[:5]=', self.length[:5])
+                print('DEBUG movement: weight[:5]=', self.weight[:5])
+                print('DEBUG movement: swim_behav[:10]=', self.swim_behav[:10])
+                print('DEBUG movement: is_stuck[:10]=', self.is_stuck[:10])
+                print('DEBUG movement: prev_Hz[:10]=', self.prev_Hz[:10])
+            except Exception:
+                pass
 
         # apply movement
         try:
