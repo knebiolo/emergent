@@ -52,8 +52,12 @@ class simulation:
             self.rng = np.random.default_rng()
         except Exception:
             self.rng = None
-        # keep a pid controller if requested
-        self.pid_controller = pid.PID_controller(num_agents) if pid_tuning else None
+        # always create a PID controller instance (safe defaults)
+        # PID tuning can still be enabled via `pid_tuning` flag
+        try:
+            self.pid_controller = pid.PID_controller(self.num_agents)
+        except Exception:
+            self.pid_controller = None
         
         # create in-memory arrays for agent attributes so agent generators can populate them
         self.sex = np.zeros(self.num_agents, dtype=np.int8)
@@ -136,6 +140,64 @@ class simulation:
         agents.sim_weight(self)
         agents.sim_body_depth(self)
 
+        # If a start polygon was provided, sample initial agent positions inside it
+        if start_polygon:
+            try:
+                import geopandas as gpd
+                from shapely.geometry import Point
+                gdf = gpd.read_file(start_polygon)
+                if gdf is None or len(gdf) == 0:
+                    raise RuntimeError('start polygon shapefile empty')
+                geom = gdf.unary_union if len(gdf) > 1 else gdf.geometry.iloc[0]
+                minx, miny, maxx, maxy = geom.bounds
+                rng = getattr(self, 'rng', None)
+                if rng is None:
+                    rng = np.random.default_rng()
+                pts = []
+                attempts = 0
+                # draw random points within bbox and test containment
+                while len(pts) < self.num_agents and attempts < max(5000, self.num_agents * 100):
+                    x = float(rng.uniform(minx, maxx))
+                    y = float(rng.uniform(miny, maxy))
+                    if geom.contains(Point(x, y)):
+                        pts.append((x, y))
+                    attempts += 1
+                # fallback: use representative point / centroid if sampling failed
+                if len(pts) < self.num_agents:
+                    rep = geom.representative_point()
+                    rx, ry = float(rep.x), float(rep.y)
+                    while len(pts) < self.num_agents:
+                        pts.append((rx, ry))
+                xs = np.array([p[0] for p in pts], dtype=np.float64)
+                ys = np.array([p[1] for p in pts], dtype=np.float64)
+                # assign to simulation state
+                self.X = xs
+                self.Y = ys
+                self.prev_X = xs.copy()
+                self.prev_Y = ys.copy()
+                # write initial positions into HDF5 (top-level and time-indexed arrays)
+                try:
+                    hdf5_io.write_dataset(self.db, 'X', self.X)
+                    hdf5_io.write_dataset(self.db, 'Y', self.Y)
+                    arrX = hdf5_io.read_dataset(self.db, 'agent_data/X', default=None)
+                    arrY = hdf5_io.read_dataset(self.db, 'agent_data/Y', default=None)
+                    if arrX is not None:
+                        arrX[:, 0] = self.X
+                        hdf5_io.write_dataset(self.db, 'agent_data/X', arrX)
+                    if arrY is not None:
+                        arrY[:, 0] = self.Y
+                        hdf5_io.write_dataset(self.db, 'agent_data/Y', arrY)
+                except Exception:
+                    pass
+                # record that start polygon was used
+                try:
+                    hdf5_io.write_dataset(self.db, 'metadata/start_polygon', os.path.basename(start_polygon))
+                except Exception:
+                    pass
+            except Exception:
+                # do not fail initialization for missing or invalid polygon
+                pass
+
         # write agent attributes into HDF5 static datasets
         hdf5_io.write_dataset(self.db, "agent_data/sex", self.sex)
         hdf5_io.write_dataset(self.db, "agent_data/length", self.length)
@@ -164,6 +226,27 @@ class simulation:
         self._movement = movement_mod.movement(self)
         self._behavior = behavior_mod.behavior(1.0, self)
         self._fatigue = None
+        # ensure attributes expected by movement/behavior exist with sensible defaults
+        try:
+            self.pid_tuning = pid_tuning
+        except Exception:
+            self.pid_tuning = False
+        try:
+            # wave_drag used by drag calculations
+            self.wave_drag = np.ones(self.num_agents, dtype=float)
+        except Exception:
+            self.wave_drag = np.ones(self.num_agents)
+        try:
+            # Hz used by thrust calculations
+            self.Hz = np.zeros(self.num_agents, dtype=float)
+        except Exception:
+            self.Hz = np.zeros(self.num_agents)
+        # expose drag_coeff on simulation so movement can call it
+        try:
+            self.drag_coeff = self._movement.drag_coeff
+        except Exception:
+            # fallback to a simple interpolation if movement helper not available
+            self.drag_coeff = lambda reynolds: np.interp(reynolds, [2.5e4, 5.0e4, 7.4e4, 9.9e4, 1.2e5, 1.5e5, 1.7e5, 2.0e5], [0.23, 0.19, 0.15, 0.14, 0.12, 0.12, 0.11, 0.10])
 
     def timestep(self, t, dt, g=None, pid_controller=None):
         # Advance time and run a single simulation timestep integrating

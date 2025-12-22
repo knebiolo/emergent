@@ -125,24 +125,52 @@ class movement():
         else:
             ideal_drag = self.ideal_drag_fun()
 
-        drags_erg_s = np.where(mask, np.linalg.norm(ideal_drag, axis=-1) * self.simulation.length / 1000 * 10000000, 0)
+            # compute drag power correctly: power = force (N) * speed (m/s)
+            # ideal_drag is in N, swim_speeds_cms is in cm/s -> convert to m/s
+            drag_force_N = np.linalg.norm(ideal_drag, axis=-1)
+            swim_speed_m_s = swim_speeds_cms / 100.0
+            # power in J/s (W) = N * m/s; convert to erg/s by multiplying 1e7
+            drags_erg_s = np.where(mask, drag_force_N * swim_speed_m_s * 1e7, 0.0)
 
+        # baseline minimum Hz for certain swim behaviors (per original code)
         min_Hz = np.interp(self.simulation.length, [450, 7.5], [690, 2.])
 
-        Hz = np.where(self.simulation.swim_behav == 3, min_Hz,
-                      np.sqrt(drags_erg_s * V ** 2 * np.cos(np.radians(theta)) /
-                              (A ** 2 * B ** 2 * swim_speeds_cms * np.pi ** 3 * rho *
-                               (swim_speeds_cms - V) *
-                               (-0.062518880701972 * swim_speeds_cms -
-                                0.125037761403944 * V * np.cos(np.radians(theta)) +
-                                0.062518880701972 * V)
-                               )
-                              )
-                      )
-        Hz = np.where(self.simulation.is_stuck, 0, Hz)
+        # Safe calculation of Hz: guard denominators and negative/near-zero values
+        # numerator and denominator for the square-root expression
+        num = drags_erg_s * (V ** 2) * np.cos(np.radians(theta))
 
-        self.simulation.prev_Hz = self.simulation.Hz
-        self.simulation.Hz = np.where(self.simulation.Hz > 20, 20, Hz)
+        # build denominator with safe handling
+        small_val = 1e-12
+        term1 = (A ** 2) * (B ** 2) * swim_speeds_cms * (np.pi ** 3) * rho
+        term2 = (swim_speeds_cms - V)
+        term3 = (-0.062518880701972 * swim_speeds_cms -
+             0.125037761403944 * V * np.cos(np.radians(theta)) +
+             0.062518880701972 * V)
+        denom = term1 * term2 * term3
+
+        # create mask of safe positions where numerator and denom produce positive ratio
+        safe = (denom > small_val) & (num > 0)
+
+        # compute Hz safely where possible, otherwise fallback to a reasonable default
+        Hz_raw = np.zeros_like(num, dtype=float)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            Hz_raw = np.where(safe, np.sqrt(num / denom), np.nan)
+
+        # where swim behavior indicates minimum Hz, set to min_Hz
+        Hz = np.where(self.simulation.swim_behav == 3, min_Hz, Hz_raw)
+
+        # stuck agents have zero Hz
+        Hz = np.where(self.simulation.is_stuck, 0.0, Hz)
+
+        # replace NaNs and infinities with a conservative value (min_Hz)
+        Hz = np.where(np.isfinite(Hz), Hz, min_Hz)
+
+        # finally, clip to a biologically plausible range (0.0 - 20.0 Hz)
+        Hz = np.clip(Hz, 0.0, 20.0)
+
+        # store prev and current Hz
+        self.simulation.prev_Hz = getattr(self.simulation, 'Hz', np.zeros_like(Hz))
+        self.simulation.Hz = Hz
 
     def kin_visc(self, temp):
         kin_temp = np.array([0.01, 10., 20., 25., 30., 40., 50., 60., 70., 80.,
@@ -230,7 +258,9 @@ class movement():
         relative_velocities = fish_velocities - water_velocities
         relative_speeds_squared = np.linalg.norm(relative_velocities, axis=-1) ** 2
 
-        unit_relative_vector = np.nan_to_num(relative_velocities / np.linalg.norm(relative_velocities, axis=1)[:, np.newaxis])
+        rel_norms = np.linalg.norm(relative_velocities, axis=1)
+        rel_norms_safe = np.where(rel_norms == 0, 1.0, rel_norms)
+        unit_relative_vector = np.nan_to_num(relative_velocities / rel_norms_safe[:, np.newaxis])
 
         drags = np.where(mask[:, np.newaxis],
                          -0.5 * (density * 1000) * (surface_areas[:, np.newaxis] / 100 ** 2) \
@@ -259,9 +289,12 @@ class movement():
         holding_mask = (self.simulation.swim_behav == 3) & (ideal_swim_speeds > self.simulation.max_s_U)
         too_fast = refugia_mask + holding_mask
 
-        fish_velocities = np.where(too_fast[:, np.newaxis],
-                                   (self.simulation.max_s_U / ideal_swim_speeds[:, np.newaxis]) * fish_velocities,
-                                   fish_velocities)
+        # ensure proper broadcasting: shape max_s_U as (n,1) so division
+        # yields (n,1) and multiplies correctly with fish_velocities (n,2)
+        # avoid division by zero when ideal_swim_speeds == 0
+        denom = ideal_swim_speeds[:, np.newaxis]
+        ratio = np.divide(self.simulation.max_s_U[:, np.newaxis], denom, out=np.ones_like(denom), where=denom != 0)
+        fish_velocities = np.where(too_fast[:, np.newaxis], ratio * fish_velocities, fish_velocities)
 
         self.simulation.max_practical_sog = fish_velocities
 
@@ -279,7 +312,9 @@ class movement():
 
         relative_velocities = self.simulation.max_practical_sog - water_velocities
         relative_speeds_squared = np.linalg.norm(relative_velocities, axis=-1) ** 2
-        unit_max_practical_sog = self.simulation.max_practical_sog / np.linalg.norm(self.simulation.max_practical_sog, axis=1)[:, np.newaxis]
+        max_prac_norms = np.linalg.norm(self.simulation.max_practical_sog, axis=1)
+        max_prac_norms_safe = np.where(max_prac_norms == 0, 1.0, max_prac_norms)
+        unit_max_practical_sog = self.simulation.max_practical_sog / max_prac_norms_safe[:, np.newaxis]
 
         ideal_drags = -0.5 * (density * 1000) * (surface_areas[:, np.newaxis] / 100 ** 2) * drag_coeffs[:, np.newaxis] * relative_speeds_squared[:, np.newaxis] * unit_max_practical_sog * self.simulation.wave_drag[:, np.newaxis]
 

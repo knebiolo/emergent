@@ -12,7 +12,7 @@ from scipy.optimize import curve_fit
 
 
 class PID_controller:
-    def __init__(self, n_agents, k_p = 0., k_i = 0., k_d = 0., tau_d = 1):
+    def __init__(self, n_agents, k_p = 1.0, k_i = 0.0, k_d = 0.0, tau_d = 1):
         # coerce n_agents to int
         n = int(np.round(n_agents))
         # accept scalar or array gains; store as arrays shape (n,)
@@ -69,19 +69,37 @@ class PID_controller:
         self.D_params, _ = curve_fit(plane_model, (length, velocity), D)
 
     def PID_func(self, velocity, length):
-        a_P = self.P_params[0]
-        b_P = self.P_params[1]
-        c_P = self.P_params[2]
-        a_I = self.I_params[0]
-        b_I = self.I_params[1]
-        c_I = self.I_params[2]
-        a_D = self.D_params[0]
-        b_D = self.D_params[1]
-        c_D = self.D_params[2]
-        P = a_P * length + b_P * velocity + c_P
-        I = a_I * length + b_I * velocity + c_I
-        D = a_D * length + b_D * velocity + c_D
-        return P, I, D
+        # If trained parameters are not available, fall back to controller gains
+        try:
+            a_P = self.P_params[0]
+            b_P = self.P_params[1]
+            c_P = self.P_params[2]
+            a_I = self.I_params[0]
+            b_I = self.I_params[1]
+            c_I = self.I_params[2]
+            a_D = self.D_params[0]
+            b_D = self.D_params[1]
+            c_D = self.D_params[2]
+            P = a_P * length + b_P * velocity + c_P
+            I = a_I * length + b_I * velocity + c_I
+            D = a_D * length + b_D * velocity + c_D
+            return P, I, D
+        except Exception:
+            # return the current controller gains (scalars or arrays)
+            # convert to scalars when possible
+            try:
+                kp = float(np.mean(self.k_p))
+            except Exception:
+                kp = 1.0
+            try:
+                ki = float(np.mean(self.k_i))
+            except Exception:
+                ki = 0.0
+            try:
+                kd = float(np.mean(self.k_d))
+            except Exception:
+                kd = 0.0
+            return kp, ki, kd
 
 
 __all__ = ["PID_controller"]

@@ -541,9 +541,19 @@ class behavior():
         vec_sum_migratory = np.zeros_like(rheotaxis)
         vec_sum_tired = np.zeros_like(rheotaxis)
 
+        cue_magnitudes = {}
         for i in order_dict.keys():
             cue = order_dict[i]
             vec = cue_dict[cue]
+            # record L2 norm per agent for debugging
+            try:
+                cue_magnitudes[cue] = np.linalg.norm(vec, axis=1)
+            except Exception:
+                # scalar or different shape
+                try:
+                    cue_magnitudes[cue] = np.abs(vec)
+                except Exception:
+                    cue_magnitudes[cue] = np.zeros(self.simulation.num_agents)
             if cue != 'refugia':
                 vec_sum_migratory = np.where(np.linalg.norm(vec_sum_migratory, axis=-1)[:, np.newaxis] < tolerance,
                                               vec_sum_migratory + vec,
@@ -563,6 +573,22 @@ class behavior():
         head_vec = np.where(self.simulation.in_eddy[:, np.newaxis] == 1, cue_dict['border'] + cue_dict['shallow'], head_vec)
 
         if len(head_vec.shape) == 2:
+            # debug print of cue magnitudes if requested
+            if getattr(self.simulation, 'debug', False):
+                try:
+                    print('behavior cue magnitudes (summary min/max) at t=', t)
+                    for k, v in cue_magnitudes.items():
+                        arr = np.array(v)
+                        print(f' - {k}: min={float(np.nanmin(arr)):.4g}, max={float(np.nanmax(arr)):.4g}')
+                except Exception:
+                    pass
             return np.arctan2(head_vec[:, 1], head_vec[:, 0])
         else:
+            if getattr(self.simulation, 'debug', False):
+                try:
+                    print('behavior cue magnitudes (scalar) at t=', t)
+                    for k, v in cue_magnitudes.items():
+                        print(' -', k, v)
+                except Exception:
+                    pass
             return np.arctan2(head_vec[:, 0, 1], head_vec[:, 0, 0])
