@@ -12,6 +12,29 @@ from scipy.ndimage import distance_transform_edt
 
 from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, standardize_shape, calculate_front_masks
 
+# Try to prepare a SymPy-backed numeric evaluator for the symbolic frequency expression.
+# If SymPy is not available or lambdify fails, fall back to numeric implementation.
+_SYMPY_AVAILABLE = False
+_sympy_freq_func = None
+try:
+    import sympy as _sp
+    # define symbols (SI units expected: m, s, kg, J)
+    _f_s, _A_s, _B_s, _V_s, _U_s, _rho_s, _theta_s, _D_s = _sp.symbols('f A B V U rho theta D', positive=True)
+    _m_sym = _sp.pi * _rho_s * _B_s ** 2 / 4
+    _W_amp = _f_s * _A_s * _sp.pi / _sp.sqrt(2)
+    _w = _W_amp * (1 - _U_s / _V_s)
+    _thrust_sym = _m_sym * _W_amp * _w * _U_s - (_m_sym * _w ** 2 * _U_s) / (2 * _sp.cos(_theta_s))
+    # solve symbolic for f and pick positive root
+    _sol = _sp.solve(_sp.Eq(_thrust_sym, _D_s), _f_s)
+    if _sol:
+        # choose positive branch (last one is positive in our derivation)
+        _f_expr = _sp.simplify(_sol[-1])
+        # lambdify to numpy for fast evaluation: inputs order A,B,V,U,D,rho,theta
+        _sympy_freq_func = _sp.lambdify((_A_s, _B_s, _V_s, _U_s, _D_s, _rho_s, _theta_s), _f_expr, 'numpy')
+        _SYMPY_AVAILABLE = True
+except Exception:
+    _SYMPY_AVAILABLE = False
+
 
 class movement():
     def __init__(self, simulation_object):
@@ -86,7 +109,7 @@ class movement():
 
         self.simulation.thrust = thrust.T
 
-    def frequency(self, mask, t, dt, fish_velocities=None):
+    def frequency(self, mask, t, dt, fish_velocities=None, use_sympy=False):
         rho = 1.0
         theta = 32.
         lengths_cm = self.simulation.length / 10
@@ -120,41 +143,73 @@ class movement():
         V = V_spline(swim_speeds_cms)
         B = B_spline(lengths_cm)
 
-        if alternate:
-            ideal_drag = self.ideal_drag_fun(fish_velocities=fish_velocities)
-        else:
-            ideal_drag = self.ideal_drag_fun()
-
-            # compute drag power correctly: power = force (N) * speed (m/s)
-            # ideal_drag is in N, swim_speeds_cms is in cm/s -> convert to m/s
-            drag_force_N = np.linalg.norm(ideal_drag, axis=-1)
-            swim_speed_m_s = swim_speeds_cms / 100.0
-            # power in J/s (W) = N * m/s; convert to erg/s by multiplying 1e7
-            drags_erg_s = np.where(mask, drag_force_N * swim_speed_m_s * 1e7, 0.0)
+        # compute ideal drag vector for numeric D (N)
+        ideal_drag = self.ideal_drag_fun(fish_velocities=fish_velocities)
+        drag_force_N = np.linalg.norm(ideal_drag, axis=-1)
+        swim_speed_m_s = swim_speeds_cms / 100.0
+        # power in J/s (W) = N * m/s
+        drags_J_s = np.where(mask, drag_force_N * swim_speed_m_s, 0.0)
+        # legacy code used erg/s in places; keep drags_erg_s for backward compatibility
+        drags_erg_s = drags_J_s * 1e7
 
         # baseline minimum Hz for certain swim behaviors (per original code)
         min_Hz = np.interp(self.simulation.length, [450, 7.5], [690, 2.])
 
         # Safe calculation of Hz: guard denominators and negative/near-zero values
         # numerator and denominator for the square-root expression
-        num = drags_erg_s * (V ** 2) * np.cos(np.radians(theta))
+        # compute numerator and denominator in SI units (vectorized)
+        # Use J/s (W) for power: drags_J_s is already J/s
+        theta_rad = np.radians(theta)
 
-        # build denominator with safe handling
-        small_val = 1e-12
-        term1 = (A ** 2) * (B ** 2) * swim_speeds_cms * (np.pi ** 3) * rho
-        term2 = (swim_speeds_cms - V)
-        term3 = (-0.062518880701972 * swim_speeds_cms -
-             0.125037761403944 * V * np.cos(np.radians(theta)) +
-             0.062518880701972 * V)
-        denom = term1 * term2 * term3
+        # convert spline outputs to SI-consistent units
+        # A spline: amplitude values in the archived derivation are given as fraction/percent -> convert to meters
+        # Empirically the Webb data in previous scripts divided amp_dat by 100 -> use the same convention
+        A_m = A / 100.0
+        # B (trailing edge span) historically provided as percent -> convert to meters
+        B_m = B / 100.0
+        # V from spline historically in cm/s -> convert to m/s
+        V_m_s = V / 100.0
+        # swim speed in m/s
+        U_m_s = swim_speeds_cms / 100.0
+        # density: rho was given as 1.0 (g/cm^3) in legacy code; convert to kg/m^3
+        rho_si = rho * 1000.0
 
-        # create mask of safe positions where numerator and denom produce positive ratio
-        safe = (denom > small_val) & (num > 0)
+        # numerator (SI): D (J/s) * V^2 * cos(theta)
+        num_si = drags_J_s * (V_m_s ** 2) * np.cos(theta_rad)
 
-        # compute Hz safely where possible, otherwise fallback to a reasonable default
-        Hz_raw = np.zeros_like(num, dtype=float)
+        # denominator (SI): A^2 * B^2 * U * pi^3 * rho * (U - V) * (U + 2*V*cos(theta) - V)
+        small_val = 1e-20
+        term1_si = (A_m ** 2) * (B_m ** 2) * U_m_s * (np.pi ** 3) * rho_si
+        term2_si = (U_m_s - V_m_s)
+        term3_si = (U_m_s + 2.0 * V_m_s * np.cos(theta_rad) - V_m_s)
+        denom_si = term1_si * term2_si * term3_si
+
+        # safe mask and compute Hz in SI
+        safe_si = (denom_si > small_val) & (num_si > 0)
+        Hz_raw = np.full_like(num_si, np.nan, dtype=float)
         with np.errstate(divide='ignore', invalid='ignore'):
-            Hz_raw = np.where(safe, np.sqrt(num / denom), np.nan)
+            Hz_raw = np.where(safe_si, np.sqrt(num_si / denom_si), Hz_raw)
+
+        # If requested, and sympy is available, compute Hz using the symbolic lambdified function
+        if use_sympy and _SYMPY_AVAILABLE:
+            try:
+                # SymPy lambda expects A (m), B (m), V (m/s), U (m/s), D (J/s), rho (kg/m^3), theta (rad)
+                # movement uses lengths in mm for self.simulation.length, convert appropriately
+                A_m = A / 100.0 if np.any(A > 1.0) else A  # in case A is in cm-like units, but splines usually gave m
+                B_m = B
+                V_m_s = V / 100.0 if np.nanmax(V) > 10 else V  # V in movement was derived sometimes in cm/s; make safe
+                U_m_s = swim_speeds_cms / 100.0
+                D_J_s = drags_J_s
+                rho_si = rho * 1000.0 if np.nanmax(rho) < 10 else rho  # sustain rho scaling if needed
+                theta_rad = np.radians(theta)
+                # call lambdified sympy function; it supports vectorized numpy inputs
+                Hz_sym = _sympy_freq_func(A_m, B_m, V_m_s, U_m_s, D_J_s, rho_si, theta_rad)
+                # ensure shape and finite values
+                Hz_sym = np.where(np.isfinite(Hz_sym), Hz_sym, np.nan)
+                Hz_raw = np.where(mask, Hz_sym, Hz_raw)
+            except Exception:
+                # if anything fails, leave Hz_raw as computed numerically
+                pass
 
         # where swim behavior indicates minimum Hz, set to min_Hz
         Hz = np.where(self.simulation.swim_behav == 3, min_Hz, Hz_raw)
