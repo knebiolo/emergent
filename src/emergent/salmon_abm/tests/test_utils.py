@@ -1,4 +1,38 @@
 import numpy as np
+from emergent.salmon_abm import utils
+
+
+def test_geo_pixel_roundtrip():
+    # simple affine: x = col, y = row
+    transform = (1, 0, 0, 0, 1, 0)
+    row, col = 10, 5
+    x, y = utils.pixel_to_geo(row, col, transform)
+    r2, c2 = utils.geo_to_pixel(x, y, transform)
+    assert (r2, c2) == (row, col)
+
+
+def test_standardize_shape_and_slices():
+    arr = np.zeros((20, 30))
+    assert utils.standardize_shape(arr) == (20, 30)
+    srow, scol = utils.determine_slices((5, 5), 2, (20, 30))
+    assert srow.start == 3 and srow.stop == 8
+    assert scol.start == 3 and scol.stop == 8
+
+
+def test_linear_interpolate():
+    a = np.array([0.0, 1.0])
+    b = np.array([2.0, 3.0])
+    mid = utils.linear_interpolate(a, b, 0.5)
+    assert np.allclose(mid, np.array([1.0, 2.0]))
+
+
+def test_calculate_front_mask():
+    vals = np.array([[0.0, 0.1, 0.2], [0.2, 2.0, 0.3]])
+    mask = utils.calculate_front_mask(vals, axis=1)
+    assert mask.shape == vals.shape
+    # at least one True expected (the jump to 2.0)
+    assert mask.any()
+import numpy as np
 import importlib.util
 from pathlib import Path
 
