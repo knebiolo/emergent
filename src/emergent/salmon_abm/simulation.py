@@ -495,9 +495,9 @@ class simulation:
         except Exception:
             return np.full(self.num_agents, np.nan)
 
-    def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None, return_status: bool = False, video_hook=None):
-        # Enhanced run loop with PID plumbing, write frequency, and optional video hook
-        # Backwards compatible: original signature still works
+    def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None, return_status: bool = False, video_hook=None, viewer: bool = False, viewer_blocking: bool = False):
+        # Enhanced run loop with PID plumbing, write frequency, optional video hook,
+        # and optional real-time viewer. Backwards compatible: original signature still works.
         write_frequency = 1
         video_hook = None
 
@@ -521,6 +521,25 @@ class simulation:
                 pass
 
         status = {'steps': 0, 'errors': [], 'video_frames': 0}
+
+        # Optionally launch the realtime viewer as a subprocess that reads
+        # the HDF5 database written by this simulation. If `viewer_blocking` is
+        # True the run will block until the viewer exits; otherwise the viewer
+        # runs in parallel.
+        viewer_proc = None
+        if viewer:
+            try:
+                import subprocess, shlex
+                viewer_cmd = [
+                    sys.executable,
+                    "-m",
+                    "emergent.salmon_abm.realtime_viewer",
+                    self.db_path,
+                ]
+                # Launch detached on Windows so it doesn't inherit std handles
+                viewer_proc = subprocess.Popen(viewer_cmd, creationflags=0)
+            except Exception as e:
+                status['errors'].append(f'viewer_launch_error:{e}')
         for i in range(n):
             try:
                 self.timestep(i, dt, pid_controller=controller)
@@ -536,6 +555,24 @@ class simulation:
                 status['errors'].append(str(e))
                 # continue running unless unrecoverable
                 continue
+
+        # flush and close viewer process if requested
+        try:
+            if hasattr(self.db, 'flush'):
+                try:
+                    self.db.flush()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # If we launched the viewer and the user wants blocking behavior, wait
+        if viewer and viewer_proc is not None:
+            try:
+                if viewer_blocking:
+                    viewer_proc.wait()
+            except Exception:
+                pass
 
         # preserve legacy return value for backwards compatibility
         self.last_run_status = status

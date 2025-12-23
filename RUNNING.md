@@ -34,6 +34,15 @@ python -m pip install -r requirements.txt
 python -m pip install pyqt5 pyqtgraph geopandas shapely fiona rtree
 ```
 
+Realtime viewer:
+
+```powershell
+# Run the realtime viewer against an HDF5 simulation DB
+emergent-viewer outputs/sim_db_XXXX.h5
+# Or use the module form:
+python -m emergent.salmon_abm.realtime_viewer outputs/sim_db_XXXX.h5
+```
+
 Notes:
 - `load_enc` can block startup if GDAL/Fiona are not available or ENC files are large. Use `load_enc=False` for fast headless testing.
 - If you hit errors in `simulation` or `ship` code, paste the full traceback here and I'll triage.

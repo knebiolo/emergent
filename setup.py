@@ -88,6 +88,7 @@ setup(
     entry_points={
         "console_scripts": [
             "emergent-ship=emergent.ship_abm.simulation_core:main",
+            "emergent-viewer=emergent.salmon_abm.realtime_viewer:main",
         ],
     },
     include_package_data=True,
