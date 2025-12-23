@@ -668,30 +668,16 @@ class LiveReceiver(QObject):
         self._sock = sock
         try:
             while self._running:
-                try:
-                    first = sock.recv(1)
-                except Exception as e:
-                    try:
-                        self.error.emit(f'recv_header_error:{e}')
-                    except Exception:
-                        pass
+                first = sock.recv(1)
+                if not first:
                     break
                 if not first:
                     break
                 # If first byte is 'R' -> raw protocol: read next 4-byte length
                 if first == b'R':
-                    try:
-                        lb = sock.recv(4)
-                    except Exception as e:
-                        try:
-                            self.error.emit(f'incomplete_raw_length:{e}')
-                            try:
-                                import logging as _lg
-                                _lg.getLogger('realtime_viewer').debug('incomplete_raw_length recv exception: %s', e)
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
+                    lb = sock.recv(4)
+                    if not lb or len(lb) < 4:
+                        self.error.emit('incomplete_raw_length')
                         break
                     if not lb or len(lb) < 4:
                         try:
@@ -712,14 +698,7 @@ class LiveReceiver(QObject):
                         pass
                     buf = bytearray()
                     while len(buf) < nbytes:
-                        try:
-                            chunk = sock.recv(nbytes - len(buf))
-                        except Exception as e:
-                            try:
-                                self.error.emit(f'recv_chunk_error:{e}')
-                            except Exception:
-                                pass
-                            chunk = None
+                        chunk = sock.recv(nbytes - len(buf))
                         if not chunk:
                             break
                         buf.extend(chunk)
@@ -734,39 +713,16 @@ class LiveReceiver(QObject):
                         except Exception:
                             pass
                         continue
-                    try:
-                        arr = np.frombuffer(bytes(buf), dtype=np.float32)
-                        if arr.size % 2 != 0:
-                            try:
-                                self.error.emit('raw_payload_not_even')
-                            except Exception:
-                                pass
-                            continue
-                        arr = arr.reshape((-1, 2))
-                    except Exception as e:
-                        try:
-                            self.error.emit(f'raw_parse_error:{e}')
-                            try:
-                                import logging as _lg
-                                _lg.getLogger('realtime_viewer').exception('raw_parse_error: nbytes=%d buf_len=%d', nbytes, len(buf))
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
+                    arr = np.frombuffer(bytes(buf), dtype=np.float32)
+                    if arr.size % 2 != 0:
+                        self.error.emit('raw_payload_not_even')
                         continue
+                    arr = arr.reshape((-1, 2))
                 else:
                     # first is first byte of 4-byte big-endian length for numpy case
                     rest = sock.recv(3)
                     if not rest or len(rest) < 3:
-                        try:
-                            self.error.emit('incomplete_length')
-                            try:
-                                import logging as _lg
-                                _lg.getLogger('realtime_viewer').debug('incomplete_length first=%r rest=%r', first, rest)
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
+                        self.error.emit('incomplete_length')
                         break
                     length_bytes = first + rest
                     (nbytes,) = struct.unpack('!I', length_bytes)
@@ -777,14 +733,7 @@ class LiveReceiver(QObject):
                         pass
                     buf = bytearray()
                     while len(buf) < nbytes:
-                        try:
-                            chunk = sock.recv(nbytes - len(buf))
-                        except Exception as e:
-                            try:
-                                self.error.emit(f'recv_chunk_error:{e}')
-                            except Exception:
-                                pass
-                            chunk = None
+                        chunk = sock.recv(nbytes - len(buf))
                         if not chunk:
                             break
                         buf.extend(chunk)
@@ -969,25 +918,16 @@ def main(argv=None):
                             logger.exception('pyqtgraph renderer init failed')
                     # set positions on whichever viewer we have (diagnostic: prefer ReplayWidget)
                     try:
-                        # Diagnostic: if forced, always swap in a fresh ReplayWidget
-                        if force_replay or not isinstance(win.viewer, ReplayWidget):
+                        # Prefer the reliable software `ReplayWidget` renderer unless GL requested
+                        if not args.use_gl and not isinstance(win.viewer, ReplayWidget):
                             try:
                                 replay = ReplayWidget(positions_live)
                                 win.centralWidget().layout().replaceWidget(win.viewer, replay)
-                                try:
-                                    win.viewer.setParent(None)
-                                except Exception:
-                                    pass
+                                win.viewer.setParent(None)
                                 win.viewer = replay
-                                log.debug('Swapped in ReplayWidget for live frames (diagnostic)')
+                                log.debug('Swapped in ReplayWidget for live frames')
                             except Exception:
                                 log.exception('Failed to swap in ReplayWidget')
-
-                        # diagnostics: persist the latest frame to disk for inspection
-                        try:
-                            np.save('latest_live_frame.npy', positions_live)
-                        except Exception:
-                            pass
                         # compute frame bounds and log them
                         try:
                             xs = positions_live[:, :, 0]
@@ -1016,12 +956,7 @@ def main(argv=None):
                                 log.debug('Applying live positions to viewer: xmin=%s xmax=%s ymin=%s ymax=%s', xmin, xmax, ymin, ymax)
                         except Exception:
                             log.exception('Failed to compute live bounds for logging')
-                        # if a ReplayWidget is active, request visibly larger points for debugging
-                        try:
-                            if isinstance(win.viewer, ReplayWidget):
-                                win.viewer._debug_force_big = True
-                        except Exception:
-                            pass
+                        # diagnostic flag disabled by default; do not force large points
                         # if legacy ReplayWidget
                         if hasattr(win.viewer, 'T'):
                             win.viewer.T, win.viewer.N = positions_live.shape[0], positions_live.shape[1]
@@ -1034,33 +969,7 @@ def main(argv=None):
                                 win.viewer.xmax = float(np.nanmax(xs[valid]))
                                 win.viewer.ymin = float(np.nanmin(ys[valid]))
                                 win.viewer.ymax = float(np.nanmax(ys[valid]))
-                            # also write an image snapshot for later inspection (best-effort)
-                            try:
-                                from PIL import Image, ImageDraw
-                                w = 800
-                                h = 600
-                                img = Image.new('RGB', (w, h), (255, 255, 255))
-                                draw = ImageDraw.Draw(img)
-                                # map world coords to image coords
-                                dx = win.viewer.xmax - win.viewer.xmin if win.viewer.xmax != win.viewer.xmin else 1.0
-                                dy = win.viewer.ymax - win.viewer.ymin if win.viewer.ymax != win.viewer.ymin else 1.0
-                                s = min(w / dx, h / dy) * 0.9
-                                tx = (w - s * dx) / 2.0
-                                ty = (h - s * dy) / 2.0
-                                for x, y in positions_live[0]:
-                                    if not (np.isfinite(x) and np.isfinite(y)):
-                                        continue
-                                    sxp = tx + (x - win.viewer.xmin) * s
-                                    syp = ty + (win.viewer.ymax - y) * s
-                                    r = max(1, int(min(w, h) * 0.01))
-                                    draw.ellipse((sxp - r, syp - r, sxp + r, syp + r), fill=(220, 30, 30))
-                                try:
-                                    img.save('viewer_snapshot.png')
-                                except Exception:
-                                    pass
-                            except Exception:
-                                # PIL might not be installed; skip snapshot
-                                pass
+                            # snapshot logic removed (diagnostics reverted)
                             try:
                                 win.viewer.update()
                                 log.debug('Called win.viewer.update()')
