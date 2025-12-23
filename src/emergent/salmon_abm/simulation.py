@@ -495,7 +495,7 @@ class simulation:
         except Exception:
             return np.full(self.num_agents, np.nan)
 
-    def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None, return_status: bool = False, video_hook=None, viewer: bool = False, viewer_blocking: bool = False):
+    def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None, return_status: bool = False, video_hook=None, viewer: bool = False, viewer_blocking: bool = False, viewer_live: bool = False, viewer_host: str = '127.0.0.1', viewer_port: int = 50007, viewer_stream_raw: bool = False, viewer_fps: float = 20.0):
         # Enhanced run loop with PID plumbing, write frequency, optional video hook,
         # and optional real-time viewer. Backwards compatible: original signature still works.
         write_frequency = 1
@@ -527,6 +527,20 @@ class simulation:
         # True the run will block until the viewer exits; otherwise the viewer
         # runs in parallel.
         viewer_proc = None
+        # live server socket used to stream frames to a connected viewer client
+        live_server = None
+        client_conn = None
+        if viewer_live:
+            try:
+                import socket
+                live_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                live_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                live_server.bind((viewer_host, int(viewer_port)))
+                live_server.listen(1)
+                # set to non-blocking so accept can be polled
+                live_server.setblocking(False)
+            except Exception as e:
+                status['errors'].append(f'viewer_live_bind_error:{e}')
         if viewer:
             try:
                 import subprocess, shlex
@@ -551,6 +565,47 @@ class simulation:
                         status['video_frames'] += 1
                     except Exception as e:
                         status['errors'].append(f'video_hook_error:{e}')
+                # Live viewer: accept a client and stream the current positions frame
+                if viewer_live and live_server is not None:
+                    try:
+                        # accept a single client if not connected
+                        if client_conn is None:
+                            try:
+                                conn, addr = live_server.accept()
+                                conn.setblocking(True)
+                                client_conn = conn
+                            except BlockingIOError:
+                                conn = None
+                        if client_conn is not None:
+                            # send current frame positions as either raw float32 or numpy .npy
+                            try:
+                                import io
+                                import struct
+                                # build frame as (N,2) float32 array
+                                xs = getattr(self, 'X', None)
+                                ys = getattr(self, 'Y', None)
+                                if xs is not None and ys is not None:
+                                    frame = np.vstack((xs, ys)).T.astype(np.float32)
+                                else:
+                                    frame = np.zeros((self.num_agents, 2), dtype=np.float32)
+                                if viewer_stream_raw:
+                                    # raw protocol: 'R' + 4-byte length + payload
+                                    payload = frame.astype(np.float32).tobytes()
+                                    client_conn.sendall(b'R' + struct.pack('!I', len(payload)) + payload)
+                                else:
+                                    buf = io.BytesIO()
+                                    np.save(buf, frame)
+                                    data = buf.getvalue()
+                                    client_conn.sendall(struct.pack('!I', len(data)))
+                                    client_conn.sendall(data)
+                            except Exception:
+                                try:
+                                    client_conn.close()
+                                except Exception:
+                                    pass
+                                client_conn = None
+                    except Exception:
+                        pass
             except Exception as e:
                 status['errors'].append(str(e))
                 # continue running unless unrecoverable

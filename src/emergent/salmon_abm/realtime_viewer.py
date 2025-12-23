@@ -44,7 +44,7 @@ try:
         QVBoxLayout,
         QOpenGLWidget,
     )
-    from PyQt5.QtCore import QTimer, Qt
+    from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject, QThread
     from PyQt5.QtGui import QPainter, QColor, QPen
 except Exception:
     raise
@@ -163,9 +163,13 @@ class ReplayWidget(QOpenGLWidget):
         self.timer.timeout.connect(self._tick)
         self.base_interval_ms = 50
         self.timer.setInterval(self.base_interval_ms)
+        # live-related attributes
+        self._live_thread = None
+        self._live_worker = None
 
-        xs = positions[:, :, 0]
-        ys = positions[:, :, 1]
+        # compute bounds from provided positions
+        xs = self.positions[:, :, 0]
+        ys = self.positions[:, :, 1]
         valid = np.isfinite(xs) & np.isfinite(ys)
         if np.any(valid):
             self.xmin = float(np.nanmin(xs[valid]))
@@ -179,7 +183,7 @@ class ReplayWidget(QOpenGLWidget):
             self.ymax = 1.0
 
     def _tick(self):
-        if not self.playing:
+        if not getattr(self, 'playing', False):
             return
         self.frame += 1
         if self.frame >= self.T:
@@ -225,6 +229,18 @@ class ReplayWidget(QOpenGLWidget):
         h = self.height()
         painter.fillRect(0, 0, w, h, QColor(255, 255, 255))
 
+        # draw light grid to show canvas area
+        try:
+            pen = QPen(QColor(230, 230, 230))
+            painter.setPen(pen)
+            step = max(20, int(min(w, h) / 10))
+            for x in range(0, w, step):
+                painter.drawLine(x, 0, x, h)
+            for y in range(0, h, step):
+                painter.drawLine(0, y, w, y)
+        except Exception:
+            pass
+
         dx = self.xmax - self.xmin
         dy = self.ymax - self.ymin
         if dx == 0:
@@ -238,6 +254,15 @@ class ReplayWidget(QOpenGLWidget):
         ty = (h - s * dy) / 2.0
 
         pts = self.positions[self.frame]
+        # if no agents, show waiting message
+        try:
+            if self.N == 0 or pts.size == 0:
+                painter.setPen(QPen(QColor(80, 80, 80)))
+                painter.drawText(int(w / 2) - 80, int(h / 2), 'Waiting for frames...')
+                painter.end()
+                return
+        except Exception:
+            pass
         pen = QPen(QColor(180, 10, 10))
         pen.setWidthF(1.0)
         painter.setPen(pen)
@@ -257,10 +282,247 @@ class ReplayWidget(QOpenGLWidget):
         painter.end()
 
 
+class GLViewer(QOpenGLWidget):
+    """OpenGL VBO-backed viewer for large numbers of agents.
+
+    This attempts to use PyOpenGL. If not available, constructing this
+    widget will raise ImportError and the caller should fall back.
+    """
+
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        if positions.ndim != 3 or positions.shape[2] != 2:
+            raise ValueError("positions must be (T, N, 2)")
+        self.positions = positions
+        self.T, self.N, _ = positions.shape
+        self.frame = 0
+        self.playing = False
+        self.base_interval_ms = 50
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.setInterval(self.base_interval_ms)
+        self._vbo = None
+        self._program = None
+        self._gl_available = False
+
+        try:
+            from OpenGL import GL
+            from OpenGL.arrays import vbo as glvbo
+            self._GL = GL
+            self._glvbo = glvbo
+            self._gl_available = True
+        except Exception:
+            self._gl_available = False
+        # compute initial world bounds (avoid degenerate projection)
+        try:
+            xs = self.positions[:, :, 0]
+            ys = self.positions[:, :, 1]
+            valid = np.isfinite(xs) & np.isfinite(ys)
+            if np.any(valid):
+                self.xmin = float(np.nanmin(xs[valid]))
+                self.xmax = float(np.nanmax(xs[valid]))
+                self.ymin = float(np.nanmin(ys[valid]))
+                self.ymax = float(np.nanmax(ys[valid]))
+            else:
+                self.xmin, self.xmax, self.ymin, self.ymax = 0.0, 1.0, 0.0, 1.0
+        except Exception:
+            self.xmin, self.xmax, self.ymin, self.ymax = 0.0, 1.0, 0.0, 1.0
+
+    def _tick(self):
+        if not self.playing:
+            return
+        self.frame += 1
+        if self.frame >= self.T:
+            self.frame = self.T - 1
+            self.playing = False
+            self.timer.stop()
+        self.update()
+
+    def start(self):
+        if self.frame >= self.T - 1:
+            self.frame = 0
+        self.playing = True
+        if not self.timer.isActive():
+            self.timer.start()
+
+    def pause(self):
+        self.playing = False
+        if self.timer.isActive():
+            self.timer.stop()
+
+    def stop(self):
+        self.playing = False
+        self.frame = 0
+        if self.timer.isActive():
+            self.timer.stop()
+        self.update()
+
+    def restart(self):
+        self.frame = 0
+        self.playing = True
+        if not self.timer.isActive():
+            self.timer.start()
+        self.update()
+
+    def set_speed(self, multiplier: float):
+        interval = max(1, int(self.base_interval_ms / float(multiplier)))
+        self.timer.setInterval(interval)
+
+    def initializeGL(self):
+        if not self._gl_available:
+            return
+        GL = self._GL
+        GL.glClearColor(1.0, 1.0, 1.0, 1.0)
+        try:
+            # create an empty VBO
+            self._vbo = self._glvbo.VBO(np.zeros((0, 2), dtype=np.float32))
+        except Exception:
+            self._vbo = None
+
+    def paintGL(self):
+        if not self._gl_available:
+            # fallback to software painter
+            painter = QPainter(self)
+            painter.drawText(10, 20, 'OpenGL not available')
+            painter.end()
+            return
+        GL = self._GL
+        # ensure viewport and clear
+        try:
+            GL.glViewport(0, 0, int(self.width()), int(self.height()))
+        except Exception:
+            pass
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+        # fetch current positions and draw as points
+        try:
+            pts = self.positions[self.frame].astype(np.float32)
+            # set projection to world coordinates
+            try:
+                GL.glMatrixMode(GL.GL_PROJECTION)
+                GL.glLoadIdentity()
+                # Note: OpenGL bottom-left origin; flip Y by swapping ymin/ymax for correct orientation
+                GL.glOrtho(self.xmin, self.xmax, self.ymax, self.ymin, -1.0, 1.0)
+                GL.glMatrixMode(GL.GL_MODELVIEW)
+                GL.glLoadIdentity()
+            except Exception:
+                pass
+            if self._vbo is None:
+                # fallback to immediate mode
+                try:
+                    import logging as _lg
+                    _lg.getLogger('realtime_viewer').debug('GLViewer.paintGL immediate mode: pts=%s bounds=(%s,%s,%s,%s)',
+                                                              getattr(pts, 'shape', None), self.xmin, self.xmax, self.ymin, self.ymax)
+                except Exception:
+                    pass
+                GL.glColor3f(0.8, 0.12, 0.12)
+                # draw larger points so they're visible
+                GL.glPointSize(6.0)
+                GL.glBegin(GL.GL_POINTS)
+                for x, y in pts:
+                    try:
+                        GL.glVertex2f(float(x), float(y))
+                    except Exception:
+                        pass
+                GL.glEnd()
+                # draw a visible cross at world center for debugging
+                try:
+                    cx = 0.5 * (self.xmin + self.xmax)
+                    cy = 0.5 * (self.ymin + self.ymax)
+                    GL.glColor3f(0.0, 0.0, 0.0)
+                    GL.glLineWidth(2.0)
+                    GL.glBegin(GL.GL_LINES)
+                    GL.glVertex2f(cx - (self.xmax - self.xmin) * 0.01, cy)
+                    GL.glVertex2f(cx + (self.xmax - self.xmin) * 0.01, cy)
+                    GL.glVertex2f(cx, cy - (self.ymax - self.ymin) * 0.01)
+                    GL.glVertex2f(cx, cy + (self.ymax - self.ymin) * 0.01)
+                    GL.glEnd()
+                except Exception:
+                    pass
+            else:
+                # update VBO with current points and draw with vertex arrays
+                try:
+                    self._vbo.set_array(pts)
+                    self._vbo.bind()
+                    GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
+                    GL.glVertexPointer(2, GL.GL_FLOAT, 0, self._vbo)
+                    GL.glPointSize(3.0)
+                    GL.glDrawArrays(GL.GL_POINTS, 0, pts.shape[0])
+                    GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                    self._vbo.unbind()
+                except Exception:
+                    # final fallback to immediate mode
+                    GL.glColor3f(0.8, 0.12, 0.12)
+                    GL.glPointSize(3.0)
+                    GL.glBegin(GL.GL_POINTS)
+                    for x, y in pts:
+                        GL.glVertex2f(float(x), float(y))
+                    GL.glEnd()
+        except Exception:
+            pass
+
+    def update_frame(self, arr):
+        """Called from GUI thread with an (N,2) float array to update current points."""
+        try:
+            pts = np.asarray(arr, dtype=np.float32)
+            if pts.ndim != 2 or pts.shape[1] != 2:
+                return
+            # update world bounds
+            xs = pts[:, 0]
+            ys = pts[:, 1]
+            valid = np.isfinite(xs) & np.isfinite(ys)
+            if np.any(valid):
+                self.xmin = float(np.nanmin(xs[valid]))
+                self.xmax = float(np.nanmax(xs[valid]))
+                self.ymin = float(np.nanmin(ys[valid]))
+                self.ymax = float(np.nanmax(ys[valid]))
+            # assign into positions buffer so paintGL can access indexed by frame
+            try:
+                self.positions = pts[np.newaxis, :, :]
+                self.T, self.N = self.positions.shape[0], self.positions.shape[1]
+            except Exception:
+                pass
+            # if VBO present, update it now
+            if self._gl_available and self._vbo is not None:
+                try:
+                    self._vbo.set_array(pts)
+                except Exception:
+                    pass
+            self.update()
+        except Exception:
+            pass
+
+
+    def shutdown_live(self):
+        try:
+            if self._live_worker is not None:
+                try:
+                    self._live_worker.stop()
+                except Exception:
+                    pass
+            if self._live_thread is not None:
+                try:
+                    # ask thread to quit and wait a short while
+                    import logging as _lg
+                    _lg.getLogger('realtime_viewer').debug('Requesting live thread quit')
+                    self._live_thread.quit()
+                    # wait up to 2s for clean stop
+                    if not self._live_thread.wait(2000):
+                        _lg.getLogger('realtime_viewer').warning('Live thread did not stop after quit(); terminating')
+                        try:
+                            self._live_thread.terminate()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
 class MainWindow(QMainWindow):
-    def __init__(self, positions: np.ndarray):
+    def __init__(self, positions: np.ndarray, watchdog_seconds: float = 5.0):
         super().__init__()
         self.setWindowTitle("Realtime Simulation Viewer")
+        self._watchdog_seconds = float(watchdog_seconds)
         self.viewer = ReplayWidget(positions)
 
         btn_start = QPushButton("Start")
@@ -293,9 +555,255 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
+    def closeEvent(self, event):
+        # ensure viewer widget cleans up any live sockets/timers
+        try:
+            import logging as _lg
+            _lg.getLogger('realtime_viewer').debug('MainWindow.closeEvent: initiating shutdown_live')
+            self.viewer.shutdown_live()
+        except Exception:
+            pass
+
+        # if there is still a live thread, start a short watchdog to force-stop
+        try:
+            thr = getattr(self.viewer, '_live_thread', None)
+            worker = getattr(self.viewer, '_live_worker', None)
+            if thr is not None and thr.isRunning():
+                import logging as _lg
+                log = _lg.getLogger('realtime_viewer')
+                # request worker stop if available
+                try:
+                    if worker is not None:
+                        worker.stop()
+                except Exception:
+                    pass
+                # give it some time to stop gracefully
+                waited = 0.0
+                step = 0.1
+                max_wait = max(0.1, float(self._watchdog_seconds))
+                log.debug('Waiting up to %.2fs for live thread to stop', max_wait)
+                while thr.isRunning() and waited < max_wait:
+                    QThread.msleep(int(step * 1000))
+                    waited += step
+                if thr.isRunning():
+                    try:
+                        log.debug('Requesting thread quit()')
+                        thr.quit()
+                        if not thr.wait(int(max_wait * 1000)):
+                            log.warning('Thread did not stop; terminating')
+                            try:
+                                thr.terminate()
+                            except Exception:
+                                pass
+                    except Exception:
+                        try:
+                            thr.terminate()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        return super().closeEvent(event)
+
     def _on_speed(self, v: int):
         mult = v / 100.0
         self.viewer.set_speed(mult if mult > 0 else 1.0)
+
+
+class LiveReceiver(QObject):
+    """Worker that connects to a TCP server and emits numpy frames."""
+    frame_received = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, host: str, port: int, parent=None):
+        super().__init__(parent)
+        self.host = host
+        self.port = int(port)
+        self._running = False
+        self._sock = None
+
+    def stop(self):
+        self._running = False
+        try:
+            if self._sock is not None:
+                try:
+                    self._sock.shutdown(2)
+                except Exception:
+                    pass
+                try:
+                    self._sock.close()
+                except Exception:
+                    pass
+                self._sock = None
+        except Exception:
+            pass
+
+    def run(self):
+        import socket, io, struct, time
+
+        self._running = True
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # retry connect a few times
+        connected = False
+        for _ in range(60):
+            try:
+                sock.connect((self.host, self.port))
+                connected = True
+                break
+            except Exception:
+                time.sleep(0.2)
+        if not connected:
+            try:
+                self.error.emit(f'connect_failed:{self.host}:{self.port}')
+            except Exception:
+                pass
+            return
+        sock.setblocking(True)
+        self._sock = sock
+        try:
+            while self._running:
+                try:
+                    first = sock.recv(1)
+                except Exception as e:
+                    try:
+                        self.error.emit(f'recv_header_error:{e}')
+                    except Exception:
+                        pass
+                    break
+                if not first:
+                    break
+                # If first byte is 'R' -> raw protocol: read next 4-byte length
+                if first == b'R':
+                    try:
+                        lb = sock.recv(4)
+                    except Exception as e:
+                        try:
+                            self.error.emit(f'incomplete_raw_length:{e}')
+                            try:
+                                import logging as _lg
+                                _lg.getLogger('realtime_viewer').debug('incomplete_raw_length recv exception: %s', e)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        break
+                    if not lb or len(lb) < 4:
+                        try:
+                            self.error.emit('incomplete_raw_length')
+                            try:
+                                import logging as _lg
+                                _lg.getLogger('realtime_viewer').debug('incomplete_raw_length lb=%r', lb)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        break
+                    (nbytes,) = struct.unpack('!I', lb)
+                    try:
+                        import logging as _lg
+                        _lg.getLogger('realtime_viewer').debug('raw header nbytes=%d', nbytes)
+                    except Exception:
+                        pass
+                    buf = bytearray()
+                    while len(buf) < nbytes:
+                        try:
+                            chunk = sock.recv(nbytes - len(buf))
+                        except Exception as e:
+                            try:
+                                self.error.emit(f'recv_chunk_error:{e}')
+                            except Exception:
+                                pass
+                            chunk = None
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+                    if len(buf) < nbytes:
+                        try:
+                            self.error.emit('incomplete_raw_payload')
+                            try:
+                                import logging as _lg
+                                _lg.getLogger('realtime_viewer').debug('incomplete_raw_payload expected=%d got=%d', nbytes, len(buf))
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        continue
+                    try:
+                        arr = np.frombuffer(bytes(buf), dtype=np.float32)
+                        if arr.size % 2 != 0:
+                            try:
+                                self.error.emit('raw_payload_not_even')
+                            except Exception:
+                                pass
+                            continue
+                        arr = arr.reshape((-1, 2))
+                    except Exception as e:
+                        try:
+                            self.error.emit(f'raw_parse_error:{e}')
+                            try:
+                                import logging as _lg
+                                _lg.getLogger('realtime_viewer').exception('raw_parse_error: nbytes=%d buf_len=%d', nbytes, len(buf))
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        continue
+                else:
+                    # first is first byte of 4-byte big-endian length for numpy case
+                    rest = sock.recv(3)
+                    if not rest or len(rest) < 3:
+                        try:
+                            self.error.emit('incomplete_length')
+                            try:
+                                import logging as _lg
+                                _lg.getLogger('realtime_viewer').debug('incomplete_length first=%r rest=%r', first, rest)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        break
+                    length_bytes = first + rest
+                    (nbytes,) = struct.unpack('!I', length_bytes)
+                    try:
+                        import logging as _lg
+                        _lg.getLogger('realtime_viewer').debug('npy header length=%d', nbytes)
+                    except Exception:
+                        pass
+                    buf = bytearray()
+                    while len(buf) < nbytes:
+                        try:
+                            chunk = sock.recv(nbytes - len(buf))
+                        except Exception as e:
+                            try:
+                                self.error.emit(f'recv_chunk_error:{e}')
+                            except Exception:
+                                pass
+                            chunk = None
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+                    bio = io.BytesIO(bytes(buf))
+                    try:
+                        arr = np.load(bio)
+                    except Exception as e:
+                        try:
+                            self.error.emit(f'npy_load_error:{e}')
+                        except Exception:
+                            pass
+                        continue
+                # emit to GUI thread
+                self.frame_received.emit(arr)
+        except Exception as e:
+            try:
+                self.error.emit(f'worker_exception:{e}')
+            except Exception:
+                pass
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
 
 def load_any(path: str) -> np.ndarray:
@@ -319,10 +827,222 @@ def load_any(path: str) -> np.ndarray:
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("file", nargs="?", help="HDF5 (.h5) or CSV file with simulation positions")
+    parser.add_argument("--live", dest="live", action="store_true", help="Connect to a live simulation TCP stream instead of loading a file")
+    parser.add_argument("--host", dest="host", default="127.0.0.1", help="Host for live stream (default 127.0.0.1)")
+    parser.add_argument("--port", dest="port", type=int, default=50007, help="Port for live stream (default 50007)")
+    parser.add_argument("--debug", dest="debug", action="store_true", help="Enable verbose debug logging to viewer_debug.log and stderr")
+    parser.add_argument("--use-pg", dest="use_pg", action="store_true", help="Use pyqtgraph ScatterPlotItem for rendering (faster for many agents)")
+    parser.add_argument("--use-gl", dest="use_gl", action="store_true", help="Use OpenGL VBO renderer for very large agent counts (best performance if PyOpenGL available)")
+    parser.add_argument("--watchdog-seconds", dest="watchdog_seconds", type=float, default=5.0, help="Force-stop live receiver thread after this many seconds when closing (default 5.0)")
     args = parser.parse_args(argv)
 
     app = QApplication(sys.argv)
 
+    # configure logging
+    import logging
+
+    logger = logging.getLogger('realtime_viewer')
+    logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
+    fh = logging.FileHandler('viewer_debug.log')
+    fh.setLevel(logging.DEBUG)
+    fmt = logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s')
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    if args.debug:
+        sh = logging.StreamHandler()
+        sh.setLevel(logging.DEBUG)
+        sh.setFormatter(fmt)
+        logger.addHandler(sh)
+
+    # live mode: connect to TCP stream and poll frames
+        host = args.host
+        port = args.port
+        positions = np.zeros((1, 0, 2), dtype=float)
+        win = MainWindow(positions, watchdog_seconds=args.watchdog_seconds)
+        # add status label for errors
+        try:
+            status = QLabel('Ready')
+            win.statusBar = status
+        except Exception:
+            status = None
+        win.resize(1000, 700)
+        win.show()
+
+        # Start a LiveReceiver in a QThread to receive frames without blocking the GUI
+        thread = QThread()
+        worker = LiveReceiver(host, port)
+        worker.moveToThread(thread)
+
+        def handle_frame(arr):
+            # arr is (N,2) -> convert to (T=1,N,2)
+            try:
+                if arr.ndim == 2 and arr.shape[1] == 2:
+                    positions_live = arr[np.newaxis, :, :]
+                    # If we receive a large number of agents, prefer GL or PG renderer
+                    try:
+                        Nagents = positions_live.shape[1]
+                    except Exception:
+                        Nagents = 0
+                    use_gl_now = args.use_gl or (Nagents >= 1000)
+                    use_pg_now = args.use_pg or (Nagents > 500 and not use_gl_now)
+                    if use_gl_now:
+                        try:
+                            gl_view = GLViewer(positions_live)
+                            try:
+                                win.centralWidget().layout().replaceWidget(win.viewer, gl_view)
+                                win.viewer.setParent(None)
+                                win.viewer = gl_view
+                            except Exception:
+                                logger.exception('Failed to swap GLViewer into MainWindow')
+                        except Exception:
+                            logger.exception('GLViewer init failed; falling back')
+                    elif use_pg_now and not isinstance(win.viewer, QWidget):
+                        # Lazily initialize PGViewer and swap it in
+                        try:
+                            from pyqtgraph import GraphicsLayoutWidget, ScatterPlotItem
+
+                            class PGViewer(QWidget):
+                                def __init__(self, parent=None):
+                                    super().__init__(parent)
+                                    self.plot = GraphicsLayoutWidget()
+                                    self.sp = ScatterPlotItem(size=4, pen=None, brush=(200, 30, 30, 200))
+                                    vw = self.plot.addViewBox()
+                                    vw.addItem(self.sp)
+                                    layout = QVBoxLayout()
+                                    layout.addWidget(self.plot)
+                                    self.setLayout(layout)
+
+                                def update_frame(self, arr):
+                                    try:
+                                        if arr is None or arr.size == 0:
+                                            self.sp.setData([])
+                                            return
+                                        x = arr[:, 0]
+                                        y = arr[:, 1]
+                                        self.sp.setData(x, y)
+                                    except Exception:
+                                        logger.exception('PGViewer update_frame error')
+
+                            pg_view = PGViewer()
+                            try:
+                                win.centralWidget().layout().replaceWidget(win.viewer, pg_view)
+                                win.viewer.setParent(None)
+                                win.viewer = pg_view
+                            except Exception:
+                                logger.exception('Failed to swap PGViewer into MainWindow')
+                        except Exception:
+                            logger.exception('pyqtgraph renderer init failed')
+                    # set positions on whichever viewer we have
+                    try:
+                        win.viewer.positions = positions_live
+                        # if legacy ReplayWidget
+                        if hasattr(win.viewer, 'T'):
+                            win.viewer.T, win.viewer.N = positions_live.shape[0], positions_live.shape[1]
+                            win.viewer.frame = 0
+                            xs = positions_live[:, :, 0]
+                            ys = positions_live[:, :, 1]
+                            valid = np.isfinite(xs) & np.isfinite(ys)
+                            if np.any(valid):
+                                win.viewer.xmin = float(np.nanmin(xs[valid]))
+                                win.viewer.xmax = float(np.nanmax(xs[valid]))
+                                win.viewer.ymin = float(np.nanmin(ys[valid]))
+                                win.viewer.ymax = float(np.nanmax(ys[valid]))
+                            try:
+                                win.viewer.update()
+                            except Exception:
+                                pass
+                        else:
+                            # assume PGViewer-like
+                            try:
+                                win.viewer.update_frame(arr)
+                            except Exception:
+                                pass
+                    except Exception:
+                        logger.exception('Error setting live positions')
+            except Exception:
+                logger.exception('Error handling frame')
+                pass
+
+        def handle_error(msg):
+            logger.error('LiveReceiver error: %s', msg)
+            try:
+                if status is not None:
+                    status.setText(f'ERROR: {msg}')
+            except Exception:
+                pass
+
+        # worker error signal
+        try:
+            worker.error.connect(handle_error)
+        except Exception:
+            pass
+        worker.frame_received.connect(handle_frame)
+        thread.started.connect(worker.run)
+        thread.start()
+        # store references for cleanup
+        win.viewer._live_thread = thread
+        win.viewer._live_worker = worker
+        logger.info('Started LiveReceiver thread for %s:%d', host, port)
+
+        # optionally use pyqtgraph renderer if requested
+        use_pg = args.use_pg
+        if use_pg:
+            try:
+                from pyqtgraph import PlotWidget, GraphicsLayoutWidget, ScatterPlotItem
+
+                class PGViewer(QWidget):
+                    def __init__(self, parent=None):
+                        super().__init__(parent)
+                        self.plot = GraphicsLayoutWidget()
+                        self.sp = ScatterPlotItem(size=5, pen=None, brush=(200, 30, 30, 200))
+                        vw = self.plot.addViewBox()
+                        vw.addItem(self.sp)
+                        layout = QVBoxLayout()
+                        layout.addWidget(self.plot)
+                        self.setLayout(layout)
+
+                    def update_frame(self, arr):
+                        try:
+                            if arr is None or arr.size == 0:
+                                self.sp.setData([])
+                                return
+                            x = arr[:, 0]
+                            y = arr[:, 1]
+                            self.sp.setData(x, y)
+                        except Exception:
+                            logger.exception('PGViewer update_frame error')
+
+                pg_view = PGViewer()
+                # replace the existing viewer widget in the main layout
+                try:
+                    win.centralWidget().layout().replaceWidget(win.viewer, pg_view)
+                    win.viewer.setParent(None)
+                    win.viewer = pg_view
+                except Exception:
+                    logger.exception('Failed to swap PGViewer into MainWindow')
+            except Exception:
+                logger.exception('pyqtgraph renderer init failed')
+
+        try:
+            ret = app.exec_()
+        except Exception as e:
+            import traceback
+
+            tb = traceback.format_exc()
+            try:
+                with open('viewer_stderr.txt', 'a') as fh:
+                    fh.write('Unhandled exception in viewer:\n')
+                    fh.write(tb)
+            except Exception:
+                pass
+            try:
+                win.viewer.shutdown_live()
+            except Exception:
+                pass
+            sys.exit(1)
+        sys.exit(ret)
+
+    # file mode (fallback)
     path = args.file
     if not path:
         dlg = QFileDialog()
@@ -341,10 +1061,45 @@ def main(argv=None):
         print("Failed to load positions:", e)
         return
 
+    # create window and pick renderer based on agent count
     win = MainWindow(positions)
+    try:
+        Nagents = positions.shape[1]
+    except Exception:
+        Nagents = 0
+    use_gl_mode = args.use_gl or (Nagents >= 1000)
+    if use_gl_mode:
+        try:
+            glw = GLViewer(positions)
+            try:
+                win.centralWidget().layout().replaceWidget(win.viewer, glw)
+                win.viewer.setParent(None)
+                win.viewer = glw
+            except Exception:
+                logger.exception('Failed to swap GLViewer into MainWindow (file mode)')
+        except Exception:
+            logger.exception('GLViewer init failed in file mode; using fallback')
+
     win.resize(1000, 700)
     win.show()
-    sys.exit(app.exec_())
+    try:
+        ret = app.exec_()
+    except Exception as e:
+        import traceback
+
+        tb = traceback.format_exc()
+        try:
+            with open('viewer_stderr.txt', 'a') as fh:
+                fh.write('Unhandled exception in viewer:\n')
+                fh.write(tb)
+        except Exception:
+            pass
+        try:
+            win.viewer.shutdown_live()
+        except Exception:
+            pass
+        sys.exit(1)
+    sys.exit(ret)
 
 
 if __name__ == '__main__':
