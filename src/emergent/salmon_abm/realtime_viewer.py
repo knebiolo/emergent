@@ -181,6 +181,8 @@ class ReplayWidget(QOpenGLWidget):
             self.xmax = 1.0
             self.ymin = 0.0
             self.ymax = 1.0
+        # debug flag to force larger, visible points when in live-diagnostic mode
+        self._debug_force_big = False
 
     def _tick(self):
         if not getattr(self, 'playing', False):
@@ -269,6 +271,9 @@ class ReplayWidget(QOpenGLWidget):
         brush = QColor(220, 30, 30)
         painter.setBrush(brush)
         r = max(1, int(min(w, h) * 0.002))
+        if getattr(self, '_debug_force_big', False):
+            # force large visible dots for live debugging
+            r = max(r, int(min(w, h) * 0.01))
         for i in range(self.N):
             x, y = pts[i]
             if not (np.isfinite(x) and np.isfinite(y)):
@@ -793,7 +798,22 @@ class LiveReceiver(QObject):
                             pass
                         continue
                 # emit to GUI thread
-                self.frame_received.emit(arr)
+                try:
+                    try:
+                        # also write a minimal trace file for robust diagnostics
+                        with open('viewer_frame_trace.txt', 'a') as _tf:
+                            _tf.write(f'frame_received shape={getattr(arr, "shape", None)}\n')
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                try:
+                    self.frame_received.emit(arr)
+                except Exception as e:
+                    try:
+                        self.error.emit(f'emit_error:{e}')
+                    except Exception:
+                        pass
         except Exception as e:
             try:
                 self.error.emit(f'worker_exception:{e}')
@@ -876,6 +896,11 @@ def main(argv=None):
         def handle_frame(arr):
             # arr is (N,2) -> convert to (T=1,N,2)
             try:
+                import logging as _lg
+                log = _lg.getLogger('realtime_viewer')
+                log.debug('handle_frame received arr: ndim=%s shape=%s', getattr(arr, 'ndim', None), getattr(arr, 'shape', None))
+                if arr is None:
+                    return
                 if arr.ndim == 2 and arr.shape[1] == 2:
                     positions_live = arr[np.newaxis, :, :]
                     # If we receive a large number of agents, prefer GL or PG renderer
@@ -885,6 +910,16 @@ def main(argv=None):
                         Nagents = 0
                     use_gl_now = args.use_gl or (Nagents >= 1000)
                     use_pg_now = args.use_pg or (Nagents > 500 and not use_gl_now)
+                    log.debug('Detected %d agents; use_gl_now=%s use_pg_now=%s', Nagents, use_gl_now, use_pg_now)
+                    # For diagnosis: force the reliable software `ReplayWidget` renderer
+                    # unless the user explicitly requested GL via CLI.
+                    if not args.use_gl:
+                        use_gl_now = False
+                        use_pg_now = False
+                        force_replay = True
+                    else:
+                        force_replay = False
+
                     if use_gl_now:
                         try:
                             gl_view = GLViewer(positions_live)
@@ -932,9 +967,61 @@ def main(argv=None):
                                 logger.exception('Failed to swap PGViewer into MainWindow')
                         except Exception:
                             logger.exception('pyqtgraph renderer init failed')
-                    # set positions on whichever viewer we have
+                    # set positions on whichever viewer we have (diagnostic: prefer ReplayWidget)
                     try:
+                        # Diagnostic: if forced, always swap in a fresh ReplayWidget
+                        if force_replay or not isinstance(win.viewer, ReplayWidget):
+                            try:
+                                replay = ReplayWidget(positions_live)
+                                win.centralWidget().layout().replaceWidget(win.viewer, replay)
+                                try:
+                                    win.viewer.setParent(None)
+                                except Exception:
+                                    pass
+                                win.viewer = replay
+                                log.debug('Swapped in ReplayWidget for live frames (diagnostic)')
+                            except Exception:
+                                log.exception('Failed to swap in ReplayWidget')
+
+                        # diagnostics: persist the latest frame to disk for inspection
+                        try:
+                            np.save('latest_live_frame.npy', positions_live)
+                        except Exception:
+                            pass
+                        # compute frame bounds and log them
+                        try:
+                            xs = positions_live[:, :, 0]
+                            ys = positions_live[:, :, 1]
+                            valid = np.isfinite(xs) & np.isfinite(ys)
+                            if np.any(valid):
+                                xmin = float(np.nanmin(xs[valid]))
+                                xmax = float(np.nanmax(xs[valid]))
+                                ymin = float(np.nanmin(ys[valid]))
+                                ymax = float(np.nanmax(ys[valid]))
+                                log.debug('live frame bounds xmin=%s xmax=%s ymin=%s ymax=%s', xmin, xmax, ymin, ymax)
+                        except Exception:
+                            log.exception('Failed computing live frame bounds')
+
                         win.viewer.positions = positions_live
+                        # Extra diagnostic logging: report bounds and trigger update
+                        try:
+                            xs = positions_live[:, :, 0]
+                            ys = positions_live[:, :, 1]
+                            valid = np.isfinite(xs) & np.isfinite(ys)
+                            if np.any(valid):
+                                xmin = float(np.nanmin(xs[valid]))
+                                xmax = float(np.nanmax(xs[valid]))
+                                ymin = float(np.nanmin(ys[valid]))
+                                ymax = float(np.nanmax(ys[valid]))
+                                log.debug('Applying live positions to viewer: xmin=%s xmax=%s ymin=%s ymax=%s', xmin, xmax, ymin, ymax)
+                        except Exception:
+                            log.exception('Failed to compute live bounds for logging')
+                        # if a ReplayWidget is active, request visibly larger points for debugging
+                        try:
+                            if isinstance(win.viewer, ReplayWidget):
+                                win.viewer._debug_force_big = True
+                        except Exception:
+                            pass
                         # if legacy ReplayWidget
                         if hasattr(win.viewer, 'T'):
                             win.viewer.T, win.viewer.N = positions_live.shape[0], positions_live.shape[1]
@@ -947,18 +1034,46 @@ def main(argv=None):
                                 win.viewer.xmax = float(np.nanmax(xs[valid]))
                                 win.viewer.ymin = float(np.nanmin(ys[valid]))
                                 win.viewer.ymax = float(np.nanmax(ys[valid]))
+                            # also write an image snapshot for later inspection (best-effort)
+                            try:
+                                from PIL import Image, ImageDraw
+                                w = 800
+                                h = 600
+                                img = Image.new('RGB', (w, h), (255, 255, 255))
+                                draw = ImageDraw.Draw(img)
+                                # map world coords to image coords
+                                dx = win.viewer.xmax - win.viewer.xmin if win.viewer.xmax != win.viewer.xmin else 1.0
+                                dy = win.viewer.ymax - win.viewer.ymin if win.viewer.ymax != win.viewer.ymin else 1.0
+                                s = min(w / dx, h / dy) * 0.9
+                                tx = (w - s * dx) / 2.0
+                                ty = (h - s * dy) / 2.0
+                                for x, y in positions_live[0]:
+                                    if not (np.isfinite(x) and np.isfinite(y)):
+                                        continue
+                                    sxp = tx + (x - win.viewer.xmin) * s
+                                    syp = ty + (win.viewer.ymax - y) * s
+                                    r = max(1, int(min(w, h) * 0.01))
+                                    draw.ellipse((sxp - r, syp - r, sxp + r, syp + r), fill=(220, 30, 30))
+                                try:
+                                    img.save('viewer_snapshot.png')
+                                except Exception:
+                                    pass
+                            except Exception:
+                                # PIL might not be installed; skip snapshot
+                                pass
                             try:
                                 win.viewer.update()
+                                log.debug('Called win.viewer.update()')
                             except Exception:
-                                pass
+                                log.exception('viewer.update() failed')
                         else:
                             # assume PGViewer-like
                             try:
                                 win.viewer.update_frame(arr)
                             except Exception:
-                                pass
+                                log.exception('PGViewer update_frame failed')
                     except Exception:
-                        logger.exception('Error setting live positions')
+                        log.exception('Error setting live positions')
             except Exception:
                 logger.exception('Error handling frame')
                 pass
