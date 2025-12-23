@@ -231,7 +231,8 @@ class movement():
         Hz = np.where(self.simulation.swim_behav == 3, min_Hz, Hz_raw)
 
         # if the numerator (power) is essentially zero, there is no thrust requirement -> no tailbeat
-        zero_power_mask = (num_si <= (1e-12))
+        # do not override minimum-Hz behavior (swim_behav == 3)
+        zero_power_mask = (num_si <= (1e-12)) & (self.simulation.swim_behav != 3)
         Hz = np.where(zero_power_mask, 0.0, Hz)
 
         # stuck agents have zero Hz

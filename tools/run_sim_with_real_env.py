@@ -115,13 +115,123 @@ if depth is not None:
     except Exception as e:
         print('Debug geo_to_pixel failed:', e)
 
-# run for requested timesteps and print diagnostics per step
+# Prepare per-timestep agent_data datasets so we persist a time-series for later analysis
+# We'll create datasets with shape (n_agents, nsteps+1) and store the initial state at column 0
+n_agents = getattr(sim, 'X', None).shape[0]
+nsteps = args.nsteps
+if 'agent_data' not in sim.db:
+    sim.db.create_group('agent_data')
+
+# helper to create a timeseries dataset if it doesn't exist
+def _create_ts(name, init_array, dtype=None):
+    key = 'agent_data/' + name
+    shape = (n_agents, nsteps + 1)
+    if dtype is None:
+        dtype = init_array.dtype
+    # only create if missing
+    if key not in sim.db:
+        try:
+            sim.db.create_dataset(key, shape=shape, dtype=dtype)
+        except Exception:
+            # fallback to writing with numpy array
+            sim.db.create_dataset(key, data=np.zeros(shape, dtype=dtype))
+    # write initial column
+    try:
+        sim.db[key][:, 0] = init_array
+    except Exception:
+        # try broadcasting
+        sim.db[key][:, 0] = np.array(init_array)
+
+# Create core time-series datasets from available sim fields or top-level datasets
+_create_ts('X', getattr(sim, 'X'))
+_create_ts('Y', getattr(sim, 'Y'))
+_create_ts('prev_X', getattr(sim, 'prev_X'))
+_create_ts('prev_Y', getattr(sim, 'prev_Y'))
+# velocities if present on sim
+if hasattr(sim, 'x_vel') and hasattr(sim, 'y_vel'):
+    _create_ts('x_vel', getattr(sim, 'x_vel'))
+    _create_ts('y_vel', getattr(sim, 'y_vel'))
+# Hz (tailbeat freq)
+if hasattr(sim, 'Hz'):
+    _create_ts('Hz', getattr(sim, 'Hz'))
+# swim behavior and stuck flags
+if hasattr(sim, 'swim_behav'):
+    _create_ts('swim_behav', getattr(sim, 'swim_behav'))
+if hasattr(sim, 'is_stuck'):
+    _create_ts('is_stuck', getattr(sim, 'is_stuck'))
+# length/weight/sex
+if hasattr(sim, 'length'):
+    try:
+        _create_ts('length', getattr(sim, 'length'))
+    except Exception:
+        pass
+if hasattr(sim, 'weight'):
+    try:
+        _create_ts('weight', getattr(sim, 'weight'))
+    except Exception:
+        pass
+
+# optional scalar summaries (thrust and drag magnitudes)
+try:
+    thrust_mag = np.linalg.norm(getattr(sim, 'thrust'), axis=1)
+    _create_ts('thrust_mag', thrust_mag)
+except Exception:
+    pass
+try:
+    drag_mag = np.linalg.norm(getattr(sim, 'drag'), axis=1)
+    _create_ts('drag_mag', drag_mag)
+except Exception:
+    pass
+
+# run for requested timesteps and print diagnostics per step, write per-step columns
 for i in range(args.nsteps):
     sim.timestep(i, 1.0)
-    mean_Hz = np.nanmean(sim.Hz)
-    mean_thrust = np.nanmean(np.linalg.norm(sim.thrust, axis=1))
-    mean_drag = np.nanmean(np.linalg.norm(sim.drag, axis=1))
-    mean_speed = np.nanmean(np.linalg.norm(np.stack((sim.x_vel, sim.y_vel), axis=-1), axis=1))
+    # Persist current state into agent_data/* datasets at column i+1
+    col = i + 1
+    try:
+        sim.db['agent_data/X'][:, col] = sim.X
+        sim.db['agent_data/Y'][:, col] = sim.Y
+    except Exception:
+        pass
+    try:
+        if 'x_vel' in sim.db and hasattr(sim, 'x_vel'):
+            sim.db['agent_data/x_vel'][:, col] = sim.x_vel
+        if 'y_vel' in sim.db and hasattr(sim, 'y_vel'):
+            sim.db['agent_data/y_vel'][:, col] = sim.y_vel
+    except Exception:
+        pass
+    try:
+        if 'Hz' in sim.db and hasattr(sim, 'Hz'):
+            sim.db['agent_data/Hz'][:, col] = sim.Hz
+    except Exception:
+        pass
+    try:
+        if 'swim_behav' in sim.db and hasattr(sim, 'swim_behav'):
+            sim.db['agent_data/swim_behav'][:, col] = sim.swim_behav
+    except Exception:
+        pass
+    try:
+        if 'is_stuck' in sim.db and hasattr(sim, 'is_stuck'):
+            sim.db['agent_data/is_stuck'][:, col] = sim.is_stuck
+    except Exception:
+        pass
+    try:
+        if 'thrust_mag' in sim.db and hasattr(sim, 'thrust'):
+            tmag = np.linalg.norm(sim.thrust, axis=1)
+            sim.db['agent_data/thrust_mag'][:, col] = tmag
+    except Exception:
+        pass
+    try:
+        if 'drag_mag' in sim.db and hasattr(sim, 'drag'):
+            dmag = np.linalg.norm(sim.drag, axis=1)
+            sim.db['agent_data/drag_mag'][:, col] = dmag
+    except Exception:
+        pass
+
+    mean_Hz = np.nanmean(sim.Hz) if hasattr(sim, 'Hz') else float('nan')
+    mean_thrust = np.nanmean(np.linalg.norm(sim.thrust, axis=1)) if hasattr(sim, 'thrust') else float('nan')
+    mean_drag = np.nanmean(np.linalg.norm(sim.drag, axis=1)) if hasattr(sim, 'drag') else float('nan')
+    mean_speed = np.nanmean(np.linalg.norm(np.stack((getattr(sim,'x_vel', np.zeros_like(sim.X)), getattr(sim,'y_vel', np.zeros_like(sim.Y))), axis=-1), axis=1))
     moved = np.sum((sim.X != sim.prev_X) | (sim.Y != sim.prev_Y))
     print(f'step {i}: mean_Hz={mean_Hz:.3f}, mean_thrust={mean_thrust:.3e}, mean_drag={mean_drag:.3e}, mean_speed={mean_speed:.3f}, moved_agents={moved}')
 
