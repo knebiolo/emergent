@@ -43,19 +43,34 @@ def plot_db(db_path, out_path):
             Y = f['agent_data/Y'][()]
 
     fig, ax = plt.subplots(figsize=(10, 8))
-    # show depth raster using geographic extents so trajectories overlay correctly
-    # x_coords and y_coords are raster-shaped arrays giving world coordinates for each pixel
+    # prepare georeferenced extent and mask invalid values (sentinel -9999)
+    depth_mask = depth.astype(float)
+    depth_mask[depth_mask <= -1000] = np.nan
     x_min, x_max = float(np.nanmin(x_coords)), float(np.nanmax(x_coords))
     y_min, y_max = float(np.nanmin(y_coords)), float(np.nanmax(y_coords))
     extent = [x_min, x_max, y_min, y_max]
-    # use a blue colormap reversed so deeper = darker
-    im = ax.imshow(depth, cmap='Blues_r', origin='upper', extent=extent)
+    # decide origin based on y_coords ordering: if y decreases with row index, origin='upper'
+    origin = 'lower'
+    try:
+        if np.nanmean(y_coords[0, :]) > np.nanmean(y_coords[-1, :]):
+            origin = 'upper'
+        else:
+            origin = 'lower'
+    except Exception:
+        origin = 'lower'
+    try:
+        vmin, vmax = np.nanpercentile(depth_mask, [1, 99])
+    except Exception:
+        vmin, vmax = None, None
+    im = ax.imshow(depth_mask, cmap='Blues_r', origin=origin, extent=extent, vmin=vmin, vmax=vmax)
     cbar = fig.colorbar(im, ax=ax, label='Depth (m)')
 
     # Plot trajectories directly in world coordinates (X, Y). Split on NaNs and large jumps.
     n_agents = X.shape[0]
     n_steps = X.shape[1] if X.ndim > 1 else 1
-    max_jump = max(x_max - x_min, y_max - y_min) * 0.1  # large jump threshold (10% of domain)
+    # dynamic jump threshold per agent: fraction of domain diagonal or median*4
+    domain_diag = np.hypot(x_max - x_min, y_max - y_min)
+    max_jump_domain = domain_diag * 0.05
     segments = []
     starts = []
     for ai in range(n_agents):
@@ -70,9 +85,16 @@ def plot_db(db_path, out_path):
         last_idx = run_start
         run_x = [xs[run_start]]
         run_y = [ys[run_start]]
+        # compute median jump to set per-agent threshold
+        if len(idxs_valid) > 2:
+            jumps = np.hypot(np.diff(xs[idxs_valid]), np.diff(ys[idxs_valid]))
+            med = float(np.nanmedian(jumps)) if jumps.size else 0.0
+            thr = min(max_jump_domain, max(med * 4.0, 1.0))
+        else:
+            thr = max_jump_domain
         for k in idxs_valid[1:]:
             jump = np.hypot(xs[k] - xs[last_idx], ys[k] - ys[last_idx])
-            if k != last_idx + 1 or jump > max_jump:
+            if k != last_idx + 1 or jump > thr:
                 # end current run
                 if len(run_x) >= 2:
                     segments.append(np.column_stack((run_x, run_y)))
@@ -88,13 +110,13 @@ def plot_db(db_path, out_path):
             starts.append((run_x[0], run_y[0]))
     # add all segments as a LineCollection
     if segments:
-        # convert geographic segments to pixel coords for plotting over the image; but since image uses extent,
-        # plotting world coords directly is fine
-        lc = LineCollection(segments, linewidths=0.6, colors='black', alpha=0.6)
-        ax.add_collection(lc)
-        starts = np.array(starts)
-        if starts.size:
-            ax.scatter(starts[:, 0], starts[:, 1], s=4, c='red')
+        # add line collection below markers (thin red lines only to reduce clutter)
+            lc = LineCollection(segments, linewidths=0.4, colors='red', alpha=0.85, zorder=2)
+            ax.add_collection(lc)
+            starts = np.array(starts)
+            if starts.size:
+                # plot starts on top
+                ax.scatter(starts[:, 0], starts[:, 1], s=12, c='red', zorder=3)
 
     ax.set_title('Agent trajectories over depth raster')
     ax.set_xlabel('Easting')
@@ -102,7 +124,8 @@ def plot_db(db_path, out_path):
     ax.set_aspect('equal', adjustable='box')
     # no legend for readability when many agents
     plt.tight_layout()
-    fig.savefig(out_path)
+    # save at higher DPI for clarity
+    fig.savefig(out_path, dpi=300)
     print('Saved plot to', out_path)
 
 
