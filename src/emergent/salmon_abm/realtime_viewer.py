@@ -149,7 +149,7 @@ def load_positions_from_csv(path: str) -> np.ndarray:
 
 
 class ReplayWidget(QOpenGLWidget):
-    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None):
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0):
         super().__init__(parent)
         if positions.ndim != 3 or positions.shape[2] != 2:
             raise ValueError("positions must be (T, N, 2)")
@@ -183,6 +183,10 @@ class ReplayWidget(QOpenGLWidget):
             self.ymax = 1.0
         # debug flag to force larger, visible points when in live-diagnostic mode
         self._debug_force_big = False
+        # view transform state
+        self._pad = float(pad)
+        self._pan_x = float(pan_x)
+        self._pan_y = float(pan_y)
 
     def _tick(self):
         if not getattr(self, 'playing', False):
@@ -226,15 +230,16 @@ class ReplayWidget(QOpenGLWidget):
 
     def paintGL(self):
         import logging as _lg
-        _lg.getLogger('realtime_viewer').debug('ReplayWidget.paintGL called: size=%sx%s frame=%s N=%s', self.width(), self.height(), getattr(self, 'frame', None), getattr(self, 'N', None))
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        w = self.width()
-        h = self.height()
-        painter.fillRect(0, 0, w, h, QColor(255, 255, 255))
-
-        # draw light grid to show canvas area
+        log = _lg.getLogger('realtime_viewer')
         try:
+            log.debug('ReplayWidget.paintGL called: size=%sx%s frame=%s N=%s', self.width(), self.height(), getattr(self, 'frame', None), getattr(self, 'N', None))
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            w = self.width()
+            h = self.height()
+            painter.fillRect(0, 0, w, h, QColor(255, 255, 255))
+
+            # draw light grid to show canvas area
             pen = QPen(QColor(230, 230, 230))
             painter.setPen(pen)
             step = max(20, int(min(w, h) / 10))
@@ -242,79 +247,67 @@ class ReplayWidget(QOpenGLWidget):
                 painter.drawLine(x, 0, x, h)
             for y in range(0, h, step):
                 painter.drawLine(0, y, w, y)
-        except Exception:
-            pass
 
-        dx = self.xmax - self.xmin
-        dy = self.ymax - self.ymin
-        if dx == 0:
-            dx = 1.0
-        if dy == 0:
-            dy = 1.0
-        # add small padding so the view is slightly zoomed out for better context
-        try:
-            pad_factor = 1.15
+            dx = self.xmax - self.xmin
+            dy = self.ymax - self.ymin
+            if dx == 0:
+                dx = 1.0
+            if dy == 0:
+                dy = 1.0
+
+            pad_factor = float(getattr(self, '_pad', 1.15))
             cx = self.xmin + dx * 0.5
             cy = self.ymin + dy * 0.5
             dx = dx * pad_factor
             dy = dy * pad_factor
-            self_xmin = cx - dx * 0.5
-            self_ymin = cy - dy * 0.5
-            # use local vars below to avoid mutating stored bounds
-            xmin_loc = self_xmin
-            ymin_loc = self_ymin
+            xmin_loc = cx - dx * 0.5
+            ymin_loc = cy - dy * 0.5
             xmax_loc = xmin_loc + dx
             ymax_loc = ymin_loc + dy
-        except Exception:
-            xmin_loc = self.xmin
-            xmax_loc = self.xmax
-            ymin_loc = self.ymin
-            ymax_loc = self.ymax
-        sx = w / dx
-        sy = h / dy
-        s = min(sx, sy) * 0.95
-        tx = (w - s * dx) / 2.0
-        ty = (h - s * dy) / 2.0
 
-        pts = self.positions[self.frame]
-        # if no agents, show waiting message
-        try:
+            sx = w / dx
+            sy = h / dy
+            s = min(sx, sy) * 0.95
+            tx = (w - s * dx) / 2.0
+            ty = (h - s * dy) / 2.0
+
+            pts = self.positions[self.frame]
             if self.N == 0 or pts.size == 0:
                 painter.setPen(QPen(QColor(80, 80, 80)))
                 painter.drawText(int(w / 2) - 80, int(h / 2), 'Waiting for frames...')
-                # also draw debug overlay
                 painter.setPen(QPen(QColor(0, 0, 0)))
                 painter.drawText(6, 28, f'DEBUG: frame={self.frame} N={self.N}')
                 painter.end()
                 return
-        except Exception:
-            pass
-        pen = QPen(QColor(180, 10, 10))
-        pen.setWidthF(1.0)
-        painter.setPen(pen)
-        brush = QColor(220, 30, 30)
-        painter.setBrush(brush)
-        r = max(1, int(min(w, h) * 0.002))
-        if getattr(self, '_debug_force_big', False):
-            # force large visible dots for live debugging
-            r = max(r, int(min(w, h) * 0.01))
-        for i in range(self.N):
-            x, y = pts[i]
-            if not (np.isfinite(x) and np.isfinite(y)):
-                continue
-            sxp = tx + (x - xmin_loc) * s
-            syp = ty + (ymax_loc - y) * s
-            painter.drawEllipse(int(sxp) - r, int(syp) - r, 2 * r, 2 * r)
 
-        painter.setPen(QPen(QColor(0, 0, 0)))
-        painter.drawText(6, 14, f"Frame: {self.frame+1}/{self.T}  Agents: {self.N}")
-        # debug overlay for live diagnostics
-        try:
+            pen = QPen(QColor(180, 10, 10))
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            brush = QColor(220, 30, 30)
+            painter.setBrush(brush)
+            r = max(1, int(min(w, h) * 0.002))
+            if getattr(self, '_debug_force_big', False):
+                r = max(r, int(min(w, h) * 0.01))
+
+            pan_x = getattr(self, '_pan_x', 0.0)
+            pan_y = getattr(self, '_pan_y', 0.0)
+            for i in range(self.N):
+                x, y = pts[i]
+                if not (np.isfinite(x) and np.isfinite(y)):
+                    continue
+                x_adj = x + pan_x * (xmax_loc - xmin_loc)
+                y_adj = y + pan_y * (ymax_loc - ymin_loc)
+                sxp = tx + (x_adj - xmin_loc) * s
+                syp = ty + (ymax_loc - y_adj) * s
+                painter.drawEllipse(int(sxp) - r, int(syp) - r, 2 * r, 2 * r)
+
+            painter.setPen(QPen(QColor(0, 0, 0)))
+            painter.drawText(6, 14, f"Frame: {self.frame+1}/{self.T}  Agents: {self.N}")
             painter.setPen(QPen(QColor(0, 0, 0)))
             painter.drawText(6, 28, f'DEBUG: frame={self.frame} N={self.N} xmin={xmin_loc:.2f} xmax={xmax_loc:.2f} ymin={ymin_loc:.2f} ymax={ymax_loc:.2f}')
+            painter.end()
         except Exception:
-            pass
-        painter.end()
+            _lg.getLogger('realtime_viewer').exception('ReplayWidget.paintGL failed')
 
 
 class GLViewer(QOpenGLWidget):
@@ -324,7 +317,7 @@ class GLViewer(QOpenGLWidget):
     widget will raise ImportError and the caller should fall back.
     """
 
-    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None):
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, force_vbo: bool = False):
         super().__init__(parent)
         if positions.ndim != 3 or positions.shape[2] != 2:
             raise ValueError("positions must be (T, N, 2)")
@@ -339,6 +332,10 @@ class GLViewer(QOpenGLWidget):
         self._vbo = None
         self._program = None
         self._gl_available = False
+        self._pad = float(pad)
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._force_vbo = bool(force_vbo)
 
         try:
             from OpenGL import GL
@@ -407,59 +404,61 @@ class GLViewer(QOpenGLWidget):
         if not self._gl_available:
             return
         GL = self._GL
-        GL.glClearColor(1.0, 1.0, 1.0, 1.0)
         try:
-            # Preallocate a GPU buffer (raw GL buffer) for dynamic point data
+            GL.glClearColor(1.0, 1.0, 1.0, 1.0)
             import ctypes
+            # Preallocate a GPU buffer (raw GL buffer) for dynamic point data
             self._vbo_capacity = max(256, int(getattr(self, 'N', 0)))
             self._vbo_capacity_bytes = int(self._vbo_capacity * 2 * np.dtype(np.float32).itemsize)
+
+            # attempt raw GL buffer creation
+            self._vbo_id = None
             try:
-                # create a raw GL buffer id
                 self._vbo_id = GL.glGenBuffers(1)
                 GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._vbo_id))
-                # allocate empty storage
                 GL.glBufferData(GL.GL_ARRAY_BUFFER, self._vbo_capacity_bytes, None, GL.GL_DYNAMIC_DRAW)
                 GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
                 self._using_raw_vbo = True
             except Exception:
-                # fallback to PyOpenGL VBO wrapper
-                self._vbo = self._glvbo.VBO(np.zeros((self._vbo_capacity, 2), dtype=np.float32))
-                self._using_raw_vbo = False
-            # try to compile a minimal pass-through shader for faster drawing
-            try:
-                vs = b"""
-                #version 120
-                attribute vec2 position;
-                void main() {
-                    gl_Position = gl_ModelViewProjectionMatrix * vec4(position.xy, 0.0, 1.0);
-                    gl_PointSize = 3.0;
-                }
-                """
-                fs = b"""
-                #version 120
-                void main() {
-                    gl_FragColor = vec4(0.8, 0.12, 0.12, 1.0);
-                }
-                """
-                self._program = None
+                # try PyOpenGL VBO wrapper
                 try:
-                    self._program = GL.glCreateProgram()
-                    vs_id = GL.glCreateShader(GL.GL_VERTEX_SHADER)
-                    fs_id = GL.glCreateShader(GL.GL_FRAGMENT_SHADER)
-                    GL.glShaderSource(vs_id, vs)
-                    GL.glCompileShader(vs_id)
-                    GL.glShaderSource(fs_id, fs)
-                    GL.glCompileShader(fs_id)
-                    GL.glAttachShader(self._program, vs_id)
-                    GL.glAttachShader(self._program, fs_id)
-                    GL.glLinkProgram(self._program)
+                    self._vbo = self._glvbo.VBO(np.zeros((self._vbo_capacity, 2), dtype=np.float32))
+                    self._using_raw_vbo = False
                 except Exception:
-                    self._program = None
+                    self._vbo = None
+                    self._using_raw_vbo = False
+
+            # compile a minimal passthrough shader (optional)
+            vs = b"""
+            #version 120
+            attribute vec2 position;
+            void main() {
+                gl_Position = gl_ModelViewProjectionMatrix * vec4(position.xy, 0.0, 1.0);
+                gl_PointSize = 3.0;
+            }
+            """
+            fs = b"""
+            #version 120
+            void main() {
+                gl_FragColor = vec4(0.8, 0.12, 0.12, 1.0);
+            }
+            """
+            try:
+                self._program = GL.glCreateProgram()
+                vs_id = GL.glCreateShader(GL.GL_VERTEX_SHADER)
+                fs_id = GL.glCreateShader(GL.GL_FRAGMENT_SHADER)
+                GL.glShaderSource(vs_id, vs)
+                GL.glCompileShader(vs_id)
+                GL.glShaderSource(fs_id, fs)
+                GL.glCompileShader(fs_id)
+                GL.glAttachShader(self._program, vs_id)
+                GL.glAttachShader(self._program, fs_id)
+                GL.glLinkProgram(self._program)
             except Exception:
-                pass
+                self._program = None
         except Exception:
-            self._vbo = None
-            self._using_raw_vbo = False
+            import logging as _lg
+            _lg.getLogger('realtime_viewer').exception('GLViewer.initializeGL failed')
 
     def paintGL(self):
         if not self._gl_available:
@@ -470,10 +469,7 @@ class GLViewer(QOpenGLWidget):
             return
         GL = self._GL
         # ensure viewport and clear
-        try:
-            GL.glViewport(0, 0, int(self.width()), int(self.height()))
-        except Exception:
-            pass
+        GL.glViewport(0, 0, int(self.width()), int(self.height()))
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
         # fetch current positions and draw as points
         try:
@@ -491,11 +487,16 @@ class GLViewer(QOpenGLWidget):
                         dx = 1.0
                     if dy == 0:
                         dy = 1.0
-                    pad = 1.15
+                    pad = float(getattr(self, '_pad', 1.15))
+                    pan_x = float(getattr(self, '_pan_x', 0.0))
+                    pan_y = float(getattr(self, '_pan_y', 0.0))
                     cx = self.xmin + dx * 0.5
                     cy = self.ymin + dy * 0.5
                     dx *= pad
                     dy *= pad
+                    # apply pan offsets as fraction of (padded) world extents
+                    cx += pan_x * dx
+                    cy += pan_y * dy
                     xminp = cx - dx * 0.5
                     xmaxp = xminp + dx
                     yminp = cy - dy * 0.5
@@ -510,26 +511,74 @@ class GLViewer(QOpenGLWidget):
                 GL.glLoadIdentity()
             except Exception:
                 pass
-            if self._vbo is None:
-                # fallback to immediate mode
-                try:
-                    import logging as _lg
-                    _lg.getLogger('realtime_viewer').debug('GLViewer.paintGL immediate mode: pts=%s bounds=(%s,%s,%s,%s)',
-                                                              getattr(pts, 'shape', None), self.xmin, self.xmax, self.ymin, self.ymax)
-                except Exception:
-                    pass
-                GL.glColor3f(0.8, 0.12, 0.12)
-                # draw larger points so they're visible
-                GL.glPointSize(6.0)
-                GL.glBegin(GL.GL_POINTS)
-                for x, y in pts:
-                    try:
+            # choose drawing path: prefer raw GL buffer when available/forced, else wrapper or immediate
+            import logging as _lg
+            log = _lg.getLogger('realtime_viewer')
+            try:
+                pts2 = np.ascontiguousarray(pts, dtype=np.float32)
+                npoints = pts2.shape[0]
+                using_raw = getattr(self, '_using_raw_vbo', False) and getattr(self, '_vbo_id', None) is not None
+                using_wrapper = getattr(self, '_vbo', None) is not None
+                if self._force_vbo and using_raw:
+                    path = 'raw-vbo'
+                elif using_raw and not using_wrapper:
+                    path = 'raw-vbo'
+                elif using_wrapper and not using_raw:
+                    path = 'wrapper-vbo'
+                elif using_raw and using_wrapper:
+                    path = 'raw-vbo'
+                else:
+                    path = 'immediate'
+                log.debug('GLViewer.paintGL draw path=%s pts=%s bounds=(%s,%s,%s,%s)', path, getattr(pts, 'shape', None), self.xmin, self.xmax, self.ymin, self.ymax)
+
+                if path == 'raw-vbo':
+                    import ctypes
+                    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._vbo_id))
+                    size_bytes = pts2.nbytes
+                    if size_bytes <= getattr(self, '_vbo_capacity_bytes', 0):
+                        GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, pts2)
+                    else:
+                        self._vbo_capacity = npoints
+                        self._vbo_capacity_bytes = pts2.nbytes
+                        GL.glBufferData(GL.GL_ARRAY_BUFFER, self._vbo_capacity_bytes, pts2, GL.GL_DYNAMIC_DRAW)
+                    if getattr(self, '_program', None) is not None:
+                        GL.glUseProgram(self._program)
+                        loc = GL.glGetAttribLocation(self._program, b'position')
+                        if loc != -1:
+                            GL.glEnableVertexAttribArray(loc)
+                            GL.glVertexAttribPointer(loc, 2, GL.GL_FLOAT, False, 0, ctypes.c_void_p(0))
+                            GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                            GL.glDisableVertexAttribArray(loc)
+                        else:
+                            GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
+                            GL.glVertexPointer(2, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
+                            GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                            GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                        GL.glUseProgram(0)
+                    else:
+                        GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
+                        GL.glVertexPointer(2, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
+                        GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                        GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+
+                elif path == 'wrapper-vbo':
+                    self._vbo.set_array(pts2)
+                    self._vbo.bind()
+                    GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
+                    GL.glVertexPointer(2, GL.GL_FLOAT, 0, self._vbo)
+                    GL.glPointSize(3.0)
+                    GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                    GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                    self._vbo.unbind()
+
+                else:
+                    GL.glColor3f(0.8, 0.12, 0.12)
+                    GL.glPointSize(6.0)
+                    GL.glBegin(GL.GL_POINTS)
+                    for x, y in pts:
                         GL.glVertex2f(float(x), float(y))
-                    except Exception:
-                        pass
-                GL.glEnd()
-                # draw a visible cross at world center for debugging
-                try:
+                    GL.glEnd()
                     cx = 0.5 * (self.xmin + self.xmax)
                     cy = 0.5 * (self.ymin + self.ymax)
                     GL.glColor3f(0.0, 0.0, 0.0)
@@ -540,93 +589,9 @@ class GLViewer(QOpenGLWidget):
                     GL.glVertex2f(cx, cy - (self.ymax - self.ymin) * 0.01)
                     GL.glVertex2f(cx, cy + (self.ymax - self.ymin) * 0.01)
                     GL.glEnd()
-                except Exception:
-                    pass
-            else:
-                # update VBO with current points and draw with vertex arrays
-                try:
-                    pts2 = np.ascontiguousarray(pts, dtype=np.float32)
-                    npoints = pts2.shape[0]
-                    # if we have a raw GL buffer id, use glBufferSubData for fast updates
-                    if getattr(self, '_using_raw_vbo', False) and hasattr(self, '_vbo_id'):
-                        try:
-                            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._vbo_id))
-                            size_bytes = pts2.nbytes
-                            if size_bytes <= getattr(self, '_vbo_capacity_bytes', 0):
-                                GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, pts2)
-                            else:
-                                # reallocate larger buffer
-                                self._vbo_capacity = npoints
-                                self._vbo_capacity_bytes = pts2.nbytes
-                                GL.glBufferData(GL.GL_ARRAY_BUFFER, self._vbo_capacity_bytes, pts2, GL.GL_DYNAMIC_DRAW)
-                            # if shader program available, use it
-                            if getattr(self, '_program', None) is not None:
-                                try:
-                                    GL.glUseProgram(self._program)
-                                    loc = GL.glGetAttribLocation(self._program, b'position')
-                                    if loc != -1:
-                                        GL.glEnableVertexAttribArray(loc)
-                                        GL.glVertexAttribPointer(loc, 2, GL.GL_FLOAT, False, 0, ctypes.c_void_p(0))
-                                        GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
-                                        GL.glDisableVertexAttribArray(loc)
-                                    else:
-                                        GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
-                                        GL.glVertexPointer(2, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
-                                        GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
-                                        GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
-                                    GL.glUseProgram(0)
-                                except Exception:
-                                    # fallback to fixed-function pipeline
-                                    GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
-                                    GL.glVertexPointer(2, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
-                                    GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
-                                    GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
-                            else:
-                                GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
-                                GL.glVertexPointer(2, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
-                                GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
-                                GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
-                            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-                        except Exception:
-                            # fallback to PyOpenGL VBO wrapper path
-                            try:
-                                self._vbo.set_array(pts2)
-                                self._vbo.bind()
-                                GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
-                                GL.glVertexPointer(2, GL.GL_FLOAT, 0, self._vbo)
-                                GL.glPointSize(3.0)
-                                GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
-                                GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
-                                self._vbo.unbind()
-                            except Exception:
-                                # final fallback to immediate mode
-                                GL.glColor3f(0.8, 0.12, 0.12)
-                                GL.glPointSize(3.0)
-                                GL.glBegin(GL.GL_POINTS)
-                                for x, y in pts2:
-                                    GL.glVertex2f(float(x), float(y))
-                                GL.glEnd()
-                    else:
-                        # use PyOpenGL VBO wrapper if available
-                        try:
-                            self._vbo.set_array(pts2)
-                            self._vbo.bind()
-                            GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
-                            GL.glVertexPointer(2, GL.GL_FLOAT, 0, self._vbo)
-                            GL.glPointSize(3.0)
-                            GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
-                            GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
-                            self._vbo.unbind()
-                        except Exception:
-                            # final fallback to immediate mode
-                            GL.glColor3f(0.8, 0.12, 0.12)
-                            GL.glPointSize(3.0)
-                            GL.glBegin(GL.GL_POINTS)
-                            for x, y in pts2:
-                                GL.glVertex2f(float(x), float(y))
-                            GL.glEnd()
-                except Exception:
-                    pass
+            except Exception:
+                import logging as _lg
+                _lg.getLogger('realtime_viewer').exception('GLViewer.paintGL failed')
         except Exception:
             pass
 
@@ -689,11 +654,16 @@ class GLViewer(QOpenGLWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, positions: np.ndarray, watchdog_seconds: float = 5.0):
+    def __init__(self, positions: np.ndarray, watchdog_seconds: float = 5.0, pad: float = 1.15, force_vbo: bool = False):
         super().__init__()
         self.setWindowTitle("Realtime Simulation Viewer")
         self._watchdog_seconds = float(watchdog_seconds)
         self.viewer = ReplayWidget(positions)
+        # view state
+        self._pad = float(pad)
+        self._force_vbo = bool(force_vbo)
+        self._pan_x = 0.0
+        self._pan_y = 0.0
 
         btn_start = QPushButton("Start")
         btn_pause = QPushButton("Pause")
@@ -717,6 +687,32 @@ class MainWindow(QMainWindow):
         hl.addWidget(btn_restart)
         hl.addWidget(lbl_speed)
         hl.addWidget(self.speed_slider)
+
+        # zoom and pan controls
+        lbl_zoom = QLabel('Zoom')
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setRange(50, 200)
+        self.zoom_slider.setValue(int(self._pad * 100))
+        self.zoom_slider.valueChanged.connect(self._on_zoom)
+
+        lbl_panx = QLabel('Pan X')
+        self.panx_slider = QSlider(Qt.Horizontal)
+        self.panx_slider.setRange(-200, 200)
+        self.panx_slider.setValue(0)
+        self.panx_slider.valueChanged.connect(self._on_panx)
+
+        lbl_pany = QLabel('Pan Y')
+        self.pany_slider = QSlider(Qt.Horizontal)
+        self.pany_slider.setRange(-200, 200)
+        self.pany_slider.setValue(0)
+        self.pany_slider.valueChanged.connect(self._on_pany)
+
+        hl.addWidget(lbl_zoom)
+        hl.addWidget(self.zoom_slider)
+        hl.addWidget(lbl_panx)
+        hl.addWidget(self.panx_slider)
+        hl.addWidget(lbl_pany)
+        hl.addWidget(self.pany_slider)
 
         container = QWidget()
         layout = QVBoxLayout()
@@ -778,6 +774,24 @@ class MainWindow(QMainWindow):
     def _on_speed(self, v: int):
         mult = v / 100.0
         self.viewer.set_speed(mult if mult > 0 else 1.0)
+
+    def _on_zoom(self, v: int):
+        self._pad = max(0.1, v / 100.0)
+        if hasattr(self.viewer, '_pad'):
+            self.viewer._pad = self._pad
+        self.viewer.update()
+
+    def _on_panx(self, v: int):
+        self._pan_x = float(v) / 100.0
+        if hasattr(self.viewer, '_pan_x'):
+            self.viewer._pan_x = self._pan_x
+        self.viewer.update()
+
+    def _on_pany(self, v: int):
+        self._pan_y = float(v) / 100.0
+        if hasattr(self.viewer, '_pan_y'):
+            self.viewer._pan_y = self._pan_y
+        self.viewer.update()
 
 
 def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
@@ -871,11 +885,8 @@ class LiveReceiver(QObject):
                 connected = True
                 break
             except Exception as e:
-                try:
-                    import logging as _lg
-                    _lg.getLogger('realtime_viewer').debug('LiveReceiver connect attempt %d/%d failed: %s', attempts, max_attempts, e)
-                except Exception:
-                    pass
+                import logging as _lg
+                _lg.getLogger('realtime_viewer').debug('LiveReceiver connect attempt %d/%d failed: %s', attempts, max_attempts, e)
                 time.sleep(0.2)
         if not connected:
             try:
@@ -896,31 +907,16 @@ class LiveReceiver(QObject):
                 first = sock.recv(1)
                 if not first:
                     break
-                if not first:
-                    break
+
                 # If first byte is 'R' -> raw protocol: read next 4-byte length
                 if first == b'R':
                     lb = sock.recv(4)
                     if not lb or len(lb) < 4:
                         self.error.emit('incomplete_raw_length')
                         break
-                    if not lb or len(lb) < 4:
-                        try:
-                            self.error.emit('incomplete_raw_length')
-                            try:
-                                import logging as _lg
-                                _lg.getLogger('realtime_viewer').debug('incomplete_raw_length lb=%r', lb)
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-                        break
                     (nbytes,) = struct.unpack('!I', lb)
-                    try:
-                        import logging as _lg
-                        _lg.getLogger('realtime_viewer').debug('raw header nbytes=%d', nbytes)
-                    except Exception:
-                        pass
+                    import logging as _lg
+                    _lg.getLogger('realtime_viewer').debug('raw header nbytes=%d', nbytes)
                     buf = bytearray()
                     while len(buf) < nbytes:
                         chunk = sock.recv(nbytes - len(buf))
@@ -928,15 +924,8 @@ class LiveReceiver(QObject):
                             break
                         buf.extend(chunk)
                     if len(buf) < nbytes:
-                        try:
-                            self.error.emit('incomplete_raw_payload')
-                            try:
-                                import logging as _lg
-                                _lg.getLogger('realtime_viewer').debug('incomplete_raw_payload expected=%d got=%d', nbytes, len(buf))
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
+                        self.error.emit('incomplete_raw_payload')
+                        _lg.getLogger('realtime_viewer').debug('incomplete_raw_payload expected=%d got=%d', nbytes, len(buf))
                         continue
                     arr = np.frombuffer(bytes(buf), dtype=np.float32)
                     if arr.size % 2 != 0:
@@ -951,11 +940,8 @@ class LiveReceiver(QObject):
                         break
                     length_bytes = first + rest
                     (nbytes,) = struct.unpack('!I', length_bytes)
-                    try:
-                        import logging as _lg
-                        _lg.getLogger('realtime_viewer').debug('npy header length=%d', nbytes)
-                    except Exception:
-                        pass
+                    import logging as _lg
+                    _lg.getLogger('realtime_viewer').debug('npy header length=%d', nbytes)
                     buf = bytearray()
                     while len(buf) < nbytes:
                         chunk = sock.recv(nbytes - len(buf))
@@ -966,10 +952,7 @@ class LiveReceiver(QObject):
                     try:
                         arr = np.load(bio)
                     except Exception as e:
-                        try:
-                            self.error.emit(f'npy_load_error:{e}')
-                        except Exception:
-                            pass
+                        self.error.emit(f'npy_load_error:{e}')
                         continue
                 # emit to GUI thread
                 try:
@@ -1027,6 +1010,8 @@ def main(argv=None):
     parser.add_argument("--debug", dest="debug", action="store_true", help="Enable verbose debug logging to viewer_debug.log and stderr")
     parser.add_argument("--use-pg", dest="use_pg", action="store_true", help="Use pyqtgraph ScatterPlotItem for rendering (faster for many agents)")
     parser.add_argument("--use-gl", dest="use_gl", action="store_true", help="Use OpenGL VBO renderer for very large agent counts (best performance if PyOpenGL available)")
+    parser.add_argument("--view-pad", dest="view_pad", type=float, default=1.15, help="View padding factor (zoom out). Default 1.15")
+    parser.add_argument("--force-vbo", dest="force_vbo", action="store_true", help="Force VBO/raw GL buffer path when available")
     parser.add_argument("--watchdog-seconds", dest="watchdog_seconds", type=float, default=5.0, help="Force-stop live receiver thread after this many seconds when closing (default 5.0)")
     args = parser.parse_args(argv)
 
@@ -1053,7 +1038,7 @@ def main(argv=None):
         host = args.host
         port = args.port
         positions = np.zeros((1, 0, 2), dtype=float)
-        win = MainWindow(positions, watchdog_seconds=args.watchdog_seconds)
+        win = MainWindow(positions, watchdog_seconds=args.watchdog_seconds, pad=args.view_pad, force_vbo=args.force_vbo)
         # add status label for errors
         try:
             status = QLabel('Ready')
@@ -1097,7 +1082,7 @@ def main(argv=None):
 
                     if use_gl_now:
                         try:
-                            gl_view = GLViewer(positions_live)
+                            gl_view = GLViewer(positions_live, pad=win._pad, force_vbo=win._force_vbo)
                         except Exception:
                             # if GLViewer init fails, log and continue to fallback
                             log.exception('GLViewer init failed; falling back to other renderers')
@@ -1105,6 +1090,13 @@ def main(argv=None):
                         if gl_view is not None:
                             try:
                                 swap_viewer_in_main(win, gl_view)
+                                # apply window pan/zoom state
+                                try:
+                                    gl_view._pad = win._pad
+                                    gl_view._pan_x = win._pan_x
+                                    gl_view._pan_y = win._pan_y
+                                except Exception:
+                                    pass
                             except Exception:
                                 logger.exception('Failed to swap GLViewer into MainWindow')
                     elif use_pg_now and not isinstance(win.viewer, QWidget):
@@ -1145,53 +1137,46 @@ def main(argv=None):
                     try:
                         # Prefer the reliable software `ReplayWidget` renderer unless GL requested
                         if not args.use_gl and not isinstance(win.viewer, ReplayWidget):
+                            replay = ReplayWidget(positions_live, pad=win._pad)
+                            try:
+                                swap_viewer_in_main(win, replay)
+                            except Exception:
+                                # fallback: insert into layout and remove old viewer
+                                parent = win.centralWidget()
+                                layout = parent.layout()
                                 try:
-                                    replay = ReplayWidget(positions_live)
+                                    idx = layout.indexOf(win.viewer)
+                                except Exception:
+                                    idx = -1
+                                if idx is None or idx < 0:
                                     try:
-                                        swap_viewer_in_main(win, replay)
-                                    except Exception:
-                                        # fallback: try to insert new widget next to old, then remove old
-                                        try:
-                                            parent = win.centralWidget()
-                                            layout = parent.layout()
-                                            try:
-                                                idx = layout.indexOf(win.viewer)
-                                            except Exception:
-                                                idx = -1
-                                            if idx is not None and idx >= 0:
-                                                try:
-                                                    layout.insertWidget(idx, replay)
-                                                except Exception:
-                                                    try:
-                                                        layout.addWidget(replay)
-                                                    except Exception:
-                                                        pass
-                                                try:
-                                                    layout.removeWidget(win.viewer)
-                                                except Exception:
-                                                    pass
-                                            else:
-                                                try:
-                                                    layout.addWidget(replay)
-                                                except Exception:
-                                                    pass
-                                            try:
-                                                win.viewer.setParent(None)
-                                            except Exception:
-                                                pass
-                                            win.viewer = replay
-                                        except Exception:
-                                            log.exception('Failed to swap in ReplayWidget')
-                                    log.debug('Swapped in ReplayWidget for live frames')
-                                    try:
-                                        # ensure the widget is visible and request immediate repaint
-                                        win.viewer.show()
-                                        win.viewer.repaint()
-                                        log.debug('Requested show() and repaint() on ReplayWidget')
+                                        layout.addWidget(replay)
                                     except Exception:
                                         pass
+                                else:
+                                    try:
+                                        layout.insertWidget(idx, replay)
+                                    except Exception:
+                                        try:
+                                            layout.addWidget(replay)
+                                        except Exception:
+                                            pass
+                                    try:
+                                        layout.removeWidget(win.viewer)
+                                    except Exception:
+                                        pass
+                                try:
+                                    win.viewer.setParent(None)
                                 except Exception:
-                                    log.exception('Failed to swap in ReplayWidget')
+                                    pass
+                                win.viewer = replay
+                            # ensure the widget is visible and repaint
+                            try:
+                                win.viewer.show()
+                                win.viewer.repaint()
+                                log.debug('Swapped in ReplayWidget for live frames')
+                            except Exception:
+                                log.exception('Failed to show/repaint ReplayWidget')
                         # compute frame bounds and log them
                         try:
                             xs = positions_live[:, :, 0]
@@ -1233,6 +1218,15 @@ def main(argv=None):
                                 win.viewer.xmax = float(np.nanmax(xs[valid]))
                                 win.viewer.ymin = float(np.nanmin(ys[valid]))
                                 win.viewer.ymax = float(np.nanmax(ys[valid]))
+
+                            # ensure viewer inherits window pad/pan state
+                            try:
+                                win.viewer._pad = win._pad
+                                win.viewer._pan_x = win._pan_x
+                                win.viewer._pan_y = win._pan_y
+                            except Exception:
+                                pass
+
                             # snapshot logic removed (diagnostics reverted)
                             try:
                                 win.viewer.update()
@@ -1348,7 +1342,7 @@ def main(argv=None):
         return
 
     # create window and pick renderer based on agent count
-    win = MainWindow(positions)
+    win = MainWindow(positions, pad=args.view_pad, force_vbo=args.force_vbo)
     try:
         Nagents = positions.shape[1]
     except Exception:
@@ -1356,7 +1350,7 @@ def main(argv=None):
     use_gl_mode = args.use_gl or (Nagents >= 1000)
     if use_gl_mode:
         try:
-            glw = GLViewer(positions)
+            glw = GLViewer(positions, pad=win._pad, force_vbo=win._force_vbo)
             try:
                 swap_viewer_in_main(win, glw)
             except Exception:
