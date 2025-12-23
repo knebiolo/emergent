@@ -21,6 +21,8 @@ sim = simulation(model_dir='.', model_name='real_probe', crs=None, basin='test',
 # enable debug flags for diagnostics
 sim.debug_env = True
 sim.debug_freq = True
+# enable fine-grained frequency probe CSV output
+sim.debug_freq_probe = True
 
 # Import rasters into sim.db using io.enviro_import if available
 for ef in env_files:
@@ -127,9 +129,6 @@ for i in range(args.nsteps):
 print('sample depth for agents 0..4:', sim.sample_environment(sim.depth_rast_transform, 'depth')[:5])
 print('sample vel_x for agents 0..4:', sim.sample_environment(sim.vel_dir_rast_transform, 'vel_x')[:5])
 
-sim.db.close()
-print('DB path:', sim.db_path)
-
 # End-of-run diagnostics: print small slices of key arrays and persist freq_debug_history
 try:
     print('\nEnd-of-run diagnostics:')
@@ -137,38 +136,69 @@ try:
     print('thrust[:20]:', getattr(sim, 'thrust', None)[:20])
     print('drag[:20]:', getattr(sim, 'drag', None)[:20])
     print('X[:20]:', getattr(sim, 'X', None)[:20])
-    # freq_debug snapshot if present
-    try:
-        print('freq_debug (most recent):', getattr(sim, 'freq_debug', None))
-        fd_hist = getattr(sim, 'freq_debug_history', None)
-        print('freq_debug_history length:', 0 if fd_hist is None else len(fd_hist))
-        if fd_hist is not None and len(fd_hist) > 0:
-            import json
-            # convert numpy arrays to native Python types for JSON serialization
-            def _make_serializable(o):
-                try:
-                    import numpy as _np
-                except Exception:
-                    _np = None
-                if isinstance(o, dict):
-                    return {k: _make_serializable(v) for k, v in o.items()}
-                if isinstance(o, (list, tuple)):
-                    return [_make_serializable(v) for v in o]
-                if _np is not None and isinstance(o, _np.ndarray):
-                    return _make_serializable(o.tolist())
-                # numpy scalar types
-                if _np is not None and isinstance(o, (_np.integer, _np.floating)):
-                    return o.item()
-                return o
 
+    # freq_debug snapshot if present
+    print('freq_debug (most recent):', getattr(sim, 'freq_debug', None))
+    fd_hist = getattr(sim, 'freq_debug_history', None)
+    print('freq_debug_history length:', 0 if fd_hist is None else len(fd_hist))
+
+    import json
+
+    # convert numpy arrays to native Python types for JSON serialization
+    def _make_serializable(o):
+        try:
+            import numpy as _np
+        except Exception:
+            _np = None
+        if isinstance(o, dict):
+            return {k: _make_serializable(v) for k, v in o.items()}
+        if isinstance(o, (list, tuple)):
+            return [_make_serializable(v) for v in o]
+        if _np is not None and isinstance(o, _np.ndarray):
+            return _make_serializable(o.tolist())
+        # numpy scalar types
+        if _np is not None and isinstance(o, (_np.integer, _np.floating)):
+            return o.item()
+        return o
+
+    # persist freq_debug_history if it exists
+    if fd_hist is not None and len(fd_hist) > 0:
+        try:
             serial = [_make_serializable(d) for d in fd_hist]
-            diag_group = 'diagnostics'
-            try:
-                hdf5_io.write_dataset(sim.db, diag_group + '/freq_debug_history_json', np.array([json.dumps(serial)]))
-                print('Wrote diagnostics/freq_debug_history_json to DB')
-            except Exception as e:
-                print('Failed to write freq_debug_history to DB:', e)
-    except Exception as e:
-        print('Error collecting freq_debug:', e)
+            hdf5_io.write_dataset(sim.db, 'diagnostics/freq_debug_history_json', np.array([json.dumps(serial)]))
+            print('Wrote diagnostics/freq_debug_history_json to DB')
+        except Exception as e:
+            print('Failed to write freq_debug_history to DB:', e)
+
+    # persist the term-level history if present
+    fth = getattr(sim, 'freq_terms_history', None)
+    if fth is not None and len(fth) > 0:
+        try:
+            serial_terms = _make_serializable(fth)
+            hdf5_io.write_dataset(sim.db, 'diagnostics/freq_terms_history_json', np.array([json.dumps(serial_terms)]))
+            print('Wrote diagnostics/freq_terms_history_json to DB')
+        except Exception as e:
+            print('Failed to write freq_terms_history to DB:', e)
+        # also write a JSON copy into outputs/ for easier inspection
+        try:
+            out_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
+            out_dir = os.path.abspath(out_dir)
+            if not os.path.exists(out_dir):
+                os.makedirs(out_dir, exist_ok=True)
+            import time
+            fname = f"diagnostics_freq_terms_{int(time.time())}.json"
+            out_path = os.path.join(out_dir, fname)
+            with open(out_path, 'w') as of:
+                json.dump(serial_terms, of)
+            print('Wrote JSON diagnostics copy to', out_path)
+        except Exception as e:
+            print('Failed to write JSON diagnostics copy:', e)
 except Exception as e:
     print('Error printing end-of-run diagnostics:', e)
+
+# Close DB after diagnostics persistence
+try:
+    sim.db.close()
+    print('DB path:', sim.db_path)
+except Exception:
+    pass

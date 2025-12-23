@@ -5,6 +5,8 @@ The implementation is a near-direct extraction and imports light-weight helpers
 from `emergent.salmon_abm.utils` so callers can migrate to the new module.
 """
 import os
+import time
+import csv
 import numpy as np
 import pandas as pd
 from scipy.interpolate import UnivariateSpline
@@ -188,7 +190,8 @@ class movement():
         # denominator (SI): A^2 * B^2 * U * pi^3 * rho * (U - V) * (U + 2*V*cos(theta) - V)
         small_val = 1e-20
         term1_si = (A_m ** 2) * (B_m ** 2) * U_m_s * (np.pi ** 3) * rho_si
-        term2_si = (U_m_s - V_m_s)
+        # Use (V - U) so denominator is positive when body wave speed V > swim speed U
+        term2_si = (V_m_s - U_m_s)
         term3_si = (U_m_s + 2.0 * V_m_s * np.cos(theta_rad) - V_m_s)
         denom_si = term1_si * term2_si * term3_si
 
@@ -242,32 +245,80 @@ class movement():
 
         # Optional instrumentation for debugging frequency internals.
         # If the simulation has attribute `debug_freq` set to True, store
-        # a compact diagnostics dict for the first few agents in `simulation.freq_debug`.
+        # a compact diagnostics dict for the first few agents in `simulation.freq_debug`
+        # and a per-step JSON-serializable history in `simulation.freq_terms_history`.
         try:
             if getattr(self.simulation, 'debug_freq', False):
-                n_diag = min(5, Hz.size)
+                # number of agents in mask
+                N_total = int(mask.sum())
+                # snapshot first few agents for readability
+                Nsnap = min(10, N_total)
+                # build a compact, JSON-serializable diagnostics dict
                 diag = {
-                    'drags_J_s': drags_J_s[:n_diag].astype(float),
-                    'denom_si': denom_si[:n_diag].astype(float),
-                    'num_si': num_si[:n_diag].astype(float),
-                    'Hz_raw': Hz_raw[:n_diag].astype(float),
-                    'ratio_si': (ratio[:n_diag].astype(float)),
-                    'Hz': Hz[:n_diag].astype(float),
-                    'A_m': (A / 100.0)[:n_diag].astype(float),
-                    'B_m': (B / 100.0)[:n_diag].astype(float),
-                    'V_m_s': (V / 100.0)[:n_diag].astype(float),
-                    'U_m_s': (swim_speeds_cms / 100.0)[:n_diag].astype(float),
-                    'safe_ratio': safe_ratio[:n_diag].astype(bool)
+                    'term1_si': np.asarray(term1_si[:Nsnap]).astype(float).tolist(),
+                    'term2_si': np.asarray(term2_si[:Nsnap]).astype(float).tolist(),
+                    'term3_si': np.asarray(term3_si[:Nsnap]).astype(float).tolist(),
+                    'num_si': np.asarray(num_si[:Nsnap]).astype(float).tolist(),
+                    'denom_si': np.asarray(denom_si[:Nsnap]).astype(float).tolist(),
+                    'ratio_si': np.asarray(ratio[:Nsnap]).astype(float).tolist(),
+                    'Hz_raw': np.asarray(Hz_raw[:Nsnap]).astype(float).tolist(),
+                    'Hz': np.asarray(Hz[:Nsnap]).astype(float).tolist(),
+                    'A_m': np.asarray(A_m[:Nsnap]).astype(float).tolist(),
+                    'B_m': np.asarray(B_m[:Nsnap]).astype(float).tolist(),
+                    'V_m_s': np.asarray(V_m_s[:Nsnap]).astype(float).tolist(),
+                    'U_m_s': np.asarray(U_m_s[:Nsnap]).astype(float).tolist(),
+                    'safe_ratio': np.asarray(safe_ratio[:Nsnap]).astype(bool).tolist(),
+                    'counts': {
+                        'N_total': N_total,
+                        'N_safe_ratio': int(np.sum(safe_ratio)),
+                        'N_invalid_ratio': int(N_total - int(np.sum(safe_ratio)))
+                    }
                 }
+
+                # legacy single-step compact debug for quick inspection
                 self.simulation.freq_debug = diag
-                # maintain a short history if requested
-                if getattr(self.simulation, 'freq_debug_history', None) is None:
-                    self.simulation.freq_debug_history = [diag]
+
+                # maintain a short rolling history of these per-step diagnostics
+                if getattr(self.simulation, 'freq_terms_history', None) is None:
+                    self.simulation.freq_terms_history = [diag]
                 else:
-                    self.simulation.freq_debug_history.append(diag)
-                    # cap history
-                    if len(self.simulation.freq_debug_history) > 20:
-                        self.simulation.freq_debug_history.pop(0)
+                    self.simulation.freq_terms_history.append(diag)
+                    # cap history length to keep memory bounded
+                    if len(self.simulation.freq_terms_history) > 200:
+                        self.simulation.freq_terms_history.pop(0)
+                    # optional probe: write CSV row(s) with raw Webb/term values for first few agents
+                    try:
+                        if getattr(self.simulation, 'debug_freq_probe', False):
+                            probe_dir = os.path.join(os.path.dirname(__file__), '../../outputs')
+                            probe_dir = os.path.abspath(probe_dir)
+                            if not os.path.exists(probe_dir):
+                                os.makedirs(probe_dir, exist_ok=True)
+                            fname = os.path.join(probe_dir, f'freq_probe_{int(time.time())}.csv')
+                            Np = min(10, N_total)
+                            with open(fname, 'w', newline='') as cf:
+                                writer = csv.writer(cf)
+                                # header
+                                writer.writerow(['step', 'agent_idx', 'A_m', 'B_m', 'V_m_s', 'U_m_s', 'term1_si', 'term2_si', 'term3_si', 'num_si', 'denom_si', 'ratio_si', 'Hz_raw', 'Hz'])
+                                for ai in range(Np):
+                                    writer.writerow([
+                                        int(getattr(self.simulation, 'current_step', 0)),
+                                        ai,
+                                        float(A_m[ai]) if ai < len(A_m) else None,
+                                        float(B_m[ai]) if ai < len(B_m) else None,
+                                        float(V_m_s[ai]) if ai < len(V_m_s) else None,
+                                        float(U_m_s[ai]) if ai < len(U_m_s) else None,
+                                        float(term1_si[ai]) if ai < len(term1_si) else None,
+                                        float(term2_si[ai]) if ai < len(term2_si) else None,
+                                        float(term3_si[ai]) if ai < len(term3_si) else None,
+                                        float(num_si[ai]) if ai < len(num_si) else None,
+                                        float(denom_si[ai]) if ai < len(denom_si) else None,
+                                        float(ratio[ai]) if ai < len(ratio) else None,
+                                        float(Hz_raw[ai]) if ai < len(Hz_raw) else None,
+                                        float(Hz[ai]) if ai < len(Hz) else None,
+                                    ])
+                            print('Wrote probe CSV:', fname)
+                    except Exception:
+                        pass
         except Exception:
             # never raise from instrumentation
             pass
