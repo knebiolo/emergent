@@ -37,6 +37,10 @@ def main(argv=None):
                 continue
             print('Viewer connected from', addr)
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:
+                print('Socket peername:', conn.getpeername())
+            except Exception:
+                pass
             N = args.agents
             period = 1.0 / max(1.0, float(args.fps))
             steps = None if args.duration <= 0 else int(max(1, args.duration * args.fps))

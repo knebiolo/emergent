@@ -390,11 +390,57 @@ class GLViewer(QOpenGLWidget):
         GL = self._GL
         GL.glClearColor(1.0, 1.0, 1.0, 1.0)
         try:
-            # Preallocate a VBO with some capacity to avoid reallocating every frame
+            # Preallocate a GPU buffer (raw GL buffer) for dynamic point data
+            import ctypes
             self._vbo_capacity = max(256, int(getattr(self, 'N', 0)))
-            self._vbo = self._glvbo.VBO(np.zeros((self._vbo_capacity, 2), dtype=np.float32))
+            self._vbo_capacity_bytes = int(self._vbo_capacity * 2 * np.dtype(np.float32).itemsize)
+            try:
+                # create a raw GL buffer id
+                self._vbo_id = GL.glGenBuffers(1)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._vbo_id))
+                # allocate empty storage
+                GL.glBufferData(GL.GL_ARRAY_BUFFER, self._vbo_capacity_bytes, None, GL.GL_DYNAMIC_DRAW)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+                self._using_raw_vbo = True
+            except Exception:
+                # fallback to PyOpenGL VBO wrapper
+                self._vbo = self._glvbo.VBO(np.zeros((self._vbo_capacity, 2), dtype=np.float32))
+                self._using_raw_vbo = False
+            # try to compile a minimal pass-through shader for faster drawing
+            try:
+                vs = b"""
+                #version 120
+                attribute vec2 position;
+                void main() {
+                    gl_Position = gl_ModelViewProjectionMatrix * vec4(position.xy, 0.0, 1.0);
+                    gl_PointSize = 3.0;
+                }
+                """
+                fs = b"""
+                #version 120
+                void main() {
+                    gl_FragColor = vec4(0.8, 0.12, 0.12, 1.0);
+                }
+                """
+                self._program = None
+                try:
+                    self._program = GL.glCreateProgram()
+                    vs_id = GL.glCreateShader(GL.GL_VERTEX_SHADER)
+                    fs_id = GL.glCreateShader(GL.GL_FRAGMENT_SHADER)
+                    GL.glShaderSource(vs_id, vs)
+                    GL.glCompileShader(vs_id)
+                    GL.glShaderSource(fs_id, fs)
+                    GL.glCompileShader(fs_id)
+                    GL.glAttachShader(self._program, vs_id)
+                    GL.glAttachShader(self._program, fs_id)
+                    GL.glLinkProgram(self._program)
+                except Exception:
+                    self._program = None
+            except Exception:
+                pass
         except Exception:
             self._vbo = None
+            self._using_raw_vbo = False
 
     def paintGL(self):
         if not self._gl_available:
@@ -458,38 +504,88 @@ class GLViewer(QOpenGLWidget):
             else:
                 # update VBO with current points and draw with vertex arrays
                 try:
-                    # ensure contiguous float32 array
                     pts2 = np.ascontiguousarray(pts, dtype=np.float32)
-                    # resize VBO if capacity exceeded
-                    if hasattr(self, '_vbo_capacity') and pts2.shape[0] > self._vbo_capacity:
-                        # recreate VBO with larger capacity
+                    npoints = pts2.shape[0]
+                    # if we have a raw GL buffer id, use glBufferSubData for fast updates
+                    if getattr(self, '_using_raw_vbo', False) and hasattr(self, '_vbo_id'):
                         try:
-                            self._vbo = self._glvbo.VBO(np.zeros((pts2.shape[0], 2), dtype=np.float32))
-                            self._vbo_capacity = pts2.shape[0]
+                            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._vbo_id))
+                            size_bytes = pts2.nbytes
+                            if size_bytes <= getattr(self, '_vbo_capacity_bytes', 0):
+                                GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, pts2)
+                            else:
+                                # reallocate larger buffer
+                                self._vbo_capacity = npoints
+                                self._vbo_capacity_bytes = pts2.nbytes
+                                GL.glBufferData(GL.GL_ARRAY_BUFFER, self._vbo_capacity_bytes, pts2, GL.GL_DYNAMIC_DRAW)
+                            # if shader program available, use it
+                            if getattr(self, '_program', None) is not None:
+                                try:
+                                    GL.glUseProgram(self._program)
+                                    loc = GL.glGetAttribLocation(self._program, b'position')
+                                    if loc != -1:
+                                        GL.glEnableVertexAttribArray(loc)
+                                        GL.glVertexAttribPointer(loc, 2, GL.GL_FLOAT, False, 0, ctypes.c_void_p(0))
+                                        GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                                        GL.glDisableVertexAttribArray(loc)
+                                    else:
+                                        GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
+                                        GL.glVertexPointer(2, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
+                                        GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                                        GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                                    GL.glUseProgram(0)
+                                except Exception:
+                                    # fallback to fixed-function pipeline
+                                    GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
+                                    GL.glVertexPointer(2, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
+                                    GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                                    GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                            else:
+                                GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
+                                GL.glVertexPointer(2, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
+                                GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                                GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
                         except Exception:
-                            pass
-                    # set array and bind
-                    try:
-                        self._vbo.set_array(pts2)
-                    except Exception:
-                        # fallback: create a temporary VBO wrapper
-                        self._vbo = self._glvbo.VBO(pts2)
-                        self._vbo_capacity = pts2.shape[0]
-                    self._vbo.bind()
-                    GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
-                    GL.glVertexPointer(2, GL.GL_FLOAT, 0, self._vbo)
-                    GL.glPointSize(3.0)
-                    GL.glDrawArrays(GL.GL_POINTS, 0, pts.shape[0])
-                    GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
-                    self._vbo.unbind()
+                            # fallback to PyOpenGL VBO wrapper path
+                            try:
+                                self._vbo.set_array(pts2)
+                                self._vbo.bind()
+                                GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
+                                GL.glVertexPointer(2, GL.GL_FLOAT, 0, self._vbo)
+                                GL.glPointSize(3.0)
+                                GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                                GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                                self._vbo.unbind()
+                            except Exception:
+                                # final fallback to immediate mode
+                                GL.glColor3f(0.8, 0.12, 0.12)
+                                GL.glPointSize(3.0)
+                                GL.glBegin(GL.GL_POINTS)
+                                for x, y in pts2:
+                                    GL.glVertex2f(float(x), float(y))
+                                GL.glEnd()
+                    else:
+                        # use PyOpenGL VBO wrapper if available
+                        try:
+                            self._vbo.set_array(pts2)
+                            self._vbo.bind()
+                            GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
+                            GL.glVertexPointer(2, GL.GL_FLOAT, 0, self._vbo)
+                            GL.glPointSize(3.0)
+                            GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                            GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                            self._vbo.unbind()
+                        except Exception:
+                            # final fallback to immediate mode
+                            GL.glColor3f(0.8, 0.12, 0.12)
+                            GL.glPointSize(3.0)
+                            GL.glBegin(GL.GL_POINTS)
+                            for x, y in pts2:
+                                GL.glVertex2f(float(x), float(y))
+                            GL.glEnd()
                 except Exception:
-                    # final fallback to immediate mode
-                    GL.glColor3f(0.8, 0.12, 0.12)
-                    GL.glPointSize(3.0)
-                    GL.glBegin(GL.GL_POINTS)
-                    for x, y in pts:
-                        GL.glVertex2f(float(x), float(y))
-                    GL.glEnd()
+                    pass
         except Exception:
             pass
 
@@ -559,9 +655,9 @@ class MainWindow(QMainWindow):
         self.viewer = ReplayWidget(positions)
 
         btn_start = QPushButton("Start")
-        btn_pause = QPushButton("Pause")
-        btn_stop = QPushButton("Stop")
-        btn_restart = QPushButton("Restart")
+            btn_pause = QPushButton("Pause")
+            btn_stop = QPushButton("Stop")
+            btn_restart = QPushButton("Restart")
         self.speed_slider = QSlider(Qt.Horizontal)
         self.speed_slider.setRange(1, 400)
         self.speed_slider.setValue(100)
@@ -587,6 +683,43 @@ class MainWindow(QMainWindow):
         layout.addLayout(hl)
         container.setLayout(layout)
         self.setCentralWidget(container)
+
+
+def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
+    """Safely replace the viewer widget in the main window without collapsing layout.
+
+    This sets sensible size policies and removes the old widget cleanly.
+    """
+    try:
+        old = win.viewer
+        parent = win.centralWidget()
+        layout = parent.layout()
+        # ensure new widget inherits sizing from old widget
+        new_widget.setMinimumSize(old.minimumSize())
+        new_widget.setSizePolicy(old.sizePolicy())
+        # perform replace
+        layout.replaceWidget(old, new_widget)
+        try:
+            old.hide()  # Hide the old viewer
+        except Exception:
+            pass
+        try:
+            old.setParent(None)  # Remove old viewer from parent
+        except Exception:
+            pass
+        win.viewer = new_widget
+        new_widget.show()
+    except Exception:
+        # best-effort fallback
+        try:
+            win.centralWidget().layout().replaceWidget(win.viewer, new_widget)
+            try:
+                win.viewer.setParent(None)
+            except Exception:
+                pass
+            win.viewer = new_widget
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         # ensure viewer widget cleans up any live sockets/timers
@@ -922,15 +1055,17 @@ def main(argv=None):
 
                     if use_gl_now:
                         try:
-                            gl_view = GLViewer(positions_live)
                             try:
-                                win.centralWidget().layout().replaceWidget(win.viewer, gl_view)
-                                win.viewer.setParent(None)
-                                win.viewer = gl_view
+                                gl_view = GLViewer(positions_live)
                             except Exception:
-                                logger.exception('Failed to swap GLViewer into MainWindow')
-                        except Exception:
-                            logger.exception('GLViewer init failed; falling back')
+                                # if GLViewer init fails, log and continue to fallback
+                                log.exception('GLViewer init failed; falling back to other renderers')
+                                gl_view = None
+                            if gl_view is not None:
+                                try:
+                                    swap_viewer_in_main(win, gl_view)
+                                except Exception:
+                                    logger.exception('Failed to swap GLViewer into MainWindow')
                     elif use_pg_now and not isinstance(win.viewer, QWidget):
                         # Lazily initialize PGViewer and swap it in
                         try:
@@ -960,9 +1095,7 @@ def main(argv=None):
 
                             pg_view = PGViewer()
                             try:
-                                win.centralWidget().layout().replaceWidget(win.viewer, pg_view)
-                                win.viewer.setParent(None)
-                                win.viewer = pg_view
+                                swap_viewer_in_main(win, pg_view)
                             except Exception:
                                 logger.exception('Failed to swap PGViewer into MainWindow')
                         except Exception:
@@ -971,24 +1104,53 @@ def main(argv=None):
                     try:
                         # Prefer the reliable software `ReplayWidget` renderer unless GL requested
                         if not args.use_gl and not isinstance(win.viewer, ReplayWidget):
-                            try:
-                                replay = ReplayWidget(positions_live)
-                                win.centralWidget().layout().replaceWidget(win.viewer, replay)
                                 try:
-                                    win.viewer.setParent(None)
+                                    replay = ReplayWidget(positions_live)
+                                    try:
+                                        swap_viewer_in_main(win, replay)
+                                    except Exception:
+                                        # fallback: try to insert new widget next to old, then remove old
+                                        try:
+                                            parent = win.centralWidget()
+                                            layout = parent.layout()
+                                            try:
+                                                idx = layout.indexOf(win.viewer)
+                                            except Exception:
+                                                idx = -1
+                                            if idx is not None and idx >= 0:
+                                                try:
+                                                    layout.insertWidget(idx, replay)
+                                                except Exception:
+                                                    try:
+                                                        layout.addWidget(replay)
+                                                    except Exception:
+                                                        pass
+                                                try:
+                                                    layout.removeWidget(win.viewer)
+                                                except Exception:
+                                                    pass
+                                            else:
+                                                try:
+                                                    layout.addWidget(replay)
+                                                except Exception:
+                                                    pass
+                                            try:
+                                                win.viewer.setParent(None)
+                                            except Exception:
+                                                pass
+                                            win.viewer = replay
+                                        except Exception:
+                                            log.exception('Failed to swap in ReplayWidget')
+                                    log.debug('Swapped in ReplayWidget for live frames')
+                                    try:
+                                        # ensure the widget is visible and request immediate repaint
+                                        win.viewer.show()
+                                        win.viewer.repaint()
+                                        log.debug('Requested show() and repaint() on ReplayWidget')
+                                    except Exception:
+                                        pass
                                 except Exception:
-                                    pass
-                                win.viewer = replay
-                                log.debug('Swapped in ReplayWidget for live frames')
-                                try:
-                                    # ensure the widget is visible and request immediate repaint
-                                    win.viewer.show()
-                                    win.viewer.repaint()
-                                    log.debug('Requested show() and repaint() on ReplayWidget')
-                                except Exception:
-                                    pass
-                            except Exception:
-                                log.exception('Failed to swap in ReplayWidget')
+                                    log.exception('Failed to swap in ReplayWidget')
                         # compute frame bounds and log them
                         try:
                             xs = positions_live[:, :, 0]
@@ -1100,9 +1262,7 @@ def main(argv=None):
                 pg_view = PGViewer()
                 # replace the existing viewer widget in the main layout
                 try:
-                    win.centralWidget().layout().replaceWidget(win.viewer, pg_view)
-                    win.viewer.setParent(None)
-                    win.viewer = pg_view
+                    swap_viewer_in_main(win, pg_view)
                 except Exception:
                     logger.exception('Failed to swap PGViewer into MainWindow')
             except Exception:
@@ -1154,14 +1314,12 @@ def main(argv=None):
         Nagents = 0
     use_gl_mode = args.use_gl or (Nagents >= 1000)
     if use_gl_mode:
-        try:
-            glw = GLViewer(positions)
             try:
-                win.centralWidget().layout().replaceWidget(win.viewer, glw)
-                win.viewer.setParent(None)
-                win.viewer = glw
-            except Exception:
-                logger.exception('Failed to swap GLViewer into MainWindow (file mode)')
+                glw = GLViewer(positions)
+                try:
+                    swap_viewer_in_main(win, glw)
+                except Exception:
+                    logger.exception('Failed to swap GLViewer into MainWindow (file mode)')
         except Exception:
             logger.exception('GLViewer init failed in file mode; using fallback')
 
