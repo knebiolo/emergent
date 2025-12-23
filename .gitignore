@@ -48,6 +48,9 @@ env/
 .tox/
 htmlcov/
 
+# outputs
+outputs/
+
 # Data files (large simulation outputs)
 *.h5
 *.hdf5

@@ -10,6 +10,8 @@ import glob
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+from scipy.spatial import cKDTree
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 OUT = os.path.join(ROOT, 'outputs')
@@ -47,31 +49,72 @@ def plot_db(db_path, out_path):
 
     n_agents = X.shape[0]
     n_steps = X.shape[1] if X.ndim > 1 else 1
-    # map geo coords to pixel index by nearest match in x_coords/y_coords
-    # make flattened coordinate arrays
-    x_flat = x_coords.flatten()
-    y_flat = y_coords.flatten()
+    # Vectorized mapping: build KDTree of pixel coordinates for fast nearest-neighbor lookup
+    # x_coords/y_coords are raster-shaped arrays (height, width)
+    h, w = depth.shape
+    pts = np.column_stack((x_coords.ravel(), y_coords.ravel()))
+    tree = cKDTree(pts)
 
-    def geo_to_pixel_single(xg, yg):
-        # find nearest pixel via argmin of squared distance
-        d2 = (x_flat - xg) ** 2 + (y_flat - yg) ** 2
-        idx = int(np.argmin(d2))
-        r = idx // depth.shape[1]
-        c = idx % depth.shape[1]
-        return r, c
+    # Query KDTree once for all agent-time coordinates (vectorized)
+    n_steps = X.shape[1] if X.ndim > 1 else 1
+    coords_flat = np.column_stack((X.reshape(-1), Y.reshape(-1)))
+    valid_flat = np.isfinite(coords_flat[:, 0]) & np.isfinite(coords_flat[:, 1])
+    idxs_flat = np.full(coords_flat.shape[0], -1, dtype=int)
+    if np.any(valid_flat):
+        _, idxs_valid = tree.query(coords_flat[valid_flat], k=1)
+        idxs_flat[valid_flat] = idxs_valid
+    idxs = idxs_flat.reshape(n_agents, n_steps)
+    rows = (idxs // w).astype(int)
+    cols = (idxs % w).astype(int)
 
+    # Build segments per-agent but split segments on gaps or large pixel jumps to avoid long connectors
+    max_gap = 50  # pixels; tune if needed
+    segments = []
+    starts = []
     for ai in range(n_agents):
-        xs = X[ai, :]
-        ys = Y[ai, :]
-        pixs = [geo_to_pixel_single(xg, yg) for xg, yg in zip(xs, ys)]
-        rows = [p[0] for p in pixs]
-        cols = [p[1] for p in pixs]
-        ax.plot(cols, rows, marker='o', linewidth=1, markersize=2, label=f'agent{ai}')
+        idx_ai = idxs[ai]
+        valid_mask = idx_ai != -1
+        if np.count_nonzero(valid_mask) < 2:
+            continue
+        valid_positions = np.where(valid_mask)[0]
+        # compute pixel coordinates for valid positions
+        c = cols[ai, valid_positions]
+        r = rows[ai, valid_positions]
+        # compute pixel distances between successive valid positions
+        dc = np.diff(c)
+        dr = np.diff(r)
+        pdist = np.sqrt(dc.astype(float)**2 + dr.astype(float)**2)
+        # a connection is allowed when the valid positions are consecutive timesteps and pixel jump small
+        consecutive = np.diff(valid_positions) == 1
+        connect = consecutive & (pdist <= max_gap)
+        # split into runs where connect is True
+        run_starts = [0]
+        for i, ok in enumerate(connect):
+            if not ok:
+                run_starts.append(i + 1)
+        # now build segments from run_starts
+        for start in run_starts:
+            # find end index: start .. next break where connect False
+            j = start
+            while j < len(valid_positions) - 1 and connect[j]:
+                j += 1
+            seg_c = c[start:j + 1]
+            seg_r = r[start:j + 1]
+            if seg_c.size >= 2:
+                seg = np.column_stack((seg_c, seg_r))
+                segments.append(seg)
+                starts.append((seg_c[0], seg_r[0]))
+    if segments:
+        lc = LineCollection(segments, linewidths=1.0, colors='black', alpha=0.9)
+        ax.add_collection(lc)
+        starts = np.array(starts)
+        if starts.size:
+            ax.scatter(starts[:, 0], starts[:, 1], s=4, c='red')
 
     ax.set_title('Agent trajectories over depth raster')
     ax.set_xlabel('column')
     ax.set_ylabel('row')
-    plt.legend(loc='upper right', fontsize='small', ncol=2)
+    # no legend for readability when many agents
     plt.tight_layout()
     fig.savefig(out_path)
     print('Saved plot to', out_path)
