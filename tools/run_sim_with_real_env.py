@@ -10,6 +10,7 @@ parser = argparse.ArgumentParser(description='Run instrumented sim with real env
 parser.add_argument('--nsteps', type=int, default=10, help='number of timesteps to run')
 parser.add_argument('--nagents', type=int, default=100, help='number of agents to simulate')
 parser.add_argument('--outdir', type=str, default=None, help='output directory to save DB (overrides model_dir)')
+parser.add_argument('--model_name', type=str, default='real_probe', help='model name used for the HDF5 filename')
 args = parser.parse_args()
 
 data_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'salmon_abm')
@@ -22,7 +23,7 @@ outdir = args.outdir or os.path.join(os.path.dirname(__file__), '..', 'outputs')
 outdir = os.path.abspath(outdir)
 os.makedirs(outdir, exist_ok=True)
 
-sim = simulation(model_dir=outdir, model_name='real_probe', crs=None, basin='test', water_temp=10, start_polygon=start_poly, env_files=env_files, longitudinal_profile=None, fish_length=200.0, num_timesteps=args.nsteps, num_agents=args.nagents)
+sim = simulation(model_dir=outdir, model_name=args.model_name, crs=None, basin='test', water_temp=10, start_polygon=start_poly, env_files=env_files, longitudinal_profile=None, fish_length=200.0, num_timesteps=args.nsteps, num_agents=args.nagents)
 
 # enable debug flags for diagnostics
 sim.debug_env = True
