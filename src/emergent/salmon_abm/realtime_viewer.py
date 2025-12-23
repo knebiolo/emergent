@@ -251,6 +251,25 @@ class ReplayWidget(QOpenGLWidget):
             dx = 1.0
         if dy == 0:
             dy = 1.0
+        # add small padding so the view is slightly zoomed out for better context
+        try:
+            pad_factor = 1.15
+            cx = self.xmin + dx * 0.5
+            cy = self.ymin + dy * 0.5
+            dx = dx * pad_factor
+            dy = dy * pad_factor
+            self_xmin = cx - dx * 0.5
+            self_ymin = cy - dy * 0.5
+            # use local vars below to avoid mutating stored bounds
+            xmin_loc = self_xmin
+            ymin_loc = self_ymin
+            xmax_loc = xmin_loc + dx
+            ymax_loc = ymin_loc + dy
+        except Exception:
+            xmin_loc = self.xmin
+            xmax_loc = self.xmax
+            ymin_loc = self.ymin
+            ymax_loc = self.ymax
         sx = w / dx
         sy = h / dy
         s = min(sx, sy) * 0.95
@@ -283,8 +302,8 @@ class ReplayWidget(QOpenGLWidget):
             x, y = pts[i]
             if not (np.isfinite(x) and np.isfinite(y)):
                 continue
-            sxp = tx + (x - self.xmin) * s
-            syp = ty + (self.ymax - y) * s
+            sxp = tx + (x - xmin_loc) * s
+            syp = ty + (ymax_loc - y) * s
             painter.drawEllipse(int(sxp) - r, int(syp) - r, 2 * r, 2 * r)
 
         painter.setPen(QPen(QColor(0, 0, 0)))
@@ -292,7 +311,7 @@ class ReplayWidget(QOpenGLWidget):
         # debug overlay for live diagnostics
         try:
             painter.setPen(QPen(QColor(0, 0, 0)))
-            painter.drawText(6, 28, f'DEBUG: frame={self.frame} N={self.N} xmin={self.xmin:.2f} xmax={self.xmax:.2f} ymin={self.ymin:.2f} ymax={self.ymax:.2f}')
+            painter.drawText(6, 28, f'DEBUG: frame={self.frame} N={self.N} xmin={xmin_loc:.2f} xmax={xmax_loc:.2f} ymin={ymin_loc:.2f} ymax={ymax_loc:.2f}')
         except Exception:
             pass
         painter.end()
@@ -464,7 +483,29 @@ class GLViewer(QOpenGLWidget):
                 GL.glMatrixMode(GL.GL_PROJECTION)
                 GL.glLoadIdentity()
                 # Note: OpenGL bottom-left origin; flip Y by swapping ymin/ymax for correct orientation
-                GL.glOrtho(self.xmin, self.xmax, self.ymax, self.ymin, -1.0, 1.0)
+                # add padding to world bounds so view is slightly zoomed out
+                try:
+                    dx = self.xmax - self.xmin
+                    dy = self.ymax - self.ymin
+                    if dx == 0:
+                        dx = 1.0
+                    if dy == 0:
+                        dy = 1.0
+                    pad = 1.15
+                    cx = self.xmin + dx * 0.5
+                    cy = self.ymin + dy * 0.5
+                    dx *= pad
+                    dy *= pad
+                    xminp = cx - dx * 0.5
+                    xmaxp = xminp + dx
+                    yminp = cy - dy * 0.5
+                    ymaxp = yminp + dy
+                except Exception:
+                    xminp = self.xmin
+                    xmaxp = self.xmax
+                    yminp = self.ymin
+                    ymaxp = self.ymax
+                GL.glOrtho(xminp, xmaxp, ymaxp, yminp, -1.0, 1.0)
                 GL.glMatrixMode(GL.GL_MODELVIEW)
                 GL.glLoadIdentity()
             except Exception:
@@ -655,9 +696,9 @@ class MainWindow(QMainWindow):
         self.viewer = ReplayWidget(positions)
 
         btn_start = QPushButton("Start")
-            btn_pause = QPushButton("Pause")
-            btn_stop = QPushButton("Stop")
-            btn_restart = QPushButton("Restart")
+        btn_pause = QPushButton("Pause")
+        btn_stop = QPushButton("Stop")
+        btn_restart = QPushButton("Restart")
         self.speed_slider = QSlider(Qt.Horizontal)
         self.speed_slider.setRange(1, 400)
         self.speed_slider.setValue(100)
@@ -683,43 +724,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(hl)
         container.setLayout(layout)
         self.setCentralWidget(container)
-
-
-def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
-    """Safely replace the viewer widget in the main window without collapsing layout.
-
-    This sets sensible size policies and removes the old widget cleanly.
-    """
-    try:
-        old = win.viewer
-        parent = win.centralWidget()
-        layout = parent.layout()
-        # ensure new widget inherits sizing from old widget
-        new_widget.setMinimumSize(old.minimumSize())
-        new_widget.setSizePolicy(old.sizePolicy())
-        # perform replace
-        layout.replaceWidget(old, new_widget)
-        try:
-            old.hide()  # Hide the old viewer
-        except Exception:
-            pass
-        try:
-            old.setParent(None)  # Remove old viewer from parent
-        except Exception:
-            pass
-        win.viewer = new_widget
-        new_widget.show()
-    except Exception:
-        # best-effort fallback
-        try:
-            win.centralWidget().layout().replaceWidget(win.viewer, new_widget)
-            try:
-                win.viewer.setParent(None)
-            except Exception:
-                pass
-            win.viewer = new_widget
-        except Exception:
-            pass
 
     def closeEvent(self, event):
         # ensure viewer widget cleans up any live sockets/timers
@@ -774,6 +778,43 @@ def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
     def _on_speed(self, v: int):
         mult = v / 100.0
         self.viewer.set_speed(mult if mult > 0 else 1.0)
+
+
+def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
+    """Safely replace the viewer widget in the main window without collapsing layout.
+
+    This sets sensible size policies and removes the old widget cleanly.
+    """
+    try:
+        old = win.viewer
+        parent = win.centralWidget()
+        layout = parent.layout()
+        # ensure new widget inherits sizing from old widget
+        new_widget.setMinimumSize(old.minimumSize())
+        new_widget.setSizePolicy(old.sizePolicy())
+        # perform replace
+        layout.replaceWidget(old, new_widget)
+        try:
+            old.hide()  # Hide the old viewer
+        except Exception:
+            pass
+        try:
+            old.setParent(None)  # Remove old viewer from parent
+        except Exception:
+            pass
+        win.viewer = new_widget
+        new_widget.show()
+    except Exception:
+        # best-effort fallback
+        try:
+            win.centralWidget().layout().replaceWidget(win.viewer, new_widget)
+            try:
+                win.viewer.setParent(None)
+            except Exception:
+                pass
+            win.viewer = new_widget
+        except Exception:
+            pass
 
 
 class LiveReceiver(QObject):
@@ -1008,6 +1049,7 @@ def main(argv=None):
         logger.addHandler(sh)
 
     # live mode: connect to TCP stream and poll frames
+    if args.live:
         host = args.host
         port = args.port
         positions = np.zeros((1, 0, 2), dtype=float)
@@ -1055,17 +1097,16 @@ def main(argv=None):
 
                     if use_gl_now:
                         try:
+                            gl_view = GLViewer(positions_live)
+                        except Exception:
+                            # if GLViewer init fails, log and continue to fallback
+                            log.exception('GLViewer init failed; falling back to other renderers')
+                            gl_view = None
+                        if gl_view is not None:
                             try:
-                                gl_view = GLViewer(positions_live)
+                                swap_viewer_in_main(win, gl_view)
                             except Exception:
-                                # if GLViewer init fails, log and continue to fallback
-                                log.exception('GLViewer init failed; falling back to other renderers')
-                                gl_view = None
-                            if gl_view is not None:
-                                try:
-                                    swap_viewer_in_main(win, gl_view)
-                                except Exception:
-                                    logger.exception('Failed to swap GLViewer into MainWindow')
+                                logger.exception('Failed to swap GLViewer into MainWindow')
                     elif use_pg_now and not isinstance(win.viewer, QWidget):
                         # Lazily initialize PGViewer and swap it in
                         try:
@@ -1314,12 +1355,12 @@ def main(argv=None):
         Nagents = 0
     use_gl_mode = args.use_gl or (Nagents >= 1000)
     if use_gl_mode:
+        try:
+            glw = GLViewer(positions)
             try:
-                glw = GLViewer(positions)
-                try:
-                    swap_viewer_in_main(win, glw)
-                except Exception:
-                    logger.exception('Failed to swap GLViewer into MainWindow (file mode)')
+                swap_viewer_in_main(win, glw)
+            except Exception:
+                logger.exception('Failed to swap GLViewer into MainWindow (file mode)')
         except Exception:
             logger.exception('GLViewer init failed in file mode; using fallback')
 
