@@ -225,6 +225,8 @@ class ReplayWidget(QOpenGLWidget):
         self.timer.setInterval(interval)
 
     def paintGL(self):
+        import logging as _lg
+        _lg.getLogger('realtime_viewer').debug('ReplayWidget.paintGL called: size=%sx%s frame=%s N=%s', self.width(), self.height(), getattr(self, 'frame', None), getattr(self, 'N', None))
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         w = self.width()
@@ -261,6 +263,9 @@ class ReplayWidget(QOpenGLWidget):
             if self.N == 0 or pts.size == 0:
                 painter.setPen(QPen(QColor(80, 80, 80)))
                 painter.drawText(int(w / 2) - 80, int(h / 2), 'Waiting for frames...')
+                # also draw debug overlay
+                painter.setPen(QPen(QColor(0, 0, 0)))
+                painter.drawText(6, 28, f'DEBUG: frame={self.frame} N={self.N}')
                 painter.end()
                 return
         except Exception:
@@ -284,6 +289,12 @@ class ReplayWidget(QOpenGLWidget):
 
         painter.setPen(QPen(QColor(0, 0, 0)))
         painter.drawText(6, 14, f"Frame: {self.frame+1}/{self.T}  Agents: {self.N}")
+        # debug overlay for live diagnostics
+        try:
+            painter.setPen(QPen(QColor(0, 0, 0)))
+            painter.drawText(6, 28, f'DEBUG: frame={self.frame} N={self.N} xmin={self.xmin:.2f} xmax={self.xmax:.2f} ymin={self.ymin:.2f} ymax={self.ymax:.2f}')
+        except Exception:
+            pass
         painter.end()
 
 
@@ -379,8 +390,9 @@ class GLViewer(QOpenGLWidget):
         GL = self._GL
         GL.glClearColor(1.0, 1.0, 1.0, 1.0)
         try:
-            # create an empty VBO
-            self._vbo = self._glvbo.VBO(np.zeros((0, 2), dtype=np.float32))
+            # Preallocate a VBO with some capacity to avoid reallocating every frame
+            self._vbo_capacity = max(256, int(getattr(self, 'N', 0)))
+            self._vbo = self._glvbo.VBO(np.zeros((self._vbo_capacity, 2), dtype=np.float32))
         except Exception:
             self._vbo = None
 
@@ -446,7 +458,23 @@ class GLViewer(QOpenGLWidget):
             else:
                 # update VBO with current points and draw with vertex arrays
                 try:
-                    self._vbo.set_array(pts)
+                    # ensure contiguous float32 array
+                    pts2 = np.ascontiguousarray(pts, dtype=np.float32)
+                    # resize VBO if capacity exceeded
+                    if hasattr(self, '_vbo_capacity') and pts2.shape[0] > self._vbo_capacity:
+                        # recreate VBO with larger capacity
+                        try:
+                            self._vbo = self._glvbo.VBO(np.zeros((pts2.shape[0], 2), dtype=np.float32))
+                            self._vbo_capacity = pts2.shape[0]
+                        except Exception:
+                            pass
+                    # set array and bind
+                    try:
+                        self._vbo.set_array(pts2)
+                    except Exception:
+                        # fallback: create a temporary VBO wrapper
+                        self._vbo = self._glvbo.VBO(pts2)
+                        self._vbo_capacity = pts2.shape[0]
                     self._vbo.bind()
                     GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
                     GL.glVertexPointer(2, GL.GL_FLOAT, 0, self._vbo)
@@ -649,14 +677,31 @@ class LiveReceiver(QObject):
         self._running = True
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # retry connect a few times
+        # improve TCP behavior for low-latency streaming
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except Exception:
+            pass
+        # retry connect with visible logging
         connected = False
-        for _ in range(60):
+        attempts = 0
+        max_attempts = 60
+        while attempts < max_attempts:
             try:
+                attempts += 1
                 sock.connect((self.host, self.port))
                 connected = True
                 break
-            except Exception:
+            except Exception as e:
+                try:
+                    import logging as _lg
+                    _lg.getLogger('realtime_viewer').debug('LiveReceiver connect attempt %d/%d failed: %s', attempts, max_attempts, e)
+                except Exception:
+                    pass
                 time.sleep(0.2)
         if not connected:
             try:
@@ -664,6 +709,12 @@ class LiveReceiver(QObject):
             except Exception:
                 pass
             return
+        try:
+            peer = sock.getpeername()
+            import logging as _lg
+            _lg.getLogger('realtime_viewer').info('LiveReceiver connected to %s:%d', peer[0], peer[1])
+        except Exception:
+            pass
         sock.setblocking(True)
         self._sock = sock
         try:
@@ -923,9 +974,19 @@ def main(argv=None):
                             try:
                                 replay = ReplayWidget(positions_live)
                                 win.centralWidget().layout().replaceWidget(win.viewer, replay)
-                                win.viewer.setParent(None)
+                                try:
+                                    win.viewer.setParent(None)
+                                except Exception:
+                                    pass
                                 win.viewer = replay
                                 log.debug('Swapped in ReplayWidget for live frames')
+                                try:
+                                    # ensure the widget is visible and request immediate repaint
+                                    win.viewer.show()
+                                    win.viewer.repaint()
+                                    log.debug('Requested show() and repaint() on ReplayWidget')
+                                except Exception:
+                                    pass
                             except Exception:
                                 log.exception('Failed to swap in ReplayWidget')
                         # compute frame bounds and log them
