@@ -150,3 +150,107 @@ def get_hdf5_obj(simulation_obj: Any):
     if hasattr(simulation_obj, "db"):
         return getattr(simulation_obj, "db")
     return None
+
+
+def create_agent_timeseries(hdf5_obj: Any, sim: Any, nsteps: int):
+    """Create agent time-series and scalar datasets used by the simulation runner.
+
+    This helper centralizes dataset names and shapes so callers (scripts/tools)
+    remain small. It will not overwrite existing datasets if present.
+    """
+    if hdf5_obj is None or sim is None:
+        return False
+
+    n_agents = getattr(sim, 'X', None)
+    if n_agents is None:
+        return False
+    try:
+        n_agents = int(np.array(getattr(sim, 'X')).shape[0])
+    except Exception:
+        return False
+
+    shape = (n_agents, int(nsteps))
+
+    def _ensure(key, default_arr):
+        if key in hdf5_obj:
+            return
+        try:
+            # write_dataset will handle dict-like or h5py objects
+            write_dataset(hdf5_obj, key, default_arr)
+        except Exception:
+            pass
+
+    # per-timestep 2D slots (num_agents x nsteps)
+    _ensure('agent_data/X', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/Y', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/prev_X', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/prev_Y', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/x_vel', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/y_vel', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/Hz', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/heading', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/swim_behav', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/is_stuck', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/thrust', np.zeros(shape, dtype=np.float32))
+    _ensure('agent_data/drag', np.zeros(shape, dtype=np.float32))
+
+    # 1-D per-agent scalars (parity with sockeye.py)
+    try:
+        if hasattr(sim, 'length') and 'agent_data/length' not in hdf5_obj:
+            write_dataset(hdf5_obj, 'agent_data/length', np.array(getattr(sim, 'length')))
+        if hasattr(sim, 'weight') and 'agent_data/weight' not in hdf5_obj:
+            write_dataset(hdf5_obj, 'agent_data/weight', np.array(getattr(sim, 'weight')))
+        if hasattr(sim, 'ucrit') and 'agent_data/ucrit' not in hdf5_obj:
+            write_dataset(hdf5_obj, 'agent_data/ucrit', np.array(getattr(sim, 'ucrit')))
+        if hasattr(sim, 'too_shallow') and 'agent_data/too_shallow' not in hdf5_obj:
+            write_dataset(hdf5_obj, 'agent_data/too_shallow', np.array(getattr(sim, 'too_shallow')))
+        if hasattr(sim, 'opt_wat_depth') and 'agent_data/opt_wat_depth' not in hdf5_obj:
+            write_dataset(hdf5_obj, 'agent_data/opt_wat_depth', np.array(getattr(sim, 'opt_wat_depth')))
+    except Exception:
+        pass
+
+    return True
+
+
+def write_agent_timestep(hdf5_obj: Any, sim: Any, col: int):
+    """Write the current sim per-agent state into agent_data/* at column `col`.
+
+    This attempts to write slices into existing datasets; missing keys are
+    silently skipped to keep callers simple.
+    """
+    if hdf5_obj is None or sim is None:
+        return False
+
+    keys_and_getters = [
+        ('agent_data/X', lambda s: getattr(s, 'X', None)),
+        ('agent_data/Y', lambda s: getattr(s, 'Y', None)),
+        ('agent_data/x_vel', lambda s: getattr(s, 'x_vel', None)),
+        ('agent_data/y_vel', lambda s: getattr(s, 'y_vel', None)),
+        ('agent_data/Hz', lambda s: getattr(s, 'Hz', None)),
+        ('agent_data/heading', lambda s: getattr(s, 'heading', None)),
+        ('agent_data/swim_behav', lambda s: getattr(s, 'swim_behav', None)),
+        ('agent_data/is_stuck', lambda s: getattr(s, 'is_stuck', None)),
+        ('agent_data/thrust', lambda s: (np.linalg.norm(getattr(s, 'thrust', np.zeros((len(getattr(s, "X")),2))), axis=1) if hasattr(s, 'thrust') else None)),
+        ('agent_data/drag', lambda s: (np.linalg.norm(getattr(s, 'drag', np.zeros((len(getattr(s, "X")),2))), axis=1) if hasattr(s, 'drag') else None)),
+    ]
+
+    for key, getter in keys_and_getters:
+        try:
+            if key not in hdf5_obj:
+                continue
+            val = getter(sim)
+            if val is None:
+                continue
+            # assign column for h5py datasets and dict-like arrays
+            try:
+                hdf5_obj[key][:, col] = np.array(val)
+            except Exception:
+                # fallback: overwrite whole dataset (less efficient)
+                try:
+                    write_dataset(hdf5_obj, key, np.array(val))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    return True

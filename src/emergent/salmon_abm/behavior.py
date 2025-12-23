@@ -422,20 +422,33 @@ class behavior():
         valid_neighbor_indices = neighbor_indices[valid_neighbors_mask]
         valid_agent_indices = agent_indices[valid_neighbors_mask]
 
-        avg_heading = np.zeros(num_agents)
-        np.add.at(avg_heading, valid_agent_indices, headings_neighbors[valid_neighbors_mask])
+        # compute circular mean of neighbor headings per-agent using sum of unit vectors
+        sum_cos = np.zeros(num_agents)
+        sum_sin = np.zeros(num_agents)
+        np.add.at(sum_cos, valid_agent_indices, np.cos(headings_neighbors[valid_neighbors_mask]))
+        np.add.at(sum_sin, valid_agent_indices, np.sin(headings_neighbors[valid_neighbors_mask]))
         counts = np.bincount(valid_agent_indices, minlength=num_agents)
-        avg_heading /= counts + (counts == 0)
-        no_school = np.where(avg_heading == 0., 0., 1.)
+        # avoid divide-by-zero
+        counts_safe = counts.copy()
+        counts_safe[counts_safe == 0] = 1
+        mean_cos = sum_cos / counts_safe
+        mean_sin = sum_sin / counts_safe
+        # resulting desired heading unit vector
+        avg_vec_x = mean_cos
+        avg_vec_y = mean_sin
+        no_school = np.where(counts == 0, 0., 1.)
 
-        avg_heading_x = np.cos(avg_heading)
-        avg_heading_y = np.sin(avg_heading)
-        vectors_to_heading_x = avg_heading_x - self.simulation.x_vel
-        vectors_to_heading_y = avg_heading_y - self.simulation.y_vel
+        # current heading unit vector (use stored heading angles for direction)
+        cur_hat_x = np.cos(self.simulation.heading)
+        cur_hat_y = np.sin(self.simulation.heading)
+
+        # vector difference between desired heading unit vector and current heading unit vector
+        vectors_to_heading_x = avg_vec_x - cur_hat_x
+        vectors_to_heading_y = avg_vec_y - cur_hat_y
         distances = np.sqrt(vectors_to_heading_x**2 + vectors_to_heading_y**2)
         epsilon = 1e-10
-        v_hat_align_x = np.divide(vectors_to_heading_x, distances + epsilon, out=np.zeros_like(self.simulation.x_vel), where=distances+epsilon != 0)
-        v_hat_align_y = np.divide(vectors_to_heading_y, distances + epsilon, out=np.zeros_like(self.simulation.y_vel), where=distances+epsilon != 0)
+        v_hat_align_x = np.divide(vectors_to_heading_x, distances + epsilon, out=np.zeros_like(cur_hat_x), where=distances+epsilon != 0)
+        v_hat_align_y = np.divide(vectors_to_heading_y, distances + epsilon, out=np.zeros_like(cur_hat_y), where=distances+epsilon != 0)
         alignment_array = np.zeros((num_agents, 2))
         alignment_array[:, 0] = weight * v_hat_align_x * no_school
         alignment_array[:, 1] = weight * v_hat_align_y * no_school

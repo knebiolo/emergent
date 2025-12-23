@@ -11,6 +11,7 @@ parser.add_argument('--nsteps', type=int, default=10, help='number of timesteps 
 parser.add_argument('--nagents', type=int, default=100, help='number of agents to simulate')
 parser.add_argument('--outdir', type=str, default=None, help='output directory to save DB (overrides model_dir)')
 parser.add_argument('--model_name', type=str, default='real_probe', help='model name used for the HDF5 filename')
+parser.add_argument('--debug', action='store_true', help='enable verbose debug output and diagnostic JSON writes')
 args = parser.parse_args()
 
 data_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'salmon_abm')
@@ -25,11 +26,16 @@ os.makedirs(outdir, exist_ok=True)
 
 sim = simulation(model_dir=outdir, model_name=args.model_name, crs=None, basin='test', water_temp=10, start_polygon=start_poly, env_files=env_files, longitudinal_profile=None, fish_length=200.0, num_timesteps=args.nsteps, num_agents=args.nagents)
 
-# enable debug flags for diagnostics
-sim.debug_env = True
-sim.debug_freq = True
-# enable fine-grained frequency probe CSV output
-sim.debug_freq_probe = True
+# enable debug flags for diagnostics when requested
+if args.debug:
+    sim.debug_env = True
+    sim.debug_freq = True
+    # enable fine-grained frequency probe CSV output
+    sim.debug_freq_probe = True
+else:
+    sim.debug_env = False
+    sim.debug_freq = False
+    sim.debug_freq_probe = False
 
 # Use the HDF5 object returned by hdf5_io.get_hdf5_obj(sim) if available,
 # otherwise fall back to the simulation's hdf5 attribute.
@@ -125,141 +131,19 @@ if depth is not None:
     except Exception as e:
         print('Debug geo_to_pixel failed:', e)
 
-# Prepare per-timestep agent_data datasets so we persist a time-series for later analysis
-# We'll create datasets with shape (n_agents, nsteps+1) and store the initial state at column 0
-n_agents = getattr(sim, 'X', None).shape[0]
+# Prepare agent datasets using centralized helpers for cleanliness
 nsteps = args.nsteps
-
-# ensure we operate on the HDF5 file-like object (h5obj)
 if h5obj is None:
     raise RuntimeError('No HDF5 object available for writing')
 
-if 'agent_data' not in h5obj:
-    try:
-        h5obj.create_group('agent_data')
-    except Exception:
-        pass
-
-# helper to create a timeseries dataset if it doesn't exist
-def _create_ts(name, init_array, dtype=None):
-    key = 'agent_data/' + name
-    shape = (n_agents, nsteps)
-    if init_array is None:
-        # create an empty dataset if no initial data available
-        data = np.zeros((n_agents,), dtype=np.float32)
-    else:
-        data = np.array(init_array)
-    if dtype is None:
-        dtype = data.dtype
-    # only create if missing
-    if key not in h5obj:
-        try:
-            h5obj.create_dataset(key, shape=shape, dtype='f4')
-        except Exception:
-            # fallback to writing with numpy array
-            h5obj.create_dataset(key, data=np.zeros(shape, dtype='f4'))
-    # no initial column write here — we'll write per-timestep after sim.timestep() to match sockeye.py
-
-# Create core time-series datasets from available sim fields or top-level datasets
-_create_ts('X', getattr(sim, 'X'))
-_create_ts('Y', getattr(sim, 'Y'))
-_create_ts('prev_X', getattr(sim, 'prev_X'))
-_create_ts('prev_Y', getattr(sim, 'prev_Y'))
-# velocities if present on sim
-if hasattr(sim, 'x_vel') and hasattr(sim, 'y_vel'):
-    _create_ts('x_vel', getattr(sim, 'x_vel'))
-    _create_ts('y_vel', getattr(sim, 'y_vel'))
-# Hz (tailbeat freq) and heading
-if hasattr(sim, 'Hz'):
-    _create_ts('Hz', getattr(sim, 'Hz'))
-if hasattr(sim, 'heading'):
-    _create_ts('heading', getattr(sim, 'heading'))
-# swim behavior and stuck flags
-if hasattr(sim, 'swim_behav'):
-    _create_ts('swim_behav', getattr(sim, 'swim_behav'))
-if hasattr(sim, 'is_stuck'):
-    _create_ts('is_stuck', getattr(sim, 'is_stuck'))
-# length/weight/sex
-if hasattr(sim, 'length'):
-    try:
-        # sockeye.py keeps length as a 1-D agent property; write as 1-D dataset for parity
-        hdf5_io.write_dataset(h5obj, 'agent_data/length', getattr(sim, 'length'))
-    except Exception:
-        pass
-if hasattr(sim, 'weight'):
-    try:
-        hdf5_io.write_dataset(h5obj, 'agent_data/weight', getattr(sim, 'weight'))
-    except Exception:
-        pass
-
-# ensure ucrit, too_shallow, opt_wat_depth 1-D datasets exist for exact parity with sockeye.py
-try:
-    if hasattr(sim, 'ucrit'):
-        hdf5_io.write_dataset(h5obj, 'agent_data/ucrit', getattr(sim, 'ucrit'))
-    if hasattr(sim, 'too_shallow'):
-        hdf5_io.write_dataset(h5obj, 'agent_data/too_shallow', getattr(sim, 'too_shallow'))
-    if hasattr(sim, 'opt_wat_depth'):
-        hdf5_io.write_dataset(h5obj, 'agent_data/opt_wat_depth', getattr(sim, 'opt_wat_depth'))
-except Exception:
-    pass
-
-# optional scalar summaries (thrust and drag magnitudes)
-try:
-    # create timeseries slots for thrust and drag (scalar magnitude) to match sockeye names
-    _create_ts('thrust', np.linalg.norm(getattr(sim, 'thrust'), axis=1) if hasattr(sim, 'thrust') else np.zeros((n_agents,)))
-except Exception:
-    pass
-try:
-    _create_ts('drag', np.linalg.norm(getattr(sim, 'drag'), axis=1) if hasattr(sim, 'drag') else np.zeros((n_agents,)))
-except Exception:
-    pass
+# create agent time-series and scalar datasets (no-op if already present)
+hdf5_io.create_agent_timeseries(h5obj, sim, nsteps)
 
 # run for requested timesteps and print diagnostics per step, write per-step columns
 for i in range(args.nsteps):
     sim.timestep(i, 1.0)
-    # Persist current state into agent_data/* datasets at column i (match sockeye.py timestep indexing)
-    col = i
-    try:
-        h5obj['agent_data/X'][:, col] = sim.X
-        h5obj['agent_data/Y'][:, col] = sim.Y
-    except Exception:
-        pass
-    try:
-        if 'agent_data/x_vel' in h5obj and hasattr(sim, 'x_vel'):
-            h5obj['agent_data/x_vel'][:, col] = sim.x_vel
-        if 'agent_data/y_vel' in h5obj and hasattr(sim, 'y_vel'):
-            h5obj['agent_data/y_vel'][:, col] = sim.y_vel
-    except Exception:
-        pass
-    try:
-        if 'agent_data/Hz' in h5obj and hasattr(sim, 'Hz'):
-            h5obj['agent_data/Hz'][:, col] = sim.Hz
-        if 'agent_data/heading' in h5obj and hasattr(sim, 'heading'):
-            h5obj['agent_data/heading'][:, col] = sim.heading
-    except Exception:
-        pass
-    try:
-        if 'agent_data/swim_behav' in h5obj and hasattr(sim, 'swim_behav'):
-            h5obj['agent_data/swim_behav'][:, col] = sim.swim_behav
-    except Exception:
-        pass
-    try:
-        if 'agent_data/is_stuck' in h5obj and hasattr(sim, 'is_stuck'):
-            h5obj['agent_data/is_stuck'][:, col] = sim.is_stuck
-    except Exception:
-        pass
-    try:
-        if 'agent_data/thrust' in h5obj and hasattr(sim, 'thrust'):
-            tmag = np.linalg.norm(sim.thrust, axis=1)
-            h5obj['agent_data/thrust'][:, col] = tmag
-    except Exception:
-        pass
-    try:
-        if 'agent_data/drag' in h5obj and hasattr(sim, 'drag'):
-            dmag = np.linalg.norm(sim.drag, axis=1)
-            h5obj['agent_data/drag'][:, col] = dmag
-    except Exception:
-        pass
+    # Persist current state into agent_data/* at column i via helper
+    hdf5_io.write_agent_timestep(h5obj, sim, i)
 
     mean_Hz = np.nanmean(sim.Hz) if hasattr(sim, 'Hz') else float('nan')
     mean_thrust = np.nanmean(np.linalg.norm(sim.thrust, axis=1)) if hasattr(sim, 'thrust') else float('nan')
@@ -305,37 +189,39 @@ try:
         return o
 
     # persist freq_debug_history if it exists
-    if fd_hist is not None and len(fd_hist) > 0:
-        try:
-            serial = [_make_serializable(d) for d in fd_hist]
-            hdf5_io.write_dataset(sim.db, 'diagnostics/freq_debug_history_json', np.array([json.dumps(serial)]))
-            print('Wrote diagnostics/freq_debug_history_json to DB')
-        except Exception as e:
-            print('Failed to write freq_debug_history to DB:', e)
+    if getattr(sim, 'debug_freq', False):
+        if fd_hist is not None and len(fd_hist) > 0:
+            try:
+                serial = [_make_serializable(d) for d in fd_hist]
+                hdf5_io.write_dataset(sim.db, 'diagnostics/freq_debug_history_json', np.array([json.dumps(serial)]))
+                print('Wrote diagnostics/freq_debug_history_json to DB')
+            except Exception as e:
+                print('Failed to write freq_debug_history to DB:', e)
 
     # persist the term-level history if present
     fth = getattr(sim, 'freq_terms_history', None)
-    if fth is not None and len(fth) > 0:
-        try:
-            serial_terms = _make_serializable(fth)
-            hdf5_io.write_dataset(sim.db, 'diagnostics/freq_terms_history_json', np.array([json.dumps(serial_terms)]))
-            print('Wrote diagnostics/freq_terms_history_json to DB')
-        except Exception as e:
-            print('Failed to write freq_terms_history to DB:', e)
-        # also write a JSON copy into outputs/ for easier inspection
-        try:
-            out_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
-            out_dir = os.path.abspath(out_dir)
-            if not os.path.exists(out_dir):
-                os.makedirs(out_dir, exist_ok=True)
-            import time
-            fname = f"diagnostics_freq_terms_{int(time.time())}.json"
-            out_path = os.path.join(out_dir, fname)
-            with open(out_path, 'w') as of:
-                json.dump(serial_terms, of)
-            print('Wrote JSON diagnostics copy to', out_path)
-        except Exception as e:
-            print('Failed to write JSON diagnostics copy:', e)
+    if getattr(sim, 'debug_freq', False):
+        if fth is not None and len(fth) > 0:
+            try:
+                serial_terms = _make_serializable(fth)
+                hdf5_io.write_dataset(sim.db, 'diagnostics/freq_terms_history_json', np.array([json.dumps(serial_terms)]))
+                print('Wrote diagnostics/freq_terms_history_json to DB')
+            except Exception as e:
+                print('Failed to write freq_terms_history to DB:', e)
+            # also write a JSON copy into outputs/ for easier inspection when debug
+            try:
+                out_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
+                out_dir = os.path.abspath(out_dir)
+                if not os.path.exists(out_dir):
+                    os.makedirs(out_dir, exist_ok=True)
+                import time
+                fname = f"diagnostics_freq_terms_{int(time.time())}.json"
+                out_path = os.path.join(out_dir, fname)
+                with open(out_path, 'w') as of:
+                    json.dump(serial_terms, of)
+                print('Wrote JSON diagnostics copy to', out_path)
+            except Exception as e:
+                print('Failed to write JSON diagnostics copy:', e)
 except Exception as e:
     print('Error printing end-of-run diagnostics:', e)
 
