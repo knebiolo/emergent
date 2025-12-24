@@ -52,6 +52,12 @@ class simulation:
             self.rng = np.random.default_rng()
         except Exception:
             self.rng = None
+        # compatibility: some legacy code expects `sim.arr.random.choice`
+        # simplest approach: expose the numpy module under `self.arr`
+        try:
+            self.arr = np
+        except Exception:
+            self.arr = None
         # always create a PID controller instance (safe defaults)
         # PID tuning can still be enabled via `pid_tuning` flag
         try:
