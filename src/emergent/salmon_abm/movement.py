@@ -526,9 +526,25 @@ class movement():
         # return displacement (dx, dy) over this timestep
         try:
             dxdy = fish_vel_1 * dt
-            return dxdy
         except Exception:
-            return np.zeros((self.simulation.num_agents, 2), dtype=float)
+            dxdy = np.zeros((self.simulation.num_agents, 2), dtype=float)
+
+        # optional movement debug: dump per-step arrays
+        try:
+            if getattr(self.simulation, 'debug_movement', False):
+                outdir = getattr(self.simulation, 'model_dir', None) or './outputs'
+                import os, time
+                os.makedirs(outdir, exist_ok=True)
+                fname = os.path.join(outdir, f'move_debug_step_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.npz')
+                np.savez_compressed(fname,
+                                     dxdy=dxdy,
+                                     thrust=getattr(self.simulation, 'thrust', None),
+                                     drag=getattr(self.simulation, 'drag', None),
+                                     X=self.simulation.X,
+                                     Y=self.simulation.Y,
+                                     heading=self.simulation.heading)
+        except Exception:
+            pass
 
         dxdy = np.where(mask[:, np.newaxis], fish_vel_1 * dt, np.zeros_like(fish_vel_1))
         return dxdy

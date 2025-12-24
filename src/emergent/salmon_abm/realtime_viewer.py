@@ -44,8 +44,8 @@ try:
         QVBoxLayout,
         QOpenGLWidget,
     )
-    from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject, QThread
-    from PyQt5.QtGui import QPainter, QColor, QPen
+    from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject, QThread, QRectF
+    from PyQt5.QtGui import QPainter, QColor, QPen, QImage
 except Exception:
     raise
 
@@ -149,7 +149,7 @@ def load_positions_from_csv(path: str) -> np.ndarray:
 
 
 class ReplayWidget(QOpenGLWidget):
-    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0, point_size: Optional[float] = None):
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0, point_size: Optional[float] = None, env_depth: Optional[str] = None, allow_expand_bounds: bool = False, smooth_alpha: float = 1.0, env_clip_pct: tuple = (0.0, 100.0)):
         super().__init__(parent)
         if positions.ndim != 3 or positions.shape[2] != 2:
             raise ValueError("positions must be (T, N, 2)")
@@ -189,6 +189,84 @@ class ReplayWidget(QOpenGLWidget):
         self._pan_y = float(pan_y)
         # point size in pixels (radius). If None, compute relative to canvas size
         self._point_size = None if point_size is None else float(point_size)
+        # trail buffer for live mode (list of (N,2) arrays)
+        self._trail_buf = []
+        self._trail_length = 8
+        # simple live frame counter (increments each update_frame call)
+        self._live_count = 0
+        # whether live bounds have been initialized (prevent recentering)
+        self._live_fixed_bounds = False
+        # whether allowed to expand bounds after initial setting
+        self._allow_expand_bounds = bool(allow_expand_bounds)
+        # smoothing alpha for live frames (1.0 = no smoothing)
+        self._smooth_alpha = float(smooth_alpha) if smooth_alpha is not None else 1.0
+        self._smoothed_positions = None
+        # optional background image (QImage) rendered to the world extents
+        self._bg_qimage = None
+        if env_depth is not None:
+            try:
+                from emergent.salmon_abm import io as _io
+                arr, transform, crs = _io.enviro_import(env_depth)
+                a = np.array(arr, dtype=float)
+                # detect nodata-like values (common sentinel -9999)
+                nodata_mask = np.isnan(a) | (a < -1e3)
+                valid_vals = a[~nodata_mask]
+                if valid_vals.size == 0:
+                    # nothing valid
+                    raise RuntimeError('env depth raster contains no valid data')
+                # normalize to 0-255 using percentiles (configurable) computed on valid data
+                lo_pct, hi_pct = env_clip_pct if isinstance(env_clip_pct, (list, tuple)) else (0.0, 100.0)
+                amin = float(np.nanpercentile(valid_vals, max(0.0, lo_pct)))
+                amax = float(np.nanpercentile(valid_vals, min(100.0, hi_pct)))
+                if amax <= amin:
+                    amax = amin + 1.0
+                norm = (a - amin) / (amax - amin)
+                norm = np.clip(norm, 0.0, 1.0)
+                img8 = (np.nan_to_num(norm) * 255.0).astype(np.uint8)
+                h, w = img8.shape
+                # build RGBA with transparent nodata pixels
+                rgb = np.dstack([img8, img8, img8])
+                alpha = (~nodata_mask).astype(np.uint8) * 255
+                rgba = np.dstack([rgb, alpha])
+                qimg = QImage(rgba.data.tobytes(), w, h, 4 * w, QImage.Format_RGBA8888)
+                # Compute raster world bbox from affine transform (a,b,c,d,e,f) mapping col,row -> x,y
+                try:
+                    a_t, b_t, c_t, d_t, e_t, f_t = transform
+                except Exception:
+                    try:
+                        t = transform
+                        a_t, b_t, c_t, d_t, e_t, f_t = (t.a, t.b, t.c, t.d, t.e, t.f)
+                    except Exception:
+                        a_t, b_t, c_t, d_t, e_t, f_t = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+                cols = [0.0, float(w)]
+                rows = [0.0, float(h)]
+                xs = []
+                ys = []
+                for cc in cols:
+                    for rr in rows:
+                        xval = a_t * cc + b_t * rr + c_t
+                        yval = d_t * cc + e_t * rr + f_t
+                        xs.append(xval)
+                        ys.append(yval)
+                env_xmin = float(min(xs))
+                env_xmax = float(max(xs))
+                env_ymin = float(min(ys))
+                env_ymax = float(max(ys))
+                self._env_bbox = (env_xmin, env_xmax, env_ymin, env_ymax)
+                self._bg_qimage = qimg.copy()
+                # If an environment bbox is present, lock world view to that bbox
+                try:
+                    self.xmin, self.xmax, self.ymin, self.ymax = env_xmin, env_xmax, env_ymin, env_ymax
+                    self._live_fixed_bounds = True
+                except Exception:
+                    pass
+                try:
+                    import logging as _lg
+                    _lg.getLogger('realtime_viewer').info('Loaded env-depth %s bbox=%s clip=%s/%s', env_depth, self._env_bbox, lo_pct, hi_pct)
+                except Exception:
+                    pass
+            except Exception:
+                self._bg_qimage = None
         # encourage smoother painter rendering
         try:
             self.setAttribute(Qt.WA_OpaquePaintEvent, False)
@@ -244,6 +322,10 @@ class ReplayWidget(QOpenGLWidget):
             log.debug('ReplayWidget.paintGL called: size=%sx%s frame=%s N=%s', self.width(), self.height(), getattr(self, 'frame', None), getattr(self, 'N', None))
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing)
+            try:
+                painter.setRenderHint(QPainter.HighQualityAntialiasing)
+            except Exception:
+                pass
             w = self.width()
             h = self.height()
             painter.fillRect(0, 0, w, h, QColor(255, 255, 255))
@@ -280,6 +362,39 @@ class ReplayWidget(QOpenGLWidget):
             tx = (w - s * dx) / 2.0
             ty = (h - s * dy) / 2.0
 
+            # pan offsets used for world->canvas mapping
+            pan_x = getattr(self, '_pan_x', 0.0)
+            pan_y = getattr(self, '_pan_y', 0.0)
+
+            # draw background image mapped to the computed world rectangle using raster bbox
+            if getattr(self, '_bg_qimage', None) is not None and getattr(self, '_env_bbox', None) is not None:
+                try:
+                    env_xmin, env_xmax, env_ymin, env_ymax = self._env_bbox
+                    # compute mapping from env/world coords to canvas coords
+                    def world_to_canvas(wx, wy):
+                        x_adj = wx + pan_x * (xmax_loc - xmin_loc)
+                        y_adj = wy + pan_y * (ymax_loc - ymin_loc)
+                        sxp = tx + (x_adj - xmin_loc) * s
+                        syp = ty + (ymax_loc - y_adj) * s
+                        return sxp, syp
+
+                    # get canvas rect for the env bbox corners
+                    x0, y0 = world_to_canvas(env_xmin, env_ymin)
+                    x1, y1 = world_to_canvas(env_xmax, env_ymax)
+                    left = min(x0, x1)
+                    top = min(y0, y1)
+                    right = max(x0, x1)
+                    bottom = max(y0, y1)
+                    dest = QRectF(left, top, right - left, bottom - top)
+                    # draw the background image; ensure correct orientation (flip vertically if raster rows go top->bottom)
+                    try:
+                        # if the original transform had negative y-scale we mirrored the image on load
+                        painter.drawImage(dest, self._bg_qimage)
+                    except Exception:
+                        painter.drawImage(dest, self._bg_qimage)
+                except Exception:
+                    pass
+
             pts = self.positions[self.frame]
             if self.N == 0 or pts.size == 0:
                 painter.setPen(QPen(QColor(80, 80, 80)))
@@ -292,8 +407,8 @@ class ReplayWidget(QOpenGLWidget):
             pen = QPen(QColor(180, 10, 10))
             pen.setWidthF(1.0)
             painter.setPen(pen)
-            brush = QColor(220, 30, 30)
-            painter.setBrush(brush)
+            brush_col = QColor(220, 30, 30)
+            painter.setBrush(brush_col)
             # default radius scales with canvas; override if user provided `point_size`
             r = max(1, int(min(w, h) * 0.002))
             if self._point_size is not None:
@@ -303,6 +418,30 @@ class ReplayWidget(QOpenGLWidget):
 
             pan_x = getattr(self, '_pan_x', 0.0)
             pan_y = getattr(self, '_pan_y', 0.0)
+            # draw trail buffer first (older frames with fainter alpha)
+            try:
+                if hasattr(self, '_trail_buf') and len(self._trail_buf) > 0:
+                    # draw older entries first
+                    for ti, tpts in enumerate(self._trail_buf[:-1]):
+                        alpha = int(80 * (ti + 1) / max(1, len(self._trail_buf)))
+                        trail_brush = QColor(220, 30, 30)
+                        trail_brush.setAlpha(alpha)
+                        painter.setBrush(trail_brush)
+                        for j in range(tpts.shape[0]):
+                            x, y = tpts[j]
+                            if not (np.isfinite(x) and np.isfinite(y)):
+                                continue
+                            x_adj = x + pan_x * (xmax_loc - xmin_loc)
+                            y_adj = y + pan_y * (ymax_loc - ymin_loc)
+                            sxp = tx + (x_adj - xmin_loc) * s
+                            syp = ty + (ymax_loc - y_adj) * s
+                            painter.drawEllipse(QRectF(sxp - r, syp - r, 2 * r, 2 * r))
+                    # restore main brush for newest points
+                    painter.setBrush(brush_col)
+            except Exception:
+                pass
+
+            # draw current points (newest)
             for i in range(self.N):
                 x, y = pts[i]
                 if not (np.isfinite(x) and np.isfinite(y)):
@@ -311,10 +450,31 @@ class ReplayWidget(QOpenGLWidget):
                 y_adj = y + pan_y * (ymax_loc - ymin_loc)
                 sxp = tx + (x_adj - xmin_loc) * s
                 syp = ty + (ymax_loc - y_adj) * s
-                painter.drawEllipse(int(sxp) - r, int(syp) - r, 2 * r, 2 * r)
+                painter.drawEllipse(QRectF(sxp - r, syp - r, 2 * r, 2 * r))
 
             painter.setPen(QPen(QColor(0, 0, 0)))
-            painter.drawText(6, 14, f"Frame: {self.frame+1}/{self.T}  Agents: {self.N}")
+            # display a live frame counter when receiving live updates (T often == 1)
+            try:
+                if getattr(self, '_live_count', 0) > 0 and self.T == 1:
+                    # draw a prominent live badge in top-right
+                    try:
+                        badge_text = f"LIVE {self._live_count}  Agents: {self.N}"
+                        fm = painter.fontMetrics()
+                        bw = fm.width(badge_text) + 12
+                        bh = fm.height() + 6
+                        rx = w - bw - 8
+                        ry = 8
+                        painter.setBrush(QColor(200, 30, 30, 200))
+                        painter.setPen(QPen(QColor(180, 20, 20)))
+                        painter.drawRoundedRect(rx, ry, bw, bh, 6, 6)
+                        painter.setPen(QPen(QColor(255, 255, 255)))
+                        painter.drawText(rx + 6, ry + bh - 6, badge_text)
+                    except Exception:
+                        painter.drawText(6, 14, f"Live frames: {self._live_count}  Agents: {self.N}")
+                else:
+                    painter.drawText(6, 14, f"Frame: {self.frame+1}/{self.T}  Agents: {self.N}")
+            except Exception:
+                painter.drawText(6, 14, f"Frame: {self.frame+1}/{self.T}  Agents: {self.N}")
             painter.setPen(QPen(QColor(0, 0, 0)))
             painter.drawText(6, 28, f'DEBUG: frame={self.frame} N={self.N} xmin={xmin_loc:.2f} xmax={xmax_loc:.2f} ymin={ymin_loc:.2f} ymax={ymax_loc:.2f}')
             painter.end()
@@ -327,24 +487,52 @@ class ReplayWidget(QOpenGLWidget):
             pts = np.asarray(arr, dtype=np.float32)
             if pts.ndim != 2 or pts.shape[1] != 2:
                 return
-            # update world bounds
+            # update world bounds: initialize on first live frame, then expand only
             xs = pts[:, 0]
             ys = pts[:, 1]
             valid = np.isfinite(xs) & np.isfinite(ys)
             if np.any(valid):
-                self.xmin = float(np.nanmin(xs[valid]))
-                self.xmax = float(np.nanmax(xs[valid]))
-                self.ymin = float(np.nanmin(ys[valid]))
-                self.ymax = float(np.nanmax(ys[valid]))
+                # If an environment bbox is present, do not change view bounds (lock to env)
+                if getattr(self, '_env_bbox', None) is not None:
+                    # do not modify xmin/xmax/ymin/ymax
+                    pass
+                else:
+                    new_xmin = float(np.nanmin(xs[valid]))
+                    new_xmax = float(np.nanmax(xs[valid]))
+                    new_ymin = float(np.nanmin(ys[valid]))
+                    new_ymax = float(np.nanmax(ys[valid]))
+                    if getattr(self, '_live_fixed_bounds', False):
+                        # by default do not expand bounds to avoid zooming out; expand only if allowed
+                        if self._allow_expand_bounds:
+                            self.xmin = min(self.xmin, new_xmin)
+                            self.xmax = max(self.xmax, new_xmax)
+                            self.ymin = min(self.ymin, new_ymin)
+                            self.ymax = max(self.ymax, new_ymax)
+                    else:
+                        self.xmin = new_xmin
+                        self.xmax = new_xmax
+                        self.ymin = new_ymin
+                        self.ymax = new_ymax
+                        self._live_fixed_bounds = True
             # assign into positions buffer so paintGL can access indexed by frame
+            # apply optional temporal smoothing to reduce jitter
             try:
-                self.positions = pts[np.newaxis, :, :]
+                if self._smooth_alpha is not None and 0.0 <= self._smooth_alpha < 1.0:
+                    if self._smoothed_positions is None:
+                        self._smoothed_positions = pts.copy()
+                    else:
+                        self._smoothed_positions = (self._smooth_alpha * pts) + ((1.0 - self._smooth_alpha) * self._smoothed_positions)
+                    use_pts = self._smoothed_positions
+                else:
+                    use_pts = pts
+                self.positions = use_pts[np.newaxis, :, :]
                 self.T, self.N = self.positions.shape[0], self.positions.shape[1]
                 # update trail buffer
                 try:
                     if not hasattr(self, '_trail_buf'):
                         self._trail_buf = []
-                    self._trail_buf.append(pts)
+                    # append the raw incoming points (not smoothed) to preserve motion trail fidelity
+                    self._trail_buf.append(pts.copy())
                     if len(self._trail_buf) > getattr(self, '_trail_length', 8):
                         self._trail_buf.pop(0)
                 except Exception:
@@ -1062,6 +1250,10 @@ def main(argv=None):
     parser.add_argument("--view-pad", dest="view_pad", type=float, default=1.15, help="View padding factor (zoom out). Default 1.15")
     parser.add_argument("--force-vbo", dest="force_vbo", action="store_true", help="Force VBO/raw GL buffer path when available")
     parser.add_argument("--point-size", dest="point_size", type=float, default=None, help="Point radius in pixels for agent rendering (overrides default scaling)")
+    parser.add_argument("--env-depth", dest="env_depth", type=str, default=None, help="Path to depth GeoTIFF to render as background")
+    parser.add_argument("--smooth-alpha", dest="smooth_alpha", type=float, default=1.0, help="Smoothing alpha for live frames (0.0-1.0). Lower reduces jitter; 1.0 disables smoothing.")
+    parser.add_argument("--allow-expand-bounds", dest="allow_expand_bounds", action="store_true", help="Allow live view bounds to expand during run (otherwise bounds are fixed after first frame)")
+    parser.add_argument("--env-clip", dest="env_clip", type=str, default=None, help="Percentile clip for env background as 'low,high' (e.g. 2,98)")
     parser.add_argument("--watchdog-seconds", dest="watchdog_seconds", type=float, default=5.0, help="Force-stop live receiver thread after this many seconds when closing (default 5.0)")
     args = parser.parse_args(argv)
 
@@ -1089,6 +1281,24 @@ def main(argv=None):
         port = args.port
         positions = np.zeros((1, 0, 2), dtype=float)
         win = MainWindow(positions, watchdog_seconds=args.watchdog_seconds, pad=args.view_pad, force_vbo=args.force_vbo, point_size=args.point_size)
+        # if an env depth file was passed, install it on the replay widget
+        try:
+                if args.env_depth is not None:
+                    try:
+                        env_clip_pct = None
+                        if args.env_clip:
+                            try:
+                                parts = [float(p) for p in args.env_clip.split(',')]
+                                if len(parts) >= 2:
+                                    env_clip_pct = (parts[0], parts[1])
+                            except Exception:
+                                env_clip_pct = None
+                        rv = ReplayWidget(positions, pad=args.view_pad, point_size=args.point_size, env_depth=args.env_depth, allow_expand_bounds=args.allow_expand_bounds, smooth_alpha=args.smooth_alpha, env_clip_pct=env_clip_pct)
+                        swap_viewer_in_main(win, rv)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         # add status label for errors
         try:
             status = QLabel('Ready')
@@ -1238,17 +1448,34 @@ def main(argv=None):
                                 ymin = float(np.nanmin(ys[valid]))
                                 ymax = float(np.nanmax(ys[valid]))
                                 log.debug('live frame bounds xmin=%s xmax=%s ymin=%s ymax=%s', xmin, xmax, ymin, ymax)
+                                try:
+                                    log.debug('env bbox=%s', getattr(win.viewer, '_env_bbox', None))
+                                except Exception:
+                                    pass
                         except Exception:
                             log.exception('Failed computing live frame bounds')
 
-                        # prefer viewer's update_frame if available for live updates
-                        try:
-                            if hasattr(win.viewer, 'update_frame'):
-                                win.viewer.update_frame(arr)
-                            else:
+                            # prefer viewer's update_frame if available for live updates
+                            try:
+                                # increment live counter and maintain trail buffer for smoother motion
+                                try:
+                                    if hasattr(win.viewer, '_live_count'):
+                                        win.viewer._live_count = getattr(win.viewer, '_live_count', 0) + 1
+                                    if hasattr(win.viewer, '_trail_buf'):
+                                        try:
+                                            win.viewer._trail_buf.append(arr.copy())
+                                            if len(win.viewer._trail_buf) > getattr(win.viewer, '_trail_length', 8):
+                                                win.viewer._trail_buf.pop(0)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                                if hasattr(win.viewer, 'update_frame'):
+                                    win.viewer.update_frame(arr)
+                                else:
+                                    win.viewer.positions = positions_live
+                            except Exception:
                                 win.viewer.positions = positions_live
-                        except Exception:
-                            win.viewer.positions = positions_live
                         # Extra diagnostic logging: report bounds and trigger update
                         try:
                             xs = positions_live[:, :, 0]
@@ -1260,6 +1487,12 @@ def main(argv=None):
                                 ymin = float(np.nanmin(ys[valid]))
                                 ymax = float(np.nanmax(ys[valid]))
                                 log.debug('Applying live positions to viewer: xmin=%s xmax=%s ymin=%s ymax=%s', xmin, xmax, ymin, ymax)
+                                try:
+                                    # log a small sample of agent coordinates (first 5) for numeric comparison
+                                    sample = positions_live[0, :5, :].tolist()
+                                    log.debug('Sample agent coords (first 5): %s', sample)
+                                except Exception:
+                                    pass
                         except Exception:
                             log.exception('Failed to compute live bounds for logging')
                         # diagnostic flag disabled by default; do not force large points
@@ -1400,6 +1633,24 @@ def main(argv=None):
 
     # create window and pick renderer based on agent count
     win = MainWindow(positions, pad=args.view_pad, force_vbo=args.force_vbo, point_size=args.point_size)
+    # if depth background requested, replace viewer with one that has the background
+    try:
+        if args.env_depth is not None:
+            try:
+                env_clip_pct = None
+                if args.env_clip:
+                    try:
+                        parts = [float(p) for p in args.env_clip.split(',')]
+                        if len(parts) >= 2:
+                            env_clip_pct = (parts[0], parts[1])
+                    except Exception:
+                        env_clip_pct = None
+                rv = ReplayWidget(positions, pad=args.view_pad, point_size=args.point_size, env_depth=args.env_depth, allow_expand_bounds=args.allow_expand_bounds, smooth_alpha=args.smooth_alpha, env_clip_pct=env_clip_pct)
+                swap_viewer_in_main(win, rv)
+            except Exception:
+                pass
+    except Exception:
+        pass
     try:
         Nagents = positions.shape[1]
     except Exception:

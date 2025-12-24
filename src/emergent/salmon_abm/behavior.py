@@ -163,7 +163,7 @@ class behavior():
 
         attract_x = weight * delta_x / dist
         attract_y = weight * delta_y / dist
-        return np.array([attract_x, attract_y])
+        return np.column_stack((attract_x, attract_y))
 
     def rheo_cue(self, weight, downstream=False):
         length_numpy = self.simulation.length
@@ -247,7 +247,7 @@ class behavior():
         repulse_x = np.where(too_close, weight * delta_x / dist, np.zeros_like(delta_x))
         repulse_y = np.where(too_close, weight * delta_y / dist, np.zeros_like(delta_y))
 
-        return np.array([repulse_x, repulse_y])
+        return np.column_stack((repulse_x, repulse_y))
 
     def shallow_cue(self, weight):
         buff = 2
@@ -362,7 +362,7 @@ class behavior():
         delta_y = min_y - self.simulation.Y
         attract_x = weight * delta_x / np.sqrt(delta_x**2 + delta_y**2)
         attract_y = weight * delta_y / np.sqrt(delta_x**2 + delta_y**2)
-        return np.array([attract_x, attract_y])
+        return np.column_stack((attract_x, attract_y))
 
     def cohesion_cue(self, weight, consider_front_only=False):
         num_agents = self.simulation.num_agents
@@ -548,6 +548,26 @@ class behavior():
                     'collision': collision,
                     'refugia': refugia}
 
+        # Diagnostic: capture raw cue shapes to help find broadcasting issues
+        try:
+            shapes = {}
+            for k, v in cue_dict.items():
+                try:
+                    arr = np.asarray(v)
+                    shapes[k] = {'ndim': arr.ndim, 'shape': arr.shape}
+                except Exception:
+                    shapes[k] = {'error': 'cannot convert to array'}
+            self.simulation.cue_shapes = shapes
+            if getattr(self.simulation, 'debug_behavior', False):
+                import json, os, time
+                outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                os.makedirs(outdir, exist_ok=True)
+                fname = os.path.join(outdir, f'cue_shapes_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.json')
+                with open(fname, 'w', encoding='utf-8') as fh:
+                    json.dump(shapes, fh, indent=2)
+        except Exception:
+            pass
+
         low_bat_cue_dict = {0: 'shallow', 1: 'border', 2: 'refugia'}
         self.is_in_eddy(t)
         tolerance = 50000
@@ -555,9 +575,44 @@ class behavior():
         vec_sum_tired = np.zeros_like(rheotaxis)
 
         cue_magnitudes = {}
+
+        # helper: coerce cue arrays to shape (num_agents, 2)
+        def _ensure_agent_vec(vec):
+            arr = np.asarray(vec)
+            n = self.simulation.num_agents
+            # common shapes: (n,2) -> OK
+            try:
+                if arr.shape == (n, 2):
+                    return arr
+            except Exception:
+                pass
+            # (2, n) -> transpose
+            if arr.ndim == 2 and arr.shape[0] == 2 and arr.shape[1] == n:
+                return arr.T
+            # 1-D vector of length 2 -> replicate for all agents
+            if arr.ndim == 1 and arr.size == 2:
+                return np.tile(arr, (n, 1))
+            # 1-D per-agent scalar -> use as x component, zero y
+            if arr.ndim == 1 and arr.size == n:
+                return np.column_stack((arr, np.zeros(n)))
+            # 3-D arrays (n, H, W) or similar: collapse spatial dims to scalar per agent
+            if arr.ndim >= 2:
+                # try to find axis equal to n (number of agents)
+                axes = [i for i, s in enumerate(arr.shape) if s == n]
+                if axes:
+                    axis = axes[0]
+                    # move axis to front
+                    moved = np.moveaxis(arr, axis, 0)
+                    # collapse remaining dims to a scalar per agent (sum)
+                    collapsed = np.nan_to_num(moved).reshape(n, -1).sum(axis=1)
+                    return np.column_stack((collapsed, np.zeros(n)))
+            # final fallback: zeros
+            return np.zeros((n, 2), dtype=float)
         for i in order_dict.keys():
             cue = order_dict[i]
             vec = cue_dict[cue]
+            # coerce to (n_agents, 2) to avoid accidental broadcasting
+            vec = _ensure_agent_vec(vec)
             # record L2 norm per agent for debugging
             try:
                 cue_magnitudes[cue] = np.linalg.norm(vec, axis=1)
@@ -575,6 +630,7 @@ class behavior():
         for i in np.arange(0, 3, 1):
             cue = low_bat_cue_dict[i]
             vec = cue_dict[cue]
+            vec = _ensure_agent_vec(vec)
             vec_sum_tired = np.where(np.linalg.norm(vec_sum_tired, axis=-1)[:, np.newaxis] < tolerance,
                                      vec_sum_tired + vec,
                                      vec_sum_tired)
@@ -595,6 +651,37 @@ class behavior():
                         print(f' - {k}: min={float(np.nanmin(arr)):.4g}, max={float(np.nanmax(arr)):.4g}')
                 except Exception:
                     pass
+            # store last head_vec and cue magnitudes on simulation for quick inspection
+            try:
+                self.simulation.last_head_vec = np.asarray(head_vec)
+                self.simulation.last_cue_magnitudes = {k: np.asarray(v) for k, v in cue_magnitudes.items()}
+            except Exception:
+                pass
+
+            # optional behavior debugging: dump cue snapshots
+            try:
+                if getattr(self.simulation, 'debug_behavior', False):
+                    outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                    os.makedirs(outdir, exist_ok=True)
+                    import time
+                    fname_npz = os.path.join(outdir, f'behavior_debug_step_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.npz')
+                    # safe serializable payload: head_vec (n,2) and cue_magnitudes (per-cue arrays)
+                    safe_cues = {k: (np.asarray(v).astype(float) if getattr(v, 'size', 0) > 0 else np.array([])) for k, v in cue_magnitudes.items()}
+                    try:
+                        np.savez_compressed(fname_npz, head_vec=np.asarray(head_vec).astype(float), **safe_cues)
+                        try:
+                            print('Wrote behavior debug NPZ:', fname_npz)
+                        except Exception:
+                            pass
+                    except Exception:
+                        # fallback: write a small JSON containing head_vec and cue magnitudes
+                        import json
+                        fname_json = fname_npz.replace('.npz', '.json')
+                        serial = {'head_vec': (np.asarray(head_vec)).astype(float).tolist(), 'cue_magnitudes': {k: (np.asarray(v).astype(float)).tolist() for k, v in cue_magnitudes.items()}}
+                        with open(fname_json, 'w', encoding='utf-8') as fh:
+                            json.dump(serial, fh)
+            except Exception:
+                pass
             return np.arctan2(head_vec[:, 1], head_vec[:, 0])
         else:
             if getattr(self.simulation, 'debug', False):

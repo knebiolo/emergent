@@ -1,0 +1,172 @@
+"""Headless runner for Nuyakuk diagnostic traces.
+
+Writes per-timestep per-agent CSV with positions, velocities and sampled env values.
+
+Usage:
+  python tools/run_nuyakuk_headless.py --nagents 200 --nsteps 200 --out outputs/diagnostics
+"""
+import os
+import argparse
+import time
+import csv
+
+import numpy as np
+
+from emergent.salmon_abm.simulation import simulation
+from emergent.salmon_abm import io, hdf5_io
+
+
+def discover_env_files(base_dir):
+    keys = ['depth.tif', 'vel_x.tif', 'vel_y.tif', 'vel_mag.tif', 'vel_dir.tif']
+    out = []
+    for fn in keys:
+        p = os.path.join(base_dir, fn)
+        if os.path.exists(p):
+            out.append(p)
+    return out
+
+
+def import_env_to_h5(sim, env_files):
+    try:
+        h5 = hdf5_io.get_hdf5_obj(sim)
+        for ef in env_files:
+            try:
+                arr, transform, crs = io.enviro_import(ef)
+                key = 'environment/' + os.path.splitext(os.path.basename(ef))[0]
+                hdf5_io.write_dataset(h5, key, np.array(arr))
+                print('Imported raster into HDF5:', key)
+                if os.path.basename(ef).startswith('depth'):
+                    try:
+                        t = transform
+                        sim.depth_rast_transform = (t.a, t.b, t.c, t.d, t.e, t.f)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print('Failed to import raster', ef, e)
+        # write x/y coords if depth was imported
+        try:
+            depth_ds = hdf5_io.read_dataset(h5, 'environment/depth')
+            if depth_ds is not None:
+                nrows, ncols = np.array(depth_ds).shape
+                a, b, c, d, e, f = getattr(sim, 'depth_rast_transform', (1.0, 0.0, 0.0, 0.0, 1.0, 0.0))
+                cols = np.arange(ncols, dtype=float)
+                rows = np.arange(nrows, dtype=float)
+                col_indices, row_indices = np.meshgrid(cols, rows)
+                x_coords = a * col_indices + b * row_indices + c
+                y_coords = d * col_indices + e * row_indices + f
+                hdf5_io.write_dataset(h5, 'environment/x_coords', x_coords)
+                hdf5_io.write_dataset(h5, 'environment/y_coords', y_coords)
+        except Exception:
+            pass
+    except Exception as e:
+        print('Raster import into HDF5 failed:', e)
+
+
+def run_headless(args):
+    base = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'data', 'salmon_abm'))
+    base = os.path.abspath(base)
+    env_files = discover_env_files(base)
+    start_poly = os.path.join(base, 'start_loc_river_right.shp')
+
+    outdir = os.path.abspath(args.out)
+    os.makedirs(outdir, exist_ok=True)
+
+    sim = simulation(
+        model_dir=outdir,
+        model_name=args.model_name,
+        crs=None,
+        basin='nuyakuk',
+        water_temp=10.0,
+        start_polygon=start_poly if os.path.exists(start_poly) else None,
+        env_files=env_files,
+        longitudinal_profile=os.path.join(base, 'longitudinal.shp') if os.path.exists(os.path.join(base, 'longitudinal.shp')) else None,
+        num_timesteps=args.nsteps,
+        num_agents=args.nagents,
+        db_path=os.path.join(outdir, f'{args.model_name}_headless.h5')
+    )
+
+    # enable optional movement debugging
+    if getattr(args, 'debug_movement', False):
+        setattr(sim, 'debug_movement', True)
+    if getattr(args, 'debug_behavior', False):
+        setattr(sim, 'debug_behavior', True)
+
+    # import rasters into HDF5 for sampling
+    import_env_to_h5(sim, env_files)
+
+    csv_path = os.path.join(outdir, f'{args.model_name}_trace.csv')
+    print('Writing trace to', csv_path)
+    header = ['timestep', 'agent', 'x', 'y', 'x_vel', 'y_vel', 'depth', 'vel_x_sample', 'vel_y_sample', 'vel_mag_sample']
+    with open(csv_path, 'w', newline='') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(header)
+
+        # run short deterministic simulation
+        dt = 1.0
+        for t in range(args.nsteps):
+            # expose current step so movement debug filenames are meaningful
+            setattr(sim, 'current_step', int(t))
+            sim.timestep(t, dt)
+            # sample environment values at agent positions
+            depth_vals = sim.sample_environment(getattr(sim, 'depth_rast_transform', None), 'depth')
+            velx_vals = sim.sample_environment(getattr(sim, 'vel_x_rast_transform', getattr(sim, 'depth_rast_transform', None)), 'vel_x')
+            vely_vals = sim.sample_environment(getattr(sim, 'vel_y_rast_transform', getattr(sim, 'depth_rast_transform', None)), 'vel_y')
+            mag_vals = sim.sample_environment(getattr(sim, 'vel_mag_rast_transform', getattr(sim, 'depth_rast_transform', None)), 'vel_mag')
+
+            # ensure x_vel / y_vel available (sim updates after movement)
+            xvel = getattr(sim, 'x_vel', None)
+            yvel = getattr(sim, 'y_vel', None)
+            if xvel is None:
+                xvel = (sim.X - sim.prev_X) / dt
+            if yvel is None:
+                yvel = (sim.Y - sim.prev_Y) / dt
+
+            # write per-agent rows
+            for a in range(sim.num_agents):
+                row = [t, a, float(sim.X[a]), float(sim.Y[a]), float(xvel[a]), float(yvel[a]),
+                       float(depth_vals[a]) if np.isfinite(depth_vals[a]) else '',
+                       float(velx_vals[a]) if np.isfinite(velx_vals[a]) else '',
+                       float(vely_vals[a]) if np.isfinite(vely_vals[a]) else '',
+                       float(mag_vals[a]) if np.isfinite(mag_vals[a]) else '']
+                writer.writerow(row)
+
+            # small flush to keep file consistent
+            fh.flush()
+            if (t + 1) % max(1, int(args.nsteps / 10)) == 0:
+                print(f'Progress: {t+1}/{args.nsteps}')
+
+    print('Headless run complete. Trace saved to', csv_path)
+    # fallback behavior debug dump: write last_head_vec and last_cue_magnitudes if enabled
+    try:
+        if getattr(sim, 'debug_behavior', False):
+            out_debug = os.path.join(outdir, f'{args.model_name}_behavior_last.json')
+            d = {}
+            if hasattr(sim, 'last_head_vec'):
+                d['last_head_vec'] = np.asarray(sim.last_head_vec).astype(float).tolist()
+            if hasattr(sim, 'last_cue_magnitudes'):
+                d['last_cue_magnitudes'] = {k: np.asarray(v).astype(float).tolist() for k, v in sim.last_cue_magnitudes.items()}
+            if d:
+                import json
+                with open(out_debug, 'w', encoding='utf-8') as fh:
+                    json.dump(d, fh)
+                print('Wrote behavior fallback debug to', out_debug)
+    except Exception:
+        pass
+
+    sim.close()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--nagents', type=int, default=200)
+    parser.add_argument('--nsteps', type=int, default=200)
+    parser.add_argument('--debug-movement', action='store_true', help='Enable movement debug dumps')
+    parser.add_argument('--debug-behavior', action='store_true', help='Enable behavior debug dumps')
+    parser.add_argument('--model-name', dest='model_name', default='nuyakuk_headless')
+    parser.add_argument('--out', default=os.path.join('outputs', 'diagnostics'))
+    args = parser.parse_args()
+    run_headless(args)
+
+
+if __name__ == '__main__':
+    main()
