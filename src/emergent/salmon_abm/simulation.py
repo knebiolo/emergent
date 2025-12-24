@@ -309,6 +309,28 @@ class simulation:
         # mask of agents able to move
         mask = np.where(self.dead == 0, True, False)
 
+        # --- neighbor finding: populate agents_within_buffers, closest_agent, nearest_neighbor_distance
+        try:
+            from scipy.spatial import cKDTree
+            pts = np.column_stack((self.X, self.Y))
+            if len(pts) > 0:
+                tree = cKDTree(pts)
+                # buffer radius in meters (use a simulation attribute or default)
+                radius = getattr(self, 'neighbor_buffer_radius', max(10.0, (self.length.mean() / 100.0) * 5.0))
+                agents_within = tree.query_ball_tree(tree, r=radius)
+                # convert lists to numpy arrays per-agent
+                self.agents_within_buffers = [np.array([j for j in lst if j != i], dtype=int) for i, lst in enumerate(agents_within)]
+                # nearest neighbor excluding self
+                distances, indices = tree.query(pts, k=2, n_jobs=1)
+                # distances[:,0] == 0 (self), so take 1
+                nearest = np.where(np.isfinite(distances[:, 1]), indices[:, 1], np.nan)
+                nearest_d = np.where(np.isfinite(distances[:, 1]), distances[:, 1], np.nan)
+                self.closest_agent = nearest
+                self.nearest_neighbor_distance = nearest_d
+        except Exception:
+            # Leave neighbor defaults in place
+            pass
+
         # instantiate per-timestep helpers
         try:
             behavior = behavior_mod.behavior(dt, self)

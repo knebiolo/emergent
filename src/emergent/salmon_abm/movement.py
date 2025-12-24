@@ -536,10 +536,20 @@ class movement():
                 import os, time
                 os.makedirs(outdir, exist_ok=True)
                 fname = os.path.join(outdir, f'move_debug_step_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.npz')
+                # include tailbeat frequency (Hz), ideal drag, and max_practical_sog for debugging
+                ideal_drag = None
+                try:
+                    ideal_drag = self.ideal_drag_fun()
+                except Exception:
+                    ideal_drag = getattr(self.simulation, 'drag', None)
+
                 np.savez_compressed(fname,
                                      dxdy=dxdy,
                                      thrust=getattr(self.simulation, 'thrust', None),
                                      drag=getattr(self.simulation, 'drag', None),
+                                     ideal_drag=ideal_drag,
+                                     Hz=getattr(self.simulation, 'Hz', None),
+                                     max_practical_sog=getattr(self.simulation, 'max_practical_sog', None),
                                      X=self.simulation.X,
                                      Y=self.simulation.Y,
                                      heading=self.simulation.heading)
