@@ -114,10 +114,11 @@ class behavior():
         ymin = rows - buff
         ymax = rows + buff + 1
 
-        xmin = xmin.astype(np.int32)
-        xmax = xmax.astype(np.int32)
-        ymin = ymin.astype(np.int32)
-        ymax = ymax.astype(np.int32)
+        # sanitize numeric arrays before casting to int to avoid invalid-cast runtime warnings
+        xmin = np.nan_to_num(xmin, nan=0, posinf=0, neginf=0).astype(np.int32)
+        xmax = np.nan_to_num(xmax, nan=0, posinf=0, neginf=0).astype(np.int32)
+        ymin = np.nan_to_num(ymin, nan=0, posinf=0, neginf=0).astype(np.int32)
+        ymax = np.nan_to_num(ymax, nan=0, posinf=0, neginf=0).astype(np.int32)
 
         slices = [(agent, slice(y0, y1), slice(x0, x1))
                   for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),
@@ -703,9 +704,23 @@ class behavior():
                         for bk in ('battery', 'swim_behav', 'swim_mode', 'ideal_sog', 'sog', 'bout_dur', 'dist_per_bout'):
                             if hasattr(self.simulation, bk):
                                 val = getattr(self.simulation, bk)
-                                # make sure it's serializable numeric array
                                 extra[bk] = np.asarray(val).astype(float)
-                        np.savez_compressed(fname_npz, head_vec=np.asarray(head_vec).astype(float), **safe_cues, **safe_vecs, **extra)
+
+                        # sanitize safe_cues and safe_vecs: convert empty arrays or all-NaN arrays to zeros to avoid
+                        # runtime warnings when consumers compute min/max/mean
+                        def _sanitize(arr):
+                            a = np.asarray(arr)
+                            if a.size == 0:
+                                return np.zeros((self.simulation.num_agents,)) if a.ndim == 1 else np.zeros((self.simulation.num_agents, 2))
+                            if np.all(np.isnan(a)):
+                                # replace all-NaN with zeros
+                                return np.nan_to_num(a, nan=0.0)
+                            return a
+
+                        safe_cues_s = {k: _sanitize(v) for k, v in safe_cues.items()}
+                        safe_vecs_s = {k: _sanitize(v) for k, v in safe_vecs.items()}
+
+                        np.savez_compressed(fname_npz, head_vec=np.asarray(head_vec).astype(float), **safe_cues_s, **safe_vecs_s, **extra)
                         try:
                             print('Wrote behavior debug NPZ:', fname_npz)
                         except Exception:

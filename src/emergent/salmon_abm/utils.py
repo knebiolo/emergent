@@ -55,6 +55,9 @@ def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
             rows.append(row_i)
         cols = np.asarray(cols, dtype=float)
         rows = np.asarray(rows, dtype=float)
+        # sanitize any NaN/inf results
+        cols = np.nan_to_num(cols, nan=0.0, posinf=0.0, neginf=0.0)
+        rows = np.nan_to_num(rows, nan=0.0, posinf=0.0, neginf=0.0)
         # inverse mapping likely already accounts for pixel-center offsets
         if rows.size == 1:
             return int(np.rint(rows[0])), int(np.rint(cols[0]))
@@ -71,6 +74,9 @@ def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
         # Use pixel-center convention: convert to pixel indices for pixel centers
         col = col - 0.5
         row = row - 0.5
+        # sanitize NaN/inf and convert to ints safely
+        row = np.nan_to_num(row, nan=0.0, posinf=0.0, neginf=0.0)
+        col = np.nan_to_num(col, nan=0.0, posinf=0.0, neginf=0.0)
         if row.size == 1:
             return int(np.floor(row[0] + 0.5)), int(np.floor(col[0] + 0.5))
         return np.floor(row + 0.5).astype(int), np.floor(col + 0.5).astype(int)

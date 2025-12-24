@@ -6,6 +6,9 @@ print('keys:', npz.files)
 for k in npz.files:
     a = npz[k]
     try:
+        if getattr(a, 'size', 0) == 0 or np.all(np.isnan(a)):
+            print(k, 'shape', getattr(a, 'shape', None), 'all-NaN or empty')
+            continue
         mn = float(np.nanmin(a))
         mx = float(np.nanmax(a))
         mean = float(np.nanmean(a))
