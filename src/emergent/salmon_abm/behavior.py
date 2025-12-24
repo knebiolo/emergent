@@ -698,7 +698,14 @@ class behavior():
                     safe_cues = {f'{k}_mag': (np.asarray(v).astype(float) if getattr(v, 'size', 0) > 0 else np.array([])) for k, v in cue_magnitudes.items()}
                     safe_vecs = {f'{k}_vec': (np.asarray(v).astype(float) if getattr(v, 'size', 0) > 0 else np.zeros((self.simulation.num_agents, 2))) for k, v in raw_vecs.items()}
                     try:
-                        np.savez_compressed(fname_npz, head_vec=np.asarray(head_vec).astype(float), **safe_cues, **safe_vecs)
+                        # include battery and swim state fields when present for fatigue inspection
+                        extra = {}
+                        for bk in ('battery', 'swim_behav', 'swim_mode', 'ideal_sog', 'sog', 'bout_dur', 'dist_per_bout'):
+                            if hasattr(self.simulation, bk):
+                                val = getattr(self.simulation, bk)
+                                # make sure it's serializable numeric array
+                                extra[bk] = np.asarray(val).astype(float)
+                        np.savez_compressed(fname_npz, head_vec=np.asarray(head_vec).astype(float), **safe_cues, **safe_vecs, **extra)
                         try:
                             print('Wrote behavior debug NPZ:', fname_npz)
                         except Exception:
