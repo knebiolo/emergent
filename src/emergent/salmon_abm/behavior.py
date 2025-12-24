@@ -785,6 +785,15 @@ class behavior():
         shallow_vec = _ensure_agent_vec(cue_dict['shallow'])
         head_vec = np.where(self.simulation.in_eddy[:, np.newaxis] == 1, border_vec + shallow_vec, head_vec)
 
+        try:
+            if getattr(self.simulation, 'debug_behavior', False):
+                try:
+                    print('DBG arbitrate: head_vec.shape=', getattr(head_vec, 'shape', None), 'debug_behavior=', getattr(self.simulation, 'debug_behavior', False))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if len(head_vec.shape) == 2:
             # debug print of cue magnitudes if requested
             if getattr(self.simulation, 'debug', False):
@@ -928,29 +937,156 @@ class behavior():
                         except Exception:
                             pass
 
-                        np.savez_compressed(
-                            fname_npz,
-                            head_vec=np.asarray(head_vec).astype(float),
-                            **safe_cues_s,
-                            **safe_vecs_s,
-                            **extra,
-                            neighbor_counts=neighbor_counts,
-                            neighbors_concat=neighbors_concat,
-                            neighbor_mean_distance=neighbor_mean_distance,
-                            neighbor_any_within_2bl=neighbor_any_within_2bl,
-                            neighbor_headings=(neighbor_headings if 'neighbor_headings' in locals() else np.array([])),
-                            neighbor_rel_heading=(neighbor_rel_heading if 'neighbor_rel_heading' in locals() else np.array([])),
-                            neighbors_owner=(agent_idx_repeat if 'agent_idx_repeat' in locals() else np.array([], dtype=np.int32)),
-                            neighbor_min_distance=(neighbor_min_distance if 'neighbor_min_distance' in locals() else np.full(self.simulation.num_agents, np.nan)),
-                            closest_agent=(np.asarray(getattr(self.simulation, 'closest_agent', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'closest_agent') else np.array([])),
-                            nearest_neighbor_distance=(np.asarray(getattr(self.simulation, 'nearest_neighbor_distance', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'nearest_neighbor_distance') else np.array([])),
-                            # include alignment diagnostics when available
-                            **({'alignment_diag': self.simulation._alignment_diag} if hasattr(self.simulation, '_alignment_diag') else {}),
-                        )
+                        # Prepare alignment_diag fields (prefer per-neighbor diagnostics when present)
+                        alignment_diag_payload = {}
+                        if hasattr(self.simulation, '_alignment_diag'):
+                            try:
+                                ad = self.simulation._alignment_diag
+                                # flatten and convert to serializable numpy arrays
+                                for k in ('raw_headings_neighbors', 'headings_neighbors_used', 'used_velocity_heading', 'neighbor_indices', 'agent_indices'):
+                                    if k in ad:
+                                        val = ad[k]
+                                        # ensure numpy array or scalar
+                                        if isinstance(val, (list, tuple)):
+                                            alignment_diag_payload[k] = np.asarray(val)
+                                        else:
+                                            try:
+                                                alignment_diag_payload[k] = np.asarray(val)
+                                            except Exception:
+                                                alignment_diag_payload[k] = np.array(val)
+                            except Exception:
+                                alignment_diag_payload = {}
+
+                        # Explicitly extract alignment diagnostics into locals to ensure they are written
+                        raw_headings_neighbors_arr = np.array([])
+                        headings_neighbors_used_arr = np.array([])
+                        used_velocity_heading_val = np.float64(0.0)
+                        alignment_neighbor_indices = np.array([], dtype=np.int32)
+                        alignment_agent_indices = np.array([], dtype=np.int32)
+                        if hasattr(self.simulation, '_alignment_diag'):
+                            try:
+                                ad = self.simulation._alignment_diag
+                                raw_headings_neighbors_arr = np.asarray(ad.get('raw_headings_neighbors', np.array([])))
+                                headings_neighbors_used_arr = np.asarray(ad.get('headings_neighbors_used', np.array([])))
+                                try:
+                                    used_velocity_heading_val = np.asarray(ad.get('used_velocity_heading', 0.0))
+                                except Exception:
+                                    used_velocity_heading_val = float(ad.get('used_velocity_heading', 0.0))
+                                alignment_neighbor_indices = np.asarray(ad.get('neighbor_indices', np.array([], dtype=np.int32))).astype(np.int32)
+                                alignment_agent_indices = np.asarray(ad.get('agent_indices', np.array([], dtype=np.int32))).astype(np.int32)
+                            except Exception:
+                                pass
+
                         try:
-                            print('Wrote behavior debug NPZ:', fname_npz)
+                            print('DBG NPZ write: saving alignment diagnostics shapes:', raw_headings_neighbors_arr.shape, headings_neighbors_used_arr.shape, alignment_neighbor_indices.shape, alignment_agent_indices.shape)
                         except Exception:
                             pass
+
+                        # Save NPZ and perform robust post-save verification (absolute paths,
+                        # existence, file size, and explicit key checks) to diagnose missing fields.
+                        try:
+                            abs_fname = os.path.abspath(fname_npz)
+                            print('Saving behavior NPZ ->', abs_fname)
+                        except Exception:
+                            abs_fname = fname_npz
+                        try:
+                            np.savez_compressed(
+                                fname_npz,
+                                head_vec=np.asarray(head_vec).astype(float),
+                                **safe_cues_s,
+                                **safe_vecs_s,
+                                **extra,
+                                neighbor_counts=neighbor_counts,
+                                neighbors_concat=neighbors_concat,
+                                neighbor_mean_distance=neighbor_mean_distance,
+                                neighbor_any_within_2bl=neighbor_any_within_2bl,
+                                # legacy per-agent neighbor summaries (kept for compatibility)
+                                neighbor_headings=(neighbor_headings if 'neighbor_headings' in locals() else np.array([])),
+                                neighbor_rel_heading=(neighbor_rel_heading if 'neighbor_rel_heading' in locals() else np.array([])),
+                                neighbors_owner=(agent_idx_repeat if 'agent_idx_repeat' in locals() else np.array([], dtype=np.int32)),
+                                neighbor_min_distance=(neighbor_min_distance if 'neighbor_min_distance' in locals() else np.full(self.simulation.num_agents, np.nan)),
+                                closest_agent=(np.asarray(getattr(self.simulation, 'closest_agent', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'closest_agent') else np.array([])),
+                                nearest_neighbor_distance=(np.asarray(getattr(self.simulation, 'nearest_neighbor_distance', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'nearest_neighbor_distance') else np.array([])),
+                                # explicit per-neighbor alignment diagnostics
+                                raw_headings_neighbors=raw_headings_neighbors_arr,
+                                headings_neighbors_used=headings_neighbors_used_arr,
+                                alignment_used_velocity=(used_velocity_heading_val if used_velocity_heading_val is not None else 0.0),
+                                alignment_neighbor_indices=alignment_neighbor_indices,
+                                alignment_agent_indices=alignment_agent_indices,
+                            )
+                            try:
+                                print('Wrote behavior debug NPZ:', abs_fname)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            try:
+                                print('Failed writing behavior NPZ:', e)
+                            except Exception:
+                                pass
+
+                        # Post-save verification: check file exists/size and list keys, and explicitly
+                        # report presence/shape of expected alignment fields.
+                        try:
+                            import numpy as _np, os as _os
+                            exists = _os.path.exists(abs_fname)
+                            size = _os.path.getsize(abs_fname) if exists else -1
+                            print(f'POSTSAVE: exists={exists}, size={size}', abs_fname)
+                            if exists:
+                                _d = _np.load(abs_fname)
+                                files = list(_d.files)
+                                try:
+                                    print('POSTSAVE NPZ keys:', files)
+                                except Exception:
+                                    pass
+                                # explicit expected alignment keys to check
+                                for ak in ('raw_headings_neighbors', 'headings_neighbors_used', 'alignment_used_velocity', 'alignment_neighbor_indices', 'alignment_agent_indices'):
+                                    if ak in _d:
+                                        try:
+                                            arr = _d[ak]
+                                            print(f'POSTSAVE: key {ak} present, shape/type: {getattr(arr, "shape", None)}/{type(arr)}')
+                                        except Exception as e:
+                                            print(f'POSTSAVE: key {ak} present but reading failed: {e}')
+                                    else:
+                                        print(f'POSTSAVE: key {ak} MISSING')
+                        except Exception as e:
+                            try:
+                                print('POSTSAVE verification failed:', e)
+                            except Exception:
+                                pass
+
+                        # Also write a dedicated alignment dump to ensure per-neighbor arrays are saved
+                        try:
+                            aln_fname = fname_npz.replace('.npz', '_alignment.npz')
+                            aln_abs = os.path.abspath(aln_fname)
+                            import numpy as _np, os as _os
+                            _np.savez_compressed(
+                                aln_fname,
+                                raw_headings_neighbors=raw_headings_neighbors_arr,
+                                headings_neighbors_used=headings_neighbors_used_arr,
+                                alignment_used_velocity=(used_velocity_heading_val if used_velocity_heading_val is not None else 0.0),
+                                alignment_neighbor_indices=alignment_neighbor_indices,
+                                alignment_agent_indices=alignment_agent_indices,
+                            )
+                            try:
+                                print('Wrote alignment diagnostic NPZ:', aln_abs)
+                            except Exception:
+                                pass
+                            try:
+                                exists2 = _os.path.exists(aln_abs)
+                                size2 = _os.path.getsize(aln_abs) if exists2 else -1
+                                print(f'ALIGN DUMP POSTSAVE: exists={exists2}, size={size2}', aln_abs)
+                                if exists2:
+                                    _d2 = _np.load(aln_abs)
+                                    print('ALIGN DUMP keys:', list(_d2.files))
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            try:
+                                import traceback
+                                print('Failed writing alignment NPZ:', e)
+                                traceback.print_exc()
+                            except Exception:
+                                pass
                     except Exception:
                         # fallback: write a small JSON containing head_vec and cue magnitudes
                         import json

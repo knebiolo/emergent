@@ -131,6 +131,32 @@ try:
 except Exception:
     pass
 
+# Write a guaranteed alignment-sidecar NPZ from the test harness for verification
+try:
+    if hasattr(sim, '_alignment_diag'):
+        import numpy as _np, os as _os, time as _time
+        ad = sim._alignment_diag
+        outdir = getattr(sim, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+        os.makedirs(outdir, exist_ok=True)
+        aln_fname = os.path.join(outdir, f'alignment_sidecar_step_{int(getattr(sim, "current_step", 0))}_{int(_time.time())}.npz')
+        _np.savez_compressed(
+            aln_fname,
+            raw_headings_neighbors=_np.asarray(ad.get('raw_headings_neighbors', _np.array([]))),
+            headings_neighbors_used=_np.asarray(ad.get('headings_neighbors_used', _np.array([]))),
+            alignment_used_velocity=float(ad.get('used_velocity_heading', 0.0)),
+            alignment_neighbor_indices=_np.asarray(ad.get('neighbor_indices', _np.array([], dtype=_np.int32))).astype(_np.int32),
+            alignment_agent_indices=_np.asarray(ad.get('agent_indices', _np.array([], dtype=_np.int32))).astype(_np.int32),
+        )
+        print('Wrote test harness alignment sidecar:', aln_fname)
+        try:
+            print('Sidecar exists:', _os.path.exists(aln_fname), 'size:', _os.path.getsize(aln_fname))
+            d = _np.load(aln_fname)
+            print('Sidecar keys:', list(d.files))
+        except Exception:
+            pass
+except Exception as e:
+    print('Failed writing alignment sidecar from test harness:', e)
+
 import glob, os
 files = glob.glob('outputs/diagnostics/behavior_debug_step_*.npz')
 if not files:
