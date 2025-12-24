@@ -268,10 +268,118 @@ class simulation:
             self.vel_dir_rast_transform = self.depth_rast_transform
             self.refugia_map_transform = self.depth_rast_transform
 
+        # heading initialization deferred until behavior helper is available
+
         # small helpers: construct movement and behavior helpers now
         self._movement = movement_mod.movement(self)
         self._behavior = behavior_mod.behavior(1.0, self)
+        # Initialize headings by sampling rasters from the DB (callable so
+        # external code can re-run initialization after injecting rasters).
+        try:
+            self.initialize_headings_from_db()
+        except Exception:
+            # keep default headings if any step fails
+            pass
         self._fatigue = None
+    def initialize_headings_from_db(self):
+        """(Re)initialize `self.heading` by sampling velocity rasters in the sim DB.
+
+        This is exposed as a method so callers can write rasters into `sim.db`
+        after construction and then re-run initialization.
+        """
+        h5 = hdf5_io.get_hdf5_obj(self)
+        if h5 is None:
+            return False
+        heading_set = False
+        # try raw component rasters first
+        vel_x_ds = hdf5_io.read_dataset(h5, 'environment/vel_x', default=None)
+        vel_y_ds = hdf5_io.read_dataset(h5, 'environment/vel_y', default=None)
+        try:
+            if vel_x_ds is not None and vel_y_ds is not None:
+                vel_x_arr = np.array(vel_x_ds)
+                vel_y_arr = np.array(vel_y_ds)
+                from emergent.salmon_abm.utils import geo_to_pixel
+                try:
+                    rows, cols = geo_to_pixel(self.X, self.Y, self.depth_rast_transform)
+                    rows = np.asarray(rows, dtype=int)
+                    cols = np.asarray(cols, dtype=int)
+                except Exception:
+                    # fallback: use x_coords/y_coords arrays stored in the DB to find nearest pixels
+                    x_coords_ds = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
+                    y_coords_ds = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
+                    if x_coords_ds is None or y_coords_ds is None:
+                        raise
+                    x_coords = np.asarray(x_coords_ds)
+                    y_coords = np.asarray(y_coords_ds)
+                    # x_coords assumed shape (nrows, ncols): pick nearest column per-agent
+                    # compute difference between agent X and each column (broadcast)
+                    # handle shapes carefully
+                    try:
+                        # nearest column: minimize |x_coords[row0, col] - X|
+                        cols = np.argmin(np.abs(x_coords[0:1, :] - self.X[:, None]), axis=1)
+                        # nearest row: minimize |y_coords[row, col0] - Y|
+                        rows = np.argmin(np.abs(y_coords[:, 0:1] - self.Y[None, :]), axis=0)
+                        rows = np.asarray(rows, dtype=int)
+                        cols = np.asarray(cols, dtype=int)
+                    except Exception:
+                        # last-resort: zeros
+                        rows = np.zeros(self.num_agents, dtype=int)
+                        cols = np.zeros(self.num_agents, dtype=int)
+                valid = (rows >= 0) & (cols >= 0) & (rows < vel_x_arr.shape[0]) & (cols < vel_x_arr.shape[1])
+                vx = np.full(self.num_agents, np.nan)
+                vy = np.full(self.num_agents, np.nan)
+                if np.any(valid):
+                    vx[valid] = vel_x_arr[rows[valid], cols[valid]]
+                    vy[valid] = vel_y_arr[rows[valid], cols[valid]]
+                # Record sampled water velocity components on simulation so alignment
+                # and other cues can use neighbor velocities before movement updates.
+                try:
+                    self.x_vel = np.where(np.isnan(vx), 0.0, vx).astype(np.float32)
+                    self.y_vel = np.where(np.isnan(vy), 0.0, vy).astype(np.float32)
+                except Exception:
+                    pass
+                both_nan = np.isnan(vx) & np.isnan(vy)
+                raw_heading = np.arctan2(-vy, -vx)
+                raw_heading = np.where(both_nan, self.heading, raw_heading)
+                self.heading = np.asarray(raw_heading, dtype=np.float32)
+                heading_set = True
+        except Exception:
+            heading_set = False
+
+        # fallback to magnitude+direction rasters
+        if not heading_set:
+            vel_mag_ds = hdf5_io.read_dataset(h5, 'environment/vel_mag', default=None)
+            vel_dir_ds = hdf5_io.read_dataset(h5, 'environment/vel_dir', default=None)
+            try:
+                if vel_mag_ds is not None and vel_dir_ds is not None:
+                    mag = np.array(vel_mag_ds)
+                    vdir = np.array(vel_dir_ds)
+                    from emergent.salmon_abm.utils import geo_to_pixel
+                    rows, cols = geo_to_pixel(self.X, self.Y, self.depth_rast_transform)
+                    rows = np.asarray(rows, dtype=int)
+                    cols = np.asarray(cols, dtype=int)
+                    valid = (rows >= 0) & (cols >= 0) & (rows < mag.shape[0]) & (cols < mag.shape[1])
+                    vx = np.full(self.num_agents, np.nan)
+                    vy = np.full(self.num_agents, np.nan)
+                    if np.any(valid):
+                        vals_mag = mag[rows[valid], cols[valid]]
+                        vals_dir = vdir[rows[valid], cols[valid]]
+                        vx[valid] = vals_mag * np.cos(vals_dir)
+                        vy[valid] = vals_mag * np.sin(vals_dir)
+                    try:
+                        self.x_vel = np.where(np.isnan(vx), 0.0, vx).astype(np.float32)
+                        self.y_vel = np.where(np.isnan(vy), 0.0, vy).astype(np.float32)
+                    except Exception:
+                        pass
+                    both_nan = np.isnan(vx) & np.isnan(vy)
+                    raw_heading = np.arctan2(-vy, -vx)
+                    raw_heading = np.where(both_nan, self.heading, raw_heading)
+                    self.heading = np.asarray(raw_heading, dtype=np.float32)
+                    heading_set = True
+            except Exception:
+                heading_set = False
+
+        return heading_set
         # ensure attributes expected by movement/behavior exist with sensible defaults
         try:
             self.pid_tuning = pid_tuning

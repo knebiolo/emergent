@@ -426,7 +426,67 @@ class behavior():
         num_agents = self.simulation.num_agents
         neighbor_indices = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
         agent_indices = np.repeat(np.arange(num_agents), [len(neighbors) for neighbors in self.simulation.agents_within_buffers]).astype(np.int32)
-        headings_neighbors = self.simulation.heading[neighbor_indices]
+        # capture raw neighbor headings (may be all zeros at init)
+        # Unconditional diagnostic prints to trace execution and exceptions
+        try:
+            print('DBG alignment_cue ENTER: num_agents=', num_agents)
+            print('DBG agents_within_buffers lengths=', [len(x) for x in self.simulation.agents_within_buffers])
+            print('DBG neighbor_indices sample=', neighbor_indices[:20])
+            print('DBG sim.heading sample=', np.asarray(self.simulation.heading)[:20])
+        except Exception as e:
+            try:
+                import traceback
+                print('DBG alignment_cue initial prints failed:', e)
+                traceback.print_exc()
+            except Exception:
+                pass
+        try:
+            raw_headings_neighbors = np.asarray(self.simulation.heading)[neighbor_indices]
+        except Exception as e:
+            try:
+                import traceback
+                print('DBG alignment_cue: reading raw headings failed:', e)
+                traceback.print_exc()
+            except Exception:
+                pass
+            raw_headings_neighbors = np.array([], dtype=float)
+        headings_neighbors = raw_headings_neighbors.copy()
+        # If headings are all zero (common at initialization), fall back to neighbor velocity directions
+        used_velocity_heading = False
+        try:
+            if headings_neighbors.size > 0 and np.allclose(headings_neighbors, 0.0):
+                # compute neighbor velocities' headings where available
+                vx = np.asarray(self.simulation.x_vel)[neighbor_indices]
+                vy = np.asarray(self.simulation.y_vel)[neighbor_indices]
+                vel_mag = np.sqrt(vx**2 + vy**2)
+                if np.any(vel_mag > 0):
+                    headings_neighbors = np.arctan2(vy, vx)
+                    used_velocity_heading = True
+                    if getattr(self.simulation, 'debug_behavior', False):
+                        try:
+                            print('alignment_cue: used velocity fallback; sample headings_neighbors=', headings_neighbors[:20])
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        # store diagnostics for NPZ writer to include
+        try:
+            print('DBG alignment_cue: about to set _alignment_diag; sizes raw/headings=', getattr(raw_headings_neighbors, 'size', None), getattr(headings_neighbors, 'size', None))
+            self.simulation._alignment_diag = {
+                'raw_headings_neighbors': np.asarray(raw_headings_neighbors, dtype=float),
+                'headings_neighbors_used': np.asarray(headings_neighbors, dtype=float),
+                'used_velocity_heading': bool(used_velocity_heading),
+                'neighbor_indices': np.asarray(neighbor_indices, dtype=np.int32),
+                'agent_indices': np.asarray(agent_indices, dtype=np.int32),
+            }
+            print('DBG alignment_cue: _alignment_diag set successfully')
+        except Exception as e:
+            try:
+                import traceback
+                print('DBG alignment_cue: failed to set _alignment_diag:', e)
+                traceback.print_exc()
+            except Exception:
+                pass
         vectors_to_neighbors_x = self.simulation.X[neighbor_indices] - self.simulation.X[agent_indices]
         vectors_to_neighbors_y = self.simulation.Y[neighbor_indices] - self.simulation.Y[agent_indices]
 
@@ -477,14 +537,59 @@ class behavior():
                         0.5 * self.simulation.length / 1000,
                         sogs)
         self.simulation.school_sog = sogs
+        # record whether alignment used velocity-derived headings for diagnostics
+        try:
+            self.simulation.alignment_used_velocity = used_velocity_heading
+        except Exception:
+            pass
         return np.nan_to_num(alignment_array)
 
     def collision_cue(self, weight):
-        valid_indices = ~np.isnan(self.simulation.closest_agent)
+        # ensure closest_agent and nearest_neighbor_distance are populated; reconstruct when missing
+        try:
+            closest_agent_arr = np.asarray(self.simulation.closest_agent, dtype=float).copy()
+        except Exception:
+            closest_agent_arr = np.full(self.simulation.num_agents, np.nan)
+        try:
+            nearest_d_arr = np.asarray(self.simulation.nearest_neighbor_distance, dtype=float).copy()
+        except Exception:
+            nearest_d_arr = np.full(self.simulation.num_agents, np.nan)
+
+        # reconstruct missing entries from agents_within_buffers
+        try:
+            awb = getattr(self.simulation, 'agents_within_buffers', None)
+            if awb is not None:
+                for ag in range(self.simulation.num_agents):
+                    if np.isnan(nearest_d_arr[ag]) or np.isnan(closest_agent_arr[ag]):
+                        nbrs = awb[ag]
+                        if nbrs is None or len(nbrs) == 0:
+                            continue
+                        # compute distances to neighbors
+                        dx = self.simulation.X[nbrs] - self.simulation.X[ag]
+                        dy = self.simulation.Y[nbrs] - self.simulation.Y[ag]
+                        dists = np.sqrt(dx**2 + dy**2)
+                        idx = int(np.argmin(dists))
+                        closest_agent_arr[ag] = nbrs[idx]
+                        nearest_d_arr[ag] = float(dists[idx])
+        except Exception:
+            pass
+
+        # update simulation attributes so other code sees reconstructed values
+        try:
+            self.simulation.closest_agent = closest_agent_arr
+            self.simulation.nearest_neighbor_distance = nearest_d_arr
+        except Exception:
+            pass
+
+        valid_indices = ~np.isnan(closest_agent_arr)
         closest_X = np.full_like(self.simulation.X, np.nan)
         closest_Y = np.full_like(self.simulation.Y, np.nan)
-        closest_X[valid_indices] = self.simulation.X[self.simulation.closest_agent[valid_indices].astype(int)]
-        closest_Y[valid_indices] = self.simulation.Y[self.simulation.closest_agent[valid_indices].astype(int)]
+        try:
+            closest_X[valid_indices] = self.simulation.X[closest_agent_arr[valid_indices].astype(int)]
+            closest_Y[valid_indices] = self.simulation.Y[closest_agent_arr[valid_indices].astype(int)]
+        except Exception:
+            # fallback: leave NaNs
+            pass
 
         self_2_closest = np.column_stack((closest_X.flatten() - self.simulation.X.flatten(), closest_Y.flatten() - self.simulation.Y.flatten()))
         closest_2_self = np.column_stack((self.simulation.X.flatten() - closest_X.flatten(), self.simulation.Y.flatten() - closest_Y.flatten()))
@@ -540,10 +645,20 @@ class behavior():
         self.simulation.time_since_eddy_escape[self.simulation.in_eddy == True] += 1
 
     def arbitrate(self, t):
+        # debug: print current simulation.heading at start of arbitration
+        if getattr(self.simulation, 'debug_behavior', False):
+            try:
+                print('arbitrate: simulation.heading (start)=', np.asarray(self.simulation.heading))
+            except Exception:
+                pass
         if self.simulation.pid_tuning:
             rheotaxis = self.rheo_cue(50000)
         else:
             rheotaxis = self.rheo_cue(25000)
+            try:
+                print('DBG arbitrate: about to call alignment_cue')
+            except Exception:
+                pass
             alignment = self.alignment_cue(20500)
             cohesion = self.cohesion_cue(11000)
             low_speed = self.vel_cue(1500)
@@ -705,6 +820,20 @@ class behavior():
                             if hasattr(self.simulation, bk):
                                 val = getattr(self.simulation, bk)
                                 extra[bk] = np.asarray(val).astype(float)
+                        # diagnostic: alignment fallback flag
+                        try:
+                            extra['alignment_used_velocity'] = float(getattr(self.simulation, 'alignment_used_velocity', 0.0))
+                        except Exception:
+                            extra['alignment_used_velocity'] = 0.0
+                        # debug: print neighbor diagnostics before writing NPZ
+                        if getattr(self.simulation, 'debug_behavior', False):
+                            try:
+                                nc = neighbor_counts if 'neighbor_counts' in locals() else None
+                                nc_sample = nc[:10] if nc is not None else None
+                                print('NPZ write: neighbor_counts sample=', nc_sample)
+                                print('NPZ write: simulation.heading sample=', np.asarray(self.simulation.heading)[:10])
+                            except Exception:
+                                pass
 
                         # sanitize safe_cues and safe_vecs: convert empty arrays or all-NaN arrays to zeros to avoid
                         # runtime warnings when consumers compute min/max/mean
@@ -720,7 +849,104 @@ class behavior():
                         safe_cues_s = {k: _sanitize(v) for k, v in safe_cues.items()}
                         safe_vecs_s = {k: _sanitize(v) for k, v in safe_vecs.items()}
 
-                        np.savez_compressed(fname_npz, head_vec=np.asarray(head_vec).astype(float), **safe_cues_s, **safe_vecs_s, **extra)
+                        # Neighbor diagnostics: convert agents_within_buffers (list of arrays)
+                        # into concise serializable arrays: counts per agent and concatenated indices.
+                        neighbor_counts = None
+                        neighbors_concat = None
+                        neighbor_any_within_2bl = None
+                        neighbor_mean_distance = None
+                        try:
+                            if hasattr(self.simulation, 'agents_within_buffers'):
+                                awb = self.simulation.agents_within_buffers
+                                neighbor_counts = np.array([len(x) for x in awb], dtype=np.int32)
+                                if neighbor_counts.sum() > 0:
+                                    neighbors_concat = np.concatenate(awb).astype(np.int32)
+                                    # reconstruct agent indices for each entry in concat
+                                    agent_idx_repeat = np.repeat(np.arange(self.simulation.num_agents), neighbor_counts)
+                                    # compute distances for each neighbor entry
+                                    X = np.asarray(self.simulation.X).flatten()
+                                    Y = np.asarray(self.simulation.Y).flatten()
+                                    nbr_X = X[neighbors_concat]
+                                    nbr_Y = Y[neighbors_concat]
+                                    dx = nbr_X - X[agent_idx_repeat]
+                                    dy = nbr_Y - Y[agent_idx_repeat]
+                                    dists = np.sqrt(dx**2 + dy**2)
+                                    # per-agent mean distance (nan if no neighbors)
+                                    # start from zeros, accumulate distances per-agent, then divide
+                                    mean_per_agent = np.zeros(self.simulation.num_agents, dtype=float)
+                                    np.add.at(mean_per_agent, agent_idx_repeat, dists)
+                                    # divide by counts where >0; mark agents with zero neighbors as NaN
+                                    nonzero = neighbor_counts > 0
+                                    mean_per_agent[nonzero] = mean_per_agent[nonzero] / neighbor_counts[nonzero]
+                                    mean_per_agent[~nonzero] = np.nan
+                                    neighbor_mean_distance = mean_per_agent
+                                    # per-agent minimum neighbor distance
+                                    min_per_agent = np.full(self.simulation.num_agents, np.nan)
+                                    if dists.size > 0:
+                                        # compute min per agent
+                                        # initialize accumulator with +inf
+                                        acc_min = np.full(self.simulation.num_agents, np.inf)
+                                        for idx, ag in enumerate(agent_idx_repeat):
+                                            acc_min[ag] = min(acc_min[ag], dists[idx])
+                                        acc_min[acc_min == np.inf] = np.nan
+                                        min_per_agent = acc_min
+                                    neighbor_min_distance = min_per_agent
+                                    # any neighbor within two body lengths?
+                                    two_bl = 2.0 * (self.simulation.length / 1000.0)
+                                    within_mask = dists <= two_bl[agent_idx_repeat]
+                                    any_within = np.zeros(self.simulation.num_agents, dtype=np.bool_)
+                                    if within_mask.size > 0:
+                                        np.logical_or.at(any_within, agent_idx_repeat[within_mask], True)
+                                    neighbor_any_within_2bl = any_within
+                                    # neighbor headings and relative headings per neighbor entry
+                                    try:
+                                        neighbor_headings = np.asarray(self.simulation.heading)[neighbors_concat]
+                                        neighbor_rel_heading = neighbor_headings - np.asarray(self.simulation.heading)[agent_idx_repeat]
+                                        # normalize to [-pi, pi]
+                                        neighbor_rel_heading = (neighbor_rel_heading + np.pi) % (2 * np.pi) - np.pi
+                                    except Exception:
+                                        neighbor_headings = np.array([], dtype=float)
+                                        neighbor_rel_heading = np.array([], dtype=float)
+                                else:
+                                    neighbors_concat = np.array([], dtype=np.int32)
+                                    neighbor_mean_distance = np.full(self.simulation.num_agents, np.nan)
+                                    neighbor_any_within_2bl = np.zeros(self.simulation.num_agents, dtype=np.bool_)
+                        except Exception:
+                            neighbor_counts = np.zeros(self.simulation.num_agents, dtype=np.int32)
+                            neighbors_concat = np.array([], dtype=np.int32)
+                            neighbor_mean_distance = np.full(self.simulation.num_agents, np.nan)
+                            neighbor_any_within_2bl = np.zeros(self.simulation.num_agents, dtype=np.bool_)
+
+                        try:
+                            print('DBG NPZ write: neighbor_counts.shape=', None if neighbor_counts is None else getattr(neighbor_counts, 'shape', None))
+                            print('DBG NPZ write: neighbors_concat.shape=', None if neighbors_concat is None else getattr(neighbors_concat, 'shape', None))
+                            print('DBG NPZ write: agent_idx_repeat.shape=', None if 'agent_idx_repeat' not in locals() else getattr(agent_idx_repeat, 'shape', None))
+                            if neighbors_concat is not None and getattr(neighbors_concat, 'size', 0) > 0:
+                                print('DBG NPZ write: neighbors_concat sample=', neighbors_concat[:20])
+                            if 'agent_idx_repeat' in locals() and getattr(agent_idx_repeat, 'size', 0) > 0:
+                                print('DBG NPZ write: agent_idx_repeat sample=', agent_idx_repeat[:20])
+                        except Exception:
+                            pass
+
+                        np.savez_compressed(
+                            fname_npz,
+                            head_vec=np.asarray(head_vec).astype(float),
+                            **safe_cues_s,
+                            **safe_vecs_s,
+                            **extra,
+                            neighbor_counts=neighbor_counts,
+                            neighbors_concat=neighbors_concat,
+                            neighbor_mean_distance=neighbor_mean_distance,
+                            neighbor_any_within_2bl=neighbor_any_within_2bl,
+                            neighbor_headings=(neighbor_headings if 'neighbor_headings' in locals() else np.array([])),
+                            neighbor_rel_heading=(neighbor_rel_heading if 'neighbor_rel_heading' in locals() else np.array([])),
+                            neighbors_owner=(agent_idx_repeat if 'agent_idx_repeat' in locals() else np.array([], dtype=np.int32)),
+                            neighbor_min_distance=(neighbor_min_distance if 'neighbor_min_distance' in locals() else np.full(self.simulation.num_agents, np.nan)),
+                            closest_agent=(np.asarray(getattr(self.simulation, 'closest_agent', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'closest_agent') else np.array([])),
+                            nearest_neighbor_distance=(np.asarray(getattr(self.simulation, 'nearest_neighbor_distance', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'nearest_neighbor_distance') else np.array([])),
+                            # include alignment diagnostics when available
+                            **({'alignment_diag': self.simulation._alignment_diag} if hasattr(self.simulation, '_alignment_diag') else {}),
+                        )
                         try:
                             print('Wrote behavior debug NPZ:', fname_npz)
                         except Exception:
