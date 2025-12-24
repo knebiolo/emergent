@@ -77,11 +77,17 @@ def run_probe(nagents=12):
     # call arbitrate once
     # Inspect individual cue shapes to find broadcasting offenders
     cue_shape_report = {}
+    # record simulation heading shape for debugging
+    try:
+        cue_shape_report['simulation_heading'] = {'ndim': np.asarray(sim.heading).ndim, 'shape': np.asarray(sim.heading).shape, 'dtype': str(np.asarray(sim.heading).dtype)}
+    except Exception as e:
+        cue_shape_report['simulation_heading'] = f'error: {e}'
     try:
         try:
             cue_shape_report['rheotaxis'] = np.asarray(beh.rheo_cue(25000)).shape
         except Exception as e:
             cue_shape_report['rheotaxis'] = f'error: {e}'
+        import traceback
         for fn_name, fn, args in [
             ('alignment', beh.alignment_cue, (20500,)),
             ('cohesion', beh.cohesion_cue, (11000,)),
@@ -97,7 +103,7 @@ def run_probe(nagents=12):
                 arr = fn(*args)
                 cue_shape_report[fn_name] = {'ndim': np.asarray(arr).ndim, 'shape': np.asarray(arr).shape}
             except Exception as e:
-                cue_shape_report[fn_name] = f'error: {e}'
+                cue_shape_report[fn_name] = {'error': str(e), 'traceback': traceback.format_exc()}
     except Exception:
         pass
 
@@ -107,7 +113,7 @@ def run_probe(nagents=12):
         print('behavior.arbitrate failed:', e)
         head = None
 
-    out = {'head_shape': None, 'head_preview': None, 'cue_magnitudes_keys': []}
+    out = {'head_shape': None, 'head_preview': None, 'cue_magnitudes_keys': [], 'cue_shape_report': cue_shape_report}
     try:
         if hasattr(sim, 'last_head_vec'):
             out['head_shape'] = np.asarray(sim.last_head_vec).shape

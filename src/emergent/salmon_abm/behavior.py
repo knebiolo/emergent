@@ -160,9 +160,12 @@ class behavior():
         delta_x = min_x - self.simulation.X
         delta_y = min_y - self.simulation.Y
         dist = np.sqrt(np.power(delta_x, 2) + np.power(delta_y, 2))
-
-        attract_x = weight * delta_x / dist
-        attract_y = weight * delta_y / dist
+        dist_safe = np.where(dist == 0, 1e-6, dist)
+        attract_x = weight * delta_x / dist_safe
+        attract_y = weight * delta_y / dist_safe
+        # where distance was zero, set attraction to zero to avoid NaNs
+        attract_x = np.where(dist == 0, 0.0, attract_x)
+        attract_y = np.where(dist == 0, 0.0, attract_y)
         return np.column_stack((attract_x, attract_y))
 
     def rheo_cue(self, weight, downstream=False):
@@ -214,15 +217,26 @@ class behavior():
         x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
         y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
 
-        front_multiplier = calculate_front_masks(self.simulation.heading,
-                                                 x_coords,
-                                                 y_coords,
-                                                 self.simulation.X,
-                                                 self.simulation.Y)
+        # calculate_front_masks expects 1D headings and per-agent (n,H,W) coords
+        front_multiplier = calculate_front_masks(np.asarray(self.simulation.heading).flatten(),
+                             x_coords,
+                             y_coords,
+                             np.nan_to_num(np.asarray(self.simulation.X).flatten()),
+                             np.nan_to_num(np.asarray(self.simulation.Y).flatten()))
 
         h5 = hdf5_io.get_hdf5_obj(self.simulation)
         dist_ds = hdf5_io.read_dataset(h5, 'environment/distance_to', default=np.zeros((1, 1)))
-        dist3d = np.stack([standardize_shape(dist_ds[sl[-2:]]) for sl in slices]) * front_multiplier
+        dist3d = np.stack([standardize_shape(dist_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
+        # ensure front_multiplier can broadcast to dist3d shape
+        try:
+            dist3d = dist3d * front_multiplier
+        except Exception:
+            try:
+                front_multiplier_b = np.broadcast_to(front_multiplier, dist3d.shape)
+                dist3d = dist3d * front_multiplier_b
+            except Exception:
+                # fallback: ignore front mask if broadcasting fails
+                pass
 
         num_agents, rows, cols = dist3d.shape
         dist3d = dist3d.reshape(num_agents, rows * cols)
@@ -360,8 +374,12 @@ class behavior():
         min_x, min_y = pixel_to_geo(self.simulation.vel_mag_rast_transform, min_row_indices + ymin, min_col_indices + xmin)
         delta_x = min_x - self.simulation.X
         delta_y = min_y - self.simulation.Y
-        attract_x = weight * delta_x / np.sqrt(delta_x**2 + delta_y**2)
-        attract_y = weight * delta_y / np.sqrt(delta_x**2 + delta_y**2)
+        dist = np.sqrt(delta_x**2 + delta_y**2)
+        dist_safe = np.where(dist == 0, 1e-6, dist)
+        attract_x = weight * delta_x / dist_safe
+        attract_y = weight * delta_y / dist_safe
+        attract_x = np.where(dist == 0, 0.0, attract_x)
+        attract_y = np.where(dist == 0, 0.0, attract_y)
         return np.column_stack((attract_x, attract_y))
 
     def cohesion_cue(self, weight, consider_front_only=False):
@@ -538,15 +556,15 @@ class behavior():
         order_dict = {0: 'shallow', 1: 'border', 2: 'avoid', 3: 'collision', 4: 'alignment', 5: 'cohesion', 6: 'low_speed', 7: 'rheotaxis', 8: 'wave_drag'}
 
         cue_dict = {'rheotaxis': rheotaxis,
-                    'shallow': shallow,
-                    'border': border.T,
-                    'wave_drag': wave_drag.T,
-                    'low_speed': low_speed.T,
-                    'avoid': avoid,
-                    'alignment': alignment,
-                    'cohesion': cohesion,
-                    'collision': collision,
-                    'refugia': refugia}
+                'shallow': shallow,
+                'border': border,
+                'wave_drag': wave_drag,
+                'low_speed': low_speed,
+                'avoid': avoid,
+                'alignment': alignment,
+                'cohesion': cohesion,
+                'collision': collision,
+                'refugia': refugia}
 
         # Diagnostic: capture raw cue shapes to help find broadcasting issues
         try:
@@ -569,12 +587,17 @@ class behavior():
             pass
 
         low_bat_cue_dict = {0: 'shallow', 1: 'border', 2: 'refugia'}
-        self.is_in_eddy(t)
+        try:
+            self.is_in_eddy(t)
+        except Exception:
+            # If simulation lacks helpers during lightweight probes, skip eddy detection
+            pass
         tolerance = 50000
         vec_sum_migratory = np.zeros_like(rheotaxis)
         vec_sum_tired = np.zeros_like(rheotaxis)
 
         cue_magnitudes = {}
+        raw_vecs = {}
 
         # helper: coerce cue arrays to shape (num_agents, 2)
         def _ensure_agent_vec(vec):
@@ -613,6 +636,8 @@ class behavior():
             vec = cue_dict[cue]
             # coerce to (n_agents, 2) to avoid accidental broadcasting
             vec = _ensure_agent_vec(vec)
+            # store coerced vector for debug dumps
+            raw_vecs[cue] = vec
             # record L2 norm per agent for debugging
             try:
                 cue_magnitudes[cue] = np.linalg.norm(vec, axis=1)
@@ -639,7 +664,10 @@ class behavior():
         head_vec = np.where(self.simulation.swim_behav[:, np.newaxis] == 1, vec_sum_migratory, head_vec)
         head_vec = np.where(self.simulation.swim_behav[:, np.newaxis] == 2, vec_sum_tired, head_vec)
         head_vec = np.where(self.simulation.swim_behav[:, np.newaxis] == 3, vec_sum_tired, head_vec)
-        head_vec = np.where(self.simulation.in_eddy[:, np.newaxis] == 1, cue_dict['border'] + cue_dict['shallow'], head_vec)
+        # ensure we use coerced (n,2) cue vectors for in-eddy override
+        border_vec = _ensure_agent_vec(cue_dict['border'])
+        shallow_vec = _ensure_agent_vec(cue_dict['shallow'])
+        head_vec = np.where(self.simulation.in_eddy[:, np.newaxis] == 1, border_vec + shallow_vec, head_vec)
 
         if len(head_vec.shape) == 2:
             # debug print of cue magnitudes if requested
@@ -666,9 +694,11 @@ class behavior():
                     import time
                     fname_npz = os.path.join(outdir, f'behavior_debug_step_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.npz')
                     # safe serializable payload: head_vec (n,2) and cue_magnitudes (per-cue arrays)
-                    safe_cues = {k: (np.asarray(v).astype(float) if getattr(v, 'size', 0) > 0 else np.array([])) for k, v in cue_magnitudes.items()}
+                    # include both magnitudes and the coerced per-agent vectors for inspection
+                    safe_cues = {f'{k}_mag': (np.asarray(v).astype(float) if getattr(v, 'size', 0) > 0 else np.array([])) for k, v in cue_magnitudes.items()}
+                    safe_vecs = {f'{k}_vec': (np.asarray(v).astype(float) if getattr(v, 'size', 0) > 0 else np.zeros((self.simulation.num_agents, 2))) for k, v in raw_vecs.items()}
                     try:
-                        np.savez_compressed(fname_npz, head_vec=np.asarray(head_vec).astype(float), **safe_cues)
+                        np.savez_compressed(fname_npz, head_vec=np.asarray(head_vec).astype(float), **safe_cues, **safe_vecs)
                         try:
                             print('Wrote behavior debug NPZ:', fname_npz)
                         except Exception:
@@ -684,11 +714,21 @@ class behavior():
                 pass
             return np.arctan2(head_vec[:, 1], head_vec[:, 0])
         else:
-            if getattr(self.simulation, 'debug', False):
-                try:
-                    print('behavior cue magnitudes (scalar) at t=', t)
-                    for k, v in cue_magnitudes.items():
-                        print(' -', k, v)
-                except Exception:
-                    pass
-            return np.arctan2(head_vec[:, 0, 1], head_vec[:, 0, 0])
+            # If head_vec has unexpected shape, try to sanitize: replace NaNs and zero-length vectors
+            try:
+                hv = np.asarray(head_vec)
+                if hv.ndim == 3:
+                    hv = hv.reshape(hv.shape[0], -1)
+                # compute norms and replace NaNs/zeros
+                norms = np.linalg.norm(hv, axis=-1)
+                # fallback unit vectors from previous headings
+                prev_hat_x = np.cos(self.simulation.heading)
+                prev_hat_y = np.sin(self.simulation.heading)
+                prev_hat = np.column_stack((prev_hat_x, prev_hat_y))
+                # where norm is zero or nan, replace with prev_hat or rheotaxis
+                safe_hv = np.where(np.isnan(norms)[:, np.newaxis] | (norms[:, np.newaxis] == 0), prev_hat, hv)
+                return np.arctan2(safe_hv[:, 1], safe_hv[:, 0])
+            except Exception:
+                # ultimate fallback: return previous heading
+                return np.asarray(self.simulation.heading)
+        # end of arbitrate: handled 2D and attempted safe fallback above

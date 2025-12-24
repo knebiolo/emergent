@@ -32,13 +32,48 @@ def import_env_to_h5(sim, env_files):
         for ef in env_files:
             try:
                 arr, transform, crs = io.enviro_import(ef)
+                # Convert rasterio Affine to numeric tuple (a,b,c,d,e,f) if possible
+                try:
+                    a = float(transform.a)
+                    b = float(getattr(transform, 'b', 0.0))
+                    c = float(transform.c)
+                    d = float(getattr(transform, 'd', 0.0))
+                    e = float(transform.e)
+                    f = float(transform.f)
+                except Exception:
+                    # fallback: default identity-like transform
+                    a, b, c, d, e, f = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+
+                # If row-scale is negative (common in GeoTIFFs), flip array vertically
+                # and adjust transform so pixel_to_geo / geo_to_pixel remain correct.
+                try:
+                    nrows = arr.shape[0]
+                except Exception:
+                    nrows = None
+                if nrows and e < 0:
+                    # flip rows and adjust e,f so new e' = -e, f' = f + e*(nrows-1)
+                    arr = np.flipud(arr)
+                    f = f + e * (nrows - 1)
+                    e = -e
+
                 key = 'environment/' + os.path.splitext(os.path.basename(ef))[0]
                 hdf5_io.write_dataset(h5, key, np.array(arr))
                 print('Imported raster into HDF5:', key)
+                # if this is the depth raster, write the transform tuple onto simulation
                 if os.path.basename(ef).startswith('depth'):
                     try:
-                        t = transform
-                        sim.depth_rast_transform = (t.a, t.b, t.c, t.d, t.e, t.f)
+                        sim.depth_rast_transform = (a, b, c, d, e, f)
+                    except Exception:
+                        pass
+                # set other raster-specific transforms to the depth transform if not set
+                if os.path.basename(ef).startswith('vel_mag'):
+                    try:
+                        sim.vel_mag_rast_transform = (a, b, c, d, e, f)
+                    except Exception:
+                        pass
+                if os.path.basename(ef).startswith('vel_dir'):
+                    try:
+                        sim.vel_dir_rast_transform = (a, b, c, d, e, f)
                     except Exception:
                         pass
             except Exception as e:
@@ -47,7 +82,8 @@ def import_env_to_h5(sim, env_files):
         try:
             depth_ds = hdf5_io.read_dataset(h5, 'environment/depth')
             if depth_ds is not None:
-                nrows, ncols = np.array(depth_ds).shape
+                depth_arr = np.array(depth_ds)
+                nrows, ncols = depth_arr.shape
                 a, b, c, d, e, f = getattr(sim, 'depth_rast_transform', (1.0, 0.0, 0.0, 0.0, 1.0, 0.0))
                 cols = np.arange(ncols, dtype=float)
                 rows = np.arange(nrows, dtype=float)
@@ -93,6 +129,21 @@ def run_headless(args):
 
     # import rasters into HDF5 for sampling
     import_env_to_h5(sim, env_files)
+
+    # report sampling validity for initial positions
+    try:
+        depth_vals0 = sim.sample_environment(getattr(sim, 'depth_rast_transform', None), 'depth')
+        valid_depth = int(np.sum(np.isfinite(depth_vals0) & (depth_vals0 != -9999.0)))
+        valid_report = os.path.join(outdir, f'{args.model_name}_initial_sampling.json')
+        try:
+            import json
+            with open(valid_report, 'w', encoding='utf-8') as fh:
+                json.dump({'num_agents': int(sim.num_agents), 'valid_depth_samples': int(valid_depth)}, fh, indent=2)
+            print('Wrote initial sampling report to', valid_report)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
     csv_path = os.path.join(outdir, f'{args.model_name}_trace.csv')
     print('Writing trace to', csv_path)
