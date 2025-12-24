@@ -228,6 +228,28 @@ class simulation:
         # that read environment/* will have something to sample in unit tests
         hdf5_io.create_environment_placeholders(self.db)
 
+        # Movement-related defaults required by movement helpers. Set early so
+        # movement.frequency/drag_fun/swim can run safely even if attributes
+        # are not later mutated.
+        try:
+            self.pid_tuning = pid_tuning
+        except Exception:
+            self.pid_tuning = False
+        try:
+            self.wave_drag = np.ones(self.num_agents, dtype=float)
+        except Exception:
+            self.wave_drag = np.ones(self.num_agents)
+        try:
+            self.Hz = np.zeros(self.num_agents, dtype=float)
+        except Exception:
+            self.Hz = np.zeros(self.num_agents)
+        # provide a drag_coeff callable expected by movement; will be overridden
+        # later if movement helper is available.
+        try:
+            self.drag_coeff = lambda reynolds: np.interp(reynolds, [2.5e4, 5.0e4, 7.4e4, 9.9e4, 1.2e5, 1.5e5, 1.7e5, 2.0e5], [0.23, 0.19, 0.15, 0.14, 0.12, 0.12, 0.11, 0.10])
+        except Exception:
+            self.drag_coeff = lambda reynolds: np.ones_like(reynolds) * 0.12
+
         # Create x/y coordinate grids and attach simple affine transforms so
         # behavior and sampling helpers can map geo <-> pixel indices.
         try:
