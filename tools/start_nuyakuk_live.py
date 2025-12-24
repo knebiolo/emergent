@@ -108,9 +108,12 @@ def main():
     # Run with viewer_live enabled so the simulation will accept one TCP client
     # and stream frames. The `run` method uses viewer_fps only for pacing hints.
     try:
-        status = sim.run(n=args.nsteps, dt=1.0, return_status=True, viewer_live=True,
-                         viewer_host=args.host, viewer_port=args.port,
-                         viewer_stream_raw=args.raw, viewer_fps=args.fps)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', category=RuntimeWarning)
+            status = sim.run(n=args.nsteps, dt=1.0, return_status=True, viewer_live=True,
+                             viewer_host=args.host, viewer_port=args.port,
+                             viewer_stream_raw=args.raw, viewer_fps=args.fps)
         print('Run finished status:', status)
     except KeyboardInterrupt:
         print('Interrupted by user')

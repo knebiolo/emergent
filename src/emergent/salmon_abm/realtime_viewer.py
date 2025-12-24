@@ -149,7 +149,7 @@ def load_positions_from_csv(path: str) -> np.ndarray:
 
 
 class ReplayWidget(QOpenGLWidget):
-    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0):
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0, point_size: Optional[float] = None):
         super().__init__(parent)
         if positions.ndim != 3 or positions.shape[2] != 2:
             raise ValueError("positions must be (T, N, 2)")
@@ -187,6 +187,15 @@ class ReplayWidget(QOpenGLWidget):
         self._pad = float(pad)
         self._pan_x = float(pan_x)
         self._pan_y = float(pan_y)
+        # point size in pixels (radius). If None, compute relative to canvas size
+        self._point_size = None if point_size is None else float(point_size)
+        # encourage smoother painter rendering
+        try:
+            self.setAttribute(Qt.WA_OpaquePaintEvent, False)
+            self.setAttribute(Qt.WA_NoSystemBackground, False)
+            self.setUpdatesEnabled(True)
+        except Exception:
+            pass
 
     def _tick(self):
         if not getattr(self, 'playing', False):
@@ -285,7 +294,10 @@ class ReplayWidget(QOpenGLWidget):
             painter.setPen(pen)
             brush = QColor(220, 30, 30)
             painter.setBrush(brush)
+            # default radius scales with canvas; override if user provided `point_size`
             r = max(1, int(min(w, h) * 0.002))
+            if self._point_size is not None:
+                r = max(1, int(self._point_size))
             if getattr(self, '_debug_force_big', False):
                 r = max(r, int(min(w, h) * 0.01))
 
@@ -309,6 +321,41 @@ class ReplayWidget(QOpenGLWidget):
         except Exception:
             _lg.getLogger('realtime_viewer').exception('ReplayWidget.paintGL failed')
 
+    def update_frame(self, arr):
+        """Called from GUI thread with an (N,2) float array to update current points (live mode)."""
+        try:
+            pts = np.asarray(arr, dtype=np.float32)
+            if pts.ndim != 2 or pts.shape[1] != 2:
+                return
+            # update world bounds
+            xs = pts[:, 0]
+            ys = pts[:, 1]
+            valid = np.isfinite(xs) & np.isfinite(ys)
+            if np.any(valid):
+                self.xmin = float(np.nanmin(xs[valid]))
+                self.xmax = float(np.nanmax(xs[valid]))
+                self.ymin = float(np.nanmin(ys[valid]))
+                self.ymax = float(np.nanmax(ys[valid]))
+            # assign into positions buffer so paintGL can access indexed by frame
+            try:
+                self.positions = pts[np.newaxis, :, :]
+                self.T, self.N = self.positions.shape[0], self.positions.shape[1]
+                # update trail buffer
+                try:
+                    if not hasattr(self, '_trail_buf'):
+                        self._trail_buf = []
+                    self._trail_buf.append(pts)
+                    if len(self._trail_buf) > getattr(self, '_trail_length', 8):
+                        self._trail_buf.pop(0)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # request repaint
+            self.update()
+        except Exception:
+            pass
+
 
 class GLViewer(QOpenGLWidget):
     """OpenGL VBO-backed viewer for large numbers of agents.
@@ -317,7 +364,7 @@ class GLViewer(QOpenGLWidget):
     widget will raise ImportError and the caller should fall back.
     """
 
-    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, force_vbo: bool = False):
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, force_vbo: bool = False, point_size: Optional[float] = None):
         super().__init__(parent)
         if positions.ndim != 3 or positions.shape[2] != 2:
             raise ValueError("positions must be (T, N, 2)")
@@ -336,6 +383,7 @@ class GLViewer(QOpenGLWidget):
         self._pan_x = 0.0
         self._pan_y = 0.0
         self._force_vbo = bool(force_vbo)
+        self._point_size = None if point_size is None else float(point_size)
 
         try:
             from OpenGL import GL
@@ -654,11 +702,12 @@ class GLViewer(QOpenGLWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, positions: np.ndarray, watchdog_seconds: float = 5.0, pad: float = 1.15, force_vbo: bool = False):
+    def __init__(self, positions: np.ndarray, watchdog_seconds: float = 5.0, pad: float = 1.15, force_vbo: bool = False, point_size: Optional[float] = None):
         super().__init__()
         self.setWindowTitle("Realtime Simulation Viewer")
         self._watchdog_seconds = float(watchdog_seconds)
-        self.viewer = ReplayWidget(positions)
+        self._point_size = point_size
+        self.viewer = ReplayWidget(positions, point_size=point_size)
         # view state
         self._pad = float(pad)
         self._force_vbo = bool(force_vbo)
@@ -1012,6 +1061,7 @@ def main(argv=None):
     parser.add_argument("--use-gl", dest="use_gl", action="store_true", help="Use OpenGL VBO renderer for very large agent counts (best performance if PyOpenGL available)")
     parser.add_argument("--view-pad", dest="view_pad", type=float, default=1.15, help="View padding factor (zoom out). Default 1.15")
     parser.add_argument("--force-vbo", dest="force_vbo", action="store_true", help="Force VBO/raw GL buffer path when available")
+    parser.add_argument("--point-size", dest="point_size", type=float, default=None, help="Point radius in pixels for agent rendering (overrides default scaling)")
     parser.add_argument("--watchdog-seconds", dest="watchdog_seconds", type=float, default=5.0, help="Force-stop live receiver thread after this many seconds when closing (default 5.0)")
     args = parser.parse_args(argv)
 
@@ -1038,7 +1088,7 @@ def main(argv=None):
         host = args.host
         port = args.port
         positions = np.zeros((1, 0, 2), dtype=float)
-        win = MainWindow(positions, watchdog_seconds=args.watchdog_seconds, pad=args.view_pad, force_vbo=args.force_vbo)
+        win = MainWindow(positions, watchdog_seconds=args.watchdog_seconds, pad=args.view_pad, force_vbo=args.force_vbo, point_size=args.point_size)
         # add status label for errors
         try:
             status = QLabel('Ready')
@@ -1082,7 +1132,7 @@ def main(argv=None):
 
                     if use_gl_now:
                         try:
-                            gl_view = GLViewer(positions_live, pad=win._pad, force_vbo=win._force_vbo)
+                            gl_view = GLViewer(positions_live, pad=win._pad, force_vbo=win._force_vbo, point_size=win._point_size)
                         except Exception:
                             # if GLViewer init fails, log and continue to fallback
                             log.exception('GLViewer init failed; falling back to other renderers')
@@ -1137,7 +1187,7 @@ def main(argv=None):
                     try:
                         # Prefer the reliable software `ReplayWidget` renderer unless GL requested
                         if not args.use_gl and not isinstance(win.viewer, ReplayWidget):
-                            replay = ReplayWidget(positions_live, pad=win._pad)
+                            replay = ReplayWidget(positions_live, pad=win._pad, point_size=win._point_size)
                             try:
                                 swap_viewer_in_main(win, replay)
                             except Exception:
@@ -1191,7 +1241,14 @@ def main(argv=None):
                         except Exception:
                             log.exception('Failed computing live frame bounds')
 
-                        win.viewer.positions = positions_live
+                        # prefer viewer's update_frame if available for live updates
+                        try:
+                            if hasattr(win.viewer, 'update_frame'):
+                                win.viewer.update_frame(arr)
+                            else:
+                                win.viewer.positions = positions_live
+                        except Exception:
+                            win.viewer.positions = positions_live
                         # Extra diagnostic logging: report bounds and trigger update
                         try:
                             xs = positions_live[:, :, 0]
@@ -1207,7 +1264,7 @@ def main(argv=None):
                             log.exception('Failed to compute live bounds for logging')
                         # diagnostic flag disabled by default; do not force large points
                         # if legacy ReplayWidget
-                        if hasattr(win.viewer, 'T'):
+                        if hasattr(win.viewer, 'T') and not hasattr(win.viewer, 'update_frame'):
                             win.viewer.T, win.viewer.N = positions_live.shape[0], positions_live.shape[1]
                             win.viewer.frame = 0
                             xs = positions_live[:, :, 0]
@@ -1342,7 +1399,7 @@ def main(argv=None):
         return
 
     # create window and pick renderer based on agent count
-    win = MainWindow(positions, pad=args.view_pad, force_vbo=args.force_vbo)
+    win = MainWindow(positions, pad=args.view_pad, force_vbo=args.force_vbo, point_size=args.point_size)
     try:
         Nagents = positions.shape[1]
     except Exception:
@@ -1350,7 +1407,7 @@ def main(argv=None):
     use_gl_mode = args.use_gl or (Nagents >= 1000)
     if use_gl_mode:
         try:
-            glw = GLViewer(positions, pad=win._pad, force_vbo=win._force_vbo)
+            glw = GLViewer(positions, pad=win._pad, force_vbo=win._force_vbo, point_size=win._point_size)
             try:
                 swap_viewer_in_main(win, glw)
             except Exception:
