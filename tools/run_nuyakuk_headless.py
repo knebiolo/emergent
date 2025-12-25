@@ -28,57 +28,17 @@ def discover_env_files(base_dir):
 
 def import_env_to_h5(sim, env_files):
     try:
+        # Use centralized helper which writes raster into HDF5 and attaches
+        # a plain (a,b,c,d,e,f) transform tuple onto `sim` when provided.
         h5 = hdf5_io.get_hdf5_obj(sim)
         for ef in env_files:
             try:
-                arr, transform, crs = io.enviro_import(ef)
-                # Convert rasterio Affine to numeric tuple (a,b,c,d,e,f) if possible
-                try:
-                    a = float(transform.a)
-                    b = float(getattr(transform, 'b', 0.0))
-                    c = float(transform.c)
-                    d = float(getattr(transform, 'd', 0.0))
-                    e = float(transform.e)
-                    f = float(transform.f)
-                except Exception:
-                    # fallback: default identity-like transform
-                    a, b, c, d, e, f = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
-
-                # If row-scale is negative (common in GeoTIFFs), flip array vertically
-                # and adjust transform so pixel_to_geo / geo_to_pixel remain correct.
-                try:
-                    nrows = arr.shape[0]
-                except Exception:
-                    nrows = None
-                if nrows and e < 0:
-                    # flip rows and adjust e,f so new e' = -e, f' = f + e*(nrows-1)
-                    arr = np.flipud(arr)
-                    f = f + e * (nrows - 1)
-                    e = -e
-
+                arr, tr_tup, crs = io.write_raster_to_hdf5(h5, ef, dataset_name=None, sim=sim)
                 key = 'environment/' + os.path.splitext(os.path.basename(ef))[0]
-                hdf5_io.write_dataset(h5, key, np.array(arr))
                 print('Imported raster into HDF5:', key)
-                # if this is the depth raster, write the transform tuple onto simulation
-                if os.path.basename(ef).startswith('depth'):
-                    try:
-                        sim.depth_rast_transform = (a, b, c, d, e, f)
-                    except Exception:
-                        pass
-                # set other raster-specific transforms to the depth transform if not set
-                if os.path.basename(ef).startswith('vel_mag'):
-                    try:
-                        sim.vel_mag_rast_transform = (a, b, c, d, e, f)
-                    except Exception:
-                        pass
-                if os.path.basename(ef).startswith('vel_dir'):
-                    try:
-                        sim.vel_dir_rast_transform = (a, b, c, d, e, f)
-                    except Exception:
-                        pass
             except Exception as e:
                 print('Failed to import raster', ef, e)
-        # write x/y coords if depth was imported
+        # write x/y coords if depth exists (helper may have set sim.depth_rast_transform)
         try:
             depth_ds = hdf5_io.read_dataset(h5, 'environment/depth')
             if depth_ds is not None:
