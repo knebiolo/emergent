@@ -179,8 +179,15 @@ class behavior():
             y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_y')
 
         v = np.column_stack([x_vel, y_vel])
-        v_hat = v / np.linalg.norm(v, axis=-1)[:, np.newaxis]
-        rheotaxis = np.zeros_like(v)
+        # sanitize sampled values (handle nodata values like -9999 and zeros)
+        v = np.asarray(v, dtype=float)
+        mags = np.linalg.norm(v, axis=-1)
+        # treat nodata / enormous values as zero (no rheotaxis)
+        invalid = ~np.isfinite(mags) | (mags <= 0) | (mags > 1e6)
+        v_hat = np.zeros_like(v)
+        valid = ~invalid
+        if np.any(valid):
+            v_hat[valid] = (v[valid].T / mags[valid]).T
         rheotaxis = weight * v_hat
         return rheotaxis
 
@@ -408,8 +415,17 @@ class behavior():
         np.add.at(center_x, valid_agent_indices, x_neighbors[valid_neighbors_mask])
         np.add.at(center_y, valid_agent_indices, y_neighbors[valid_neighbors_mask])
         counts = np.bincount(valid_agent_indices, minlength=num_agents)
-        center_x /= counts + (counts == 0)
-        center_y /= counts + (counts == 0)
+        # avoid creating spurious attraction to origin for agents with zero neighbors
+        counts_safe = counts.copy()
+        counts_safe[counts_safe == 0] = 1
+        center_x = center_x / counts_safe
+        center_y = center_y / counts_safe
+
+        # for agents with no neighbors, force the center to the agent position so vectors_to_center==0
+        no_neighbors = counts == 0
+        if np.any(no_neighbors):
+            center_x[no_neighbors] = self.simulation.X[no_neighbors]
+            center_y[no_neighbors] = self.simulation.Y[no_neighbors]
 
         vectors_to_center_x = center_x - self.simulation.X
         vectors_to_center_y = center_y - self.simulation.Y
@@ -988,29 +1004,28 @@ class behavior():
                             abs_fname = fname_npz
                         try:
                             np.savez_compressed(
-                                fname_npz,
-                                head_vec=np.asarray(head_vec).astype(float),
-                                **safe_cues_s,
-                                **safe_vecs_s,
-                                **extra,
-                                neighbor_counts=neighbor_counts,
-                                neighbors_concat=neighbors_concat,
-                                neighbor_mean_distance=neighbor_mean_distance,
-                                neighbor_any_within_2bl=neighbor_any_within_2bl,
-                                # legacy per-agent neighbor summaries (kept for compatibility)
-                                neighbor_headings=(neighbor_headings if 'neighbor_headings' in locals() else np.array([])),
-                                neighbor_rel_heading=(neighbor_rel_heading if 'neighbor_rel_heading' in locals() else np.array([])),
-                                neighbors_owner=(agent_idx_repeat if 'agent_idx_repeat' in locals() else np.array([], dtype=np.int32)),
-                                neighbor_min_distance=(neighbor_min_distance if 'neighbor_min_distance' in locals() else np.full(self.simulation.num_agents, np.nan)),
-                                closest_agent=(np.asarray(getattr(self.simulation, 'closest_agent', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'closest_agent') else np.array([])),
-                                nearest_neighbor_distance=(np.asarray(getattr(self.simulation, 'nearest_neighbor_distance', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'nearest_neighbor_distance') else np.array([])),
-                                # explicit per-neighbor alignment diagnostics
-                                raw_headings_neighbors=raw_headings_neighbors_arr,
-                                headings_neighbors_used=headings_neighbors_used_arr,
-                                alignment_used_velocity=(used_velocity_heading_val if used_velocity_heading_val is not None else 0.0),
-                                alignment_neighbor_indices=alignment_neighbor_indices,
-                                alignment_agent_indices=alignment_agent_indices,
-                            )
+                                    fname_npz,
+                                    head_vec=np.asarray(head_vec).astype(float),
+                                    **safe_cues_s,
+                                    **safe_vecs_s,
+                                    **extra,
+                                    neighbor_counts=neighbor_counts,
+                                    neighbors_concat=neighbors_concat,
+                                    neighbor_mean_distance=neighbor_mean_distance,
+                                    neighbor_any_within_2bl=neighbor_any_within_2bl,
+                                    # legacy per-agent neighbor summaries (kept for compatibility)
+                                    neighbor_headings=(neighbor_headings if 'neighbor_headings' in locals() else np.array([])),
+                                    neighbor_rel_heading=(neighbor_rel_heading if 'neighbor_rel_heading' in locals() else np.array([])),
+                                    neighbors_owner=(agent_idx_repeat if 'agent_idx_repeat' in locals() else np.array([], dtype=np.int32)),
+                                    neighbor_min_distance=(neighbor_min_distance if 'neighbor_min_distance' in locals() else np.full(self.simulation.num_agents, np.nan)),
+                                    closest_agent=(np.asarray(getattr(self.simulation, 'closest_agent', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'closest_agent') else np.array([])),
+                                    nearest_neighbor_distance=(np.asarray(getattr(self.simulation, 'nearest_neighbor_distance', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'nearest_neighbor_distance') else np.array([])),
+                                    # explicit per-neighbor alignment diagnostics
+                                    raw_headings_neighbors=raw_headings_neighbors_arr,
+                                    headings_neighbors_used=headings_neighbors_used_arr,
+                                    alignment_neighbor_indices=alignment_neighbor_indices,
+                                    alignment_agent_indices=alignment_agent_indices,
+                                )
                             try:
                                 print('Wrote behavior debug NPZ:', abs_fname)
                             except Exception:
