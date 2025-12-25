@@ -427,35 +427,29 @@ class behavior():
         neighbor_indices = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
         agent_indices = np.repeat(np.arange(num_agents), [len(neighbors) for neighbors in self.simulation.agents_within_buffers]).astype(np.int32)
         # capture raw neighbor headings (may be all zeros at init)
-        # Unconditional diagnostic prints to trace execution and exceptions
-        try:
-            print('DBG alignment_cue ENTER: num_agents=', num_agents)
-            print('DBG agents_within_buffers lengths=', [len(x) for x in self.simulation.agents_within_buffers])
-            print('DBG neighbor_indices sample=', neighbor_indices[:20])
-            print('DBG sim.heading sample=', np.asarray(self.simulation.heading)[:20])
-        except Exception as e:
+        if getattr(self.simulation, 'debug_behavior', False):
             try:
-                import traceback
-                print('DBG alignment_cue initial prints failed:', e)
-                traceback.print_exc()
+                import logging
+                logging.getLogger(__name__).debug('alignment_cue ENTER: num_agents=%s', num_agents)
+                logging.getLogger(__name__).debug('agents_within_buffers lengths=%s', [len(x) for x in self.simulation.agents_within_buffers])
+                logging.getLogger(__name__).debug('neighbor_indices sample=%s', neighbor_indices[:20])
+                logging.getLogger(__name__).debug('sim.heading sample=%s', np.asarray(self.simulation.heading)[:20])
             except Exception:
+                # non-fatal: continue without verbose logs
                 pass
+        # read raw headings; if unavailable, use empty array
+        raw_headings_neighbors = np.array([], dtype=float)
         try:
             raw_headings_neighbors = np.asarray(self.simulation.heading)[neighbor_indices]
-        except Exception as e:
-            try:
-                import traceback
-                print('DBG alignment_cue: reading raw headings failed:', e)
-                traceback.print_exc()
-            except Exception:
-                pass
+        except Exception:
+            # keep empty fallback
             raw_headings_neighbors = np.array([], dtype=float)
         headings_neighbors = raw_headings_neighbors.copy()
         # If headings are all zero (common at initialization), fall back to neighbor velocity directions
         used_velocity_heading = False
-        try:
-            if headings_neighbors.size > 0 and np.allclose(headings_neighbors, 0.0):
-                # compute neighbor velocities' headings where available
+        if headings_neighbors.size > 0 and np.allclose(headings_neighbors, 0.0):
+            # compute neighbor velocities' headings where available
+            try:
                 vx = np.asarray(self.simulation.x_vel)[neighbor_indices]
                 vy = np.asarray(self.simulation.y_vel)[neighbor_indices]
                 vel_mag = np.sqrt(vx**2 + vy**2)
@@ -464,14 +458,19 @@ class behavior():
                     used_velocity_heading = True
                     if getattr(self.simulation, 'debug_behavior', False):
                         try:
-                            print('alignment_cue: used velocity fallback; sample headings_neighbors=', headings_neighbors[:20])
+                            import logging
+                            logging.getLogger(__name__).debug('alignment_cue: used velocity fallback; sample headings_neighbors=%s', headings_neighbors[:20])
                         except Exception:
                             pass
-        except Exception:
-            pass
+            except Exception:
+                # do not propagate; leave headings_neighbors as-is
+                pass
         # store diagnostics for NPZ writer to include
+        # set diagnostic alignment structure on simulation (best-effort)
         try:
-            print('DBG alignment_cue: about to set _alignment_diag; sizes raw/headings=', getattr(raw_headings_neighbors, 'size', None), getattr(headings_neighbors, 'size', None))
+            if getattr(self.simulation, 'debug_behavior', False):
+                import logging
+                logging.getLogger(__name__).debug('alignment_cue: about to set _alignment_diag; sizes raw/headings=%s %s', getattr(raw_headings_neighbors, 'size', None), getattr(headings_neighbors, 'size', None))
             self.simulation._alignment_diag = {
                 'raw_headings_neighbors': np.asarray(raw_headings_neighbors, dtype=float),
                 'headings_neighbors_used': np.asarray(headings_neighbors, dtype=float),
@@ -479,14 +478,12 @@ class behavior():
                 'neighbor_indices': np.asarray(neighbor_indices, dtype=np.int32),
                 'agent_indices': np.asarray(agent_indices, dtype=np.int32),
             }
-            print('DBG alignment_cue: _alignment_diag set successfully')
-        except Exception as e:
-            try:
-                import traceback
-                print('DBG alignment_cue: failed to set _alignment_diag:', e)
-                traceback.print_exc()
-            except Exception:
-                pass
+            if getattr(self.simulation, 'debug_behavior', False):
+                import logging
+                logging.getLogger(__name__).debug('alignment_cue: _alignment_diag set successfully')
+        except Exception:
+            # non-fatal: alignment diagnostics are best-effort
+            pass
         vectors_to_neighbors_x = self.simulation.X[neighbor_indices] - self.simulation.X[agent_indices]
         vectors_to_neighbors_y = self.simulation.Y[neighbor_indices] - self.simulation.Y[agent_indices]
 

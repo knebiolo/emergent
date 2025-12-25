@@ -51,11 +51,13 @@ for ef in env_files:
         except Exception:
             pass
     except Exception as e:
-        print('env import failed', ef, e)
+        import logging
+        logging.getLogger(__name__).warning('env import failed %s: %s', ef, e)
 try:
     sim.initialize_headings_from_db()
 except Exception as e:
-    print('initialize_headings_from_db failed', e)
+    import logging
+    logging.getLogger(__name__).warning('initialize_headings_from_db failed: %s', e)
 
 # Read arrays
 vx_arr = hdf5_io.read_dataset(h5, 'environment/vel_x')

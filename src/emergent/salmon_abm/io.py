@@ -98,6 +98,64 @@ def enviro_import(path):
     return arr, transform, crs
 
 
+def write_raster_to_hdf5(h5obj, path, dataset_name=None, sim=None):
+    """Read a raster and write into `h5obj` under `environment/<dataset_name>`.
+
+    - `h5obj` may be an h5py.File or dict-like store.
+    - `path` is a filesystem path to a raster
+    - `dataset_name` if provided uses that base name; otherwise uses filename stem.
+    - If `sim` is provided, attempt to set `sim.<dataset_name>_rast_transform`
+      to a plain 6-tuple (a,b,c,d,e,f) for compatibility with existing code.
+
+    Returns: (arr, transform_tuple, crs)
+    """
+    arr, transform, crs = enviro_import(path)
+    base = dataset_name or os.path.splitext(os.path.basename(path))[0]
+    # write array into HDF5 using hdf5_io helper to support dict-like stores
+    try:
+        from emergent.salmon_abm import hdf5_io
+        hdf5_io.write_dataset(h5obj, f'environment/{base}', arr)
+    except Exception:
+        # best-effort: ignore write errors
+        pass
+
+    # convert affine to plain tuple (a,b,c,d,e,f) for compatibility
+    tr_tup = None
+    try:
+        a = float(getattr(transform, 'a', transform[0]))
+        b = float(getattr(transform, 'b', transform[1]))
+        c = float(getattr(transform, 'c', transform[2]))
+        d = float(getattr(transform, 'd', transform[3]))
+        e = float(getattr(transform, 'e', transform[4]))
+        f = float(getattr(transform, 'f', transform[5]))
+        tr_tup = (a, b, c, d, e, f)
+    except Exception:
+        try:
+            tr_tup = tuple([float(x) for x in transform])
+        except Exception:
+            tr_tup = None
+
+    # set attribute on sim if provided
+    if sim is not None and tr_tup is not None:
+        try:
+            if base == 'depth':
+                sim.depth_rast_transform = tr_tup
+            elif base == 'vel_x':
+                sim.vel_x_rast_transform = tr_tup
+            elif base == 'vel_y':
+                sim.vel_y_rast_transform = tr_tup
+            elif base == 'vel_mag':
+                sim.vel_mag_rast_transform = tr_tup
+            elif base == 'vel_dir':
+                sim.vel_dir_rast_transform = tr_tup
+            elif base == 'wetted':
+                sim.wetted_transform = tr_tup
+        except Exception:
+            pass
+
+    return arr, tr_tup, crs
+
+
 def longitudinal_import(shapefile):
     """Read a longitudinal shapefile and return a GeoDataFrame.
 

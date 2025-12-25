@@ -221,8 +221,20 @@ class simulation:
                 pass
 
         # import any provided environment files (fail loudly during development)
-        for ef in self.env_files:
-            _ = io.enviro_import(ef)
+        # Import provided environment rasters into the simulation HDF5 DB and
+        # set raster transform attributes using the centralized helper.
+        try:
+            for ef in self.env_files:
+                try:
+                    base = os.path.splitext(os.path.basename(ef))[0]
+                    # helper writes into HDF5 and returns the transform tuple
+                    arr, tr_tup, crs = io.write_raster_to_hdf5(self.db, ef, dataset_name=base, sim=self)
+                except Exception:
+                    # best-effort per-file: continue on error
+                    continue
+        except Exception:
+            # non-fatal: proceed even if env file handling fails
+            pass
 
         # ensure minimal environment placeholders exist so downstream modules
         # that read environment/* will have something to sample in unit tests
@@ -303,11 +315,11 @@ class simulation:
         self._behavior = behavior_mod.behavior(1.0, self)
         # Initialize headings by sampling rasters from the DB (callable so
         # external code can re-run initialization after injecting rasters).
+        import logging
         try:
             self.initialize_headings_from_db()
-        except Exception:
-            # keep default headings if any step fails
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).warning('initialize_headings_from_db failed during simulation init: %s', e)
         # set initial fish velocity so agents start with non-zero fish velocity
         try:
             fv_x = self.ideal_sog * np.cos(self.heading)
