@@ -482,11 +482,20 @@ class movement():
 
     def swim(self, t, dt, pid_controller, mask):
         tired_mask = np.where(self.simulation.swim_behav == 3, True, False)
-
         if t == 0:
-            fish_vel_0_x = np.where(mask, self.simulation.sog * np.cos(self.simulation.heading), 0)
-            fish_vel_0_y = np.where(mask, self.simulation.sog * np.sin(self.simulation.heading), 0)
-            fish_vel_0 = np.stack((fish_vel_0_x, fish_vel_0_y)).T
+            # If simulation provided `initial_fish_vel`, use it so agents start moving
+            init_fv = getattr(self.simulation, 'initial_fish_vel', None)
+            if init_fv is not None:
+                try:
+                    fish_vel_0 = np.array(init_fv, dtype=float)
+                except Exception:
+                    fish_vel_0_x = np.where(mask, self.simulation.sog * np.cos(self.simulation.heading), 0)
+                    fish_vel_0_y = np.where(mask, self.simulation.sog * np.sin(self.simulation.heading), 0)
+                    fish_vel_0 = np.stack((fish_vel_0_x, fish_vel_0_y)).T
+            else:
+                fish_vel_0_x = np.where(mask, self.simulation.sog * np.cos(self.simulation.heading), 0)
+                fish_vel_0_y = np.where(mask, self.simulation.sog * np.sin(self.simulation.heading), 0)
+                fish_vel_0 = np.stack((fish_vel_0_x, fish_vel_0_y)).T
         else:
             fish_vel_0_x = (self.simulation.X - self.simulation.prev_X) / dt
             fish_vel_0_y = (self.simulation.Y - self.simulation.prev_Y) / dt

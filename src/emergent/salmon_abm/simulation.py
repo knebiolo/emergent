@@ -308,6 +308,13 @@ class simulation:
         except Exception:
             # keep default headings if any step fails
             pass
+        # set initial fish velocity so agents start with non-zero fish velocity
+        try:
+            fv_x = self.ideal_sog * np.cos(self.heading)
+            fv_y = self.ideal_sog * np.sin(self.heading)
+            self.initial_fish_vel = np.stack((fv_x, fv_y), axis=1)
+        except Exception:
+            self.initial_fish_vel = np.zeros((self.num_agents, 2), dtype=float)
         self._fatigue = None
     def initialize_headings_from_db(self):
         """(Re)initialize `self.heading` by sampling velocity rasters in the sim DB.
