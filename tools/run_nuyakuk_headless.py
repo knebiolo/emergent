@@ -102,7 +102,9 @@ def run_headless(args):
     base = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'data', 'salmon_abm'))
     base = os.path.abspath(base)
     env_files = discover_env_files(base)
-    start_poly = os.path.join(base, 'start_loc_river_right.shp')
+    start_poly_default = os.path.join(base, 'start_loc_river_right.shp')
+    # allow overriding start polygon from CLI
+    start_poly = args.start_polygon if getattr(args, 'start_polygon', None) else start_poly_default
 
     outdir = os.path.abspath(args.out)
     os.makedirs(outdir, exist_ok=True)
@@ -113,13 +115,24 @@ def run_headless(args):
         crs=None,
         basin='nuyakuk',
         water_temp=10.0,
-        start_polygon=start_poly if os.path.exists(start_poly) else None,
+        start_polygon=start_poly if (start_poly and os.path.exists(start_poly)) else None,
         env_files=env_files,
         longitudinal_profile=os.path.join(base, 'longitudinal.shp') if os.path.exists(os.path.join(base, 'longitudinal.shp')) else None,
         num_timesteps=args.nsteps,
         num_agents=args.nagents,
         db_path=os.path.join(outdir, f'{args.model_name}_headless.h5')
     )
+
+    # load optional test weights JSON and attach to sim
+    if getattr(args, 'test_weights_file', None):
+        try:
+            import json
+            with open(args.test_weights_file, 'r', encoding='utf-8') as fh:
+                tw = json.load(fh)
+            sim.test_weights = tw
+            print('Loaded test weights from', args.test_weights_file)
+        except Exception as e:
+            print('Failed to load test weights file:', e)
 
     # enable optional movement debugging
     if getattr(args, 'debug_movement', False):
@@ -215,6 +228,8 @@ def main():
     parser.add_argument('--debug-behavior', action='store_true', help='Enable behavior debug dumps')
     parser.add_argument('--model-name', dest='model_name', default='nuyakuk_headless')
     parser.add_argument('--out', default=os.path.join('outputs', 'diagnostics'))
+    parser.add_argument('--start-polygon', dest='start_polygon', default=None, help='Optional path to start location shapefile')
+    parser.add_argument('--test-weights-file', dest='test_weights_file', default=None, help='Optional JSON file with per-cue test weight overrides')
     args = parser.parse_args()
     run_headless(args)
 

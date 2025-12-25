@@ -171,12 +171,29 @@ class behavior():
 
     def rheo_cue(self, weight, downstream=False):
         length_numpy = self.simulation.length
-        if not downstream:
-            x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_x') * -1
-            y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_y') * -1
-        else:
-            x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_x')
-            y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_y')
+        # prefer explicit per-component raster transforms when available
+        tx = getattr(self.simulation, 'vel_x_rast_transform', None) or getattr(self.simulation, 'vel_dir_rast_transform', None)
+        ty = getattr(self.simulation, 'vel_y_rast_transform', None) or getattr(self.simulation, 'vel_dir_rast_transform', None)
+        # sample vel_x/vel_y using the preferred transforms; apply sign flip if downstream=False
+        try:
+            if not downstream:
+                x_vel = self.simulation.sample_environment(tx, 'vel_x') * -1
+                y_vel = self.simulation.sample_environment(ty, 'vel_y') * -1
+            else:
+                x_vel = self.simulation.sample_environment(tx, 'vel_x')
+                y_vel = self.simulation.sample_environment(ty, 'vel_y')
+        except Exception:
+            # fallback to previous behavior using vel_dir transform if sampling fails
+            try:
+                if not downstream:
+                    x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_x') * -1
+                    y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_y') * -1
+                else:
+                    x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_x')
+                    y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_y')
+            except Exception:
+                x_vel = np.full(self.simulation.num_agents, np.nan)
+                y_vel = np.full(self.simulation.num_agents, np.nan)
 
         v = np.column_stack([x_vel, y_vel])
         # sanitize sampled values (handle nodata values like -9999 and zeros)
@@ -665,22 +682,48 @@ class behavior():
             except Exception:
                 pass
         if self.simulation.pid_tuning:
-            rheotaxis = self.rheo_cue(50000)
+            # allow test-time override of weights via simulation.test_weights dict
+            tw = getattr(self.simulation, 'test_weights', None)
+            if tw and 'rheotaxis' in tw:
+                rheotaxis = self.rheo_cue(float(tw.get('rheotaxis', 50000)))
+            else:
+                rheotaxis = self.rheo_cue(50000)
         else:
-            rheotaxis = self.rheo_cue(25000)
+            tw = getattr(self.simulation, 'test_weights', None)
+            # default weights
+            default_weights = {
+                'rheotaxis': 25000,
+                'alignment': 20500,
+                'cohesion': 11000,
+                'low_speed': 1500,
+                'wave_drag': 0,
+                'refugia': 50000,
+                'border': 50000,
+                'shallow': 100000,
+                'avoid': 25000,
+                'collision': 50000,
+            }
+            # merge test overrides if present
+            if tw:
+                for k, v in tw.items():
+                    try:
+                        default_weights[k] = float(v)
+                    except Exception:
+                        pass
+
             try:
                 print('DBG arbitrate: about to call alignment_cue')
             except Exception:
                 pass
-            alignment = self.alignment_cue(20500)
-            cohesion = self.cohesion_cue(11000)
-            low_speed = self.vel_cue(1500)
-            wave_drag = self.wave_drag_cue(0)
-            refugia = self.find_nearest_refuge(50000)
-            border = self.border_cue(50000, t)
-            shallow = self.shallow_cue(100000)
-            avoid = self.already_been_here(25000, t)
-            collision = self.collision_cue(50000)
+            alignment = self.alignment_cue(default_weights['alignment'])
+            cohesion = self.cohesion_cue(default_weights['cohesion'])
+            low_speed = self.vel_cue(default_weights['low_speed'])
+            wave_drag = self.wave_drag_cue(default_weights['wave_drag'])
+            refugia = self.find_nearest_refuge(default_weights['refugia'])
+            border = self.border_cue(default_weights['border'], t)
+            shallow = self.shallow_cue(default_weights['shallow'])
+            avoid = self.already_been_here(default_weights['avoid'], t)
+            collision = self.collision_cue(default_weights['collision'])
 
         order_dict = {0: 'shallow', 1: 'border', 2: 'avoid', 3: 'collision', 4: 'alignment', 5: 'cohesion', 6: 'low_speed', 7: 'rheotaxis', 8: 'wave_drag'}
 
@@ -765,6 +808,25 @@ class behavior():
             vec = cue_dict[cue]
             # coerce to (n_agents, 2) to avoid accidental broadcasting
             vec = _ensure_agent_vec(vec)
+            # clip per-agent cue magnitudes to avoid single cue domination
+            try:
+                cap = float(getattr(self.simulation, 'max_cue_magnitude', 5000.0))
+                norms = np.linalg.norm(vec, axis=1)
+                # avoid division by zero
+                with np.errstate(invalid='ignore', divide='ignore'):
+                    scale = np.where(norms > cap, (cap / norms), 1.0)
+                vec = vec * scale[:, np.newaxis]
+                # debug: report how many agents were clipped for this cue
+                if getattr(self.simulation, 'debug_behavior', False):
+                    try:
+                        n_clip = int(np.sum(norms > cap))
+                        if n_clip > 0:
+                            print(f'DBG arbitrate: clipped {n_clip} agents for cue={cue} (cap={cap})')
+                    except Exception:
+                        pass
+            except Exception:
+                # if anything goes wrong, fall back to original vec
+                pass
             # store coerced vector for debug dumps
             raw_vecs[cue] = vec
             # record L2 norm per agent for debugging
@@ -808,13 +870,48 @@ class behavior():
             pass
 
         if len(head_vec.shape) == 2:
-            # debug print of cue magnitudes if requested
-            if getattr(self.simulation, 'debug', False):
+            # debug print of cue magnitudes when debug_behavior is enabled
+            if getattr(self.simulation, 'debug_behavior', False):
                 try:
-                    print('behavior cue magnitudes (summary min/max) at t=', t)
+                    import json, time
+                    print(f'behavior cue summary at step={int(getattr(self.simulation, "current_step", t))}')
+                    # show mean, max, and nonzero counts per cue
+                    cue_summary = {}
                     for k, v in cue_magnitudes.items():
-                        arr = np.array(v)
-                        print(f' - {k}: min={float(np.nanmin(arr)):.4g}, max={float(np.nanmax(arr)):.4g}')
+                        arr = np.asarray(v, dtype=float)
+                        nonzero = int(np.sum(np.isfinite(arr) & (np.abs(arr) > 0)))
+                        mean = float(np.nanmean(arr)) if arr.size > 0 else float('nan')
+                        mx = float(np.nanmax(arr)) if arr.size > 0 else float('nan')
+                        cue_summary[k] = {'mean': mean, 'max': mx, 'nonzero_count': nonzero}
+                        try:
+                            print(f' - {k}: mean={mean:.4g}, max={mx:.4g}, nonzero={nonzero}')
+                        except Exception:
+                            pass
+
+                    # include test_weights overview when present
+                    tw = getattr(self.simulation, 'test_weights', None)
+                    if tw:
+                        try:
+                            print(' - test_weights overrides:', {k: float(v) for k, v in tw.items()})
+                        except Exception:
+                            print(' - test_weights overrides present')
+
+                    # write a compact JSON snapshot for this step to model_dir for later parsing
+                    outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                    os.makedirs(outdir, exist_ok=True)
+                    snap = {
+                        'step': int(getattr(self.simulation, 'current_step', t)),
+                        'time': int(time.time()),
+                        'cue_summary': cue_summary,
+                        'test_weights': tw if tw is not None else {},
+                    }
+                    snap_fname = os.path.join(outdir, f'behavior_cues_step_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.json')
+                    with open(snap_fname, 'w', encoding='utf-8') as fh:
+                        json.dump(snap, fh)
+                    try:
+                        print('Wrote behavior cue snapshot to', snap_fname)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             # store last head_vec and cue magnitudes on simulation for quick inspection
