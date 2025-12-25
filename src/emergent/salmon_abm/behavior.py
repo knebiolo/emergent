@@ -675,10 +675,14 @@ class behavior():
         self.simulation.time_since_eddy_escape[self.simulation.in_eddy == True] += 1
 
     def arbitrate(self, t):
-        # debug: print current simulation.heading at start of arbitration
+        # debug: print a concise summary of current headings at start of arbitration
         if getattr(self.simulation, 'debug_behavior', False):
             try:
-                print('arbitrate: simulation.heading (start)=', np.asarray(self.simulation.heading))
+                h = np.asarray(self.simulation.heading)
+                # show size, mean, and a short sample (first 10 entries) instead of whole array
+                sample = list(h[:10]) if getattr(h, 'size', 0) > 0 else []
+                mean = float(np.nanmean(h)) if getattr(h, 'size', 0) > 0 else float('nan')
+                print(f"arbitrate: simulation.heading size={getattr(h, 'size', 0)}, mean={mean:.4g}, sample={sample}")
             except Exception:
                 pass
         if self.simulation.pid_tuning:
@@ -948,9 +952,11 @@ class behavior():
                         if getattr(self.simulation, 'debug_behavior', False):
                             try:
                                 nc = neighbor_counts if 'neighbor_counts' in locals() else None
-                                nc_sample = nc[:10] if nc is not None else None
-                                print('NPZ write: neighbor_counts sample=', nc_sample)
-                                print('NPZ write: simulation.heading sample=', np.asarray(self.simulation.heading)[:10])
+                                nc_shape = None if nc is None else getattr(nc, 'shape', None)
+                                heading_arr = np.asarray(self.simulation.heading)
+                                heading_sample = list(heading_arr[:10]) if getattr(heading_arr, 'size', 0) > 0 else []
+                                print('NPZ write: neighbor_counts.shape=', nc_shape, 'neighbor_counts_sample=', (nc[:10].tolist() if nc is not None and getattr(nc, "size", 0) > 0 else []))
+                                print('NPZ write: simulation.heading size=', getattr(heading_arr, 'size', 0), 'sample=', heading_sample)
                             except Exception:
                                 pass
 
@@ -1037,13 +1043,14 @@ class behavior():
                             neighbor_any_within_2bl = np.zeros(self.simulation.num_agents, dtype=np.bool_)
 
                         try:
-                            print('DBG NPZ write: neighbor_counts.shape=', None if neighbor_counts is None else getattr(neighbor_counts, 'shape', None))
-                            print('DBG NPZ write: neighbors_concat.shape=', None if neighbors_concat is None else getattr(neighbors_concat, 'shape', None))
-                            print('DBG NPZ write: agent_idx_repeat.shape=', None if 'agent_idx_repeat' not in locals() else getattr(agent_idx_repeat, 'shape', None))
+                            nc_shape = None if neighbor_counts is None else getattr(neighbor_counts, 'shape', None)
+                            neigh_concat_shape = None if neighbors_concat is None else getattr(neighbors_concat, 'shape', None)
+                            agent_idx_shape = None if 'agent_idx_repeat' not in locals() else getattr(agent_idx_repeat, 'shape', None)
+                            print('DBG NPZ write: neighbor_counts.shape=', nc_shape, 'neighbors_concat.shape=', neigh_concat_shape, 'agent_idx_repeat.shape=', agent_idx_shape)
                             if neighbors_concat is not None and getattr(neighbors_concat, 'size', 0) > 0:
-                                print('DBG NPZ write: neighbors_concat sample=', neighbors_concat[:20])
+                                print('DBG NPZ write: neighbors_concat sample=', neighbors_concat[:20].tolist())
                             if 'agent_idx_repeat' in locals() and getattr(agent_idx_repeat, 'size', 0) > 0:
-                                print('DBG NPZ write: agent_idx_repeat sample=', agent_idx_repeat[:20])
+                                print('DBG NPZ write: agent_idx_repeat sample=', agent_idx_repeat[:20].tolist())
                         except Exception:
                             pass
 
