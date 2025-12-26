@@ -135,21 +135,27 @@ def write_raster_to_hdf5(h5obj, path, dataset_name=None, sim=None):
         except Exception:
             tr_tup = None
 
-    # set attribute on sim if provided
+    # set attribute on sim if provided: attach both original transform (when available)
+    # and the plain 6-tuple for backward compatibility.
     if sim is not None and tr_tup is not None:
         try:
-            if base == 'depth':
-                sim.depth_rast_transform = tr_tup
-            elif base == 'vel_x':
-                sim.vel_x_rast_transform = tr_tup
-            elif base == 'vel_y':
-                sim.vel_y_rast_transform = tr_tup
-            elif base == 'vel_mag':
-                sim.vel_mag_rast_transform = tr_tup
-            elif base == 'vel_dir':
-                sim.vel_dir_rast_transform = tr_tup
-            elif base == 'wetted':
-                sim.wetted_transform = tr_tup
+            # prefer to attach the original transform object when it exposes affine attrs
+            transform_obj = transform
+            # use naming: <base>_rast_transform holds the original transform when possible
+            # and <base>_rast_transform_tuple holds the plain 6-tuple
+            attr_obj = f'{base}_rast_transform'
+            attr_tup = f'{base}_rast_transform_tuple'
+            try:
+                setattr(sim, attr_obj, transform_obj)
+            except Exception:
+                try:
+                    setattr(sim, attr_obj, tr_tup)
+                except Exception:
+                    pass
+            try:
+                setattr(sim, attr_tup, tr_tup)
+            except Exception:
+                pass
         except Exception:
             pass
 
