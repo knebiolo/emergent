@@ -1,92 +1,97 @@
 import numpy as np
 import glob, os, h5py, math
 
-# find latest behavior NPZ (non-alignment preferred)
-files_all = sorted(glob.glob('outputs/diagnostics/behavior_debug_step_*.npz'), key=os.path.getmtime)
-if not files_all:
-    print('No behavior NPZs found')
-    raise SystemExit(1)
-files = [f for f in files_all if not f.endswith('_alignment.npz')]
-if not files:
-    files = files_all
-npz_path = files[-1]
-print('Using NPZ:', npz_path)
-npz = np.load(npz_path)
-if 'rheotaxis_vec' not in npz or 'head_vec' not in npz:
-    print('NPZ missing required keys')
-    print('keys:', list(npz.keys()))
-    raise SystemExit(1)
-rheo = npz['rheotaxis_vec']
-head = npz['head_vec']
-# try to find a headless h5 in outputs/diagnostics
-h5_files = sorted(glob.glob('outputs/diagnostics/*headless.h5'), key=os.path.getmtime)
-if h5_files:
-    h5_path = h5_files[-1]
-else:
-    # fallback known name
-    h5_path = 'outputs/diagnostics/mini_rheo_test_headless.h5'
-print('Using HDF5:', h5_path)
-if not os.path.exists(h5_path):
-    print('HDF5 not found, will skip upstream comparisons')
-    h5 = None
-else:
-    h5 = h5py.File(h5_path,'r')
-
-# sample flow from HDF5 if possible: try environment vel_x vel_y and sample at agent X/Y from HDF5
-vel = None
-agent_X = None
-agent_Y = None
-if h5 is not None:
-    try:
-        vx = h5['environment/vel_x'][:]
-        vy = h5['environment/vel_y'][:]
-        # try X/Y top-level or agent_data
-        if 'agent_data/X' in h5:
-            agent_X = h5['agent_data/X'][:,0]
-            agent_Y = h5['agent_data/Y'][:,0]
-        elif 'X' in h5:
-            agent_X = h5['X'][:]
-            agent_Y = h5['Y'][:]
-        # try x_coords/y_coords
-        if 'environment/x_coords' in h5 and 'environment/y_coords' in h5 and agent_X is not None:
-            x_coords = h5['environment/x_coords'][:]
-            y_coords = h5['environment/y_coords'][:]
-            # pick nearest pixel
-            n = len(agent_X)
-            sampled_vx = np.full(n, np.nan)
-            sampled_vy = np.full(n, np.nan)
-            cols_vals = x_coords[0,:]
-            rows_vals = y_coords[:,0]
-            for i in range(n):
-                col = int(np.argmin(np.abs(cols_vals - agent_X[i])))
-                row = int(np.argmin(np.abs(rows_vals - agent_Y[i])))
-                col = max(0, min(col, vx.shape[1]-1))
-                row = max(0, min(row, vx.shape[0]-1))
-                sampled_vx[i] = vx[row, col]
-                sampled_vy[i] = vy[row, col]
-            vel = np.column_stack((sampled_vx, sampled_vy))
-    except Exception as e:
-        print('Failed to read vel rasters from HDF5:', e)
-
 # helper
 def angle_between(u, v):
-    # returns angle in degrees between vectors u and v, shape (2,)
     if u is None or v is None:
         return np.nan
     u = np.array(u, dtype=float)
     v = np.array(v, dtype=float)
-    if np.linalg.norm(u) == 0 or np.linalg.norm(v) == 0:
+    nu = np.linalg.norm(u)
+    nv = np.linalg.norm(v)
+    if nu == 0 or nv == 0 or not np.isfinite(nu) or not np.isfinite(nv):
         return np.nan
-    cosang = np.dot(u, v) / (np.linalg.norm(u) * np.linalg.norm(v))
+    cosang = np.dot(u, v) / (nu * nv)
     cosang = max(-1.0, min(1.0, cosang))
-    ang = math.degrees(math.acos(cosang))
-    return ang
+    return math.degrees(math.acos(cosang))
 
-# compute per-agent angles
-n_rheo = rheo.shape[0]
-n_head = head.shape[0]
-n = min(n_rheo, n_head)
-print(f'NPZ counts: rheo={n_rheo}, head={n_head}')
+# Try to find latest NPZ behavior dump
+files_all = sorted(glob.glob('outputs/diagnostics/behavior_debug_step_*.npz'), key=os.path.getmtime)
+use_npz = False
+rheo = None
+head = None
+if files_all:
+    files = [f for f in files_all if not f.endswith('_alignment.npz')]
+    if not files:
+        files = files_all
+    npz_path = files[-1]
+    print('Found behavior NPZ:', npz_path)
+    try:
+        npz = np.load(npz_path)
+        if 'rheotaxis_vec' in npz and 'head_vec' in npz:
+            rheo = npz['rheotaxis_vec']
+            head = npz['head_vec']
+            use_npz = True
+            print('Using rheotaxis/head vectors from NPZ')
+        else:
+            print('NPZ missing expected keys; falling back to HDF5-only analysis')
+    except Exception as e:
+        print('Failed to load NPZ:', e)
+
+# locate latest headless HDF5
+h5_files = sorted(glob.glob('outputs/diagnostics/*headless.h5'), key=os.path.getmtime)
+if h5_files:
+    h5_path = h5_files[-1]
+    print('Using HDF5:', h5_path)
+else:
+    print('No headless HDF5 found in outputs/diagnostics; aborting')
+    raise SystemExit(1)
+
+h5 = h5py.File(h5_path, 'r')
+
+# If no NPZ provided, build rheo/head from HDF5
+if not use_npz:
+    # read agent positions
+    if 'agent_data/X' in h5:
+        agent_X = h5['agent_data/X'][:, 0]
+        agent_Y = h5['agent_data/Y'][:, 0]
+    else:
+        agent_X = h5['X'][:]
+        agent_Y = h5['Y'][:]
+    # read vel rasters and coords
+    vx = h5['environment/vel_x'][:]
+    vy = h5['environment/vel_y'][:]
+    x_coords = h5['environment/x_coords'][:]
+    y_coords = h5['environment/y_coords'][:]
+    n_agents = agent_X.shape[0]
+    sampled_vx = np.full(n_agents, np.nan)
+    sampled_vy = np.full(n_agents, np.nan)
+    cols_vals = x_coords[0, :]
+    rows_vals = y_coords[:, 0]
+    for i in range(n_agents):
+        col = int(np.argmin(np.abs(cols_vals - agent_X[i])))
+        row = int(np.argmin(np.abs(rows_vals - agent_Y[i])))
+        col = max(0, min(col, vx.shape[1]-1))
+        row = max(0, min(row, vx.shape[0]-1))
+        sampled_vx[i] = vx[row, col]
+        sampled_vy[i] = vy[row, col]
+    # rheotaxis points upstream i.e. -vel
+    rheo = np.column_stack((-sampled_vx, -sampled_vy))
+    # headings from persisted headings if available
+    if 'agent_data/heading' in h5:
+        head_angles = h5['agent_data/heading'][:, 0]
+        head = np.column_stack((np.cos(head_angles), np.sin(head_angles)))
+    elif 'heading' in h5:
+        head_angles = h5['heading'][:]
+        head = np.column_stack((np.cos(head_angles), np.sin(head_angles)))
+    else:
+        print('No headings in HDF5; cannot compute head vs upstream. Aborting')
+        h5.close()
+        raise SystemExit(1)
+    print(f'Built rheo/head from HDF5; n_agents={rheo.shape[0]}')
+
+# Now compute angles
+n = min(rheo.shape[0], head.shape[0])
 ang_head_rheo = np.zeros(n)
 ang_rheo_up = np.zeros(n)
 ang_head_up = np.zeros(n)
@@ -94,14 +99,9 @@ for i in range(n):
     rv = rheo[i]
     hv = head[i]
     ang_head_rheo[i] = angle_between(hv, rv)
-    if vel is not None:
-        # ensure we have matching HDF5 vel rows; if not, use min length
-        up = -vel[i] if i < vel.shape[0] else None
-        ang_rheo_up[i] = angle_between(rv, up)
-        ang_head_up[i] = angle_between(hv, up)
-    else:
-        ang_rheo_up[i] = np.nan
-        ang_head_up[i] = np.nan
+    # upstream vector is -vel; derive from rheo since rheo = -vel
+    ang_rheo_up[i] = angle_between(rv, -rv)
+    ang_head_up[i] = angle_between(hv, -rv)
 
 # summary function
 import numpy as _np

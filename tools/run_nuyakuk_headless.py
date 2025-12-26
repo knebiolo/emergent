@@ -83,6 +83,21 @@ def run_headless(args):
         db_path=os.path.join(outdir, f'{args.model_name}_headless.h5')
     )
 
+    # apply optional deterministic seed
+    if getattr(args, 'seed', None) is not None:
+        try:
+            seed = int(args.seed)
+            # numpy global seed for deterministic numpy operations
+            np.random.seed(seed)
+            # attach a numpy Generator to sim to be used by components
+            try:
+                sim.rng = np.random.default_rng(seed)
+            except Exception:
+                sim.rng = None
+            print('Applied deterministic seed:', seed)
+        except Exception:
+            pass
+
     # load optional test weights JSON and attach to sim
     if getattr(args, 'test_weights_file', None):
         try:
@@ -194,6 +209,35 @@ def run_headless(args):
     except Exception:
         pass
 
+    # Persist agent headings into the HDF5 so off-line analysis can access them
+    try:
+        h5 = hdf5_io.get_hdf5_obj(sim)
+        if h5 is not None:
+            # ensure agent_data/heading dataset exists (shape: num_agents x num_timesteps)
+            try:
+                if 'agent_data/heading' not in h5:
+                    import numpy as _np
+                    hdf5_io.write_dataset(h5, 'agent_data/heading', _np.zeros((sim.num_agents, int(sim.num_timesteps)), dtype=_np.float32))
+                # write current heading into column 0
+                try:
+                    arr = h5['agent_data/heading']
+                    arr[:, 0] = np.array(sim.heading)
+                    hdf5_io.write_dataset(h5, 'agent_data/heading', arr[:])
+                except Exception:
+                    try:
+                        hdf5_io.write_dataset(h5, 'agent_data/heading', np.array(sim.heading)[:, None])
+                    except Exception:
+                        pass
+                # also write top-level heading for quick access
+                try:
+                    hdf5_io.write_dataset(h5, 'heading', np.array(sim.heading))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     sim.close()
 
 
@@ -201,6 +245,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--nagents', type=int, default=200)
     parser.add_argument('--nsteps', type=int, default=200)
+    parser.add_argument('--seed', type=int, default=None, help='Optional RNG seed for deterministic runs')
     parser.add_argument('--debug-movement', action='store_true', help='Enable movement debug dumps')
     parser.add_argument('--debug-behavior', action='store_true', help='Enable behavior debug dumps')
     parser.add_argument('--model-name', dest='model_name', default='nuyakuk_headless')
