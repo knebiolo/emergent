@@ -426,6 +426,19 @@ class simulation:
             except Exception:
                 heading_set = False
 
+        # Persist initial ideal_sog into the HDF5 time-indexed array (column 0)
+        try:
+            h5 = hdf5_io.get_hdf5_obj(self)
+            arr = hdf5_io.read_dataset(h5, 'agent_data/ideal_sog', default=None)
+            if arr is not None:
+                try:
+                    arr[:, 0] = np.array(self.ideal_sog)
+                    hdf5_io.write_dataset(h5, 'agent_data/ideal_sog', arr)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         return heading_set
         # ensure attributes expected by movement/behavior exist with sensible defaults
         try:
