@@ -103,6 +103,23 @@ def run_headless(args):
     # import rasters into HDF5 for sampling
     import_env_to_h5(sim, env_files)
 
+    # After rasters are imported into the HDF5 DB, re-run heading initialization
+    # so agents sample the velocity rasters and start with realistic headings
+    # and component velocities. This fixes headless runs that constructed the
+    # simulation before rasters existed (which left headings at zero).
+    try:
+        sim.initialize_headings_from_db()
+        # recompute initial fish velocity from newly-initialized heading/ideal_sog
+        try:
+            fv_x = sim.ideal_sog * np.cos(sim.heading)
+            fv_y = sim.ideal_sog * np.sin(sim.heading)
+            sim.initial_fish_vel = np.stack((fv_x, fv_y), axis=1)
+        except Exception:
+            pass
+        print('Reinitialized headings from imported rasters')
+    except Exception as e:
+        print('initialize_headings_from_db after import failed:', e)
+
     # report sampling validity for initial positions
     try:
         depth_vals0 = sim.sample_environment(getattr(sim, 'depth_rast_transform', None), 'depth')
