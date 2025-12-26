@@ -24,9 +24,6 @@ docs\HECRAS_HDF5_STRUCTURE.md
 docs\USER_CONFIG_OPTIONS.md
 .ai_journal\long_term\personality.md
 
-End of prompt.
-
-
 # Additional assistant preferences (added 2025-12-10)
 
 # Personality & Interaction Rules
@@ -56,3 +53,8 @@ End of prompt.
 
 # Small housekeeping
 - Verbosity default: medium. If user asks for more detail, expand session file outputs to include diffs and commands.
+
+# git
+- The user will handle all git actions, commit, PR, push, etc. 
+
+END of PROMPT
