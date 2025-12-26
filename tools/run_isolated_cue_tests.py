@@ -18,12 +18,17 @@ OUT = os.path.join(ROOT, 'outputs', 'diagnostics')
 os.makedirs(OUT, exist_ok=True)
 
 
-WEIGHT_MAPS = {
-    'rheotaxis': {'rheotaxis': 5000.0, 'cohesion': 0.0, 'alignment': 0.0, 'collision': 0.0, 'low_speed': 0.0},
-    'cohesion': {'rheotaxis': 0.0, 'cohesion': 10000.0, 'alignment': 0.0, 'collision': 0.0, 'low_speed': 0.0},
-    'alignment': {'rheotaxis': 0.0, 'cohesion': 0.0, 'alignment': 8000.0, 'collision': 0.0, 'low_speed': 0.0},
-    'collision': {'rheotaxis': 0.0, 'cohesion': 0.0, 'alignment': 0.0, 'collision': 20000.0, 'low_speed': 0.0},
-    'low_speed': {'rheotaxis': 0.0, 'cohesion': 0.0, 'alignment': 0.0, 'collision': 0.0, 'low_speed': 3000.0},
+BEHAVIOR_KEYS = ['rheotaxis', 'alignment', 'cohesion', 'low_speed', 'wave_drag', 'refugia', 'border', 'shallow', 'avoid', 'collision']
+
+# Target exploratory weights for each isolated cue test; tests will write a full
+# weights JSON where all keys are present and only the target receives the
+# non-zero exploratory value.
+TARGET_WEIGHTS = {
+    'rheotaxis': 5000.0,
+    'cohesion': 10000.0,
+    'alignment': 8000.0,
+    'collision': 20000.0,
+    'low_speed': 3000.0,
 }
 
 
@@ -36,7 +41,9 @@ def run_cue(cue, start_shp=None, nagents=50, nsteps=20, seed=42):
     now = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
     model_name = f'cue_test_{cue}_{now}'
     outdir = OUT
-    weights = WEIGHT_MAPS.get(cue, {})
+    # build a full weight dict where non-target cues are zeroed
+    weights = {k: 0.0 for k in BEHAVIOR_KEYS}
+    weights.update({cue: TARGET_WEIGHTS.get(cue, 0.0)})
     # write temporary weights file as JSON
     import json, tempfile
     tf = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json', encoding='utf-8')
