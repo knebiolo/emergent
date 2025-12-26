@@ -159,6 +159,42 @@ def write_raster_to_hdf5(h5obj, path, dataset_name=None, sim=None):
         except Exception:
             pass
 
+    # Also write environment x_coords/y_coords for this raster when possible.
+    # This helps downstream sampling code locate nearest pixels using a
+    # dataset-local coordinate grid instead of relying on separate placeholders.
+    try:
+        # `arr` is a numpy array; use its shape to build x/y coordinate grids
+        # using the affine tuple (a,b,c,d,e,f) mapping (col,row) -> (x,y).
+        if arr is not None and tr_tup is not None:
+            nrows, ncols = arr.shape[:2]
+            a, b, c, d, e, f = tr_tup
+            cols = np.arange(ncols, dtype=float)
+            rows = np.arange(nrows, dtype=float)
+            col_indices, row_indices = np.meshgrid(cols, rows)
+            x_coords = a * col_indices + b * row_indices + c
+            y_coords = d * col_indices + e * row_indices + f
+            # write only if not present or shape differs (do not clobber intentionally set grids)
+            try:
+                existing_x = hdf5_io.read_dataset(h5obj, f'environment/x_coords', default=None)
+            except Exception:
+                existing_x = None
+            write_flag = True
+            if existing_x is not None:
+                try:
+                    existing_shape = np.array(existing_x).shape
+                    if existing_shape == x_coords.shape:
+                        write_flag = False
+                except Exception:
+                    write_flag = True
+            if write_flag:
+                try:
+                    hdf5_io.write_dataset(h5obj, 'environment/x_coords', x_coords)
+                    hdf5_io.write_dataset(h5obj, 'environment/y_coords', y_coords)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     return arr, tr_tup, crs
 
 

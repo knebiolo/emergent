@@ -196,6 +196,12 @@ class behavior():
                 y_vel = np.full(self.simulation.num_agents, np.nan)
 
         v = np.column_stack([x_vel, y_vel])
+        # store sampled velocities for debugging/inspection by NPZ dumps
+        try:
+            # ensure array shape (n_agents,2)
+            self.simulation.last_sampled_vel = np.asarray(v, dtype=float)
+        except Exception:
+            self.simulation.last_sampled_vel = None
         # sanitize sampled values (handle nodata values like -9999 and zeros)
         v = np.asarray(v, dtype=float)
         mags = np.linalg.norm(v, axis=-1)
@@ -695,25 +701,31 @@ class behavior():
         else:
             tw = getattr(self.simulation, 'test_weights', None)
             # default weights
-            default_weights = {
-                'rheotaxis': 25000,
-                'alignment': 20500,
-                'cohesion': 11000,
-                'low_speed': 1500,
-                'wave_drag': 0,
-                'refugia': 50000,
-                'border': 50000,
-                'shallow': 100000,
-                'avoid': 25000,
-                'collision': 50000,
-            }
-            # merge test overrides if present
+            # If a test_weights dict is present we treat it as authoritative:
+            # start with zero weights for all known cues then apply overrides
+            # so that missing keys remain zero (useful for isolated-cue tests).
+            known_keys = ['rheotaxis', 'alignment', 'cohesion', 'low_speed', 'wave_drag', 'refugia', 'border', 'shallow', 'avoid', 'collision']
             if tw:
+                default_weights = {k: 0.0 for k in known_keys}
                 for k, v in tw.items():
                     try:
-                        default_weights[k] = float(v)
+                        if k in default_weights:
+                            default_weights[k] = float(v)
                     except Exception:
                         pass
+            else:
+                default_weights = {
+                    'rheotaxis': 25000,
+                    'alignment': 20500,
+                    'cohesion': 11000,
+                    'low_speed': 1500,
+                    'wave_drag': 0,
+                    'refugia': 50000,
+                    'border': 50000,
+                    'shallow': 100000,
+                    'avoid': 25000,
+                    'collision': 50000,
+                }
 
             try:
                 print('DBG arbitrate: about to call alignment_cue')
@@ -943,6 +955,12 @@ class behavior():
                             if hasattr(self.simulation, bk):
                                 val = getattr(self.simulation, bk)
                                 extra[bk] = np.asarray(val).astype(float)
+                        # include last sampled velocity (from rheotaxis sampling) when present
+                        if hasattr(self.simulation, 'last_sampled_vel') and self.simulation.last_sampled_vel is not None:
+                            try:
+                                extra['last_sampled_vel'] = np.asarray(self.simulation.last_sampled_vel).astype(float)
+                            except Exception:
+                                pass
                         # diagnostic: alignment fallback flag
                         try:
                             extra['alignment_used_velocity'] = float(getattr(self.simulation, 'alignment_used_velocity', 0.0))
