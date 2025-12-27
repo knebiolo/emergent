@@ -47,17 +47,196 @@ def abs_angle_diff(a, b):
     return d
 
 
+def process_many(inputs, out_dir):
+    aggregated_rows = []
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    per_agent_rows = []
+    for inp in inputs:
+        if not os.path.exists(inp):
+            continue
+        if inp.endswith('.h5') or inp.endswith('.hdf5'):
+            with h5py.File(inp, 'r') as f:
+                grp = f.get('steps')
+                if grp is None:
+                    continue
+                for s in grp.keys():
+                    try:
+                        g = grp[s]
+                        payload = {k: g[k][()] for k in g.keys()}
+                        # compute candidate keys
+                        candidate_keys = sorted([k for k in payload.keys() if ('vec' in k or 'raw' in k or 'cue' in k) and k != 'head_vec'])
+                        # infer n_agents
+                        n_agents = None
+                        if 'head_vec' in payload:
+                            hv = np.array(payload['head_vec'])
+                            if hv.ndim == 2:
+                                n_agents = hv.shape[0]
+                        cue_vec_keys = []
+                        if n_agents is None:
+                            for k in candidate_keys:
+                                v = np.array(payload[k])
+                                if v.ndim == 2 and v.shape[1] == 2:
+                                    n_agents = v.shape[0]
+                                    break
+                        for k in candidate_keys:
+                            v = np.array(payload[k])
+                            if n_agents is not None:
+                                if v.ndim == 2 and v.shape[0] == n_agents and v.shape[1] == 2:
+                                    cue_vec_keys.append(k)
+                            else:
+                                if v.ndim == 2 and v.shape[1] == 2:
+                                    cue_vec_keys.append(k)
+                        # compute magnitudes per cue
+                        mag_matrix = []
+                        cue_list = []
+                        for ck in cue_vec_keys:
+                            arr = np.array(payload[ck]).astype(float)
+                            mags = np.linalg.norm(arr, axis=1)
+                            mag_matrix.append(mags)
+                            cue_list.append(ck)
+                        if mag_matrix:
+                            M = np.column_stack(mag_matrix)
+                        else:
+                            M = None
+                        res = compute_resultant(cue_vec_keys, payload)
+                        if res is None:
+                            continue
+                        res_angles = vecs_to_angles(res)
+                        head_vec = None
+                        if 'head_vec' in payload:
+                            head_vec = np.array(payload['head_vec'])
+                            if head_vec.ndim == 1 and head_vec.size % 2 == 0:
+                                head_vec = head_vec.reshape(-1,2)
+                        if head_vec is not None and head_vec.shape == res.shape:
+                            head_angles = vecs_to_angles(head_vec)
+                            diffs = abs_angle_diff(res_angles, head_angles)
+                        else:
+                            head_angles = None
+                            diffs = np.full(res_angles.shape, np.nan)
+                        for i in range(res.shape[0]):
+                            ra = float(np.degrees(res_angles[i]))
+                            ha = float(np.degrees(head_angles[i])) if head_angles is not None else float('nan')
+                            dd = float(np.degrees(diffs[i])) if diffs is not None else float('nan')
+                            aggregated_rows.append((os.path.basename(inp), s, int(i), ra, ha, dd))
+                            # per-cue contribution fractions
+                            if M is not None:
+                                row_mags = M[i, :]
+                                total = np.linalg.norm(res[i])
+                                for j, ck in enumerate(cue_list):
+                                    mag = float(row_mags[j])
+                                    frac = float(mag / total) if total > 0 else float('nan')
+                                    per_agent_rows.append((os.path.basename(inp), s, int(i), ck, mag, frac))
+                    except Exception:
+                        continue
+        elif inp.endswith('.npz'):
+            try:
+                payload = load_npz(inp)
+            except Exception:
+                continue
+            try:
+                base = os.path.basename(inp)
+                step = 0
+                parts = base.split('_')
+                for i,p in enumerate(parts):
+                    if p=='step' and i+1 < len(parts):
+                        try:
+                            step = int(parts[i+1]); break
+                        except Exception:
+                            continue
+                candidate_keys = sorted([k for k in payload.keys() if ('vec' in k or 'raw' in k or 'cue' in k) and k != 'head_vec'])
+                cue_vec_keys = [k for k in candidate_keys if np.array(payload[k]).ndim==2 and np.array(payload[k]).shape[1]==2]
+                # compute magnitudes per cue for NPZ
+                mag_matrix = []
+                cue_list = []
+                for ck in cue_vec_keys:
+                    arr = np.array(payload[ck]).astype(float)
+                    mags = np.linalg.norm(arr, axis=1)
+                    mag_matrix.append(mags)
+                    cue_list.append(ck)
+                if mag_matrix:
+                    M = np.column_stack(mag_matrix)
+                else:
+                    M = None
+                res = compute_resultant(cue_vec_keys, payload)
+                if res is None:
+                    continue
+                res_angles = vecs_to_angles(res)
+                head_vec = None
+                if 'head_vec' in payload:
+                    head_vec = np.array(payload['head_vec'])
+                    if head_vec.ndim == 1 and head_vec.size % 2 == 0:
+                        head_vec = head_vec.reshape(-1,2)
+                if head_vec is not None and head_vec.shape == res.shape:
+                    head_angles = vecs_to_angles(head_vec)
+                    diffs = abs_angle_diff(res_angles, head_angles)
+                else:
+                    head_angles = None
+                    diffs = np.full(res_angles.shape, np.nan)
+                for i in range(res.shape[0]):
+                    ra = float(np.degrees(res_angles[i]))
+                    ha = float(np.degrees(head_angles[i])) if head_angles is not None else float('nan')
+                    dd = float(np.degrees(diffs[i])) if diffs is not None else float('nan')
+                    aggregated_rows.append((os.path.basename(inp), str(step), int(i), ra, ha, dd))
+                    if M is not None:
+                        row_mags = M[i, :]
+                        total = np.linalg.norm(res[i])
+                        for j, ck in enumerate(cue_list):
+                            mag = float(row_mags[j])
+                            frac = float(mag / total) if total > 0 else float('nan')
+                            per_agent_rows.append((os.path.basename(inp), str(step), int(i), ck, mag, frac))
+            except Exception:
+                continue
+    agg_path = out_dir / 'aggregated_cue_checks.csv'
+    with open(agg_path, 'w', newline='') as af:
+        w = csv.writer(af)
+        w.writerow(['file','step','agent','resultant_angle_deg','head_angle_deg','abs_diff_deg'])
+        for r in aggregated_rows:
+            w.writerow(r)
+    print('Wrote aggregated CSV to', agg_path)
+    # write per-agent per-cue contributions
+    contrib_path = out_dir / 'per_agent_cue_contribs.csv'
+    with open(contrib_path, 'w', newline='') as cf:
+        w = csv.writer(cf)
+        w.writerow(['file','step','agent','cue','mag','frac_of_resultant'])
+        for r in per_agent_rows:
+            w.writerow(r)
+    print('Wrote per-agent cue contributions to', contrib_path)
+
+
 def main():
-    target = None
-    if len(sys.argv) > 1:
-        target = sys.argv[1]
-    else:
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument('path', nargs='?', help='Path to .npz or .h5 diagnostics file or directory')
+    p.add_argument('--step', type=int, default=0)
+    p.add_argument('--out-csv-dir', default='outputs/diagnostics/cue_checks')
+    p.add_argument('--multi', action='store_true', help='Process multiple files in a directory or multiple inputs')
+    args = p.parse_args()
+    target = args.path
+    if target is None:
         # pick latest NPZ in forced_rawvecs
         files = sorted(glob('outputs/diagnostics/forced_rawvecs/*.npz'), key=os.path.getmtime)
         if not files:
             print('No authoritative NPZs found in outputs/diagnostics/forced_rawvecs')
             sys.exit(1)
         target = files[-1]
+    # multi-mode: process directory or many inputs
+    if target is None and args.multi:
+        # find HDF5s/NPZs under outputs/diagnostics
+        inputs = sorted(glob('outputs/diagnostics/*_diagnostics.h5')) + sorted(glob('outputs/diagnostics/behavior_debug_step_*.npz'))
+        process_many(inputs, args.out_csv_dir)
+        return
+    if args.multi:
+        # if target provided and multi, treat target as a directory or glob
+        if os.path.isdir(target):
+            inputs = sorted(glob(os.path.join(target, '*_diagnostics.h5'))) + sorted(glob(os.path.join(target, 'behavior_debug_step_*.npz')))
+        else:
+            inputs = [target]
+        process_many(inputs, args.out_csv_dir)
+        return
+    if target is None:
+        print('No input provided')
+        sys.exit(1)
     # allow .h5 or .npz
     if target.endswith('.npz'):
         print('Using NPZ:', target)
@@ -65,13 +244,8 @@ def main():
         src_type = 'npz'
     elif target.endswith('.h5') or target.endswith('.hdf5'):
         print('Using HDF5:', target)
-        # default to step 0 unless provided as second arg
-        step = 0
-        if len(sys.argv) > 2:
-            try:
-                step = int(sys.argv[2])
-            except Exception:
-                pass
+        # default to step from args
+        step = args.step
         # read /steps/<step>
         with h5py.File(target, 'r') as f:
             grp = f.get('steps')
@@ -194,3 +368,112 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+def process_many(inputs, out_dir):
+    aggregated_rows = []
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for inp in inputs:
+        if not os.path.exists(inp):
+            continue
+        if inp.endswith('.h5') or inp.endswith('.hdf5'):
+            with h5py.File(inp, 'r') as f:
+                grp = f.get('steps')
+                if grp is None:
+                    continue
+                for s in grp.keys():
+                    try:
+                        g = grp[s]
+                        payload = {k: g[k][()] for k in g.keys()}
+                        # compute candidate keys
+                        candidate_keys = sorted([k for k in payload.keys() if ('vec' in k or 'raw' in k or 'cue' in k) and k != 'head_vec'])
+                        # infer n_agents
+                        n_agents = None
+                        if 'head_vec' in payload:
+                            hv = np.array(payload['head_vec'])
+                            if hv.ndim == 2:
+                                n_agents = hv.shape[0]
+                        cue_vec_keys = []
+                        if n_agents is None:
+                            for k in candidate_keys:
+                                v = np.array(payload[k])
+                                if v.ndim == 2 and v.shape[1] == 2:
+                                    n_agents = v.shape[0]
+                                    break
+                        for k in candidate_keys:
+                            v = np.array(payload[k])
+                            if n_agents is not None:
+                                if v.ndim == 2 and v.shape[0] == n_agents and v.shape[1] == 2:
+                                    cue_vec_keys.append(k)
+                            else:
+                                if v.ndim == 2 and v.shape[1] == 2:
+                                    cue_vec_keys.append(k)
+                        res = compute_resultant(cue_vec_keys, payload)
+                        if res is None:
+                            continue
+                        res_angles = vecs_to_angles(res)
+                        head_vec = None
+                        if 'head_vec' in payload:
+                            head_vec = np.array(payload['head_vec'])
+                            if head_vec.ndim == 1 and head_vec.size % 2 == 0:
+                                head_vec = head_vec.reshape(-1,2)
+                        if head_vec is not None and head_vec.shape == res.shape:
+                            head_angles = vecs_to_angles(head_vec)
+                            diffs = abs_angle_diff(res_angles, head_angles)
+                        else:
+                            head_angles = None
+                            diffs = np.full(res_angles.shape, np.nan)
+                        for i in range(res.shape[0]):
+                            ra = float(np.degrees(res_angles[i]))
+                            ha = float(np.degrees(head_angles[i])) if head_angles is not None else float('nan')
+                            dd = float(np.degrees(diffs[i])) if diffs is not None else float('nan')
+                            aggregated_rows.append((os.path.basename(inp), s, int(i), ra, ha, dd))
+                    except Exception:
+                        continue
+        elif inp.endswith('.npz'):
+            try:
+                payload = load_npz(inp)
+            except Exception:
+                continue
+            try:
+                base = os.path.basename(inp)
+                step = 0
+                parts = base.split('_')
+                for i,p in enumerate(parts):
+                    if p=='step' and i+1 < len(parts):
+                        try:
+                            step = int(parts[i+1]); break
+                        except Exception:
+                            continue
+                candidate_keys = sorted([k for k in payload.keys() if ('vec' in k or 'raw' in k or 'cue' in k) and k != 'head_vec'])
+                cue_vec_keys = [k for k in candidate_keys if np.array(payload[k]).ndim==2 and np.array(payload[k]).shape[1]==2]
+                res = compute_resultant(cue_vec_keys, payload)
+                if res is None:
+                    continue
+                res_angles = vecs_to_angles(res)
+                head_vec = None
+                if 'head_vec' in payload:
+                    head_vec = np.array(payload['head_vec'])
+                    if head_vec.ndim == 1 and head_vec.size % 2 == 0:
+                        head_vec = head_vec.reshape(-1,2)
+                if head_vec is not None and head_vec.shape == res.shape:
+                    head_angles = vecs_to_angles(head_vec)
+                    diffs = abs_angle_diff(res_angles, head_angles)
+                else:
+                    head_angles = None
+                    diffs = np.full(res_angles.shape, np.nan)
+                for i in range(res.shape[0]):
+                    ra = float(np.degrees(res_angles[i]))
+                    ha = float(np.degrees(head_angles[i])) if head_angles is not None else float('nan')
+                    dd = float(np.degrees(diffs[i])) if diffs is not None else float('nan')
+                    aggregated_rows.append((os.path.basename(inp), str(step), int(i), ra, ha, dd))
+            except Exception:
+                continue
+    agg_path = out_dir / 'aggregated_cue_checks.csv'
+    with open(agg_path, 'w', newline='') as af:
+        w = csv.writer(af)
+        w.writerow(['file','step','agent','resultant_angle_deg','head_angle_deg','abs_diff_deg'])
+        for r in aggregated_rows:
+            w.writerow(r)
+    print('Wrote aggregated CSV to', agg_path)
