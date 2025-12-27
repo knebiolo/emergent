@@ -25,6 +25,12 @@ def circular_variance_from_vel(vx, vy):
 
 
 def find_latest_npz_for_step(npz_dir, step):
+    # first look for HDF5 diagnostics in the dir
+    import h5py
+    h5_matches = sorted(glob.glob(os.path.join(npz_dir, '*_diagnostics.h5')))
+    if h5_matches:
+        # return h5 path and indicate h5 found by returning a tuple
+        return h5_matches[-1]
     pattern = os.path.join(npz_dir, f'behavior_debug_step_{step}_*.npz')
     files = [f for f in glob.glob(pattern) if not f.endswith('_alignment.npz')]
     if not files:
@@ -104,33 +110,57 @@ def summarize(trace_csv, npz_dir, out_csv):
         if npzfile:
             try:
                 import numpy as _np
-                d = _np.load(npzfile)
-                # for each cue, read *_vec
-                mag_matrix = []
-                for cn in cue_names:
-                    key = cn + '_vec'
-                    if key in d:
-                        arr = np.asarray(d[key]).astype(float)
-                        if arr.ndim == 1:
-                            # scalar per-agent or empty
-                            mags = np.abs(arr)
-                            # ensure length n
-                            if mags.size != n:
-                                mags = np.resize(mags, n)
+                # HDF5 path returned
+                if str(npzfile).endswith('.h5') or str(npzfile).endswith('.hdf5'):
+                    import h5py
+                    with h5py.File(npzfile, 'r') as h5:
+                        grp = h5.get('steps')
+                        if grp and str(t) in grp:
+                            g = grp[str(t)]
+                            mag_matrix = []
+                            for cn in cue_names:
+                                key = cn + '_vec'
+                                if key in g:
+                                    arr = np.asarray(g[key]).astype(float)
+                                    if arr.ndim == 1:
+                                        mags = np.abs(arr)
+                                        if mags.size != n:
+                                            mags = np.resize(mags, n)
+                                    else:
+                                        mags = np.linalg.norm(arr, axis=1)
+                                    cue_mean_mags[cn] = float(np.nanmean(mags))
+                                    mag_matrix.append(mags)
+                                else:
+                                    mag_matrix.append(np.full(n, np.nan))
+                            if mag_matrix:
+                                M = np.column_stack(mag_matrix)
+                                dom_idx = np.nanargmax(np.nan_to_num(M, nan=-np.inf), axis=1)
+                                for i, cn in enumerate(cue_names):
+                                    cue_dom_counts[cn] = int(np.sum(dom_idx == i))
+                else:
+                    d = _np.load(npzfile)
+                    mag_matrix = []
+                    for cn in cue_names:
+                        key = cn + '_vec'
+                        if key in d:
+                            arr = np.asarray(d[key]).astype(float)
+                            if arr.ndim == 1:
+                                mags = np.abs(arr)
+                                if mags.size != n:
+                                    mags = np.resize(mags, n)
+                            else:
+                                mags = np.linalg.norm(arr, axis=1)
+                            cue_mean_mags[cn] = float(np.nanmean(mags))
+                            mag_matrix.append(mags)
                         else:
-                            mags = np.linalg.norm(arr, axis=1)
-                        cue_mean_mags[cn] = float(np.nanmean(mags))
-                        mag_matrix.append(mags)
-                    else:
-                        mag_matrix.append(np.full(n, np.nan))
-                if mag_matrix:
-                    M = np.column_stack(mag_matrix)
-                    # dominant cue per agent
-                    dom_idx = np.nanargmax(np.nan_to_num(M, nan=-np.inf), axis=1)
-                    for i, cn in enumerate(cue_names):
-                        cue_dom_counts[cn] = int(np.sum(dom_idx == i))
-            except Exception as e:
-                # couldn't parse NPZ
+                            mag_matrix.append(np.full(n, np.nan))
+                    if mag_matrix:
+                        M = np.column_stack(mag_matrix)
+                        dom_idx = np.nanargmax(np.nan_to_num(M, nan=-np.inf), axis=1)
+                        for i, cn in enumerate(cue_names):
+                            cue_dom_counts[cn] = int(np.sum(dom_idx == i))
+            except Exception:
+                # couldn't parse NPZ/HDF5
                 pass
         row = [t, n, mean_nn, heading_var]
         for cn in cue_names:

@@ -1218,22 +1218,22 @@ class behavior():
                     dw = getattr(self.simulation, 'diagnostics_writer', None)
                     if dw is not None:
                         try:
-                            try:
-                                print('BEHAVIOR DBG: about to write HDF5 diagnostics for step', step_i, 'keys=', list(payload.keys()))
-                            except Exception:
-                                pass
                             dw.write_step(step_i, payload)
-                            try:
-                                print('Wrote diagnostics to HDF5 for step', step_i)
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            try:
-                                print('BEHAVIOR DBG: HDF5 write failed:', e)
-                            except Exception:
-                                pass
                         except Exception:
-                            # fallback to NPZ write if HDF5 write fails
+                            # if HDF5 fails, optionally write a small NPZ fallback when explicitly requested
+                            if getattr(self.simulation, 'force_npz_fallback', False):
+                                try:
+                                    import numpy as _np
+                                    outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                                    os.makedirs(outdir, exist_ok=True)
+                                    ts = int(time.time())
+                                    guard_fname = os.path.join(outdir, f'behavior_debug_guarded_step_{step_i}_{ts}.npz')
+                                    _np.savez_compressed(guard_fname, **payload)
+                                except Exception:
+                                    pass
+                    else:
+                        # no diagnostics writer: only write NPZ if explicitly requested
+                        if getattr(self.simulation, 'force_npz_fallback', False):
                             try:
                                 import numpy as _np
                                 outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
@@ -1241,27 +1241,8 @@ class behavior():
                                 ts = int(time.time())
                                 guard_fname = os.path.join(outdir, f'behavior_debug_guarded_step_{step_i}_{ts}.npz')
                                 _np.savez_compressed(guard_fname, **payload)
-                                try:
-                                    print('Wrote guarded behavior NPZ (fallback):', os.path.abspath(guard_fname))
-                                except Exception:
-                                    pass
                             except Exception:
                                 pass
-                    else:
-                        # no diagnostics writer: write NPZ for backward compatibility
-                        try:
-                            import numpy as _np
-                            outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                            os.makedirs(outdir, exist_ok=True)
-                            ts = int(time.time())
-                            guard_fname = os.path.join(outdir, f'behavior_debug_guarded_step_{step_i}_{ts}.npz')
-                            _np.savez_compressed(guard_fname, **payload)
-                            try:
-                                print('Wrote guarded behavior NPZ (no HDF5):', os.path.abspath(guard_fname))
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
                 except Exception:
                     pass
             except Exception:

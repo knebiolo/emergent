@@ -88,6 +88,13 @@ def load_headings_from_h5():
 
 
 def iter_step_npzs():
+    # prefer HDF5 diagnostics if present
+    h5s = sorted(glob.glob(os.path.join(OUTDIR, '*_diagnostics.h5')))
+    if h5s:
+        for h5p in h5s:
+            # assume interested in step 0 for now
+            yield 0, h5p
+        return
     files = sorted(glob.glob(os.path.join(OUTDIR, 'behavior_debug_step_*.npz')))
     for f in files:
         try:
@@ -138,14 +145,27 @@ def main():
     steps_seen = set()
     for step, npz in iter_step_npzs():
         try:
-            d = np.load(npz, allow_pickle=True)
+            if str(npz).endswith('.h5') or str(npz).endswith('.hdf5'):
+                import h5py
+                with h5py.File(npz, 'r') as h5:
+                    grp = h5.get('steps')
+                    if grp is None or str(step) not in grp:
+                        continue
+                    g = grp[str(step)]
+                    if 'neighbor_counts' not in g or 'neighbors_concat' not in g:
+                        continue
+                    nc = np.asarray(g['neighbor_counts'])
+                    nc = nc.astype(int)
+                    neighbors_concat = np.asarray(g['neighbors_concat']) if 'neighbors_concat' in g else np.array([], dtype=int)
+            else:
+                d = np.load(npz, allow_pickle=True)
+                if 'neighbor_counts' not in d or 'neighbors_concat' not in d:
+                    continue
+                nc = np.asarray(d['neighbor_counts'])
+                nc = nc.astype(int)
+                neighbors_concat = np.asarray(d['neighbors_concat']) if 'neighbors_concat' in d else np.array([], dtype=int)
         except Exception:
             continue
-        if 'neighbor_counts' not in d or 'neighbors_concat' not in d:
-            continue
-        nc = np.asarray(d['neighbor_counts'])
-        nc = nc.astype(int)
-        neighbors_concat = np.asarray(d['neighbors_concat']) if 'neighbors_concat' in d else np.array([], dtype=int)
         neighbors = concat_neighbors(nc, neighbors_concat)
         # collect per-agent cohesion vectors
         # need positions at this step

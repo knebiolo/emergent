@@ -26,25 +26,33 @@ def load_trace(trace_file):
 
 
 def analyze(npzfile, trace, outdir):
-    d = np.load(npzfile)
+    import h5py
     base = os.path.basename(npzfile)
-    # extract step number (behavior_debug_step_<step>_<ts>.npz)
-    parts = base.split('_')
-    step = None
-    for i,p in enumerate(parts):
-        if p=='step' and i+1 < len(parts):
-            try:
-                step = int(parts[i+1]); break
-            except Exception:
-                continue
-    if step is None:
-        # fallback to first numeric token
-        for p in parts:
-            if p.isdigit():
-                step = int(p); break
-    if 'rheotaxis_vec' not in d.files:
-        return None
-    rv = np.asarray(d['rheotaxis_vec']).astype(float)
+    # detect .h5 vs .npz
+    if npzfile.endswith('.h5') or npzfile.endswith('.hdf5'):
+        # expect path to an h5 file; read step 0 by default or encoded step
+        # try to infer step from basename
+        parts = base.split('_')
+        step = None
+        for i,p in enumerate(parts):
+            if p=='step' and i+1 < len(parts):
+                try:
+                    step = int(parts[i+1]); break
+                except Exception:
+                    continue
+        if step is None:
+            step = 0
+        with h5py.File(npzfile,'r') as f:
+            grp = f.get('steps')
+            if grp is None or str(step) not in grp:
+                return None
+            g = grp[str(step)]
+            if 'rheo_vec' not in g:
+                return None
+            rv = np.asarray(g['rheo_vec']).astype(float)
+    else:
+        d = np.load(npzfile)
+    # base and step detection for NPZ preserved below
     N = rv.shape[0]
     deltas = []
     per_agent = []
