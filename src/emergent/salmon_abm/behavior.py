@@ -1119,6 +1119,86 @@ class behavior():
             except Exception:
                 pass
 
+            # Robust final assignment: ensure attributes exist, correct shapes, and are serializable.
+            try:
+                n_agents = int(getattr(self.simulation, 'num_agents', 0)) or int(getattr(self.simulation, 'n_agents', 0))
+                if n_agents <= 0:
+                    n_agents = int(getattr(self.simulation, 'num_agents', 0))
+                # Build safe last_cue_vecs with guaranteed shape (n_agents,2)
+                last_cue_vecs_final = {}
+                for k, v in raw_vecs.items():
+                    try:
+                        arr = np.asarray(v, dtype=np.float32)
+                        if arr.ndim == 1 and arr.size == 2:
+                            arr = np.tile(arr.reshape(1, 2), (n_agents, 1))
+                        if arr.ndim == 2 and arr.shape[0] == n_agents and arr.shape[1] == 2:
+                            last_cue_vecs_final[k] = arr
+                        else:
+                            try:
+                                arr = arr.reshape((n_agents, 2)).astype(np.float32)
+                                last_cue_vecs_final[k] = arr
+                            except Exception:
+                                last_cue_vecs_final[k] = np.zeros((n_agents, 2), dtype=np.float32)
+                    except Exception:
+                        last_cue_vecs_final[k] = np.zeros((n_agents, 2), dtype=np.float32)
+
+                # Ensure known cues are present even if empty
+                for known in ('cohesion', 'alignment', 'rheo', 'refugia', 'border', 'shallow', 'collision', 'avoid'):
+                    if known not in last_cue_vecs_final:
+                        last_cue_vecs_final[known] = np.zeros((n_agents, 2), dtype=np.float32)
+
+                try:
+                    setattr(self.simulation, 'last_cue_vecs', last_cue_vecs_final)
+                except Exception:
+                    # best-effort fallback
+                    try:
+                        self.simulation.last_cue_vecs = last_cue_vecs_final
+                    except Exception:
+                        pass
+
+                # magnitudes
+                last_cue_mags = {}
+                for k, v in cue_magnitudes.items():
+                    try:
+                        last_cue_mags[k] = np.asarray(v, dtype=np.float32)
+                    except Exception:
+                        last_cue_mags[k] = np.zeros((n_agents,), dtype=np.float32)
+                for known in ('cohesion', 'alignment', 'rheo', 'refugia', 'border', 'shallow', 'collision', 'avoid'):
+                    if known not in last_cue_mags:
+                        last_cue_mags[known] = np.zeros((n_agents,), dtype=np.float32)
+                try:
+                    setattr(self.simulation, 'last_cue_magnitudes', last_cue_mags)
+                except Exception:
+                    try:
+                        self.simulation.last_cue_magnitudes = last_cue_mags
+                    except Exception:
+                        pass
+
+                # head vector
+                try:
+                    hv = np.asarray(head_vec, dtype=np.float32)
+                    if hv.ndim == 1 and hv.size == 2:
+                        hv = np.tile(hv.reshape(1, 2), (n_agents, 1))
+                    if not (hv.ndim == 2 and hv.shape[0] == n_agents and hv.shape[1] == 2):
+                        try:
+                            hv = hv.reshape((n_agents, 2)).astype(np.float32)
+                        except Exception:
+                            hv = np.zeros((n_agents, 2), dtype=np.float32)
+                except Exception:
+                    hv = np.zeros((n_agents, 2), dtype=np.float32)
+                try:
+                    setattr(self.simulation, 'last_head_vec', hv)
+                except Exception:
+                    try:
+                        self.simulation.last_head_vec = hv
+                    except Exception:
+                        pass
+            except Exception:
+                try:
+                    print('DBG: failed robust final assignment of last_cue_vecs/last_head_vec', file=sys.stderr)
+                except Exception:
+                    pass
+
             # optional behavior debugging: dump cue snapshots
             try:
                 if getattr(self.simulation, 'debug_behavior', False):
@@ -1307,29 +1387,34 @@ class behavior():
                         except Exception:
                             abs_fname = fname_npz
                         try:
-                            np.savez_compressed(
-                                    fname_npz,
-                                    head_vec=np.asarray(head_vec).astype(float),
-                                    **safe_cues_s,
-                                    **safe_vecs_s,
-                                    **extra,
-                                    neighbor_counts=neighbor_counts,
-                                    neighbors_concat=neighbors_concat,
-                                    neighbor_mean_distance=neighbor_mean_distance,
-                                    neighbor_any_within_2bl=neighbor_any_within_2bl,
-                                    # legacy per-agent neighbor summaries (kept for compatibility)
-                                    neighbor_headings=(neighbor_headings if 'neighbor_headings' in locals() else np.array([])),
-                                    neighbor_rel_heading=(neighbor_rel_heading if 'neighbor_rel_heading' in locals() else np.array([])),
-                                    neighbors_owner=(agent_idx_repeat if 'agent_idx_repeat' in locals() else np.array([], dtype=np.int32)),
-                                    neighbor_min_distance=(neighbor_min_distance if 'neighbor_min_distance' in locals() else np.full(self.simulation.num_agents, np.nan)),
-                                    closest_agent=(np.asarray(getattr(self.simulation, 'closest_agent', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'closest_agent') else np.array([])),
-                                    nearest_neighbor_distance=(np.asarray(getattr(self.simulation, 'nearest_neighbor_distance', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'nearest_neighbor_distance') else np.array([])),
-                                    # explicit per-neighbor alignment diagnostics
-                                    raw_headings_neighbors=raw_headings_neighbors_arr,
-                                    headings_neighbors_used=headings_neighbors_used_arr,
-                                    alignment_neighbor_indices=alignment_neighbor_indices,
-                                    alignment_agent_indices=alignment_agent_indices,
-                                )
+                            # Ensure head_vec and per-cue vectors are explicitly included
+                            to_write = {}
+                            try:
+                                to_write['head_vec'] = np.asarray(head_vec).astype(float)
+                            except Exception:
+                                to_write['head_vec'] = np.zeros((self.simulation.num_agents, 2))
+                            # include sanitized cue magnitudes and vectors
+                            to_write.update(safe_cues_s)
+                            to_write.update(safe_vecs_s)
+                            # include extras and neighbor diagnostics
+                            to_write.update(extra)
+                            to_write['neighbor_counts'] = neighbor_counts
+                            to_write['neighbors_concat'] = neighbors_concat
+                            to_write['neighbor_mean_distance'] = neighbor_mean_distance
+                            to_write['neighbor_any_within_2bl'] = neighbor_any_within_2bl
+                            # legacy per-agent neighbor summaries (kept for compatibility)
+                            to_write['neighbor_headings'] = (neighbor_headings if 'neighbor_headings' in locals() else np.array([]))
+                            to_write['neighbor_rel_heading'] = (neighbor_rel_heading if 'neighbor_rel_heading' in locals() else np.array([]))
+                            to_write['neighbors_owner'] = (agent_idx_repeat if 'agent_idx_repeat' in locals() else np.array([], dtype=np.int32))
+                            to_write['neighbor_min_distance'] = (neighbor_min_distance if 'neighbor_min_distance' in locals() else np.full(self.simulation.num_agents, np.nan))
+                            to_write['closest_agent'] = (np.asarray(getattr(self.simulation, 'closest_agent', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'closest_agent') else np.array([]))
+                            to_write['nearest_neighbor_distance'] = (np.asarray(getattr(self.simulation, 'nearest_neighbor_distance', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'nearest_neighbor_distance') else np.array([]))
+                            # explicit per-neighbor alignment diagnostics
+                            to_write['raw_headings_neighbors'] = raw_headings_neighbors_arr
+                            to_write['headings_neighbors_used'] = headings_neighbors_used_arr
+                            to_write['alignment_neighbor_indices'] = alignment_neighbor_indices
+                            to_write['alignment_agent_indices'] = alignment_agent_indices
+                            np.savez_compressed(fname_npz, **to_write)
                             try:
                                 print('Wrote behavior debug NPZ:', abs_fname)
                             except Exception:
@@ -1427,6 +1512,45 @@ class behavior():
                 prev_hat = np.column_stack((prev_hat_x, prev_hat_y))
                 # where norm is zero or nan, replace with prev_hat or rheotaxis
                 safe_hv = np.where(np.isnan(norms)[:, np.newaxis] | (norms[:, np.newaxis] == 0), prev_hat, hv)
+                # Ensure we also persist a safe last_head_vec and cue vecs even in this fallback path
+                try:
+                    n_agents = int(getattr(self.simulation, 'num_agents', 0)) or int(getattr(self.simulation, 'n_agents', 0))
+                except Exception:
+                    n_agents = getattr(self.simulation, 'num_agents', None) or getattr(self.simulation, 'n_agents', None) or 0
+                try:
+                    if n_agents and getattr(self.simulation, 'last_cue_vecs', None) is None:
+                        # build minimal last_cue_vecs from raw_vecs if available
+                        try:
+                            last_cue_vecs_final = {k: np.zeros((n_agents, 2), dtype=np.float32) for k in ('cohesion', 'alignment', 'rheo', 'refugia', 'border', 'shallow', 'collision', 'avoid')}
+                            if 'raw_vecs' in locals():
+                                for k, v in raw_vecs.items():
+                                    try:
+                                        arr = np.asarray(v, dtype=np.float32)
+                                        if arr.ndim == 1 and arr.size == 2:
+                                            arr = np.tile(arr.reshape(1, 2), (n_agents, 1))
+                                        if arr.ndim == 2 and arr.shape[0] == n_agents and arr.shape[1] == 2:
+                                            last_cue_vecs_final[k] = arr
+                                    except Exception:
+                                        pass
+                            self.simulation.last_cue_vecs = last_cue_vecs_final
+                        except Exception:
+                            try:
+                                setattr(self.simulation, 'last_cue_vecs', {})
+                            except Exception:
+                                pass
+                    # set last_head_vec to safe_hv coerced
+                    try:
+                        hv_safe = np.asarray(safe_hv, dtype=np.float32)
+                        if hv_safe.ndim == 1 and hv_safe.size == 2:
+                            hv_safe = np.tile(hv_safe.reshape(1, 2), (n_agents if n_agents else 1, 1))
+                        self.simulation.last_head_vec = hv_safe
+                    except Exception:
+                        try:
+                            setattr(self.simulation, 'last_head_vec', np.zeros((n_agents if n_agents else 1, 2), dtype=np.float32))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 return np.arctan2(safe_hv[:, 1], safe_hv[:, 0])
             except Exception:
                 # ultimate fallback: return previous heading

@@ -256,6 +256,102 @@ def run_headless(args):
                             print('Failed writing per-step NPZ:', e)
                         except Exception:
                             pass
+                    # Additionally write an authoritative per-step NPZ into a dedicated folder
+                    try:
+                        forced_dir = os.path.join(outdir, 'forced_rawvecs')
+                        os.makedirs(forced_dir, exist_ok=True)
+                        # Build authoritative payload from simulation attributes set by behavior
+                        auth_payload = {}
+                        # brief polling to allow behavior to populate last_head_vec/last_cue_vecs
+                        try:
+                            import time as _time
+                            waited = 0.0
+                            interval = 0.01
+                            maxwait = 0.1
+                            while waited < maxwait and not (hasattr(sim, 'last_head_vec') and getattr(sim, 'last_head_vec') is not None):
+                                _time.sleep(interval)
+                                waited += interval
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(sim, 'last_head_vec') and getattr(sim, 'last_head_vec') is not None:
+                                auth_payload['head_vec'] = np.asarray(sim.last_head_vec).astype(float)
+                            if hasattr(sim, 'last_cue_vecs') and isinstance(sim.last_cue_vecs, dict):
+                                for ck, cv in sim.last_cue_vecs.items():
+                                    try:
+                                        auth_payload[f'{ck}_vec'] = np.asarray(cv).astype(float)
+                                    except Exception:
+                                        pass
+                            if hasattr(sim, 'last_cue_magnitudes') and isinstance(sim.last_cue_magnitudes, dict):
+                                for ck, cv in sim.last_cue_magnitudes.items():
+                                    try:
+                                        auth_payload[f'{ck}_mag'] = np.asarray(cv).astype(float)
+                                    except Exception:
+                                        pass
+                            # neighbor diagnostics
+                            if hasattr(sim, 'agents_within_buffers'):
+                                try:
+                                    neighbor_counts = np.array([len(x) for x in sim.agents_within_buffers], dtype=np.int32)
+                                    auth_payload['neighbor_counts'] = neighbor_counts
+                                    if neighbor_counts.sum() > 0:
+                                        auth_payload['neighbors_concat'] = np.concatenate(sim.agents_within_buffers).astype(np.int32)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        # atomic write: write to temp file then replace
+                        import tempfile
+                        ts = int(time.time())
+                        tmp_fd, tmp_path = tempfile.mkstemp(prefix=f'auth_step_{t}_', suffix='.npz', dir=forced_dir)
+                        os.close(tmp_fd)
+                        try:
+                            # Attempt to augment auth_payload with the behavior-produced NPZ for this step
+                            try:
+                                import glob
+                                beh_files = sorted(glob.glob(os.path.join(outdir, f'behavior_debug_step_{int(t)}_*')))
+                                if beh_files:
+                                    # pick the latest
+                                    bf = beh_files[-1]
+                                    try:
+                                        bdata = np.load(bf)
+                                        for k in bdata.files:
+                                            if k not in auth_payload:
+                                                try:
+                                                    auth_payload[k] = np.asarray(bdata[k])
+                                                except Exception:
+                                                    pass
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                            # use numpy to save to tmp_path
+                            np.savez_compressed(tmp_path, **auth_payload)
+                            final_path = os.path.join(forced_dir, f'auth_behavior_step_{t}_{ts}.npz')
+                            # atomic replace
+                            os.replace(tmp_path, final_path)
+                            try:
+                                # ensure file is flushed to disk (best-effort)
+                                with open(final_path, 'rb') as f:
+                                    try:
+                                        os.fsync(f.fileno())
+                                    except Exception:
+                                        pass
+                                print('Wrote authoritative NPZ:', final_path)
+                            except Exception:
+                                print('Wrote authoritative NPZ (no fsync):', final_path)
+                        except Exception as e:
+                            try:
+                                if os.path.exists(tmp_path):
+                                    os.remove(tmp_path)
+                            except Exception:
+                                pass
+                            try:
+                                print('Failed writing authoritative NPZ:', e)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
