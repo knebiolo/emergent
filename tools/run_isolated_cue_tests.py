@@ -29,6 +29,11 @@ TARGET_WEIGHTS = {
     'alignment': 8000.0,
     'collision': 20000.0,
     'low_speed': 3000.0,
+    'avoid': 15000.0,
+    'wave_drag': 4000.0,
+    'refugia': 7000.0,
+    'border': 12000.0,
+    'shallow': 12000.0,
 }
 
 
@@ -68,11 +73,18 @@ def run_cue(cue, start_shp=None, nagents=50, nsteps=20, seed=42):
 
 
 def main(args):
-    cues = args or list(WEIGHT_MAPS.keys())
-    start_shp = os.path.join(ROOT, 'data', 'salmon_abm', 'start_loc_river_right.shp')
+    cues = args or BEHAVIOR_KEYS
+    # starting polygons
+    river_right = os.path.join(ROOT, 'data', 'salmon_abm', 'start_loc_river_right.shp')
+    near_shore = os.path.join(ROOT, 'data', 'salmon_abm', 'near_shore.shp')
     results = {}
     for cue in cues:
-        rc = run_cue(cue, start_shp=start_shp)
+        if cue in ('border', 'shallow'):
+            start_shp = near_shore
+        else:
+            start_shp = river_right
+        # use 1000 agents to force interaction as requested
+        rc = run_cue(cue, start_shp=start_shp, nagents=1000, nsteps=20, seed=42)
         results[cue] = rc
     print('\nResults:')
     for k, v in results.items():
