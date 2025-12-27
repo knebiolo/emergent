@@ -11,6 +11,7 @@ import time
 import csv
 
 import numpy as np
+import h5py
 
 from emergent.salmon_abm.simulation import simulation
 from emergent.salmon_abm import io, hdf5_io
@@ -83,6 +84,39 @@ def run_headless(args):
         num_agents=args.nagents,
         db_path=os.path.join(outdir, f'{args.model_name}_headless.h5')
     )
+
+    # If provided, preload memory HDF5 into sim.hdf5['memory/*'] before starting
+    if getattr(args, 'preload_memory', None):
+        try:
+            preload_path = os.path.abspath(args.preload_memory)
+            if os.path.exists(preload_path):
+                print('Preloading memory from', preload_path)
+                with h5py.File(preload_path, 'r') as ph5:
+                    # ensure sim has memory group
+                    if 'memory' in ph5:
+                        for key in ph5['memory'].keys():
+                            dst = f'memory/{key}'
+                            try:
+                                data = np.array(ph5['memory'][key])
+                                # write into sim.hdf5, create dataset if missing
+                                try:
+                                    if dst in sim.hdf5:
+                                        sim.hdf5[dst][:] = data
+                                    else:
+                                        sim.hdf5.create_dataset(dst, data=data, dtype='f4')
+                                except Exception:
+                                    try:
+                                        sim.hdf5[dst] = data
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                try:
+                    sim.hdf5.flush()
+                except Exception:
+                    pass
+        except Exception as e:
+            print('Failed to preload memory:', e)
 
     # Open HDF5 diagnostics writer for this run and attach to sim
     try:
@@ -542,6 +576,29 @@ def run_headless(args):
 
     sim.close()
 
+    # If preseed export requested, write out sim.hdf5['memory/*'] to a separate HDF5
+    if getattr(args, 'preseed_memory_out', None):
+        try:
+            out_path = os.path.abspath(args.preseed_memory_out)
+            print('Exporting memory to', out_path)
+            with h5py.File(out_path, 'w') as oh5:
+                # create memory group
+                mg = oh5.create_group('memory')
+                # copy datasets from sim.hdf5 if present
+                try:
+                    if 'memory' in sim.hdf5:
+                        for k in sim.hdf5['memory'].keys():
+                            try:
+                                data = np.array(sim.hdf5[f'memory/{k}'])
+                                mg.create_dataset(str(k), data=data, dtype='f4')
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            print('Memory export complete')
+        except Exception as e:
+            print('Failed to export memory:', e)
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -554,6 +611,8 @@ def main():
     parser.add_argument('--out', default=os.path.join('outputs', 'diagnostics'))
     parser.add_argument('--start-polygon', dest='start_polygon', default=None, help='Optional path to start location shapefile')
     parser.add_argument('--test-weights-file', dest='test_weights_file', default=None, help='Optional JSON file with per-cue test weight overrides')
+    parser.add_argument('--preload-memory', dest='preload_memory', default=None, help='Optional HDF5 file to preload per-agent memory (memory/* datasets)')
+    parser.add_argument('--preseed-memory-out', dest='preseed_memory_out', default=None, help='Optional path to export sim.hdf5 memory/* datasets after run')
     args = parser.parse_args()
     run_headless(args)
 

@@ -1,0 +1,12 @@
+{
+  "avoid": 25000,
+  "rheotaxis": 0,
+  "alignment": 0,
+  "cohesion": 0,
+  "low_speed": 0,
+  "wave_drag": 0,
+  "refugia": 0,
+  "border": 0,
+  "shallow": 0,
+  "collision": 0
+}

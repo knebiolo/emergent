@@ -20,7 +20,11 @@ class behavior():
     def already_been_here(self, weight, t):
         x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
 
-        mental_map_rows, mental_map_cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
+        # use the mental map transform (coarser avoid-cell grid) when converting
+        # geographic positions to memory pixel indices. Previously the depth
+        # raster transform was used which produced indices on a different grid
+        # and resulted in out-of-bounds / empty slices causing zero forces.
+        mental_map_rows, mental_map_cols = geo_to_pixel(x, y, getattr(self.simulation, 'mental_map_transform', getattr(self.simulation, 'depth_rast_transform', None)))
 
         buff = 10
         row_min = np.clip(mental_map_rows - buff, 0, None)
