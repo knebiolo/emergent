@@ -786,6 +786,18 @@ class behavior():
 
         cue_magnitudes = {}
         raw_vecs = {}
+        # defensive: ensure simulation exposes last_cue_vecs attribute even if empty
+        try:
+            if getattr(self.simulation, 'debug_behavior', False):
+                try:
+                    self.simulation.last_cue_vecs = {} if not hasattr(self.simulation, 'last_cue_vecs') else getattr(self.simulation, 'last_cue_vecs')
+                except Exception:
+                    try:
+                        setattr(self.simulation, 'last_cue_vecs', {})
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         # helper: coerce cue arrays to shape (num_agents, 2)
         def _ensure_agent_vec(vec):
@@ -858,6 +870,170 @@ class behavior():
                 vec_sum_migratory = np.where(np.linalg.norm(vec_sum_migratory, axis=-1)[:, np.newaxis] < tolerance,
                                               vec_sum_migratory + vec,
                                               vec_sum_migratory)
+        # immediate unconditional debug prints to reveal raw_vecs and cue_magnitudes
+        try:
+            print('DBG RAWVECS POST BUILD keys=', list(raw_vecs.keys()))
+        except Exception:
+            pass
+        try:
+            print('DBG CUE_MAGS POST BUILD keys=', list(cue_magnitudes.keys()))
+        except Exception:
+            pass
+
+        # debug: show raw_vecs and cue_magnitudes available at this point
+        try:
+            try:
+                kv = {k: (np.asarray(v).shape if hasattr(v, 'shape') else None) for k, v in raw_vecs.items()}
+            except Exception:
+                kv = {k: None for k in raw_vecs.keys()}
+            try:
+                km = {k: (np.asarray(v).shape if hasattr(v, 'shape') else None) for k, v in cue_magnitudes.items()}
+            except Exception:
+                km = {k: None for k in cue_magnitudes.keys()}
+            try:
+                print('DBG raw_vecs keys/shapes=', kv, 'cue_magnitudes shapes=', km)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # persist raw_vecs unconditionally (best-effort) so external tools can access them
+        try:
+            try:
+                self.simulation.last_cue_vecs = {k: np.asarray(v) for k, v in raw_vecs.items()}
+            except Exception:
+                # fallback: ensure attribute exists as empty dict
+                setattr(self.simulation, 'last_cue_vecs', {})
+        except Exception:
+            pass
+
+        # Forced NPZ dump of raw per-cue vectors and magnitudes for deterministic debugging.
+        # This is written immediately after raw_vecs and cue_magnitudes are available so
+        # external runners can rely on a consistent payload when `debug_behavior` is True.
+        try:
+            if getattr(self.simulation, 'debug_behavior', False):
+                import time, os, json
+                outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                os.makedirs(outdir, exist_ok=True)
+                step_i = int(getattr(self.simulation, 'current_step', t))
+                ts = int(time.time())
+                fname = os.path.join(outdir, f'behavior_debug_rawvecs_step_{step_i}_{ts}.npz')
+                payload = {}
+                # ensure at least one key so NPZ is non-empty
+                payload_written = False
+                try:
+                    for k, v in raw_vecs.items():
+                        try:
+                            payload[f'{k}_vec'] = np.asarray(v).astype(float)
+                            payload_written = True
+                        except Exception:
+                            # fall through; don't let one bad cue prevent others
+                            pass
+                except Exception:
+                    pass
+                try:
+                    for k, v in cue_magnitudes.items():
+                        try:
+                            payload[f'{k}_mag'] = np.asarray(v).astype(float)
+                            payload_written = True
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self.simulation, 'agents_within_buffers'):
+                        neighbor_counts = np.array([len(x) for x in self.simulation.agents_within_buffers], dtype=np.int32)
+                        payload['neighbor_counts'] = neighbor_counts
+                        payload_written = True
+                        if neighbor_counts.sum() > 0:
+                            try:
+                                payload['neighbors_concat'] = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
+                            except Exception:
+                                payload['neighbors_concat'] = np.array([], dtype=np.int32)
+                except Exception:
+                    pass
+
+                # If payload is empty, include a minimal marker so file exists
+                if not payload_written:
+                    payload['marker'] = np.array([1], dtype=np.int8)
+
+                # Attempt to write NPZ; if it fails, write a JSON fallback
+                try:
+                    import numpy as _np
+                    try:
+                        absf = os.path.abspath(fname)
+                    except Exception:
+                        absf = fname
+                    # explicit pre-write trace so we can correlate stdout to files
+                    try:
+                        print('ABOUT TO WRITE forced rawvecs NPZ ->', absf)
+                    except Exception:
+                        pass
+                    _np.savez_compressed(fname, **payload)
+                    try:
+                        size = os.path.getsize(absf) if os.path.exists(absf) else -1
+                        print('Wrote forced rawvecs NPZ:', absf, 'size=', size)
+                    except Exception:
+                        print('Wrote forced rawvecs NPZ (path unknown)')
+                except Exception as e:
+                    try:
+                        # JSON fallback with summary fields
+                        fallback = {
+                            'step': step_i,
+                            'time': ts,
+                            'num_agents': int(getattr(self.simulation, 'num_agents', -1)),
+                            'cue_keys': list(raw_vecs.keys()),
+                        }
+                        jname = fname.replace('.npz', '.json')
+                        with open(jname, 'w', encoding='utf-8') as jf:
+                            json.dump(fallback, jf)
+                        print('Failed NPZ write; wrote JSON fallback:', os.path.abspath(jname), 'err=', e)
+                    except Exception:
+                        try:
+                            print('Failed writing forced rawvecs NPZ and JSON fallback:', e)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Additional forced writer: if environment variable FORCE_RAWVECS is set to 'true',
+        # write rawvecs unconditionally (useful when debug_behavior isn't toggled).
+        try:
+            if os.environ.get('FORCE_RAWVECS', '').lower() == 'true':
+                try:
+                    import time
+                    outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                    os.makedirs(outdir, exist_ok=True)
+                    step_i = int(getattr(self.simulation, 'current_step', t))
+                    ts = int(time.time())
+                    fname_force = os.path.join(outdir, f'behavior_debug_rawvecs_FORCE_step_{step_i}_{ts}.npz')
+                    payload = {f'{k}_vec': np.asarray(v).astype(float) for k, v in raw_vecs.items()}
+                    for k, v in cue_magnitudes.items():
+                        try:
+                            payload[f'{k}_mag'] = np.asarray(v).astype(float)
+                        except Exception:
+                            pass
+                    try:
+                        absf = os.path.abspath(fname_force)
+                    except Exception:
+                        absf = fname_force
+                    try:
+                        print('FORCE RAWVECS ABOUT TO WRITE ->', absf)
+                    except Exception:
+                        pass
+                    np.savez_compressed(fname_force, **payload)
+                    try:
+                        size = os.path.getsize(absf) if os.path.exists(absf) else -1
+                        print('FORCE RAWVECS WROTE NPZ:', absf, 'size=', size)
+                    except Exception:
+                        print('FORCE RAWVECS WROTE NPZ (path unknown)')
+                except Exception as e:
+                    try:
+                        print('FORCE RAWVECS failed to write NPZ:', e)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         for i in np.arange(0, 3, 1):
             cue = low_bat_cue_dict[i]
@@ -934,6 +1110,12 @@ class behavior():
             try:
                 self.simulation.last_head_vec = np.asarray(head_vec)
                 self.simulation.last_cue_magnitudes = {k: np.asarray(v) for k, v in cue_magnitudes.items()}
+                # persist raw per-cue vectors so external runners can include them in diagnostics
+                try:
+                    self.simulation.last_cue_vecs = {k: np.asarray(v) for k, v in raw_vecs.items()}
+                except Exception:
+                    # best-effort: skip if raw_vecs are not serializable
+                    pass
             except Exception:
                 pass
 

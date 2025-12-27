@@ -163,6 +163,20 @@ def run_headless(args):
             # expose current step so movement debug filenames are meaningful
             setattr(sim, 'current_step', int(t))
             sim.timestep(t, dt)
+            # debug: report whether behavior populated last_cue_vecs for this step
+            try:
+                if getattr(sim, 'debug_behavior', False):
+                    has_raw = hasattr(sim, 'last_cue_vecs') and isinstance(getattr(sim, 'last_cue_vecs', None), dict)
+                    if has_raw:
+                        try:
+                            keys = list(sim.last_cue_vecs.keys())
+                        except Exception:
+                            keys = ['<err>']
+                    else:
+                        keys = []
+                    print('RUNNER DBG: step=', t, 'has_last_cue_vecs=', has_raw, 'keys=', keys)
+            except Exception:
+                pass
             # sample environment values at agent positions
             depth_vals = sim.sample_environment(getattr(sim, 'depth_rast_transform', None), 'depth')
             velx_vals = sim.sample_environment(getattr(sim, 'vel_x_rast_transform', getattr(sim, 'depth_rast_transform', None)), 'vel_x')
@@ -190,6 +204,60 @@ def run_headless(args):
             fh.flush()
             if (t + 1) % max(1, int(args.nsteps / 10)) == 0:
                 print(f'Progress: {t+1}/{args.nsteps}')
+
+            # Force per-step NPZ dumps when debug_behavior is enabled.
+            # This makes per-step diagnostics deterministic and available
+            # for offline analysis (cohesion/alignment/etc.). We re-use
+            # the same payload shape used inside behavior.arbitrate()
+            # to ensure consumers can parse the outputs.
+            try:
+                if getattr(sim, 'debug_behavior', False):
+                    outdir = getattr(sim, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                    os.makedirs(outdir, exist_ok=True)
+                    import time
+                    fname_npz = os.path.join(outdir, f'behavior_debug_step_{int(t)}_{int(time.time())}.npz')
+                    # collect best-effort diagnostics from sim
+                    safe_payload = {}
+                    try:
+                        if hasattr(sim, 'last_head_vec'):
+                            safe_payload['head_vec'] = np.asarray(sim.last_head_vec).astype(float)
+                        if hasattr(sim, 'last_cue_magnitudes'):
+                            for k, v in sim.last_cue_magnitudes.items():
+                                safe_payload[f'{k}_mag'] = np.asarray(v).astype(float)
+                        # neighbor lists
+                        if hasattr(sim, 'agents_within_buffers'):
+                            neighbor_counts = np.array([len(x) for x in sim.agents_within_buffers], dtype=np.int32)
+                            neighbors_concat = np.concatenate(sim.agents_within_buffers).astype(np.int32) if neighbor_counts.sum() > 0 else np.array([], dtype=np.int32)
+                            safe_payload['neighbor_counts'] = neighbor_counts
+                            safe_payload['neighbors_concat'] = neighbors_concat
+                        # include per-cue raw vectors if behavior stored them
+                        if hasattr(sim, 'last_cue_vecs'):
+                            try:
+                                for ck, cv in sim.last_cue_vecs.items():
+                                    safe_payload[f'{ck}_vec'] = np.asarray(cv).astype(float)
+                            except Exception:
+                                pass
+                        # include alignment diagnostics if present
+                        if hasattr(sim, '_alignment_diag'):
+                            ad = sim._alignment_diag
+                            for k in ('raw_headings_neighbors', 'headings_neighbors_used', 'used_velocity_heading', 'neighbor_indices', 'agent_indices'):
+                                if k in ad:
+                                    safe_payload[k] = np.asarray(ad[k])
+                    except Exception:
+                        pass
+                    try:
+                        np.savez_compressed(fname_npz, **safe_payload)
+                        try:
+                            print('Wrote per-step behavior NPZ:', fname_npz)
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        try:
+                            print('Failed writing per-step NPZ:', e)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
     print('Headless run complete. Trace saved to', csv_path)
     # fallback behavior debug dump: write last_head_vec and last_cue_magnitudes if enabled
