@@ -14,6 +14,7 @@ import numpy as np
 
 from emergent.salmon_abm.simulation import simulation
 from emergent.salmon_abm import io, hdf5_io
+from emergent.salmon_abm.diagnostics import HDF5DiagnosticsWriter
 
 
 def discover_env_files(base_dir):
@@ -82,6 +83,16 @@ def run_headless(args):
         num_agents=args.nagents,
         db_path=os.path.join(outdir, f'{args.model_name}_headless.h5')
     )
+
+    # Open HDF5 diagnostics writer for this run and attach to sim
+    try:
+        diag_path = os.path.join(outdir, f'{args.model_name}_diagnostics.h5')
+        diag_writer = HDF5DiagnosticsWriter(diag_path)
+        diag_writer.open(mode='a')
+        sim.diagnostics_writer = diag_writer
+        print('Opened HDF5 diagnostics:', diag_path)
+    except Exception:
+        sim.diagnostics_writer = None
 
     # apply optional deterministic seed
     if getattr(args, 'seed', None) is not None:
@@ -256,6 +267,18 @@ def run_headless(args):
                             print('Failed writing per-step NPZ:', e)
                         except Exception:
                             pass
+                    # Also write to HDF5 diagnostics writer when available (atomic per-step storage)
+                    try:
+                        dw = getattr(sim, 'diagnostics_writer', None)
+                        if dw is not None:
+                            # use step index t and include safe_payload arrays
+                            dw.write_step(t, safe_payload)
+                            try:
+                                print('Wrote per-step diagnostics to HDF5 for step', t)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     # Additionally write an authoritative per-step NPZ into a dedicated folder
                     try:
                         forced_dir = os.path.join(outdir, 'forced_rawvecs')
@@ -348,6 +371,121 @@ def run_headless(args):
                                 pass
                             try:
                                 print('Failed writing authoritative NPZ:', e)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    # Additionally, write an authoritative HDF5 diagnostics step.
+                    # Compute per-cue vectors here using sim._behavior to avoid race timing.
+                    try:
+                        dw = getattr(sim, 'diagnostics_writer', None)
+                        if dw is not None and hasattr(sim, '_behavior'):
+                            # decide weights (matching behavior.arbitrate logic)
+                            tw = getattr(sim, 'test_weights', None)
+                            known_keys = ['rheotaxis', 'alignment', 'cohesion', 'low_speed', 'wave_drag', 'refugia', 'border', 'shallow', 'avoid', 'collision']
+                            if tw:
+                                default_weights = {k: 0.0 for k in known_keys}
+                                for k, v in tw.items():
+                                    try:
+                                        if k in default_weights:
+                                            default_weights[k] = float(v)
+                                    except Exception:
+                                        pass
+                            else:
+                                default_weights = {
+                                    'rheotaxis': 25000,
+                                    'alignment': 20500,
+                                    'cohesion': 11000,
+                                    'low_speed': 1500,
+                                    'wave_drag': 0,
+                                    'refugia': 50000,
+                                    'border': 50000,
+                                    'shallow': 100000,
+                                    'avoid': 25000,
+                                    'collision': 50000,
+                                }
+                            # compute cues via behavior helper
+                            b = sim._behavior
+                            try:
+                                rheo = b.rheo_cue(default_weights['rheotaxis'])
+                            except Exception:
+                                rheo = np.zeros((sim.num_agents, 2))
+                            try:
+                                alignment = b.alignment_cue(default_weights['alignment'])
+                            except Exception:
+                                alignment = np.zeros((sim.num_agents, 2))
+                            try:
+                                cohesion = b.cohesion_cue(default_weights['cohesion'])
+                            except Exception:
+                                cohesion = np.zeros((sim.num_agents, 2))
+                            try:
+                                low_speed = b.vel_cue(default_weights['low_speed'])
+                            except Exception:
+                                low_speed = np.zeros((sim.num_agents, 2))
+                            try:
+                                wave_drag = b.wave_drag_cue(default_weights['wave_drag'])
+                            except Exception:
+                                wave_drag = np.zeros((sim.num_agents, 2))
+                            try:
+                                refugia = b.find_nearest_refuge(default_weights['refugia'])
+                            except Exception:
+                                refugia = np.zeros((sim.num_agents, 2))
+                            try:
+                                border = b.border_cue(default_weights['border'], t)
+                            except Exception:
+                                border = np.zeros((sim.num_agents, 2))
+                            try:
+                                shallow = b.shallow_cue(default_weights['shallow'])
+                            except Exception:
+                                shallow = np.zeros((sim.num_agents, 2))
+                            try:
+                                avoid = b.already_been_here(default_weights['avoid'], t)
+                            except Exception:
+                                avoid = np.zeros((sim.num_agents, 2))
+                            try:
+                                collision = b.collision_cue(default_weights['collision'])
+                            except Exception:
+                                collision = np.zeros((sim.num_agents, 2))
+
+                            cue_map = {
+                                'rheo': rheo,
+                                'alignment': alignment,
+                                'cohesion': cohesion,
+                                'low_speed': low_speed,
+                                'wave_drag': wave_drag,
+                                'refugia': refugia,
+                                'border': border,
+                                'shallow': shallow,
+                                'avoid': avoid,
+                                'collision': collision,
+                            }
+                            auth_payload = {}
+                            # include per-cue vecs and magnitudes
+                            for ck, cv in cue_map.items():
+                                try:
+                                    arr = np.asarray(cv).astype(float)
+                                    auth_payload[f'{ck}_vec'] = arr
+                                    try:
+                                        auth_payload[f'{ck}_mag'] = np.linalg.norm(arr, axis=1)
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+                            # resultant head vector (sum of migratory cues excluding refugia?)
+                            try:
+                                # sum all cues (simple sum for diagnostics)
+                                total = np.zeros((sim.num_agents, 2), dtype=float)
+                                for v in cue_map.values():
+                                    try:
+                                        total += np.asarray(v, dtype=float)
+                                    except Exception:
+                                        pass
+                                auth_payload['head_vec'] = total
+                            except Exception:
+                                pass
+                            try:
+                                dw.write_step(t, auth_payload)
+                                print('Wrote authoritative diagnostics to HDF5 for step', t)
                             except Exception:
                                 pass
                     except Exception:

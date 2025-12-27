@@ -1193,6 +1193,77 @@ class behavior():
                         self.simulation.last_head_vec = hv
                     except Exception:
                         pass
+                # Write diagnostics via HDF5DiagnosticsWriter when available (preferred)
+                try:
+                    import time, os
+                    step_i = int(getattr(self.simulation, 'current_step', t))
+                    payload = {}
+                    try:
+                        payload['head_vec'] = np.asarray(hv).astype(float)
+                    except Exception:
+                        payload['head_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
+                    try:
+                        for k, v in last_cue_vecs_final.items():
+                            try:
+                                payload[f'{k}_vec'] = np.asarray(v).astype(float)
+                            except Exception:
+                                payload[f'{k}_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
+                    except Exception:
+                        try:
+                            for k, v in raw_vecs.items():
+                                payload[f'{k}_vec'] = np.asarray(v).astype(float)
+                        except Exception:
+                            pass
+
+                    dw = getattr(self.simulation, 'diagnostics_writer', None)
+                    if dw is not None:
+                        try:
+                            try:
+                                print('BEHAVIOR DBG: about to write HDF5 diagnostics for step', step_i, 'keys=', list(payload.keys()))
+                            except Exception:
+                                pass
+                            dw.write_step(step_i, payload)
+                            try:
+                                print('Wrote diagnostics to HDF5 for step', step_i)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            try:
+                                print('BEHAVIOR DBG: HDF5 write failed:', e)
+                            except Exception:
+                                pass
+                        except Exception:
+                            # fallback to NPZ write if HDF5 write fails
+                            try:
+                                import numpy as _np
+                                outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                                os.makedirs(outdir, exist_ok=True)
+                                ts = int(time.time())
+                                guard_fname = os.path.join(outdir, f'behavior_debug_guarded_step_{step_i}_{ts}.npz')
+                                _np.savez_compressed(guard_fname, **payload)
+                                try:
+                                    print('Wrote guarded behavior NPZ (fallback):', os.path.abspath(guard_fname))
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+                    else:
+                        # no diagnostics writer: write NPZ for backward compatibility
+                        try:
+                            import numpy as _np
+                            outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                            os.makedirs(outdir, exist_ok=True)
+                            ts = int(time.time())
+                            guard_fname = os.path.join(outdir, f'behavior_debug_guarded_step_{step_i}_{ts}.npz')
+                            _np.savez_compressed(guard_fname, **payload)
+                            try:
+                                print('Wrote guarded behavior NPZ (no HDF5):', os.path.abspath(guard_fname))
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             except Exception:
                 try:
                     print('DBG: failed robust final assignment of last_cue_vecs/last_head_vec', file=sys.stderr)
