@@ -69,9 +69,43 @@ def main():
             sample = None
         print(f"  key={k} shape={shape} sample={sample}")
     # heuristics: keys that look like per-cue vecs
-    cue_vec_keys = sorted([k for k in payload.keys() if ('vec' in k or 'raw' in k or 'cue' in k) and k != 'head_vec'])
+    # Prefer keys that are per-agent vectors (shape: (n_agents, 2)) matching head_vec when present.
+    candidate_keys = sorted([k for k in payload.keys() if ('vec' in k or 'raw' in k or 'cue' in k) and k != 'head_vec'])
+    cue_vec_keys = []
+    # determine n_agents from head_vec if available, else infer from first (n,2) candidate
+    n_agents = None
+    if 'head_vec' in payload:
+        try:
+            hv = np.array(payload['head_vec'])
+            if hv.ndim == 2:
+                n_agents = hv.shape[0]
+        except Exception:
+            n_agents = None
+    if n_agents is None:
+        for k in candidate_keys:
+            v = np.array(payload[k])
+            if v.ndim == 2 and v.shape[1] == 2:
+                n_agents = v.shape[0]
+                break
+    for k in candidate_keys:
+        try:
+            v = np.array(payload[k])
+            if n_agents is not None:
+                if v.ndim == 2 and v.shape[0] == n_agents and v.shape[1] == 2:
+                    cue_vec_keys.append(k)
+                elif v.ndim == 1 and v.size == 2:
+                    cue_vec_keys.append(k)
+                else:
+                    # skip per-neighbor or other shapes
+                    continue
+            else:
+                # fallback: accept 2D (n,2) shapes
+                if v.ndim == 2 and v.shape[1] == 2:
+                    cue_vec_keys.append(k)
+        except Exception:
+            continue
     print('Candidate cue vec keys (heuristic):', cue_vec_keys)
-    if 'head_vec' not in payload and 'head_vec' not in [k.lower() for k in payload.keys()]:
+    if 'head_vec' not in payload:
         print('Warning: head_vec not present in NPZ; cannot compare if missing.')
     head_vec = None
     if 'head_vec' in payload:
