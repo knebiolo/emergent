@@ -70,6 +70,7 @@ setup(
         # Utilities
         "networkx>=2.6,<4.0",
         "requests>=2.25,<3.0",
+        "psutil>=5.9,<6.0",
     ],
     extras_require={
         "dev": [
@@ -84,6 +85,7 @@ setup(
             # Additional dependencies for salmon ABM module
             "scikit-learn>=1.0",
             "statsmodels>=0.13",
+            "numba>=0.55",
         ],
     },
     entry_points={

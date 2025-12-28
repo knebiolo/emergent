@@ -244,12 +244,40 @@ class behavior():
         self._buf_mult = None
         self._buf_offsets = None
         self._buf_counts = None
+        self._buf_rows_min = None
+        self._buf_cols_min = None
+        self._buf_nr = None
+        self._buf_nc = None
+        # reusable output buffer and scratch arrays to avoid repeated allocations
+        self._repulsive_out = None
+        self._scratch_counts = None
+        self._scratch_offsets = None
         # per-batch logging entries: list of dicts with keys 'start','end','time','rss_before','rss_after','batch_total'
         self._batch_log = []
         # threshold in bytes to consider reducing batch size (default 200MB)
         self._rss_threshold_bytes = int(getattr(self.simulation, 'behavior_memory_threshold_bytes', 200 * 1024 * 1024))
         # small cache to reuse world grids for repeated windows
         self._world_grid_cache = getattr(self, '_world_grid_cache', {})
+        # index / meshgrid cache keyed by (nr,nc)
+        self._meshgrid_cache = {}
+        # set numba threads to CPU count if available and not already set via env
+        try:
+            if _NUMBA_AVAILABLE:
+                import os
+                if 'NUMBA_NUM_THREADS' not in os.environ:
+                    try:
+                        from multiprocessing import cpu_count
+                        from numba import set_num_threads
+                        set_num_threads(cpu_count())
+                    except Exception:
+                        pass
+                # warmup numba kernels to avoid JIT overhead in timed runs
+                try:
+                    self._warmup_numba_kernels()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _safe_npz_dump(self, outdir, fname_prefix, payload):
         """Write a compressed NPZ of `payload` to `outdir` with `fname_prefix`.
@@ -385,6 +413,33 @@ class behavior():
         except Exception:
             return default
 
+    def _warmup_numba_kernels(self):
+        # Call numba kernels with tiny dummy data to force compilation ahead of timed runs
+        if not _NUMBA_AVAILABLE:
+            return
+        try:
+            import numpy as _np
+            # tiny arrays
+            axs = _np.array([0.0, 1.0], dtype=_np.float64)
+            ays = _np.array([0.0, 1.0], dtype=_np.float64)
+            mmap_flat = _np.array([0.0, 0.0], dtype=_np.float64)
+            mmap_offsets = _np.array([0, 1], dtype=_np.int64)
+            rows_min = _np.array([0, 0], dtype=_np.int64)
+            cols_min = _np.array([0, 0], dtype=_np.int64)
+            nr = _np.array([1, 1], dtype=_np.int64)
+            nc = _np.array([1, 1], dtype=_np.int64)
+            affine = _np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=_np.float64)
+            try:
+                _repulsive_batched_core_safe(axs, ays, mmap_flat, mmap_offsets, rows_min, cols_min, nr, nc, affine, 1.0, 0.0)
+            except Exception:
+                pass
+            try:
+                _repulsive_core_safe(0.0, 0.0, _np.array([0.0]), _np.array([0.0]), _np.array([1.0]), 1.0)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def already_been_here(self, weight, t):
         x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
 
@@ -418,8 +473,12 @@ class behavior():
         agent_ys = np.nan_to_num(self.simulation.Y).astype(np.float64)
 
         # First pass: determine total size to preallocate concatenated buffers
-        offsets = np.zeros(agent_count, dtype=np.int64)
-        counts = np.zeros(agent_count, dtype=np.int64)
+        if self._scratch_offsets is None or self._scratch_offsets.shape[0] < agent_count:
+            self._scratch_offsets = np.zeros(agent_count, dtype=np.int64)
+        if self._scratch_counts is None or self._scratch_counts.shape[0] < agent_count:
+            self._scratch_counts = np.zeros(agent_count, dtype=np.int64)
+        offsets = self._scratch_offsets[:agent_count]
+        counts = self._scratch_counts[:agent_count]
         total_elems = 0
         mem_sections = [None] * agent_count
         rows_list = [None] * agent_count
@@ -446,11 +505,15 @@ class behavior():
 
         if total_elems == 0:
             # nothing to compute
-            repulsive_forces_per_agent = np.zeros((agent_count, 2), dtype=np.float64)
+            if self._repulsive_out is None or self._repulsive_out.shape[0] < agent_count:
+                self._repulsive_out = np.zeros((agent_count, 2), dtype=np.float64)
+            repulsive_forces_per_agent = self._repulsive_out[:agent_count]
         else:
             # Process agents in manageable batches to avoid a single huge allocation
             batch_size = int(getattr(self.simulation, 'behavior_batch_size', 256))
-            repulsive_out = np.zeros((agent_count, 2), dtype=np.float64)
+            if self._repulsive_out is None or self._repulsive_out.shape[0] < agent_count:
+                self._repulsive_out = np.zeros((agent_count, 2), dtype=np.float64)
+            repulsive_out = self._repulsive_out[:agent_count]
             try:
                 for bstart in range(0, agent_count, batch_size):
                     bend = min(agent_count, bstart + batch_size)
@@ -466,19 +529,29 @@ class behavior():
                             rss_before = psutil.Process().memory_info().rss
                     except Exception:
                         rss_before = None
-                    # ensure buffers large enough for batch
-                    if self._buf_world_x is None or self._buf_world_x.shape[0] < batch_total:
-                        self._buf_world_x = np.zeros(batch_total, dtype=np.float64)
-                        self._buf_world_y = np.zeros(batch_total, dtype=np.float64)
+                    # ensure buffers large enough for batch: mmap_flat will hold timestamps
+                    if self._buf_mult is None or self._buf_mult.shape[0] < batch_total:
                         self._buf_mult = np.zeros(batch_total, dtype=np.float64)
                     nb = bend - bstart
+                    # per-agent descriptor arrays (offsets/counts) must be sized by number of agents in batch
                     if self._buf_offsets is None or self._buf_offsets.shape[0] < nb:
                         self._buf_offsets = np.zeros(nb, dtype=np.int64)
+                    if self._buf_counts is None or self._buf_counts.shape[0] < nb:
                         self._buf_counts = np.zeros(nb, dtype=np.int64)
 
                     write_ptr = 0
                     local_offsets = self._buf_offsets[:nb]
                     local_counts = self._buf_counts[:nb]
+                    # per-agent row/col/nr/nc buffers
+                    if self._buf_rows_min is None or self._buf_rows_min.shape[0] < nb:
+                        self._buf_rows_min = np.zeros(nb, dtype=np.int64)
+                        self._buf_cols_min = np.zeros(nb, dtype=np.int64)
+                        self._buf_nr = np.zeros(nb, dtype=np.int64)
+                        self._buf_nc = np.zeros(nb, dtype=np.int64)
+                    local_rows_min = self._buf_rows_min[:nb]
+                    local_cols_min = self._buf_cols_min[:nb]
+                    local_nr = self._buf_nr[:nb]
+                    local_nc = self._buf_nc[:nb]
                     for i, a in enumerate(range(bstart, bend)):
                         cnt = int(counts[a])
                         local_counts[i] = cnt
@@ -488,27 +561,39 @@ class behavior():
                         rmin, rmax = rows_list[a]
                         cmin, cmax = cols_list[a]
                         section = mem_sections[a]
-                        t_since = section - t
-                        mult = np.where((t_since > 10) & (t_since < 7200), 1 - (t_since - 5) / (7195), 0).ravel()
-                        rows_idx = np.arange(rmin, rmax)
-                        cols_idx = np.arange(cmin, cmax)
-                        col_grid, row_grid = np.meshgrid(cols_idx, rows_idx)
+                        # store raw timestamp values into mmap_flat; the kernel computes multiplier
+                        tvals = section.ravel().astype(np.float64)
+                        nr = rmax - rmin
+                        nc = cmax - cmin
+                        # reuse arange and meshgrid buffers when possible
+                        key = (nr, nc)
                         try:
-                            wx, wy = pixel_to_geo(self.simulation.mental_map_transform, row_grid, col_grid)
-                            if not hasattr(wx, 'ravel'):
-                                wx = np.array([[float(wx)]])
-                            if not hasattr(wy, 'ravel'):
-                                wy = np.array([[float(wy)]])
-                            wx = wx.ravel().astype(np.float64)
-                            wy = wy.ravel().astype(np.float64)
+                            if key in self._meshgrid_cache:
+                                col_grid, row_grid = self._meshgrid_cache[key]
+                            else:
+                                rows_idx = np.arange(rmin, rmax)
+                                cols_idx = np.arange(cmin, cmax)
+                                col_grid, row_grid = np.meshgrid(cols_idx, rows_idx)
+                                # store contiguous copies
+                                self._meshgrid_cache[key] = (np.ascontiguousarray(col_grid), np.ascontiguousarray(row_grid))
                         except Exception:
-                            wx = col_grid.ravel().astype(np.float64)
-                            wy = row_grid.ravel().astype(np.float64)
-
-                        self._buf_world_x[write_ptr:write_ptr+cnt] = wx
-                        self._buf_world_y[write_ptr:write_ptr+cnt] = wy
-                        self._buf_mult[write_ptr:write_ptr+cnt] = mult
+                            rows_idx = np.arange(rmin, rmax)
+                            cols_idx = np.arange(cmin, cmax)
+                            col_grid, row_grid = np.meshgrid(cols_idx, rows_idx)
+                        # copy timestamps to mmap_flat buffer
+                        actual_cnt = int(tvals.size)
+                        if actual_cnt != cnt:
+                            # defensive: if the underlying section size differs from the
+                            # precomputed count, use the actual size and update counters
+                            cnt = actual_cnt
+                        if cnt > 0:
+                            self._buf_mult[write_ptr:write_ptr+cnt] = tvals[:cnt]
                         local_offsets[i] = write_ptr
+                        local_counts[i] = cnt
+                        local_rows_min[i] = rmin
+                        local_cols_min[i] = cmin
+                        local_nr[i] = nr
+                        local_nc[i] = nc
                         write_ptr += cnt
 
                     # record rss after preparing batch
@@ -521,7 +606,8 @@ class behavior():
 
                     # log batch
                     try:
-                        self._batch_log.append({'start': bstart, 'end': bend, 'time': None, 'rss_before': rss_before, 'rss_after': rss_after, 'batch_total': batch_total})
+                        run_tag = getattr(self.simulation, 'run_tag', None) or os.environ.get('RUN_TAG')
+                        self._batch_log.append({'start': bstart, 'end': bend, 'time': None, 'rss_before': rss_before, 'rss_after': rss_after, 'batch_total': batch_total, 'n_agents': int(agent_count), 'batch_size': int(batch_size), 'run_tag': run_tag})
                     except Exception:
                         pass
 
@@ -532,9 +618,18 @@ class behavior():
                         # time the kernel call
                         t0 = time.time()
                         if _NUMBA_AVAILABLE and '_repulsive_batched_core_safe' in globals():
-                            out_x, out_y = _repulsive_batched_core_safe(axs, ays, self._buf_world_x[:write_ptr], self._buf_world_y[:write_ptr], self._buf_mult[:write_ptr], local_offsets, local_counts, float(weight))
+                            # pass mmap_flat timestamps and per-agent descriptors; kernel computes pixel->geo via affine
+                            affine = _unpack_affine(getattr(self.simulation, 'mental_map_transform', None))
+                            out_x, out_y = _repulsive_batched_core_safe(axs, ays, self._buf_mult[:write_ptr], local_offsets, local_rows_min, local_cols_min, local_nr, local_nc, affine, float(weight), float(t))
                         else:
-                            out_x, out_y = _repulsive_batched_python(axs, ays, self._buf_world_x[:write_ptr], self._buf_world_y[:write_ptr], self._buf_mult[:write_ptr], local_offsets, local_counts, float(weight))
+                            # Python fallback expects world coords; fall back to original per-agent compute
+                            out_x = np.zeros(nb, dtype=np.float64)
+                            out_y = np.zeros(nb, dtype=np.float64)
+                            for idx, a in enumerate(range(bstart, bend)):
+                                try:
+                                    out_x[idx], out_y[idx] = self._calculate_repulsive_force(mem_sections[a], a, int(row_min[a]), int(row_max[a]), int(col_min[a]), int(col_max[a]), weight, t)
+                                except Exception:
+                                    out_x[idx], out_y[idx] = 0.0, 0.0
                         t1 = time.time()
                         repulsive_out[bstart:bend, 0] = out_x
                         repulsive_out[bstart:bend, 1] = out_y
@@ -567,6 +662,30 @@ class behavior():
                     self._calculate_repulsive_force(mem_sections[int(agent_idx)], int(agent_idx), int(row_min[int(agent_idx)]), int(row_max[int(agent_idx)]), int(col_min[int(agent_idx)]), int(col_max[int(agent_idx)]), weight, t)
                     for agent_idx in np.arange(agent_count)
                 ])
+
+        # dump per-batch CSV log for offline analysis
+        try:
+            import csv
+            ts = int(time.time())
+            outdir = os.path.join(os.getcwd(), 'outputs', 'profiling')
+            os.makedirs(outdir, exist_ok=True)
+            run_tag = None
+            try:
+                run_tag = getattr(self.simulation, 'run_tag', None) or os.environ.get('RUN_TAG')
+            except Exception:
+                run_tag = None
+            if run_tag:
+                fname = os.path.join(outdir, f'batch_log_n{agent_count}_b{int(batch_size)}_{run_tag}_{ts}.csv')
+            else:
+                fname = os.path.join(outdir, f'batch_log_n{agent_count}_b{int(batch_size)}_{ts}.csv')
+            with open(fname, 'w', newline='', encoding='utf-8') as fh:
+                fieldnames = ['start','end','batch_total','time','rss_before','rss_after','n_agents','batch_size','run_tag']
+                w = csv.DictWriter(fh, fieldnames=fieldnames)
+                w.writeheader()
+                for r in self._batch_log:
+                    w.writerow({k: r.get(k) for k in fieldnames})
+        except Exception:
+            pass
 
         # Debug: write raw repulsive vectors only when debug_behavior is enabled
         if getattr(self.simulation, 'debug_behavior', False):

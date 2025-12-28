@@ -69,9 +69,33 @@ def profile_hotspot(n_agents=1000, iters=100):
     sim = MockSim(n_agents)
     bh = behavior(dt=1.0, simulation_object=sim)
 
-    # warmup
-    for _ in range(5):
-        bh.already_been_here(weight=100.0, t=0.0)
+    # Numba warmup: try to invoke the batched repulsive kernel once with a tiny synthetic batch
+    # to ensure JIT compilation happens before timed runs. If Numba is unavailable or the
+    # kernel wrapper isn't present, fall back to calling the Python warmup loop.
+    try:
+        # create a tiny synthetic batch via behavior internals if available
+        if hasattr(bh, '_repulsive_batched_core_safe'):
+            # prepare tiny buffers (1 agent, 1 pixel) and call safe wrapper
+            # Many internals are private; we attempt a light-weight call that should JIT the kernel.
+            try:
+                bh._repulsive_batched_core_safe(np.zeros(1, dtype=np.float32),
+                                                np.zeros(1, dtype=np.float32),
+                                                np.ones(1, dtype=np.float32),
+                                                np.array([0], dtype=np.int32),
+                                                np.array([1], dtype=np.int32),
+                                                np.array([0], dtype=np.int32),
+                                                np.array([1], dtype=np.int32),
+                                                1)
+            except Exception:
+                # fall back to Python warmup below
+                for _ in range(3):
+                    bh.already_been_here(weight=100.0, t=0.0)
+        else:
+            for _ in range(3):
+                bh.already_been_here(weight=100.0, t=0.0)
+    except Exception:
+        for _ in range(3):
+            bh.already_been_here(weight=100.0, t=0.0)
 
     pr = cProfile.Profile()
     pr.enable()
@@ -89,7 +113,9 @@ def profile_hotspot(n_agents=1000, iters=100):
     summary = f"iters={iters}, n_agents={n_agents}, wallclock={t1-t0:.3f}s\n"
     outdir = 'outputs/profiling'
     os.makedirs(outdir, exist_ok=True)
-    with open(os.path.join(outdir, 'hotspot_profile.txt'), 'w', encoding='utf-8') as fh:
+    tag = os.environ.get('RUN_TAG')
+    fname = f'hotspot_profile_{tag}.txt' if tag else 'hotspot_profile.txt'
+    with open(os.path.join(outdir, fname), 'w', encoding='utf-8') as fh:
         fh.write(summary)
         fh.write(profile_text)
 
@@ -102,9 +128,17 @@ if __name__ == '__main__':
     parser.add_argument('--iters', type=int, default=100)
     parser.add_argument('--nagents', type=int, default=500)
     parser.add_argument('--steps', type=int, default=10)
+    parser.add_argument('--debug-behavior', action='store_true',
+                        help='Enable debug_behavior on the mock simulation to force non-empty windows and richer batch logs')
+    parser.add_argument('--tag', type=str, default=None, help='Optional run tag to annotate output files')
     args = parser.parse_args()
 
     if args.mode == 'hotspot':
+        # export debug flag to environment for behavior to pick up if needed
+        if args.debug_behavior:
+            os.environ['DEBUG_BEHAVIOR'] = '1'
+        if args.tag:
+            os.environ['RUN_TAG'] = args.tag
         profile_hotspot(n_agents=args.nagents, iters=args.iters)
     else:
         print('sim mode not implemented in this harness yet')
