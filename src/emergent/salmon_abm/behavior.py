@@ -9,6 +9,7 @@ from scipy.ndimage import distance_transform_edt
 from scipy.interpolate import UnivariateSpline
 import h5py
 import time
+import sys
 
 from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, standardize_shape, calculate_front_masks, determine_slices_from_vectors, determine_slices_from_headings
 from emergent.salmon_abm import hdf5_io
@@ -18,6 +19,64 @@ class behavior():
     def __init__(self, dt, simulation_object):
         self.dt = dt
         self.simulation = simulation_object
+
+    def _safe_npz_dump(self, outdir, fname_prefix, payload):
+        """Write a compressed NPZ of `payload` to `outdir` with `fname_prefix`.
+        Best-effort: failures are swallowed and None returned on error.
+        """
+        try:
+            import numpy as _np
+            import os, time
+            os.makedirs(outdir, exist_ok=True)
+            ts = int(time.time())
+            fname = os.path.join(outdir, f"{fname_prefix}_{ts}.npz")
+            ser = {k: _np.asarray(v).astype(float) for k, v in payload.items()}
+            _np.savez_compressed(fname, **ser)
+            return fname
+        except Exception:
+            return None
+
+    def _safe_write_diagnostics(self, step_i, payload, outdir=None):
+        """Attempt to write diagnostics via diagnostics_writer, falling back to NPZ.
+        Returns True if HDF5 writer succeeded, False otherwise.
+        """
+        dw = getattr(self.simulation, 'diagnostics_writer', None)
+        # prefer the HDF5 diagnostics writer
+        if dw is not None:
+            try:
+                dw.write_step(step_i, payload)
+                return True
+            except Exception:
+                # try NPZ fallback when explicitly requested
+                pass
+
+        if outdir is None:
+            outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+        if getattr(self.simulation, 'force_npz_fallback', False):
+            try:
+                self._safe_npz_dump(outdir, f'behavior_debug_guarded_step_{step_i}', payload)
+            except Exception:
+                pass
+        return False
+
+    def _safe_set_sim_attr(self, name, value):
+        """Set attribute `name` on simulation in a best-effort way.
+        Converts numpy arrays to native types where possible. Swallows exceptions.
+        """
+        try:
+            setattr(self.simulation, name, value)
+        except Exception:
+            try:
+                self.simulation.__dict__[name] = value
+            except Exception:
+                pass
+
+    def _safe_asarray(self, v, dtype=float, default=None):
+        """Return np.asarray(v, dtype) or `default` on failure."""
+        try:
+            return np.asarray(v, dtype=dtype)
+        except Exception:
+            return default
 
     def already_been_here(self, weight, t):
         x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
@@ -256,11 +315,8 @@ class behavior():
 
         v = np.column_stack([x_vel, y_vel])
         # store sampled velocities for debugging/inspection by NPZ dumps
-        try:
-            # ensure array shape (n_agents,2)
-            self.simulation.last_sampled_vel = np.asarray(v, dtype=float)
-        except Exception:
-            self.simulation.last_sampled_vel = None
+        # ensure array shape (n_agents,2) — best-effort
+        self._safe_set_sim_attr('last_sampled_vel', self._safe_asarray(v, dtype=float, default=None))
         # sanitize sampled values (handle nodata values like -9999 and zeros)
         v = np.asarray(v, dtype=float)
         mags = np.linalg.norm(v, axis=-1)
@@ -565,23 +621,15 @@ class behavior():
                 pass
         # store diagnostics for NPZ writer to include
         # set diagnostic alignment structure on simulation (best-effort)
-        try:
-            if getattr(self.simulation, 'debug_behavior', False):
-                import logging
-                logging.getLogger(__name__).debug('alignment_cue: about to set _alignment_diag; sizes raw/headings=%s %s', getattr(raw_headings_neighbors, 'size', None), getattr(headings_neighbors, 'size', None))
-            self.simulation._alignment_diag = {
-                'raw_headings_neighbors': np.asarray(raw_headings_neighbors, dtype=float),
-                'headings_neighbors_used': np.asarray(headings_neighbors, dtype=float),
-                'used_velocity_heading': bool(used_velocity_heading),
-                'neighbor_indices': np.asarray(neighbor_indices, dtype=np.int32),
-                'agent_indices': np.asarray(agent_indices, dtype=np.int32),
-            }
-            if getattr(self.simulation, 'debug_behavior', False):
-                import logging
-                logging.getLogger(__name__).debug('alignment_cue: _alignment_diag set successfully')
-        except Exception:
-            # non-fatal: alignment diagnostics are best-effort
-            pass
+        # set diagnostic alignment structure on simulation (best-effort)
+        ad = {
+            'raw_headings_neighbors': self._safe_asarray(raw_headings_neighbors, dtype=float, default=np.array([])),
+            'headings_neighbors_used': self._safe_asarray(headings_neighbors, dtype=float, default=np.array([])),
+            'used_velocity_heading': bool(used_velocity_heading),
+            'neighbor_indices': self._safe_asarray(neighbor_indices, dtype=np.int32, default=np.array([], dtype=np.int32)),
+            'agent_indices': self._safe_asarray(agent_indices, dtype=np.int32, default=np.array([], dtype=np.int32)),
+        }
+        self._safe_set_sim_attr('_alignment_diag', ad)
         vectors_to_neighbors_x = self.simulation.X[neighbor_indices] - self.simulation.X[agent_indices]
         vectors_to_neighbors_y = self.simulation.Y[neighbor_indices] - self.simulation.Y[agent_indices]
 
@@ -633,10 +681,7 @@ class behavior():
                         sogs)
         self.simulation.school_sog = sogs
         # record whether alignment used velocity-derived headings for diagnostics
-        try:
-            self.simulation.alignment_used_velocity = used_velocity_heading
-        except Exception:
-            pass
+        self._safe_set_sim_attr('alignment_used_velocity', bool(used_velocity_heading))
         return np.nan_to_num(alignment_array)
 
     def collision_cue(self, weight):
@@ -963,11 +1008,10 @@ class behavior():
 
         # persist raw_vecs unconditionally (best-effort) so external tools can access them
         try:
-            try:
-                self.simulation.last_cue_vecs = {k: np.asarray(v) for k, v in raw_vecs.items()}
-            except Exception:
-                # fallback: ensure attribute exists as empty dict
-                setattr(self.simulation, 'last_cue_vecs', {})
+                try:
+                    self._safe_set_sim_attr('last_cue_vecs', {k: np.asarray(v) for k, v in raw_vecs.items()})
+                except Exception:
+                    self._safe_set_sim_attr('last_cue_vecs', {})
         except Exception:
             pass
 
@@ -1021,42 +1065,12 @@ class behavior():
                 if not payload_written:
                     payload['marker'] = np.array([1], dtype=np.int8)
 
-                # Attempt to write NPZ; if it fails, write a JSON fallback
+                # Attempt a best-effort NPZ dump for raw_vecs (falls back silently)
                 try:
-                    import numpy as _np
-                    try:
-                        absf = os.path.abspath(fname)
-                    except Exception:
-                        absf = fname
-                    # explicit pre-write trace so we can correlate stdout to files
-                    try:
-                        print('ABOUT TO WRITE forced rawvecs NPZ ->', absf)
-                    except Exception:
-                        pass
-                    _np.savez_compressed(fname, **payload)
-                    try:
-                        size = os.path.getsize(absf) if os.path.exists(absf) else -1
-                        print('Wrote forced rawvecs NPZ:', absf, 'size=', size)
-                    except Exception:
-                        print('Wrote forced rawvecs NPZ (path unknown)')
-                except Exception as e:
-                    try:
-                        # JSON fallback with summary fields
-                        fallback = {
-                            'step': step_i,
-                            'time': ts,
-                            'num_agents': int(getattr(self.simulation, 'num_agents', -1)),
-                            'cue_keys': list(raw_vecs.keys()),
-                        }
-                        jname = fname.replace('.npz', '.json')
-                        with open(jname, 'w', encoding='utf-8') as jf:
-                            json.dump(fallback, jf)
-                        print('Failed NPZ write; wrote JSON fallback:', os.path.abspath(jname), 'err=', e)
-                    except Exception:
-                        try:
-                            print('Failed writing forced rawvecs NPZ and JSON fallback:', e)
-                        except Exception:
-                            pass
+                    outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                    self._safe_npz_dump(outdir, f'behavior_debug_rawvecs_step_{step_i}', payload)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1082,15 +1096,10 @@ class behavior():
                     except Exception:
                         absf = fname_force
                     try:
-                        print('FORCE RAWVECS ABOUT TO WRITE ->', absf)
+                        outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                        self._safe_npz_dump(outdir, f'behavior_debug_rawvecs_FORCE_step_{step_i}', payload)
                     except Exception:
                         pass
-                    np.savez_compressed(fname_force, **payload)
-                    try:
-                        size = os.path.getsize(absf) if os.path.exists(absf) else -1
-                        print('FORCE RAWVECS WROTE NPZ:', absf, 'size=', size)
-                    except Exception:
-                        print('FORCE RAWVECS WROTE NPZ (path unknown)')
                 except Exception as e:
                     try:
                         print('FORCE RAWVECS failed to write NPZ:', e)
@@ -1210,12 +1219,9 @@ class behavior():
                         last_cue_vecs_final[known] = np.zeros((n_agents, 2), dtype=np.float32)
 
                 try:
-                    setattr(self.simulation, 'last_cue_vecs', last_cue_vecs_final)
+                    self._safe_set_sim_attr('last_cue_vecs', last_cue_vecs_final)
                 except Exception:
-                    try:
-                        self.simulation.last_cue_vecs = last_cue_vecs_final
-                    except Exception:
-                        pass
+                    pass
 
                 # magnitudes
                 last_cue_mags = {}
@@ -1228,12 +1234,9 @@ class behavior():
                     if known not in last_cue_mags:
                         last_cue_mags[known] = np.zeros((n_agents,), dtype=np.float32)
                 try:
-                    setattr(self.simulation, 'last_cue_magnitudes', last_cue_mags)
+                    self._safe_set_sim_attr('last_cue_magnitudes', last_cue_mags)
                 except Exception:
-                    try:
-                        self.simulation.last_cue_magnitudes = last_cue_mags
-                    except Exception:
-                        pass
+                    pass
 
                 # head vector
                 try:
@@ -1244,16 +1247,12 @@ class behavior():
                 except Exception:
                     hv = np.zeros((n_agents, 2), dtype=np.float32)
                 try:
-                    setattr(self.simulation, 'last_head_vec', hv)
+                    self._safe_set_sim_attr('last_head_vec', hv)
                 except Exception:
-                    try:
-                        self.simulation.last_head_vec = hv
-                    except Exception:
-                        pass
+                    pass
 
-                # Write diagnostics via HDF5DiagnosticsWriter when available (preferred)
                 try:
-                    import time, os
+                    import os
                     step_i = int(getattr(self.simulation, 'current_step', t))
                     payload = {}
                     try:
@@ -1266,44 +1265,11 @@ class behavior():
                         except Exception:
                             payload[f'{k}_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
 
-                    dw = getattr(self.simulation, 'diagnostics_writer', None)
-                    if dw is not None:
-                        try:
-                            dw.write_step(step_i, payload)
-                        except Exception:
-                            # if HDF5 fails, optionally write a small NPZ fallback when explicitly requested
-                            if getattr(self.simulation, 'force_npz_fallback', False):
-                                try:
-                                    import numpy as _np
-                                    outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                                    os.makedirs(outdir, exist_ok=True)
-                                    ts = int(time.time())
-                                    guard_fname = os.path.join(outdir, f'behavior_debug_guarded_step_{step_i}_{ts}.npz')
-                                    _np.savez_compressed(guard_fname, **payload)
-                                except Exception:
-                                    pass
-                    else:
-                        # no diagnostics writer: only write NPZ if explicitly requested
-                        if getattr(self.simulation, 'force_npz_fallback', False):
-                            try:
-                                import numpy as _np
-                                outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                                os.makedirs(outdir, exist_ok=True)
-                                ts = int(time.time())
-                                guard_fname = os.path.join(outdir, f'behavior_debug_guarded_step_{step_i}_{ts}.npz')
-                                _np.savez_compressed(guard_fname, **payload)
-                            except Exception:
-                                pass
+                    # attempt HDF5 diagnostics writer, fall back to NPZ if configured
+                    self._safe_write_diagnostics(step_i, payload)
 
-                except Exception:
+                    # Also include battery/physiology diagnostics when available (best-effort)
                     try:
-                        print('DBG: failed robust final assignment of last_cue_vecs/last_head_vec', file=sys.stderr)
-                    except Exception:
-                        pass
-
-                # Also include battery/physiology diagnostics when available
-                try:
-                    if dw is not None:
                         phys = {}
                         try:
                             phys['battery'] = np.asarray(self.simulation.battery).astype(float)
@@ -1322,12 +1288,15 @@ class behavior():
                         except Exception:
                             pass
                         if phys:
-                            try:
-                                dw.write_step(step_i, phys)
-                            except Exception:
-                                pass
+                            # write physiology separately; use diagnostics writer if available
+                            self._safe_write_diagnostics(step_i, phys)
+                    except Exception:
+                        pass
                 except Exception:
-                    pass
+                    try:
+                        print('DBG: failed robust final assignment of last_cue_vecs/last_head_vec', file=sys.stderr)
+                    except Exception:
+                        pass
             except Exception:
                 try:
                     print('DBG: failed robust final assignment of last_cue_vecs/last_head_vec', file=sys.stderr)
@@ -1552,9 +1521,12 @@ class behavior():
                             to_write['headings_neighbors_used'] = headings_neighbors_used_arr
                             to_write['alignment_neighbor_indices'] = alignment_neighbor_indices
                             to_write['alignment_agent_indices'] = alignment_agent_indices
-                            np.savez_compressed(fname_npz, **to_write)
                             try:
-                                print('Wrote behavior debug NPZ:', abs_fname)
+                                outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                                # prefer diagnostics writer; otherwise NPZ
+                                written = self._safe_write_diagnostics(int(getattr(self.simulation, 'current_step', t)), to_write, outdir=outdir)
+                                if not written:
+                                    self._safe_npz_dump(outdir, f'behavior_debug_step_{int(getattr(self.simulation, "current_step", t))}', to_write)
                             except Exception:
                                 pass
                         except Exception as e:
@@ -1565,58 +1537,24 @@ class behavior():
 
                         # Post-save verification: check file exists/size and list keys, and explicitly
                         # report presence/shape of expected alignment fields.
-                        try:
-                            import numpy as _np, os as _os
-                            exists = _os.path.exists(abs_fname)
-                            size = _os.path.getsize(abs_fname) if exists else -1
-                            print(f'POSTSAVE: exists={exists}, size={size}', abs_fname)
-                            if exists:
-                                _d = _np.load(abs_fname)
-                                files = list(_d.files)
-                                try:
-                                    print('POSTSAVE NPZ keys:', files)
-                                except Exception:
-                                    pass
-                                # explicit expected alignment keys to check
-                                for ak in ('raw_headings_neighbors', 'headings_neighbors_used', 'alignment_used_velocity', 'alignment_neighbor_indices', 'alignment_agent_indices'):
-                                    if ak in _d:
-                                        try:
-                                            arr = _d[ak]
-                                            print(f'POSTSAVE: key {ak} present, shape/type: {getattr(arr, "shape", None)}/{type(arr)}')
-                                        except Exception as e:
-                                            print(f'POSTSAVE: key {ak} present but reading failed: {e}')
-                                    else:
-                                        print(f'POSTSAVE: key {ak} MISSING')
-                        except Exception as e:
-                            try:
-                                print('POSTSAVE verification failed:', e)
-                            except Exception:
-                                pass
+                            # reduced post-save verification: rely on writer or NPZ
+                            pass
 
                         # Also write a dedicated alignment dump to ensure per-neighbor arrays are saved
                         try:
                             aln_fname = fname_npz.replace('.npz', '_alignment.npz')
                             aln_abs = os.path.abspath(aln_fname)
                             import numpy as _np, os as _os
-                            _np.savez_compressed(
-                                aln_fname,
-                                raw_headings_neighbors=raw_headings_neighbors_arr,
-                                headings_neighbors_used=headings_neighbors_used_arr,
-                                alignment_used_velocity=(used_velocity_heading_val if used_velocity_heading_val is not None else 0.0),
-                                alignment_neighbor_indices=alignment_neighbor_indices,
-                                alignment_agent_indices=alignment_agent_indices,
-                            )
                             try:
-                                print('Wrote alignment diagnostic NPZ:', aln_abs)
-                            except Exception:
-                                pass
-                            try:
-                                exists2 = _os.path.exists(aln_abs)
-                                size2 = _os.path.getsize(aln_abs) if exists2 else -1
-                                print(f'ALIGN DUMP POSTSAVE: exists={exists2}, size={size2}', aln_abs)
-                                if exists2:
-                                    _d2 = _np.load(aln_abs)
-                                    print('ALIGN DUMP keys:', list(_d2.files))
+                                outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                                aln_payload = {
+                                    'raw_headings_neighbors': raw_headings_neighbors_arr,
+                                    'headings_neighbors_used': headings_neighbors_used_arr,
+                                    'alignment_used_velocity': (used_velocity_heading_val if used_velocity_heading_val is not None else 0.0),
+                                    'alignment_neighbor_indices': alignment_neighbor_indices,
+                                    'alignment_agent_indices': alignment_agent_indices,
+                                }
+                                self._safe_npz_dump(outdir, f'behavior_alignment_dump_step_{int(getattr(self.simulation, "current_step", t))}', aln_payload)
                             except Exception:
                                 pass
                         except Exception as e:
