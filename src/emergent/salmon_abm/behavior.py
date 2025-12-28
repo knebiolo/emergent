@@ -14,6 +14,50 @@ import sys
 from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, standardize_shape, calculate_front_masks, determine_slices_from_vectors, determine_slices_from_headings
 from emergent.salmon_abm import hdf5_io
 
+# Optional Numba JIT: use if available to accelerate inner loops
+try:
+    from numba import njit
+    _NUMBA_AVAILABLE = True
+except Exception:
+    _NUMBA_AVAILABLE = False
+
+
+if _NUMBA_AVAILABLE:
+    @njit
+    def _repulsive_core(agent_x, agent_y, world_x, world_y, multiplier, weight):
+        total_x = 0.0
+        total_y = 0.0
+        for i in range(world_x.shape[0]):
+            dx = agent_x - world_x[i]
+            dy = agent_y - world_y[i]
+            mag = (dx * dx + dy * dy) ** 0.5
+            if mag == 0.0:
+                mag = 1e-6
+            ux = dx / mag
+            uy = dy / mag
+            m = multiplier.flat[i] if multiplier.size == world_x.size else multiplier.flat[i]
+            fx = ((weight * ux) / mag) * m
+            fy = ((weight * uy) / mag) * m
+            total_x += fx
+            total_y += fy
+        return total_x, total_y
+else:
+    def _repulsive_core(agent_x, agent_y, world_x, world_y, multiplier, weight):
+        # fallback Python implementation operating on flattened arrays
+        dx = agent_x - world_x
+        dy = agent_y - world_y
+        mags = np.sqrt(dx * dx + dy * dy)
+        mags = np.where(mags == 0, 1e-6, mags)
+        ux = dx / mags
+        uy = dy / mags
+        flat_multiplier = multiplier.ravel()
+        flat_ux = ux.ravel()
+        flat_uy = uy.ravel()
+        flat_mags = mags.ravel()
+        fx = ((weight * flat_ux) / flat_mags) * flat_multiplier
+        fy = ((weight * flat_uy) / flat_mags) * flat_multiplier
+        return float(np.nansum(fx)), float(np.nansum(fy))
+
 
 class behavior():
     def __init__(self, dt, simulation_object):
@@ -103,41 +147,41 @@ class behavior():
         col_min = np.clip(mental_map_cols - buff, 0, None)
         col_max = np.clip(mental_map_cols + buff + 1, None, memory0.shape[1])
 
+        # cache HDF5-like object to avoid repeated opens
+        h5 = hdf5_io.get_hdf5_obj(self.simulation)
         repulsive_forces_per_agent = np.array([
-            self._calculate_repulsive_force(agent_idx, rmin, rmax, cmin, cmax, weight, t)
+            self._calculate_repulsive_force(h5, agent_idx, rmin, rmax, cmin, cmax, weight, t)
             for agent_idx, rmin, rmax, cmin, cmax in zip(np.arange(self.simulation.num_agents), row_min, row_max, col_min, col_max)
         ])
 
-        # Debug: write raw repulsive vectors to a separate HDF5 to avoid interfering
-        # with the main diagnostics writer. This opens a dedicated debug file in
-        # outputs/diagnostics and stores per-run/per-step arrays for later inspection.
-        try:
-            dbg_dir = os.path.join(os.getcwd(), 'outputs', 'diagnostics')
-            os.makedirs(dbg_dir, exist_ok=True)
-            dbg_path = os.path.join(dbg_dir, 'debug_already_been_here.h5')
-            run_id = getattr(self.simulation, 'model_name', None) or f'run_{int(time.time())}'
-            step_name = f'step_{int(t)}'
-            with h5py.File(dbg_path, 'a') as dh:
-                grp = dh.require_group(run_id)
-                # overwrite any existing dataset for this step
-                if step_name in grp:
+        # Debug: write raw repulsive vectors only when debug_behavior is enabled
+        if getattr(self.simulation, 'debug_behavior', False):
+            try:
+                dbg_dir = os.path.join(os.getcwd(), 'outputs', 'diagnostics')
+                os.makedirs(dbg_dir, exist_ok=True)
+                dbg_path = os.path.join(dbg_dir, 'debug_already_been_here.h5')
+                run_id = getattr(self.simulation, 'model_name', None) or f'run_{int(time.time())}'
+                step_name = f'step_{int(t)}'
+                with h5py.File(dbg_path, 'a') as dh:
+                    grp = dh.require_group(run_id)
+                    # overwrite any existing dataset for this step
+                    if step_name in grp:
+                        try:
+                            del grp[step_name]
+                        except Exception:
+                            pass
+                    grp.create_dataset(step_name, data=repulsive_forces_per_agent.astype('f4'), compression='gzip')
                     try:
-                        del grp[step_name]
+                        dh.flush()
                     except Exception:
                         pass
-                grp.create_dataset(step_name, data=repulsive_forces_per_agent.astype('f4'), compression='gzip')
-                try:
-                    dh.flush()
-                except Exception:
-                    pass
-        except Exception as ex:
-            # non-fatal debug failure
-            print('debug HDF5 write failed:', ex)
+            except Exception as ex:
+                # non-fatal debug failure
+                print('debug HDF5 write failed:', ex)
 
         return repulsive_forces_per_agent
 
-    def _calculate_repulsive_force(self, agent_idx, row_min, row_max, col_min, col_max, weight, t):
-        h5 = hdf5_io.get_hdf5_obj(self.simulation)
+    def _calculate_repulsive_force(self, h5, agent_idx, row_min, row_max, col_min, col_max, weight, t):
         mmap = hdf5_io.read_dataset(h5, f'memory/{agent_idx}', default=np.zeros((1, 1)))
         mmap_section = mmap[row_min:row_max, col_min:col_max]
         t_since = mmap_section - t
@@ -161,22 +205,30 @@ class behavior():
         agent_x = float(self.simulation.X[agent_idx])
         agent_y = float(self.simulation.Y[agent_idx])
 
-        delta_x = agent_x - world_x
-        delta_y = agent_y - world_y
-        magnitudes = np.sqrt(delta_x**2 + delta_y**2)
-        magnitudes = np.where(magnitudes == 0, 1e-6, magnitudes)
+        # Use JIT-accelerated core when available, otherwise vectorized fallback
+        try:
+            wx = world_x.ravel()
+            wy = world_y.ravel()
+            mult = multiplier
+            tx, ty = _repulsive_core(agent_x, agent_y, wx, wy, mult, weight)
+            return np.array([tx, ty])
+        except Exception:
+            delta_x = agent_x - world_x
+            delta_y = agent_y - world_y
+            magnitudes = np.sqrt(delta_x**2 + delta_y**2)
+            magnitudes = np.where(magnitudes == 0, 1e-6, magnitudes)
 
-        unit_vector_x = delta_x / magnitudes
-        unit_vector_y = delta_y / magnitudes
+            unit_vector_x = delta_x / magnitudes
+            unit_vector_y = delta_y / magnitudes
 
-        # force scales with multiplier and inversely with distance (in world units)
-        x_force = ((weight * unit_vector_x) / magnitudes) * multiplier
-        y_force = ((weight * unit_vector_y) / magnitudes) * multiplier
+            # force scales with multiplier and inversely with distance (in world units)
+            x_force = ((weight * unit_vector_x) / magnitudes) * multiplier
+            y_force = ((weight * unit_vector_y) / magnitudes) * multiplier
 
-        total_x_force = np.nansum(x_force)
-        total_y_force = np.nansum(y_force)
+            total_x_force = np.nansum(x_force)
+            total_y_force = np.nansum(y_force)
 
-        return np.array([total_x_force, total_y_force])
+            return np.array([total_x_force, total_y_force])
 
     def find_nearest_refuge(self, weight):
         x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
