@@ -12,6 +12,11 @@ import time
 import sys
 import threading
 import queue
+try:
+    import psutil
+    _PSUTIL_AVAILABLE = True
+except Exception:
+    _PSUTIL_AVAILABLE = False
 
 from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, _unpack_affine, standardize_shape, calculate_front_masks, determine_slices_from_vectors, determine_slices_from_headings
 from emergent.salmon_abm import hdf5_io
@@ -239,6 +244,12 @@ class behavior():
         self._buf_mult = None
         self._buf_offsets = None
         self._buf_counts = None
+        # per-batch logging entries: list of dicts with keys 'start','end','time','rss_before','rss_after','batch_total'
+        self._batch_log = []
+        # threshold in bytes to consider reducing batch size (default 200MB)
+        self._rss_threshold_bytes = int(getattr(self.simulation, 'behavior_memory_threshold_bytes', 200 * 1024 * 1024))
+        # small cache to reuse world grids for repeated windows
+        self._world_grid_cache = getattr(self, '_world_grid_cache', {})
 
     def _safe_npz_dump(self, outdir, fname_prefix, payload):
         """Write a compressed NPZ of `payload` to `outdir` with `fname_prefix`.
@@ -448,6 +459,13 @@ class behavior():
                     batch_total = int(batch_counts.sum())
                     if batch_total == 0:
                         continue
+                    # record rss before preparing batch
+                    rss_before = None
+                    try:
+                        if _PSUTIL_AVAILABLE:
+                            rss_before = psutil.Process().memory_info().rss
+                    except Exception:
+                        rss_before = None
                     # ensure buffers large enough for batch
                     if self._buf_world_x is None or self._buf_world_x.shape[0] < batch_total:
                         self._buf_world_x = np.zeros(batch_total, dtype=np.float64)
@@ -493,16 +511,48 @@ class behavior():
                         local_offsets[i] = write_ptr
                         write_ptr += cnt
 
+                    # record rss after preparing batch
+                    rss_after = None
+                    try:
+                        if _PSUTIL_AVAILABLE:
+                            rss_after = psutil.Process().memory_info().rss
+                    except Exception:
+                        rss_after = None
+
+                    # log batch
+                    try:
+                        self._batch_log.append({'start': bstart, 'end': bend, 'time': None, 'rss_before': rss_before, 'rss_after': rss_after, 'batch_total': batch_total})
+                    except Exception:
+                        pass
+
                     # Call batched kernel for this batch
                     axs = agent_xs[bstart:bend]
                     ays = agent_ys[bstart:bend]
                     try:
+                        # time the kernel call
+                        t0 = time.time()
                         if _NUMBA_AVAILABLE and '_repulsive_batched_core_safe' in globals():
                             out_x, out_y = _repulsive_batched_core_safe(axs, ays, self._buf_world_x[:write_ptr], self._buf_world_y[:write_ptr], self._buf_mult[:write_ptr], local_offsets, local_counts, float(weight))
                         else:
                             out_x, out_y = _repulsive_batched_python(axs, ays, self._buf_world_x[:write_ptr], self._buf_world_y[:write_ptr], self._buf_mult[:write_ptr], local_offsets, local_counts, float(weight))
+                        t1 = time.time()
                         repulsive_out[bstart:bend, 0] = out_x
                         repulsive_out[bstart:bend, 1] = out_y
+                        # update last batch log entry with time
+                        try:
+                            if self._batch_log:
+                                self._batch_log[-1]['time'] = t1 - t0
+                        except Exception:
+                            pass
+                        # if memory spiked beyond threshold, reduce batch size for future batches
+                        try:
+                            if rss_before is not None and rss_after is not None and (rss_after - rss_before) > self._rss_threshold_bytes:
+                                # shrink future batch size by half, minimum 16
+                                new_bs = max(16, int(batch_size // 2))
+                                setattr(self.simulation, 'behavior_batch_size', new_bs)
+                                batch_size = new_bs
+                        except Exception:
+                            pass
                     except Exception:
                         # batch-level failure: fall back to per-agent compute for this batch
                         for idx, a in enumerate(range(bstart, bend)):

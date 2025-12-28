@@ -21,6 +21,7 @@ import numpy as np
 
 from emergent.salmon_abm.behavior import behavior
 from emergent.salmon_abm import simulation as simmod
+import os
 
 
 def profile_hotspot(n_agents=1000, iters=100):
@@ -53,6 +54,13 @@ def profile_hotspot(n_agents=1000, iters=100):
             }
             self.model_dir = os.path.join('outputs', 'profiling')
             os.makedirs(self.model_dir, exist_ok=True)
+            # optional override for behavior batch size (tuning)
+            bsize = os.environ.get('BEHAVIOR_BATCH_SIZE')
+            if bsize is not None:
+                try:
+                    self.behavior_batch_size = int(bsize)
+                except Exception:
+                    pass
 
         def sample_environment(self, transform, key):
             # simple constant sample
