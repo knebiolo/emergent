@@ -538,30 +538,38 @@ class movement():
         except Exception:
             dxdy = np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        # optional movement debug: dump per-step arrays
+        # optional movement debug: dump per-step arrays (enqueue to diagnostics when possible)
         try:
             if getattr(self.simulation, 'debug_movement', False):
                 outdir = getattr(self.simulation, 'model_dir', None) or './outputs'
-                import os, time
-                os.makedirs(outdir, exist_ok=True)
-                fname = os.path.join(outdir, f'move_debug_step_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.npz')
-                # include tailbeat frequency (Hz), ideal drag, and max_practical_sog for debugging
-                ideal_drag = None
                 try:
-                    ideal_drag = self.ideal_drag_fun()
-                except Exception:
-                    ideal_drag = getattr(self.simulation, 'drag', None)
+                    ideal_drag = None
+                    try:
+                        ideal_drag = self.ideal_drag_fun()
+                    except Exception:
+                        ideal_drag = getattr(self.simulation, 'drag', None)
 
-                np.savez_compressed(fname,
-                                     dxdy=dxdy,
-                                     thrust=getattr(self.simulation, 'thrust', None),
-                                     drag=getattr(self.simulation, 'drag', None),
-                                     ideal_drag=ideal_drag,
-                                     Hz=getattr(self.simulation, 'Hz', None),
-                                     max_practical_sog=getattr(self.simulation, 'max_practical_sog', None),
-                                     X=self.simulation.X,
-                                     Y=self.simulation.Y,
-                                     heading=self.simulation.heading)
+                    payload = dict(
+                        dxdy=dxdy,
+                        thrust=getattr(self.simulation, 'thrust', None),
+                        drag=getattr(self.simulation, 'drag', None),
+                        ideal_drag=ideal_drag,
+                        Hz=getattr(self.simulation, 'Hz', None),
+                        max_practical_sog=getattr(self.simulation, 'max_practical_sog', None),
+                        X=self.simulation.X,
+                        Y=self.simulation.Y,
+                        heading=self.simulation.heading,
+                    )
+                    beh = getattr(self.simulation, 'behavior', None)
+                    if beh is not None and hasattr(beh, '_safe_npz_dump'):
+                        beh._safe_npz_dump(outdir, f'move_debug_step_{int(getattr(self.simulation, "current_step", t))}', payload)
+                    else:
+                        import os, time
+                        os.makedirs(outdir, exist_ok=True)
+                        fname = os.path.join(outdir, f'move_debug_step_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.npz')
+                        np.savez_compressed(fname, **payload)
+                except Exception:
+                    pass
         except Exception:
             pass
 

@@ -313,6 +313,16 @@ class simulation:
         # small helpers: construct movement and behavior helpers now
         self._movement = movement_mod.movement(self)
         self._behavior = behavior_mod.behavior(1.0, self)
+        # If debug flags are enabled, start the diagnostics worker to accept queued writes
+        try:
+            if getattr(self, 'debug_behavior', False) or getattr(self, 'debug_movement', False):
+                try:
+                    if hasattr(self._behavior, '_start_diag_thread'):
+                        self._behavior._start_diag_thread()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Initialize headings by sampling rasters from the DB (callable so
         # external code can re-run initialization after injecting rasters).
         import logging
@@ -828,6 +838,15 @@ class simulation:
     def close(self):
         # close HDF5 and optionally remove temporary DB file if it was created internally
         try:
+            # stop any background diagnostics thread
+            try:
+                if hasattr(self, '_behavior') and getattr(self._behavior, '_stop_diag_thread', None) is not None:
+                    try:
+                        self._behavior._stop_diag_thread()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             if hasattr(self, "db") and self.db is not None:
                 try:
                     self.db.close()

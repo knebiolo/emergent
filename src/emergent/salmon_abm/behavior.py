@@ -10,6 +10,8 @@ from scipy.interpolate import UnivariateSpline
 import h5py
 import time
 import sys
+import threading
+import queue
 
 from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, standardize_shape, calculate_front_masks, determine_slices_from_vectors, determine_slices_from_headings
 from emergent.salmon_abm import hdf5_io
@@ -23,11 +25,14 @@ except Exception:
 
 
 if _NUMBA_AVAILABLE:
-    @njit
+    from numba import prange
+
+    @njit(parallel=True)
     def _repulsive_core(agent_x, agent_y, world_x, world_y, multiplier, weight):
         total_x = 0.0
         total_y = 0.0
-        for i in range(world_x.shape[0]):
+        n = world_x.shape[0]
+        for i in prange(n):
             dx = agent_x - world_x[i]
             dy = agent_y - world_y[i]
             mag = (dx * dx + dy * dy) ** 0.5
@@ -63,12 +68,23 @@ class behavior():
     def __init__(self, dt, simulation_object):
         self.dt = dt
         self.simulation = simulation_object
+        # Async diagnostics queue and thread
+        self._diag_queue = None
+        self._diag_thread = None
+        self._diag_thread_running = False
 
     def _safe_npz_dump(self, outdir, fname_prefix, payload):
         """Write a compressed NPZ of `payload` to `outdir` with `fname_prefix`.
         Best-effort: failures are swallowed and None returned on error.
         """
         try:
+            # If async diag thread is running, enqueue the payload and return immediately
+            if self._diag_queue is not None and self._diag_thread_running:
+                try:
+                    self._enqueue_diag(outdir, fname_prefix, payload)
+                    return None
+                except Exception:
+                    pass
             import numpy as _np
             import os, time
             os.makedirs(outdir, exist_ok=True)
@@ -79,6 +95,75 @@ class behavior():
             return fname
         except Exception:
             return None
+
+    def _diag_worker(self):
+        while self._diag_thread_running:
+            try:
+                item = self._diag_queue.get(timeout=0.5)
+            except Exception:
+                continue
+            try:
+                outdir, fname_prefix, payload = item
+                import numpy as _np, os, time, json
+                os.makedirs(outdir, exist_ok=True)
+                ts = int(time.time())
+                # If payload requests JSON format, serialize as JSON
+                if isinstance(payload, dict) and payload.get('_fmt') == 'json':
+                    fname = os.path.join(outdir, f"{fname_prefix}_{ts}.json")
+                    try:
+                        with open(fname, 'w', encoding='utf-8') as fh:
+                            json.dump(payload.get('obj', {}), fh, indent=2)
+                    except Exception:
+                        pass
+                else:
+                    # default: NPZ compressed of numeric arrays
+                    fname = os.path.join(outdir, f"{fname_prefix}_{ts}.npz")
+                    try:
+                        ser = {k: _np.asarray(v).astype(float) for k, v in payload.items()}
+                        _np.savez_compressed(fname, **ser)
+                    except Exception:
+                        # best-effort: try to convert top-level serializable scalars
+                        try:
+                            simple = {k: float(v) for k, v in payload.items() if isinstance(v, (int, float))}
+                            if simple:
+                                _np.savez_compressed(fname, **simple)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            finally:
+                try:
+                    self._diag_queue.task_done()
+                except Exception:
+                    pass
+
+    def _start_diag_thread(self):
+        if self._diag_thread is not None and self._diag_thread_running:
+            return
+        self._diag_queue = queue.Queue()
+        self._diag_thread_running = True
+        self._diag_thread = threading.Thread(target=self._diag_worker, daemon=True)
+        self._diag_thread.start()
+
+    def _stop_diag_thread(self):
+        if self._diag_thread is None:
+            return
+        self._diag_thread_running = False
+        try:
+            self._diag_thread.join(timeout=1.0)
+        except Exception:
+            pass
+
+    def _enqueue_diag(self, outdir, fname_prefix, payload):
+        if self._diag_queue is None:
+            self._start_diag_thread()
+        self._diag_queue.put((outdir, fname_prefix, payload))
+
+    def _enqueue_diag_json(self, outdir, fname_prefix, obj):
+        if self._diag_queue is None:
+            self._start_diag_thread()
+        payload = {'_fmt': 'json', 'obj': obj}
+        self._diag_queue.put((outdir, fname_prefix, payload))
 
     def _safe_write_diagnostics(self, step_i, payload, outdir=None):
         """Attempt to write diagnostics via diagnostics_writer, falling back to NPZ.
@@ -147,42 +232,49 @@ class behavior():
         col_min = np.clip(mental_map_cols - buff, 0, None)
         col_max = np.clip(mental_map_cols + buff + 1, None, memory0.shape[1])
 
-        # cache HDF5-like object to avoid repeated opens
+        # cache HDF5-like object to avoid repeated opens and batch-read memory per-agent
         h5 = hdf5_io.get_hdf5_obj(self.simulation)
+        memory_cache = {}
+        for agent_idx in np.arange(self.simulation.num_agents):
+            try:
+                memory_cache[int(agent_idx)] = hdf5_io.read_dataset(h5, f'memory/{int(agent_idx)}', default=np.zeros((1, 1)))
+            except Exception:
+                memory_cache[int(agent_idx)] = np.zeros((1, 1))
+
         repulsive_forces_per_agent = np.array([
-            self._calculate_repulsive_force(h5, agent_idx, rmin, rmax, cmin, cmax, weight, t)
+            self._calculate_repulsive_force(memory_cache[int(agent_idx)], agent_idx, rmin, rmax, cmin, cmax, weight, t)
             for agent_idx, rmin, rmax, cmin, cmax in zip(np.arange(self.simulation.num_agents), row_min, row_max, col_min, col_max)
         ])
 
         # Debug: write raw repulsive vectors only when debug_behavior is enabled
         if getattr(self.simulation, 'debug_behavior', False):
             try:
-                dbg_dir = os.path.join(os.getcwd(), 'outputs', 'diagnostics')
-                os.makedirs(dbg_dir, exist_ok=True)
-                dbg_path = os.path.join(dbg_dir, 'debug_already_been_here.h5')
-                run_id = getattr(self.simulation, 'model_name', None) or f'run_{int(time.time())}'
-                step_name = f'step_{int(t)}'
-                with h5py.File(dbg_path, 'a') as dh:
-                    grp = dh.require_group(run_id)
-                    # overwrite any existing dataset for this step
-                    if step_name in grp:
-                        try:
-                            del grp[step_name]
-                        except Exception:
-                            pass
-                    grp.create_dataset(step_name, data=repulsive_forces_per_agent.astype('f4'), compression='gzip')
+                # Prefer the simulation diagnostics writer which may manage HDF5 safely
+                dw = getattr(self.simulation, 'diagnostics_writer', None)
+                if dw is not None:
                     try:
-                        dh.flush()
+                        dw.write_step(int(t), {'already_been_here': repulsive_forces_per_agent.astype('f4')})
                     except Exception:
-                        pass
+                        # fall through to NPZ enqueue fallback
+                        self._safe_npz_dump(os.path.join(os.getcwd(), 'outputs', 'diagnostics'), f'debug_already_been_here_step_{int(t)}', {'already_been_here': repulsive_forces_per_agent})
+                else:
+                    # HDF5 exclusive writes can block; instead enqueue as NPZ via diagnostics queue
+                    self._safe_npz_dump(os.path.join(os.getcwd(), 'outputs', 'diagnostics'), f'debug_already_been_here_step_{int(t)}', {'already_been_here': repulsive_forces_per_agent})
             except Exception as ex:
-                # non-fatal debug failure
-                print('debug HDF5 write failed:', ex)
+                # non-fatal debug failure; swallow
+                try:
+                    import logging
+                    logging.getLogger(__name__).debug('debug already_been_here write failed: %s', ex)
+                except Exception:
+                    pass
 
         return repulsive_forces_per_agent
 
-    def _calculate_repulsive_force(self, h5, agent_idx, row_min, row_max, col_min, col_max, weight, t):
-        mmap = hdf5_io.read_dataset(h5, f'memory/{agent_idx}', default=np.zeros((1, 1)))
+    def _calculate_repulsive_force(self, mmap, agent_idx, row_min, row_max, col_min, col_max, weight, t):
+        # mmap may be provided by caller for batched access; otherwise read from HDF5
+        if mmap is None:
+            h5 = hdf5_io.get_hdf5_obj(self.simulation)
+            mmap = hdf5_io.read_dataset(h5, f'memory/{agent_idx}', default=np.zeros((1, 1)))
         mmap_section = mmap[row_min:row_max, col_min:col_max]
         t_since = mmap_section - t
         multiplier = np.where((t_since > 10) & (t_since < 7200), 1 - (t_since - 5) / (7195), 0)
@@ -926,12 +1018,12 @@ class behavior():
                     shapes[k] = {'error': 'cannot convert to array'}
             self.simulation.cue_shapes = shapes
             if getattr(self.simulation, 'debug_behavior', False):
-                import json, os, time
                 outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                os.makedirs(outdir, exist_ok=True)
-                fname = os.path.join(outdir, f'cue_shapes_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.json')
-                with open(fname, 'w', encoding='utf-8') as fh:
-                    json.dump(shapes, fh, indent=2)
+                try:
+                    # enqueue JSON snapshot of cue shapes
+                    self._enqueue_diag_json(outdir, f'cue_shapes_{int(getattr(self.simulation, "current_step", t))}', shapes)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1213,20 +1305,16 @@ class behavior():
                         except Exception:
                             print(' - test_weights overrides present')
 
-                    # write a compact JSON snapshot for this step to model_dir for later parsing
+                    # enqueue a compact JSON snapshot for this step for later parsing
                     outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                    os.makedirs(outdir, exist_ok=True)
-                    snap = {
-                        'step': int(getattr(self.simulation, 'current_step', t)),
-                        'time': int(time.time()),
-                        'cue_summary': cue_summary,
-                        'test_weights': tw if tw is not None else {},
-                    }
-                    snap_fname = os.path.join(outdir, f'behavior_cues_step_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.json')
-                    with open(snap_fname, 'w', encoding='utf-8') as fh:
-                        json.dump(snap, fh)
                     try:
-                        print('Wrote behavior cue snapshot to', snap_fname)
+                        snap = {
+                            'step': int(getattr(self.simulation, 'current_step', t)),
+                            'time': int(time.time()),
+                            'cue_summary': cue_summary,
+                            'test_weights': tw if tw is not None else {},
+                        }
+                        self._enqueue_diag_json(outdir, f'behavior_cues_step_{int(getattr(self.simulation, "current_step", t))}', snap)
                     except Exception:
                         pass
                 except Exception:
@@ -1619,10 +1707,12 @@ class behavior():
                     except Exception:
                         # fallback: write a small JSON containing head_vec and cue magnitudes
                         import json
-                        fname_json = fname_npz.replace('.npz', '.json')
-                        serial = {'head_vec': (np.asarray(head_vec)).astype(float).tolist(), 'cue_magnitudes': {k: (np.asarray(v).astype(float)).tolist() for k, v in cue_magnitudes.items()}}
-                        with open(fname_json, 'w', encoding='utf-8') as fh:
-                            json.dump(serial, fh)
+                        try:
+                            serial = {'head_vec': (np.asarray(head_vec)).astype(float).tolist(), 'cue_magnitudes': {k: (np.asarray(v).astype(float)).tolist() for k, v in cue_magnitudes.items()}}
+                            outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                            self._enqueue_diag_json(outdir, f'behavior_headvecs_step_{int(getattr(self.simulation, "current_step", t))}', serial)
+                        except Exception:
+                            pass
             except Exception:
                 pass
             return np.arctan2(head_vec[:, 1], head_vec[:, 0])
