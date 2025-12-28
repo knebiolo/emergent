@@ -13,21 +13,19 @@ import sys
 import threading
 import queue
 
-from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, standardize_shape, calculate_front_masks, determine_slices_from_vectors, determine_slices_from_headings
+from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, _unpack_affine, standardize_shape, calculate_front_masks, determine_slices_from_vectors, determine_slices_from_headings
 from emergent.salmon_abm import hdf5_io
 
 # Optional Numba JIT: use if available to accelerate inner loops
 try:
-    from numba import njit
+    from numba import njit, prange
     _NUMBA_AVAILABLE = True
 except Exception:
     _NUMBA_AVAILABLE = False
 
 
 if _NUMBA_AVAILABLE:
-    from numba import prange
-
-    @njit(parallel=True)
+    @njit(parallel=True, fastmath=True)
     def _repulsive_core(agent_x, agent_y, world_x, world_y, multiplier, weight):
         total_x = 0.0
         total_y = 0.0
@@ -40,28 +38,191 @@ if _NUMBA_AVAILABLE:
                 mag = 1e-6
             ux = dx / mag
             uy = dy / mag
-            m = multiplier.flat[i] if multiplier.size == world_x.size else multiplier.flat[i]
+            m = multiplier[i]
             fx = ((weight * ux) / mag) * m
             fy = ((weight * uy) / mag) * m
             total_x += fx
             total_y += fy
         return total_x, total_y
+
+    def _repulsive_core_safe(agent_x, agent_y, world_x, world_y, multiplier, weight):
+        # Ensure inputs are contiguous float64 1-D arrays for Numba
+        wx = np.ascontiguousarray(world_x, dtype=np.float64)
+        wy = np.ascontiguousarray(world_y, dtype=np.float64)
+        mult = np.ascontiguousarray(multiplier, dtype=np.float64)
+        return _repulsive_core(agent_x, agent_y, wx, wy, mult, float(weight))
+
+    @njit(parallel=True, fastmath=True)
+    def _repulsive_batched_core(agent_xs, agent_ys, mmap_flat, mmap_offsets, rows_min, cols_min, nr_list, nc_list, affine, weight, t, out_x, out_y):
+        # affine: 6-element array (a,b,c,d,e,f)
+        a = affine[0]
+        b = affine[1]
+        c = affine[2]
+        d = affine[3]
+        e = affine[4]
+        f = affine[5]
+        n_agents = agent_xs.shape[0]
+        for aidx in prange(n_agents):
+            ax = agent_xs[aidx]
+            ay = agent_ys[aidx]
+            start = mmap_offsets[aidx]
+            nr = nr_list[aidx]
+            nc = nc_list[aidx]
+            tx = 0.0
+            ty = 0.0
+            if nr <= 0 or nc <= 0:
+                out_x[aidx] = 0.0
+                out_y[aidx] = 0.0
+                continue
+            # iterate rows and cols
+            for ri in range(nr):
+                for ci in range(nc):
+                    idx = start + ri * nc + ci
+                    val = mmap_flat[idx]
+                    t_since = val - t
+                    m = 0.0
+                    if t_since > 10.0 and t_since < 7200.0:
+                        m = 1.0 - (t_since - 5.0) / 7195.0
+                    row = rows_min[aidx] + ri
+                    col = cols_min[aidx] + ci
+                    wx = a * col + b * row + c
+                    wy = d * col + e * row + f
+                    dx = ax - wx
+                    dy = ay - wy
+                    mag = (dx * dx + dy * dy) ** 0.5
+                    if mag == 0.0:
+                        mag = 1e-6
+                    ux = dx / mag
+                    uy = dy / mag
+                    fx = ((weight * ux) / mag) * m
+                    fy = ((weight * uy) / mag) * m
+                    tx += fx
+                    ty += fy
+            out_x[aidx] = tx
+            out_y[aidx] = ty
+
+    def _repulsive_batched_core_safe(agent_xs, agent_ys, mmap_flat, mmap_offsets, rows_min, cols_min, nr_list, nc_list, affine, weight, t):
+        mf = np.ascontiguousarray(mmap_flat, dtype=np.float64)
+        mo = np.ascontiguousarray(mmap_offsets, dtype=np.int64)
+        rm = np.ascontiguousarray(rows_min, dtype=np.int64)
+        cm = np.ascontiguousarray(cols_min, dtype=np.int64)
+        nr = np.ascontiguousarray(nr_list, dtype=np.int64)
+        nc = np.ascontiguousarray(nc_list, dtype=np.int64)
+        axs = np.ascontiguousarray(agent_xs, dtype=np.float64)
+        ays = np.ascontiguousarray(agent_ys, dtype=np.float64)
+        aff = np.ascontiguousarray(affine, dtype=np.float64)
+        out_x = np.zeros(axs.shape[0], dtype=np.float64)
+        out_y = np.zeros(axs.shape[0], dtype=np.float64)
+        _repulsive_batched_core(axs, ays, mf, mo, rm, cm, nr, nc, aff, float(weight), float(t), out_x, out_y)
+        return out_x, out_y
 else:
     def _repulsive_core(agent_x, agent_y, world_x, world_y, multiplier, weight):
-        # fallback Python implementation operating on flattened arrays
-        dx = agent_x - world_x
-        dy = agent_y - world_y
+        # fallback Python implementation operating on flattened arrays with minimal temporaries
+        wx = np.asarray(world_x).ravel()
+        wy = np.asarray(world_y).ravel()
+        mult = np.asarray(multiplier).ravel()
+        dx = agent_x - wx
+        dy = agent_y - wy
         mags = np.sqrt(dx * dx + dy * dy)
-        mags = np.where(mags == 0, 1e-6, mags)
-        ux = dx / mags
-        uy = dy / mags
-        flat_multiplier = multiplier.ravel()
-        flat_ux = ux.ravel()
-        flat_uy = uy.ravel()
-        flat_mags = mags.ravel()
-        fx = ((weight * flat_ux) / flat_mags) * flat_multiplier
-        fy = ((weight * flat_uy) / flat_mags) * flat_multiplier
+        mags[mags == 0] = 1e-6
+        fx = ((weight * dx) / (mags * mags)) * mult
+        fy = ((weight * dy) / (mags * mags)) * mult
         return float(np.nansum(fx)), float(np.nansum(fy))
+
+    def _repulsive_batched_python(agent_xs, agent_ys, mmap_flat, mmap_offsets, rows_min, cols_min, nr_list, nc_list, affine, weight, t):
+        # Python fallback: compute multiplier and world coords on the fly
+        a = affine[0]
+        b = affine[1]
+        c = affine[2]
+        d = affine[3]
+        e = affine[4]
+        f = affine[5]
+        n_agents = int(agent_xs.shape[0])
+        out_x = np.zeros(n_agents, dtype=np.float64)
+        out_y = np.zeros(n_agents, dtype=np.float64)
+        for ai in range(n_agents):
+            ax = float(agent_xs[ai])
+            ay = float(agent_ys[ai])
+            start = int(mmap_offsets[ai])
+            nr = int(nr_list[ai])
+            nc = int(nc_list[ai])
+            if nr <= 0 or nc <= 0:
+                out_x[ai] = 0.0
+                out_y[ai] = 0.0
+                continue
+            tx = 0.0
+            ty = 0.0
+            for ri in range(nr):
+                for ci in range(nc):
+                    idx = start + ri * nc + ci
+                    val = mmap_flat[idx]
+                    t_since = val - t
+                    m = 0.0
+                    if t_since > 10.0 and t_since < 7200.0:
+                        m = 1.0 - (t_since - 5.0) / 7195.0
+                    row = rows_min[ai] + ri
+                    col = cols_min[ai] + ci
+                    wx = a * col + b * row + c
+                    wy = d * col + e * row + f
+                    dx = ax - wx
+                    dy = ay - wy
+                    mag = (dx * dx + dy * dy) ** 0.5
+                    if mag == 0.0:
+                        mag = 1e-6
+                    ux = dx / mag
+                    uy = dy / mag
+                    fx = ((weight * ux) / mag) * m
+                    fy = ((weight * uy) / mag) * m
+                    tx += fx
+                    ty += fy
+            out_x[ai] = tx
+            out_y[ai] = ty
+        return out_x, out_y
+        c = affine[2]
+        d = affine[3]
+        e = affine[4]
+        f = affine[5]
+        n_agents = int(agent_xs.shape[0])
+        out_x = np.zeros(n_agents, dtype=np.float64)
+        out_y = np.zeros(n_agents, dtype=np.float64)
+        for ai in range(n_agents):
+            ax = float(agent_xs[ai])
+            ay = float(agent_ys[ai])
+            start = int(mmap_offsets[ai])
+            nr = int(nr_list[ai])
+            nc = int(nc_list[ai])
+            if nr <= 0 or nc <= 0:
+                out_x[ai] = 0.0
+                out_y[ai] = 0.0
+                continue
+            tx = 0.0
+            ty = 0.0
+            for ri in range(nr):
+                for ci in range(nc):
+                    idx = start + ri * nc + ci
+                    val = mmap_flat[idx]
+                    t_since = val - t
+                    m = 0.0
+                    if t_since > 10.0 and t_since < 7200.0:
+                        m = 1.0 - (t_since - 5.0) / 7195.0
+                    row = rows_min[ai] + ri
+                    col = cols_min[ai] + ci
+                    wx = a * col + b * row + c
+                    wy = d * col + e * row + f
+                    dx = ax - wx
+                    dy = ay - wy
+                    mag = (dx * dx + dy * dy) ** 0.5
+                    if mag == 0.0:
+                        mag = 1e-6
+                    ux = dx / mag
+                    uy = dy / mag
+                    fx = ((weight * ux) / mag) * m
+                    fy = ((weight * uy) / mag) * m
+                    tx += fx
+                    ty += fy
+            out_x[ai] = tx
+            out_y[ai] = ty
+        return out_x, out_y
 
 
 class behavior():
@@ -72,6 +233,12 @@ class behavior():
         self._diag_queue = None
         self._diag_thread = None
         self._diag_thread_running = False
+        # Preallocated buffers for batched repulsive computation
+        self._buf_world_x = None
+        self._buf_world_y = None
+        self._buf_mult = None
+        self._buf_offsets = None
+        self._buf_counts = None
 
     def _safe_npz_dump(self, outdir, fname_prefix, payload):
         """Write a compressed NPZ of `payload` to `outdir` with `fname_prefix`.
@@ -234,17 +401,122 @@ class behavior():
 
         # cache HDF5-like object to avoid repeated opens and batch-read memory per-agent
         h5 = hdf5_io.get_hdf5_obj(self.simulation)
-        memory_cache = {}
-        for agent_idx in np.arange(self.simulation.num_agents):
-            try:
-                memory_cache[int(agent_idx)] = hdf5_io.read_dataset(h5, f'memory/{int(agent_idx)}', default=np.zeros((1, 1)))
-            except Exception:
-                memory_cache[int(agent_idx)] = np.zeros((1, 1))
+        # Build concatenated buffers for all agents' windows to feed batched kernel
+        agent_count = int(self.simulation.num_agents)
+        agent_xs = np.nan_to_num(self.simulation.X).astype(np.float64)
+        agent_ys = np.nan_to_num(self.simulation.Y).astype(np.float64)
 
-        repulsive_forces_per_agent = np.array([
-            self._calculate_repulsive_force(memory_cache[int(agent_idx)], agent_idx, rmin, rmax, cmin, cmax, weight, t)
-            for agent_idx, rmin, rmax, cmin, cmax in zip(np.arange(self.simulation.num_agents), row_min, row_max, col_min, col_max)
-        ])
+        # First pass: determine total size to preallocate concatenated buffers
+        offsets = np.zeros(agent_count, dtype=np.int64)
+        counts = np.zeros(agent_count, dtype=np.int64)
+        total_elems = 0
+        mem_sections = [None] * agent_count
+        rows_list = [None] * agent_count
+        cols_list = [None] * agent_count
+        for a in range(agent_count):
+            rmin = int(row_min[a])
+            rmax = int(row_max[a])
+            cmin = int(col_min[a])
+            cmax = int(col_max[a])
+            try:
+                mmap = hdf5_io.read_dataset(h5, f'memory/{a}', default=np.zeros((1, 1)))
+            except Exception:
+                mmap = np.zeros((1, 1))
+            section = mmap[rmin:rmax, cmin:cmax]
+            mem_sections[a] = section
+            nr = rmax - rmin
+            nc = cmax - cmin
+            cnt = max(0, nr * nc)
+            counts[a] = cnt
+            offsets[a] = total_elems
+            total_elems += cnt
+            rows_list[a] = (rmin, rmax)
+            cols_list[a] = (cmin, cmax)
+
+        if total_elems == 0:
+            # nothing to compute
+            repulsive_forces_per_agent = np.zeros((agent_count, 2), dtype=np.float64)
+        else:
+            # Process agents in manageable batches to avoid a single huge allocation
+            batch_size = int(getattr(self.simulation, 'behavior_batch_size', 256))
+            repulsive_out = np.zeros((agent_count, 2), dtype=np.float64)
+            try:
+                for bstart in range(0, agent_count, batch_size):
+                    bend = min(agent_count, bstart + batch_size)
+                    batch_counts = counts[bstart:bend]
+                    # compute elements needed for this batch
+                    batch_total = int(batch_counts.sum())
+                    if batch_total == 0:
+                        continue
+                    # ensure buffers large enough for batch
+                    if self._buf_world_x is None or self._buf_world_x.shape[0] < batch_total:
+                        self._buf_world_x = np.zeros(batch_total, dtype=np.float64)
+                        self._buf_world_y = np.zeros(batch_total, dtype=np.float64)
+                        self._buf_mult = np.zeros(batch_total, dtype=np.float64)
+                    nb = bend - bstart
+                    if self._buf_offsets is None or self._buf_offsets.shape[0] < nb:
+                        self._buf_offsets = np.zeros(nb, dtype=np.int64)
+                        self._buf_counts = np.zeros(nb, dtype=np.int64)
+
+                    write_ptr = 0
+                    local_offsets = self._buf_offsets[:nb]
+                    local_counts = self._buf_counts[:nb]
+                    for i, a in enumerate(range(bstart, bend)):
+                        cnt = int(counts[a])
+                        local_counts[i] = cnt
+                        if cnt == 0:
+                            local_offsets[i] = 0
+                            continue
+                        rmin, rmax = rows_list[a]
+                        cmin, cmax = cols_list[a]
+                        section = mem_sections[a]
+                        t_since = section - t
+                        mult = np.where((t_since > 10) & (t_since < 7200), 1 - (t_since - 5) / (7195), 0).ravel()
+                        rows_idx = np.arange(rmin, rmax)
+                        cols_idx = np.arange(cmin, cmax)
+                        col_grid, row_grid = np.meshgrid(cols_idx, rows_idx)
+                        try:
+                            wx, wy = pixel_to_geo(self.simulation.mental_map_transform, row_grid, col_grid)
+                            if not hasattr(wx, 'ravel'):
+                                wx = np.array([[float(wx)]])
+                            if not hasattr(wy, 'ravel'):
+                                wy = np.array([[float(wy)]])
+                            wx = wx.ravel().astype(np.float64)
+                            wy = wy.ravel().astype(np.float64)
+                        except Exception:
+                            wx = col_grid.ravel().astype(np.float64)
+                            wy = row_grid.ravel().astype(np.float64)
+
+                        self._buf_world_x[write_ptr:write_ptr+cnt] = wx
+                        self._buf_world_y[write_ptr:write_ptr+cnt] = wy
+                        self._buf_mult[write_ptr:write_ptr+cnt] = mult
+                        local_offsets[i] = write_ptr
+                        write_ptr += cnt
+
+                    # Call batched kernel for this batch
+                    axs = agent_xs[bstart:bend]
+                    ays = agent_ys[bstart:bend]
+                    try:
+                        if _NUMBA_AVAILABLE and '_repulsive_batched_core_safe' in globals():
+                            out_x, out_y = _repulsive_batched_core_safe(axs, ays, self._buf_world_x[:write_ptr], self._buf_world_y[:write_ptr], self._buf_mult[:write_ptr], local_offsets, local_counts, float(weight))
+                        else:
+                            out_x, out_y = _repulsive_batched_python(axs, ays, self._buf_world_x[:write_ptr], self._buf_world_y[:write_ptr], self._buf_mult[:write_ptr], local_offsets, local_counts, float(weight))
+                        repulsive_out[bstart:bend, 0] = out_x
+                        repulsive_out[bstart:bend, 1] = out_y
+                    except Exception:
+                        # batch-level failure: fall back to per-agent compute for this batch
+                        for idx, a in enumerate(range(bstart, bend)):
+                            try:
+                                repulsive_out[a, :] = self._calculate_repulsive_force(mem_sections[a], a, int(row_min[a]), int(row_max[a]), int(col_min[a]), int(col_max[a]), weight, t)
+                            except Exception:
+                                repulsive_out[a, :] = np.array([0.0, 0.0])
+                repulsive_forces_per_agent = repulsive_out
+            except Exception:
+                # catastrophic fallback: revert to original per-agent computation
+                repulsive_forces_per_agent = np.array([
+                    self._calculate_repulsive_force(mem_sections[int(agent_idx)], int(agent_idx), int(row_min[int(agent_idx)]), int(row_max[int(agent_idx)]), int(col_min[int(agent_idx)]), int(col_max[int(agent_idx)]), weight, t)
+                    for agent_idx in np.arange(agent_count)
+                ])
 
         # Debug: write raw repulsive vectors only when debug_behavior is enabled
         if getattr(self.simulation, 'debug_behavior', False):
@@ -285,24 +557,43 @@ class behavior():
         if rows_idx.size == 0 or cols_idx.size == 0:
             return np.array([0.0, 0.0])
 
-        col_grid, row_grid = np.meshgrid(cols_idx, rows_idx)
-        # pixel_to_geo accepts (transform, row, col) or (row, col, transform)
+        # Try to reuse a cached world grid for this window to avoid repeated meshgrid/pixel->geo calls
+        cache_key = (int(row_min), int(row_max), int(col_min), int(col_max))
+        if not hasattr(self, '_world_grid_cache'):
+            self._world_grid_cache = {}
         try:
-            world_x, world_y = pixel_to_geo(self.simulation.mental_map_transform, row_grid, col_grid)
-        except Exception:
-            # fallback: treat pixel indices as world coords (legacy behavior)
-            world_x = col_grid.astype(float)
-            world_y = row_grid.astype(float)
+            world_x, world_y = self._world_grid_cache[cache_key]
+        except KeyError:
+            col_grid, row_grid = np.meshgrid(cols_idx, rows_idx)
+            try:
+                world_x, world_y = pixel_to_geo(self.simulation.mental_map_transform, row_grid, col_grid)
+                # pixel_to_geo may return scalars for 1x1 windows; coerce to arrays
+                if not hasattr(world_x, 'ravel'):
+                    world_x = np.array([[float(world_x)]])
+                if not hasattr(world_y, 'ravel'):
+                    world_y = np.array([[float(world_y)]])
+            except Exception:
+                world_x = col_grid.astype(float)
+                world_y = row_grid.astype(float)
+            # store in cache (small windows only)
+            try:
+                self._world_grid_cache[cache_key] = (world_x, world_y)
+            except Exception:
+                pass
 
         agent_x = float(self.simulation.X[agent_idx])
         agent_y = float(self.simulation.Y[agent_idx])
 
+        # Prepare flattened multiplier for the numeric core for best performance
+        mult_flat = np.asarray(multiplier.ravel())
+        wx = np.asarray(world_x.ravel())
+        wy = np.asarray(world_y.ravel())
         # Use JIT-accelerated core when available, otherwise vectorized fallback
         try:
-            wx = world_x.ravel()
-            wy = world_y.ravel()
-            mult = multiplier
-            tx, ty = _repulsive_core(agent_x, agent_y, wx, wy, mult, weight)
+            if _NUMBA_AVAILABLE and '_repulsive_core_safe' in globals():
+                tx, ty = _repulsive_core_safe(agent_x, agent_y, wx, wy, mult_flat, float(weight))
+            else:
+                tx, ty = _repulsive_core(agent_x, agent_y, wx, wy, mult_flat, float(weight))
             return np.array([tx, ty])
         except Exception:
             delta_x = agent_x - world_x
