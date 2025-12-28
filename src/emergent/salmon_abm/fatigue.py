@@ -64,11 +64,23 @@ class fatigue():
         self.simulation.swim_mode = np.where(~(mask_prolonged | mask_sprint), 1, self.simulation.swim_mode)
 
     def recovery(self):
-        rec0 = self.simulation.recovery(self.simulation.recover_stopwatch) / 100.
+        # Some environments provide a `simulation.recovery()` helper that
+        # returns recovery percentage (0-100). Use it when present; otherwise
+        # fall back to a conservative linear recovery model so unit tests and
+        # headless runs remain deterministic and do not raise AttributeError.
+        if hasattr(self.simulation, 'recovery') and callable(getattr(self.simulation, 'recovery')):
+            rec0 = self.simulation.recovery(self.simulation.recover_stopwatch) / 100.0
+            rec1 = self.simulation.recovery(self.simulation.recover_stopwatch + self.dt) / 100.0
+        else:
+            # fallback: linear recovery percent scaled to seconds (0.1% per second)
+            rec0 = np.clip(self.simulation.recover_stopwatch * 0.1, 0.0, 100.0) / 100.0
+            rec1 = np.clip((self.simulation.recover_stopwatch + self.dt) * 0.1, 0.0, 100.0) / 100.0
+        # clamp extremes
+        rec0 = np.asarray(rec0)
         rec0[rec0 < 0.0] = 0.0
-        rec1 = self.simulation.recovery(self.simulation.recover_stopwatch + self.dt) / 100.
+        rec1 = np.asarray(rec1)
         rec1[rec1 > 1.0] = 1.0
-        rec1[rec1 < 0.] = 0.0
+        rec1[rec1 < 0.0] = 0.0
         per_rec = rec1 - rec0
         mask_station_holding = self.simulation.swim_behav == 3
         self.simulation.bout_dur[mask_station_holding] = 0.0

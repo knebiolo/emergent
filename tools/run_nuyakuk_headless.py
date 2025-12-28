@@ -92,29 +92,34 @@ def run_headless(args):
             if os.path.exists(preload_path):
                 print('Preloading memory from', preload_path)
                 with h5py.File(preload_path, 'r') as ph5:
-                    # ensure sim has memory group
-                    if 'memory' in ph5:
-                        for key in ph5['memory'].keys():
-                            dst = f'memory/{key}'
-                            try:
-                                data = np.array(ph5['memory'][key])
-                                # write into sim.hdf5, create dataset if missing
+                    # determine target HDF5 object for writing (prefers sim.hdf5 then sim.db)
+                    target_h5 = hdf5_io.get_hdf5_obj(sim) or getattr(sim, 'hdf5', None) or getattr(sim, 'db', None)
+                    if target_h5 is None:
+                        print('No HDF5 target available on simulation to preload into')
+                    else:
+                        # ensure sim has memory group in source
+                        if 'memory' in ph5:
+                            for key in ph5['memory'].keys():
+                                dst = f'memory/{key}'
                                 try:
-                                    if dst in sim.hdf5:
-                                        sim.hdf5[dst][:] = data
-                                    else:
-                                        sim.hdf5.create_dataset(dst, data=data, dtype='f4')
-                                except Exception:
+                                    data = np.array(ph5['memory'][key])
+                                    # use centralized helper to write/overwrite datasets on target
                                     try:
-                                        sim.hdf5[dst] = data
+                                        hdf5_io.write_dataset(target_h5, dst, data, dtype='f4')
                                     except Exception:
-                                        pass
-                            except Exception:
-                                pass
-                try:
-                    sim.hdf5.flush()
-                except Exception:
-                    pass
+                                        try:
+                                            if dst in target_h5:
+                                                del target_h5[dst]
+                                            target_h5.create_dataset(dst, data=data, dtype='f4')
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                        try:
+                            if hasattr(target_h5, 'flush'):
+                                target_h5.flush()
+                        except Exception:
+                            pass
         except Exception as e:
             print('Failed to preload memory:', e)
 

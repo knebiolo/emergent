@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import distance_transform_edt
 from scipy.interpolate import UnivariateSpline
+import h5py
+import time
 
 from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, standardize_shape, calculate_front_masks, determine_slices_from_vectors, determine_slices_from_headings
 from emergent.salmon_abm import hdf5_io
@@ -25,6 +27,13 @@ class behavior():
         # raster transform was used which produced indices on a different grid
         # and resulted in out-of-bounds / empty slices causing zero forces.
         mental_map_rows, mental_map_cols = geo_to_pixel(x, y, getattr(self.simulation, 'mental_map_transform', getattr(self.simulation, 'depth_rast_transform', None)))
+        # Ensure indices are 1-D integer arrays even for single-agent scalar inputs
+        try:
+            mental_map_rows = np.atleast_1d(mental_map_rows).astype(int)
+            mental_map_cols = np.atleast_1d(mental_map_cols).astype(int)
+        except Exception:
+            mental_map_rows = np.array([int(mental_map_rows)])
+            mental_map_cols = np.array([int(mental_map_cols)])
 
         buff = 10
         row_min = np.clip(mental_map_rows - buff, 0, None)
@@ -40,6 +49,32 @@ class behavior():
             for agent_idx, rmin, rmax, cmin, cmax in zip(np.arange(self.simulation.num_agents), row_min, row_max, col_min, col_max)
         ])
 
+        # Debug: write raw repulsive vectors to a separate HDF5 to avoid interfering
+        # with the main diagnostics writer. This opens a dedicated debug file in
+        # outputs/diagnostics and stores per-run/per-step arrays for later inspection.
+        try:
+            dbg_dir = os.path.join(os.getcwd(), 'outputs', 'diagnostics')
+            os.makedirs(dbg_dir, exist_ok=True)
+            dbg_path = os.path.join(dbg_dir, 'debug_already_been_here.h5')
+            run_id = getattr(self.simulation, 'model_name', None) or f'run_{int(time.time())}'
+            step_name = f'step_{int(t)}'
+            with h5py.File(dbg_path, 'a') as dh:
+                grp = dh.require_group(run_id)
+                # overwrite any existing dataset for this step
+                if step_name in grp:
+                    try:
+                        del grp[step_name]
+                    except Exception:
+                        pass
+                grp.create_dataset(step_name, data=repulsive_forces_per_agent.astype('f4'), compression='gzip')
+                try:
+                    dh.flush()
+                except Exception:
+                    pass
+        except Exception as ex:
+            # non-fatal debug failure
+            print('debug HDF5 write failed:', ex)
+
         return repulsive_forces_per_agent
 
     def _calculate_repulsive_force(self, agent_idx, row_min, row_max, col_min, col_max, weight, t):
@@ -49,13 +84,33 @@ class behavior():
         t_since = mmap_section - t
         multiplier = np.where((t_since > 10) & (t_since < 7200), 1 - (t_since - 5) / (7195), 0)
 
-        delta_x = self.simulation.X[agent_idx] - np.arange(col_min, col_max)
-        delta_y = self.simulation.Y[agent_idx] - np.arange(row_min, row_max)[:, np.newaxis]
+        # Convert mental-map pixel indices to world coordinates (pixel centers)
+        rows_idx = np.arange(row_min, row_max)
+        cols_idx = np.arange(col_min, col_max)
+        if rows_idx.size == 0 or cols_idx.size == 0:
+            return np.array([0.0, 0.0])
+
+        col_grid, row_grid = np.meshgrid(cols_idx, rows_idx)
+        # pixel_to_geo accepts (transform, row, col) or (row, col, transform)
+        try:
+            world_x, world_y = pixel_to_geo(self.simulation.mental_map_transform, row_grid, col_grid)
+        except Exception:
+            # fallback: treat pixel indices as world coords (legacy behavior)
+            world_x = col_grid.astype(float)
+            world_y = row_grid.astype(float)
+
+        agent_x = float(self.simulation.X[agent_idx])
+        agent_y = float(self.simulation.Y[agent_idx])
+
+        delta_x = agent_x - world_x
+        delta_y = agent_y - world_y
         magnitudes = np.sqrt(delta_x**2 + delta_y**2)
-        magnitudes[magnitudes == 0] = 0.000001
+        magnitudes = np.where(magnitudes == 0, 1e-6, magnitudes)
 
         unit_vector_x = delta_x / magnitudes
         unit_vector_y = delta_y / magnitudes
+
+        # force scales with multiplier and inversely with distance (in world units)
         x_force = ((weight * unit_vector_x) / magnitudes) * multiplier
         y_force = ((weight * unit_vector_y) / magnitudes) * multiplier
 
@@ -735,6 +790,11 @@ class behavior():
                 print('DBG arbitrate: about to call alignment_cue')
             except Exception:
                 pass
+            # ensure rheotaxis is always computed (used downstream)
+            try:
+                rheotaxis = self.rheo_cue(default_weights.get('rheotaxis', 25000))
+            except Exception:
+                rheotaxis = np.zeros((self.simulation.num_agents, 2))
             alignment = self.alignment_cue(default_weights['alignment'])
             cohesion = self.cohesion_cue(default_weights['cohesion'])
             low_speed = self.vel_cue(default_weights['low_speed'])
@@ -1128,6 +1188,7 @@ class behavior():
                 n_agents = int(getattr(self.simulation, 'num_agents', 0)) or int(getattr(self.simulation, 'n_agents', 0))
                 if n_agents <= 0:
                     n_agents = int(getattr(self.simulation, 'num_agents', 0))
+
                 # Build safe last_cue_vecs with guaranteed shape (n_agents,2)
                 last_cue_vecs_final = {}
                 for k, v in raw_vecs.items():
@@ -1138,11 +1199,8 @@ class behavior():
                         if arr.ndim == 2 and arr.shape[0] == n_agents and arr.shape[1] == 2:
                             last_cue_vecs_final[k] = arr
                         else:
-                            try:
-                                arr = arr.reshape((n_agents, 2)).astype(np.float32)
-                                last_cue_vecs_final[k] = arr
-                            except Exception:
-                                last_cue_vecs_final[k] = np.zeros((n_agents, 2), dtype=np.float32)
+                            arr = arr.reshape((n_agents, 2)).astype(np.float32)
+                            last_cue_vecs_final[k] = arr
                     except Exception:
                         last_cue_vecs_final[k] = np.zeros((n_agents, 2), dtype=np.float32)
 
@@ -1154,7 +1212,6 @@ class behavior():
                 try:
                     setattr(self.simulation, 'last_cue_vecs', last_cue_vecs_final)
                 except Exception:
-                    # best-effort fallback
                     try:
                         self.simulation.last_cue_vecs = last_cue_vecs_final
                     except Exception:
@@ -1183,11 +1240,7 @@ class behavior():
                     hv = np.asarray(head_vec, dtype=np.float32)
                     if hv.ndim == 1 and hv.size == 2:
                         hv = np.tile(hv.reshape(1, 2), (n_agents, 1))
-                    if not (hv.ndim == 2 and hv.shape[0] == n_agents and hv.shape[1] == 2):
-                        try:
-                            hv = hv.reshape((n_agents, 2)).astype(np.float32)
-                        except Exception:
-                            hv = np.zeros((n_agents, 2), dtype=np.float32)
+                    hv = hv.reshape((n_agents, 2)).astype(np.float32)
                 except Exception:
                     hv = np.zeros((n_agents, 2), dtype=np.float32)
                 try:
@@ -1197,6 +1250,7 @@ class behavior():
                         self.simulation.last_head_vec = hv
                     except Exception:
                         pass
+
                 # Write diagnostics via HDF5DiagnosticsWriter when available (preferred)
                 try:
                     import time, os
@@ -1206,18 +1260,11 @@ class behavior():
                         payload['head_vec'] = np.asarray(hv).astype(float)
                     except Exception:
                         payload['head_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
-                    try:
-                        for k, v in last_cue_vecs_final.items():
-                            try:
-                                payload[f'{k}_vec'] = np.asarray(v).astype(float)
-                            except Exception:
-                                payload[f'{k}_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
-                    except Exception:
+                    for k, v in last_cue_vecs_final.items():
                         try:
-                            for k, v in raw_vecs.items():
-                                payload[f'{k}_vec'] = np.asarray(v).astype(float)
+                            payload[f'{k}_vec'] = np.asarray(v).astype(float)
                         except Exception:
-                            pass
+                            payload[f'{k}_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
 
                     dw = getattr(self.simulation, 'diagnostics_writer', None)
                     if dw is not None:
@@ -1245,6 +1292,38 @@ class behavior():
                                 ts = int(time.time())
                                 guard_fname = os.path.join(outdir, f'behavior_debug_guarded_step_{step_i}_{ts}.npz')
                                 _np.savez_compressed(guard_fname, **payload)
+                            except Exception:
+                                pass
+
+                except Exception:
+                    try:
+                        print('DBG: failed robust final assignment of last_cue_vecs/last_head_vec', file=sys.stderr)
+                    except Exception:
+                        pass
+
+                # Also include battery/physiology diagnostics when available
+                try:
+                    if dw is not None:
+                        phys = {}
+                        try:
+                            phys['battery'] = np.asarray(self.simulation.battery).astype(float)
+                        except Exception:
+                            pass
+                        try:
+                            phys['recover_stopwatch'] = np.asarray(self.simulation.recover_stopwatch).astype(float)
+                        except Exception:
+                            pass
+                        try:
+                            phys['swim_behav'] = np.asarray(self.simulation.swim_behav).astype(np.int32)
+                        except Exception:
+                            pass
+                        try:
+                            phys['ideal_sog'] = np.asarray(self.simulation.ideal_sog).astype(float)
+                        except Exception:
+                            pass
+                        if phys:
+                            try:
+                                dw.write_step(step_i, phys)
                             except Exception:
                                 pass
                 except Exception:
@@ -1389,6 +1468,9 @@ class behavior():
                                 print('DBG NPZ write: agent_idx_repeat sample=', agent_idx_repeat[:20].tolist())
                         except Exception:
                             pass
+                    # battery/physiology diagnostics are intentionally omitted here to
+                    # avoid complex nested try/except blocks during import-time parsing.
+                    # They can be written elsewhere once diagnostics_writer is stable.
 
                         # Prepare alignment_diag fields (prefer per-neighbor diagnostics when present)
                         alignment_diag_payload = {}

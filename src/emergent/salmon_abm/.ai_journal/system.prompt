@@ -57,4 +57,8 @@ docs\USER_CONFIG_OPTIONS.md
 # git
 - The user will handle all git actions, commit, PR, push, etc. 
 
+# Interacting with Powershell
+- PowerShell rejects the here-doc syntax. 
+- Please run short Python snippets by invoking python -c "<code>" with proper escaping. 
+
 END of PROMPT
