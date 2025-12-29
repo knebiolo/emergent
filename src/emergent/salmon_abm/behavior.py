@@ -1,265 +1,73 @@
 """Behavior helpers extracted from sockeye.py.
 
-This includes perception and social cue calculations.
-"""
-import os
-import numpy as np
-import pandas as pd
-from scipy.ndimage import distance_transform_edt
-from scipy.interpolate import UnivariateSpline
-import h5py
-import time
-import sys
-import threading
-import queue
-try:
-    import psutil
-    _PSUTIL_AVAILABLE = True
-except Exception:
-    _PSUTIL_AVAILABLE = False
+            # optional behavior debugging: dump cue snapshots (simplified)
+            try:
+                # persist last head_vec and per-cue vectors in a compact, robust way
+                n_agents = int(getattr(self.simulation, 'num_agents', 0)) or 0
+                try:
+                    self._safe_set_sim_attr('last_head_vec', np.asarray(head_vec, dtype=np.float32))
+                except Exception:
+                    pass
 
-from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, _unpack_affine, standardize_shape, calculate_front_masks, determine_slices_from_vectors, determine_slices_from_headings
-from emergent.salmon_abm import hdf5_io
+                # Build a compact last_cue_vecs mapping with safe shapes
+                last_cue_vecs_final = {}
+                for k, v in raw_vecs.items():
+                    try:
+                        arr = np.asarray(v, dtype=np.float32)
+                        if arr.ndim == 1 and arr.size == 2 and n_agents > 0:
+                            arr = np.tile(arr.reshape(1, 2), (n_agents, 1))
+                        arr = arr.reshape((n_agents, 2)).astype(np.float32) if n_agents > 0 else np.zeros((0, 2), dtype=np.float32)
+                        last_cue_vecs_final[k] = arr
+                    except Exception:
+                        last_cue_vecs_final[k] = np.zeros((n_agents, 2), dtype=np.float32)
 
-# Optional Numba JIT: use if available to accelerate inner loops
-try:
-    from numba import njit, prange
-    _NUMBA_AVAILABLE = True
-except Exception:
-    _NUMBA_AVAILABLE = False
+                try:
+                    self._safe_set_sim_attr('last_cue_vecs', last_cue_vecs_final)
+                except Exception:
+                    pass
 
-
-if _NUMBA_AVAILABLE:
-    @njit(parallel=True, fastmath=True)
-    def _repulsive_core(agent_x, agent_y, world_x, world_y, multiplier, weight):
-        total_x = 0.0
-        total_y = 0.0
-        n = world_x.shape[0]
-        for i in prange(n):
-            dx = agent_x - world_x[i]
-            dy = agent_y - world_y[i]
-            mag = (dx * dx + dy * dy) ** 0.5
-            if mag == 0.0:
-                mag = 1e-6
-            ux = dx / mag
-            uy = dy / mag
-            m = multiplier[i]
-            fx = ((weight * ux) / mag) * m
-            fy = ((weight * uy) / mag) * m
-            total_x += fx
-            total_y += fy
-        return total_x, total_y
-
-    def _repulsive_core_safe(agent_x, agent_y, world_x, world_y, multiplier, weight):
-        # Ensure inputs are contiguous float64 1-D arrays for Numba
-        wx = np.ascontiguousarray(world_x, dtype=np.float64)
-        wy = np.ascontiguousarray(world_y, dtype=np.float64)
-        mult = np.ascontiguousarray(multiplier, dtype=np.float64)
-        return _repulsive_core(agent_x, agent_y, wx, wy, mult, float(weight))
-
-    @njit(parallel=True, fastmath=True)
-    def _repulsive_batched_core(agent_xs, agent_ys, mmap_flat, mmap_offsets, rows_min, cols_min, nr_list, nc_list, affine, weight, t, out_x, out_y):
-        # affine: 6-element array (a,b,c,d,e,f)
-        a = affine[0]
-        b = affine[1]
-        c = affine[2]
-        d = affine[3]
-        e = affine[4]
-        f = affine[5]
-        n_agents = agent_xs.shape[0]
-        for aidx in prange(n_agents):
-            ax = agent_xs[aidx]
-            ay = agent_ys[aidx]
-            start = mmap_offsets[aidx]
-            nr = nr_list[aidx]
-            nc = nc_list[aidx]
-            tx = 0.0
-            ty = 0.0
-            if nr <= 0 or nc <= 0:
-                out_x[aidx] = 0.0
-                out_y[aidx] = 0.0
-                continue
-            # iterate rows and cols
-            for ri in range(nr):
-                for ci in range(nc):
-                    idx = start + ri * nc + ci
-                    val = mmap_flat[idx]
-                    t_since = val - t
-                    m = 0.0
-                    if t_since > 10.0 and t_since < 7200.0:
-                        m = 1.0 - (t_since - 5.0) / 7195.0
-                    row = rows_min[aidx] + ri
-                    col = cols_min[aidx] + ci
-                    wx = a * col + b * row + c
-                    wy = d * col + e * row + f
-                    dx = ax - wx
-                    dy = ay - wy
-                    mag = (dx * dx + dy * dy) ** 0.5
-                    if mag == 0.0:
-                        mag = 1e-6
-                    ux = dx / mag
-                    uy = dy / mag
-                    fx = ((weight * ux) / mag) * m
-                    fy = ((weight * uy) / mag) * m
-                    tx += fx
-                    ty += fy
-            out_x[aidx] = tx
-            out_y[aidx] = ty
-
-    def _repulsive_batched_core_safe(agent_xs, agent_ys, mmap_flat, mmap_offsets, rows_min, cols_min, nr_list, nc_list, affine, weight, t):
-        mf = np.ascontiguousarray(mmap_flat, dtype=np.float64)
-        mo = np.ascontiguousarray(mmap_offsets, dtype=np.int64)
-        rm = np.ascontiguousarray(rows_min, dtype=np.int64)
-        cm = np.ascontiguousarray(cols_min, dtype=np.int64)
-        nr = np.ascontiguousarray(nr_list, dtype=np.int64)
-        nc = np.ascontiguousarray(nc_list, dtype=np.int64)
-        axs = np.ascontiguousarray(agent_xs, dtype=np.float64)
-        ays = np.ascontiguousarray(agent_ys, dtype=np.float64)
-        aff = np.ascontiguousarray(affine, dtype=np.float64)
-        out_x = np.zeros(axs.shape[0], dtype=np.float64)
-        out_y = np.zeros(axs.shape[0], dtype=np.float64)
-        _repulsive_batched_core(axs, ays, mf, mo, rm, cm, nr, nc, aff, float(weight), float(t), out_x, out_y)
-        return out_x, out_y
-else:
-    def _repulsive_core(agent_x, agent_y, world_x, world_y, multiplier, weight):
-        # fallback Python implementation operating on flattened arrays with minimal temporaries
-        wx = np.asarray(world_x).ravel()
-        wy = np.asarray(world_y).ravel()
-        mult = np.asarray(multiplier).ravel()
-        dx = agent_x - wx
-        dy = agent_y - wy
-        mags = np.sqrt(dx * dx + dy * dy)
-        mags[mags == 0] = 1e-6
-        fx = ((weight * dx) / (mags * mags)) * mult
-        fy = ((weight * dy) / (mags * mags)) * mult
-        return float(np.nansum(fx)), float(np.nansum(fy))
-
-    def _repulsive_batched_python(agent_xs, agent_ys, mmap_flat, mmap_offsets, rows_min, cols_min, nr_list, nc_list, affine, weight, t):
-        # Python fallback: compute multiplier and world coords on the fly
-        a = affine[0]
-        b = affine[1]
-        c = affine[2]
-        d = affine[3]
-        e = affine[4]
-        f = affine[5]
-        n_agents = int(agent_xs.shape[0])
-        out_x = np.zeros(n_agents, dtype=np.float64)
-        out_y = np.zeros(n_agents, dtype=np.float64)
-        for ai in range(n_agents):
-            ax = float(agent_xs[ai])
-            ay = float(agent_ys[ai])
-            start = int(mmap_offsets[ai])
-            nr = int(nr_list[ai])
-            nc = int(nc_list[ai])
-            if nr <= 0 or nc <= 0:
-                out_x[ai] = 0.0
-                out_y[ai] = 0.0
-                continue
-            tx = 0.0
-            ty = 0.0
-            for ri in range(nr):
-                for ci in range(nc):
-                    idx = start + ri * nc + ci
-                    val = mmap_flat[idx]
-                    t_since = val - t
-                    m = 0.0
-                    if t_since > 10.0 and t_since < 7200.0:
-                        m = 1.0 - (t_since - 5.0) / 7195.0
-                    row = rows_min[ai] + ri
-                    col = cols_min[ai] + ci
-                    wx = a * col + b * row + c
-                    wy = d * col + e * row + f
-                    dx = ax - wx
-                    dy = ay - wy
-                    mag = (dx * dx + dy * dy) ** 0.5
-                    if mag == 0.0:
-                        mag = 1e-6
-                    ux = dx / mag
-                    uy = dy / mag
-                    fx = ((weight * ux) / mag) * m
-                    fy = ((weight * uy) / mag) * m
-                    tx += fx
-                    ty += fy
-            out_x[ai] = tx
-            out_y[ai] = ty
-        return out_x, out_y
-        c = affine[2]
-        d = affine[3]
-        e = affine[4]
-        f = affine[5]
-        n_agents = int(agent_xs.shape[0])
-        out_x = np.zeros(n_agents, dtype=np.float64)
-        out_y = np.zeros(n_agents, dtype=np.float64)
-        for ai in range(n_agents):
-            ax = float(agent_xs[ai])
-            ay = float(agent_ys[ai])
-            start = int(mmap_offsets[ai])
-            nr = int(nr_list[ai])
-            nc = int(nc_list[ai])
-            if nr <= 0 or nc <= 0:
-                out_x[ai] = 0.0
-                out_y[ai] = 0.0
-                continue
-            tx = 0.0
-            ty = 0.0
-            for ri in range(nr):
-                for ci in range(nc):
-                    idx = start + ri * nc + ci
-                    val = mmap_flat[idx]
-                    t_since = val - t
-                    m = 0.0
-                    if t_since > 10.0 and t_since < 7200.0:
-                        m = 1.0 - (t_since - 5.0) / 7195.0
-                    row = rows_min[ai] + ri
-                    col = cols_min[ai] + ci
-                    wx = a * col + b * row + c
-                    wy = d * col + e * row + f
-                    dx = ax - wx
-                    dy = ay - wy
-                    mag = (dx * dx + dy * dy) ** 0.5
-                    if mag == 0.0:
-                        mag = 1e-6
-                    ux = dx / mag
-                    uy = dy / mag
-                    fx = ((weight * ux) / mag) * m
-                    fy = ((weight * uy) / mag) * m
-                    tx += fx
-                    ty += fy
-            out_x[ai] = tx
-            out_y[ai] = ty
-        return out_x, out_y
-
-
-class behavior():
-    def __init__(self, dt, simulation_object):
-        self.dt = dt
-        self.simulation = simulation_object
-        # Async diagnostics queue and thread
-        self._diag_queue = None
-        self._diag_thread = None
-        self._diag_thread_running = False
-        # Preallocated buffers for batched repulsive computation
-        self._buf_world_x = None
-        self._buf_world_y = None
-        self._buf_mult = None
-        self._buf_offsets = None
-        self._buf_counts = None
-        self._buf_rows_min = None
-        self._buf_cols_min = None
-        self._buf_nr = None
-        self._buf_nc = None
-        # reusable output buffer and scratch arrays to avoid repeated allocations
-        self._repulsive_out = None
-        self._scratch_counts = None
-        self._scratch_offsets = None
-        # per-batch logging entries: list of dicts with keys 'start','end','time','rss_before','rss_after','batch_total'
-        self._batch_log = []
-        # threshold in bytes to consider reducing batch size (default 200MB)
-        self._rss_threshold_bytes = int(getattr(self.simulation, 'behavior_memory_threshold_bytes', 200 * 1024 * 1024))
-        # small cache to reuse world grids for repeated windows
-        self._world_grid_cache = getattr(self, '_world_grid_cache', {})
-        # index / meshgrid cache keyed by (nr,nc)
-        self._meshgrid_cache = {}
+                # If debugging explicitly requested, write a single compact NPZ/JSON via the diagnostics writer
+                if getattr(self.simulation, 'debug_behavior', False) or os.environ.get('FORCE_RAWVECS', '').lower() == 'true':
+                    try:
+                        outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+                        payload = {'head_vec': np.asarray(head_vec).astype(float)}
+                        for k, arr in last_cue_vecs_final.items():
+                            payload[f'{k}_vec'] = np.asarray(arr).astype(float)
+                        # best-effort write (uses diagnostics_writer if present)
+                        self._safe_write_diagnostics(int(getattr(self.simulation, 'current_step', t)), payload, outdir=outdir)
+                    except Exception:
+                        try:
+                            import logging
+                            logging.getLogger(__name__).debug('Simplified debug dump failed', exc_info=True)
+                        except Exception:
+                            pass
+            except Exception:
+                try:
+                    import logging
+                    logging.getLogger(__name__).debug('Simplified optional debug block failed', exc_info=True)
+                except Exception:
+                    pass
+            return np.arctan2(head_vec[:, 1], head_vec[:, 0])
+                self._scratch_offsets = np.empty(max_agents, dtype=np.int64)
+                self._scratch_counts = np.empty(max_agents, dtype=np.int64)
+                self._repulsive_out = np.empty((max_agents, 2), dtype=np.float64)
+                # preallocate a per-batch timestamp buffer sized by the maximum window
+                self._buf_mult = np.empty(max_window, dtype=np.float64)
+                # preallocate per-agent per-batch descriptor buffers for a conservative batch size
+                conservative_batch = min(1024, max_agents)
+                self._buf_offsets = np.empty(conservative_batch, dtype=np.int64)
+                self._buf_counts = np.empty(conservative_batch, dtype=np.int64)
+                self._buf_rows_min = np.empty(conservative_batch, dtype=np.int64)
+                self._buf_cols_min = np.empty(conservative_batch, dtype=np.int64)
+                self._buf_nr = np.empty(conservative_batch, dtype=np.int64)
+                self._buf_nc = np.empty(conservative_batch, dtype=np.int64)
+                self._out_x = np.empty(conservative_batch, dtype=np.float64)
+                self._out_y = np.empty(conservative_batch, dtype=np.float64)
+            except Exception:
+                # fall back to lazy allocation if memory allocation fails
+                pass
+        except Exception:
+            pass
         # set numba threads to CPU count if available and not already set via env
         try:
             if _NUMBA_AVAILABLE:
@@ -440,6 +248,17 @@ class behavior():
         except Exception:
             pass
 
+    def _get_psutil_proc(self):
+        """Lazily create and cache a psutil.Process() object for repeated sampling."""
+        if not _PSUTIL_AVAILABLE:
+            return None
+        if getattr(self, '_psutil_proc', None) is None:
+            try:
+                self._psutil_proc = psutil.Process()
+            except Exception:
+                self._psutil_proc = None
+        return getattr(self, '_psutil_proc', None)
+
     def already_been_here(self, weight, t):
         x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
 
@@ -474,29 +293,40 @@ class behavior():
 
         # First pass: determine total size to preallocate concatenated buffers
         if self._scratch_offsets is None or self._scratch_offsets.shape[0] < agent_count:
-            self._scratch_offsets = np.zeros(agent_count, dtype=np.int64)
+            self._scratch_offsets = np.empty(agent_count, dtype=np.int64)
         if self._scratch_counts is None or self._scratch_counts.shape[0] < agent_count:
-            self._scratch_counts = np.zeros(agent_count, dtype=np.int64)
+            self._scratch_counts = np.empty(agent_count, dtype=np.int64)
         offsets = self._scratch_offsets[:agent_count]
         counts = self._scratch_counts[:agent_count]
         total_elems = 0
         mem_sections = [None] * agent_count
         rows_list = [None] * agent_count
         cols_list = [None] * agent_count
+        # cached empty window to avoid repeated allocation of np.zeros((1,1)) when datasets are missing
+        if not hasattr(self, '_empty_window'):
+            self._empty_window = np.empty((1, 1), dtype=np.float64)
+
         for a in range(agent_count):
             rmin = int(row_min[a])
             rmax = int(row_max[a])
             cmin = int(col_min[a])
             cmax = int(col_max[a])
             try:
-                mmap = hdf5_io.read_dataset(h5, f'memory/{a}', default=np.zeros((1, 1)))
+                mmap = hdf5_io.read_dataset(h5, f'memory/{a}', default=None)
+                if mmap is None:
+                    mmap = self._empty_window
             except Exception:
-                mmap = np.zeros((1, 1))
+                mmap = self._empty_window
             section = mmap[rmin:rmax, cmin:cmax]
-            mem_sections[a] = section
+            # flatten and ensure float64 contiguous to avoid repeated ravel/astype later
+            sec_flat = section.ravel()
+            if sec_flat.dtype == np.float64 and sec_flat.flags['C_CONTIGUOUS']:
+                mem_sections[a] = sec_flat
+            else:
+                mem_sections[a] = np.ascontiguousarray(sec_flat, dtype=np.float64)
             nr = rmax - rmin
             nc = cmax - cmin
-            cnt = max(0, nr * nc)
+            cnt = int(mem_sections[a].size)
             counts[a] = cnt
             offsets[a] = total_elems
             total_elems += cnt
@@ -506,7 +336,7 @@ class behavior():
         if total_elems == 0:
             # nothing to compute
             if self._repulsive_out is None or self._repulsive_out.shape[0] < agent_count:
-                self._repulsive_out = np.zeros((agent_count, 2), dtype=np.float64)
+                self._repulsive_out = np.empty((agent_count, 2), dtype=np.float64)
             repulsive_forces_per_agent = self._repulsive_out[:agent_count]
         else:
             # Process agents in manageable batches to avoid a single huge allocation
@@ -515,6 +345,22 @@ class behavior():
                 self._repulsive_out = np.zeros((agent_count, 2), dtype=np.float64)
             repulsive_out = self._repulsive_out[:agent_count]
             try:
+                # Cache psutil.Process() and sample RSS once per-method to reduce sampling overhead
+                ps_proc = self._get_psutil_proc()
+                rss_before_method = None
+                rss_after_method = None
+                try:
+                    if ps_proc is not None:
+                        rss_before_method = ps_proc.memory_info().rss
+                except Exception:
+                    rss_before_method = None
+
+                # precompute affine once to avoid repeated unpacking and conversions
+                try:
+                    affine = _unpack_affine(getattr(self.simulation, 'mental_map_transform', None))
+                except Exception:
+                    affine = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float64)
+
                 for bstart in range(0, agent_count, batch_size):
                     bend = min(agent_count, bstart + batch_size)
                     batch_counts = counts[bstart:bend]
@@ -522,32 +368,27 @@ class behavior():
                     batch_total = int(batch_counts.sum())
                     if batch_total == 0:
                         continue
-                    # record rss before preparing batch
-                    rss_before = None
-                    try:
-                        if _PSUTIL_AVAILABLE:
-                            rss_before = psutil.Process().memory_info().rss
-                    except Exception:
-                        rss_before = None
+                    # per-batch sampling disabled — use per-method rss_before_method (stored in batch log below)
+                    rss_before = rss_before_method
                     # ensure buffers large enough for batch: mmap_flat will hold timestamps
                     if self._buf_mult is None or self._buf_mult.shape[0] < batch_total:
-                        self._buf_mult = np.zeros(batch_total, dtype=np.float64)
+                        self._buf_mult = np.empty(batch_total, dtype=np.float64)
                     nb = bend - bstart
                     # per-agent descriptor arrays (offsets/counts) must be sized by number of agents in batch
                     if self._buf_offsets is None or self._buf_offsets.shape[0] < nb:
-                        self._buf_offsets = np.zeros(nb, dtype=np.int64)
+                        self._buf_offsets = np.empty(nb, dtype=np.int64)
                     if self._buf_counts is None or self._buf_counts.shape[0] < nb:
-                        self._buf_counts = np.zeros(nb, dtype=np.int64)
+                        self._buf_counts = np.empty(nb, dtype=np.int64)
 
                     write_ptr = 0
                     local_offsets = self._buf_offsets[:nb]
                     local_counts = self._buf_counts[:nb]
                     # per-agent row/col/nr/nc buffers
                     if self._buf_rows_min is None or self._buf_rows_min.shape[0] < nb:
-                        self._buf_rows_min = np.zeros(nb, dtype=np.int64)
-                        self._buf_cols_min = np.zeros(nb, dtype=np.int64)
-                        self._buf_nr = np.zeros(nb, dtype=np.int64)
-                        self._buf_nc = np.zeros(nb, dtype=np.int64)
+                        self._buf_rows_min = np.empty(nb, dtype=np.int64)
+                        self._buf_cols_min = np.empty(nb, dtype=np.int64)
+                        self._buf_nr = np.empty(nb, dtype=np.int64)
+                        self._buf_nc = np.empty(nb, dtype=np.int64)
                     local_rows_min = self._buf_rows_min[:nb]
                     local_cols_min = self._buf_cols_min[:nb]
                     local_nr = self._buf_nr[:nb]
@@ -561,8 +402,12 @@ class behavior():
                         rmin, rmax = rows_list[a]
                         cmin, cmax = cols_list[a]
                         section = mem_sections[a]
-                        # store raw timestamp values into mmap_flat; the kernel computes multiplier
-                        tvals = section.ravel().astype(np.float64)
+                        # store raw timestamp values into mmap_flat; prefer a contiguous float64 view when possible
+                        sec_ravel = section.ravel()
+                        if sec_ravel.dtype == np.float64 and sec_ravel.flags['C_CONTIGUOUS']:
+                            tvals = sec_ravel
+                        else:
+                            tvals = np.ascontiguousarray(sec_ravel, dtype=np.float64)
                         nr = rmax - rmin
                         nc = cmax - cmin
                         # reuse arange and meshgrid buffers when possible
@@ -596,13 +441,8 @@ class behavior():
                         local_nc[i] = nc
                         write_ptr += cnt
 
-                    # record rss after preparing batch
+                    # per-batch sampling disabled — use per-method rss_after_method (computed after loop)
                     rss_after = None
-                    try:
-                        if _PSUTIL_AVAILABLE:
-                            rss_after = psutil.Process().memory_info().rss
-                    except Exception:
-                        rss_after = None
 
                     # log batch
                     try:
@@ -617,14 +457,31 @@ class behavior():
                     try:
                         # time the kernel call
                         t0 = time.time()
-                        if _NUMBA_AVAILABLE and '_repulsive_batched_core_safe' in globals():
-                            # pass mmap_flat timestamps and per-agent descriptors; kernel computes pixel->geo via affine
-                            affine = _unpack_affine(getattr(self.simulation, 'mental_map_transform', None))
-                            out_x, out_y = _repulsive_batched_core_safe(axs, ays, self._buf_mult[:write_ptr], local_offsets, local_rows_min, local_cols_min, local_nr, local_nc, affine, float(weight), float(t))
+                        if _NUMBA_AVAILABLE:
+                            # ensure out buffers are large enough
+                            if self._out_x is None or self._out_x.shape[0] < nb:
+                                self._out_x = np.empty(nb, dtype=np.float64)
+                                self._out_y = np.empty(nb, dtype=np.float64)
+                            # If the low-level compiled function is available, call it with preallocated outputs
+                            if '_repulsive_batched_core' in globals():
+                                mf = np.ascontiguousarray(self._buf_mult[:write_ptr], dtype=np.float64)
+                                mo = np.ascontiguousarray(local_offsets, dtype=np.int64)
+                                rm = np.ascontiguousarray(local_rows_min, dtype=np.int64)
+                                cm = np.ascontiguousarray(local_cols_min, dtype=np.int64)
+                                nr_arr = np.ascontiguousarray(local_nr, dtype=np.int64)
+                                nc_arr = np.ascontiguousarray(local_nc, dtype=np.int64)
+                                axs_c = np.ascontiguousarray(axs, dtype=np.float64)
+                                ays_c = np.ascontiguousarray(ays, dtype=np.float64)
+                                aff_c = np.ascontiguousarray(affine, dtype=np.float64)
+                                _repulsive_batched_core(axs_c, ays_c, mf, mo, rm, cm, nr_arr, nc_arr, aff_c, float(weight), float(t), self._out_x[:nb], self._out_y[:nb])
+                                out_x = self._out_x[:nb]
+                                out_y = self._out_y[:nb]
+                            else:
+                                out_x, out_y = _repulsive_batched_core_safe(axs, ays, self._buf_mult[:write_ptr], local_offsets, local_rows_min, local_cols_min, local_nr, local_nc, affine, float(weight), float(t))
                         else:
-                            # Python fallback expects world coords; fall back to original per-agent compute
-                            out_x = np.zeros(nb, dtype=np.float64)
-                            out_y = np.zeros(nb, dtype=np.float64)
+                            # Python fallback expects world coords; reuse output buffers to avoid repeated allocations
+                            out_x = np.empty(nb, dtype=np.float64)
+                            out_y = np.empty(nb, dtype=np.float64)
                             for idx, a in enumerate(range(bstart, bend)):
                                 try:
                                     out_x[idx], out_y[idx] = self._calculate_repulsive_force(mem_sections[a], a, int(row_min[a]), int(row_max[a]), int(col_min[a]), int(col_max[a]), weight, t)
@@ -639,15 +496,8 @@ class behavior():
                                 self._batch_log[-1]['time'] = t1 - t0
                         except Exception:
                             pass
-                        # if memory spiked beyond threshold, reduce batch size for future batches
-                        try:
-                            if rss_before is not None and rss_after is not None and (rss_after - rss_before) > self._rss_threshold_bytes:
-                                # shrink future batch size by half, minimum 16
-                                new_bs = max(16, int(batch_size // 2))
-                                setattr(self.simulation, 'behavior_batch_size', new_bs)
-                                batch_size = new_bs
-                        except Exception:
-                            pass
+                        # adaptive memory check moved to after batch assembly (use per-method samples)
+                        pass
                     except Exception:
                         # batch-level failure: fall back to per-agent compute for this batch
                         for idx, a in enumerate(range(bstart, bend)):
@@ -655,6 +505,33 @@ class behavior():
                                 repulsive_out[a, :] = self._calculate_repulsive_force(mem_sections[a], a, int(row_min[a]), int(row_max[a]), int(col_min[a]), int(col_max[a]), weight, t)
                             except Exception:
                                 repulsive_out[a, :] = np.array([0.0, 0.0])
+                # sample rss after finishing all batches (single sample)
+                try:
+                    if ps_proc is not None:
+                        rss_after_method = ps_proc.memory_info().rss
+                except Exception:
+                    rss_after_method = None
+
+                # Update batch_log entries with method-level rss samples where available
+                try:
+                    if self._batch_log:
+                        for entry in self._batch_log:
+                            if 'rss_before' not in entry or entry.get('rss_before') is None:
+                                entry['rss_before'] = rss_before_method
+                            if 'rss_after' not in entry or entry.get('rss_after') is None:
+                                entry['rss_after'] = rss_after_method
+                except Exception:
+                    pass
+
+                # if memory spiked beyond threshold, reduce batch size for future batches based on method-level samples
+                try:
+                    if rss_before_method is not None and rss_after_method is not None and (rss_after_method - rss_before_method) > self._rss_threshold_bytes:
+                        new_bs = max(16, int(batch_size // 2))
+                        setattr(self.simulation, 'behavior_batch_size', new_bs)
+                        batch_size = new_bs
+                except Exception:
+                    pass
+
                 repulsive_forces_per_agent = repulsive_out
             except Exception:
                 # catastrophic fallback: revert to original per-agent computation
@@ -664,26 +541,29 @@ class behavior():
                 ])
 
         # dump per-batch CSV log for offline analysis
+        # Only write detailed per-batch CSVs when debugging or explicit SWEEP_DEBUG is set
         try:
-            import csv
-            ts = int(time.time())
-            outdir = os.path.join(os.getcwd(), 'outputs', 'profiling')
-            os.makedirs(outdir, exist_ok=True)
-            run_tag = None
-            try:
-                run_tag = getattr(self.simulation, 'run_tag', None) or os.environ.get('RUN_TAG')
-            except Exception:
+            write_batch_logs = bool(getattr(self.simulation, 'debug_behavior', False) or os.environ.get('SWEEP_DEBUG'))
+            if write_batch_logs:
+                import csv
+                ts = int(time.time())
+                outdir = os.path.join(os.getcwd(), 'outputs', 'profiling')
+                os.makedirs(outdir, exist_ok=True)
                 run_tag = None
-            if run_tag:
-                fname = os.path.join(outdir, f'batch_log_n{agent_count}_b{int(batch_size)}_{run_tag}_{ts}.csv')
-            else:
-                fname = os.path.join(outdir, f'batch_log_n{agent_count}_b{int(batch_size)}_{ts}.csv')
-            with open(fname, 'w', newline='', encoding='utf-8') as fh:
-                fieldnames = ['start','end','batch_total','time','rss_before','rss_after','n_agents','batch_size','run_tag']
-                w = csv.DictWriter(fh, fieldnames=fieldnames)
-                w.writeheader()
-                for r in self._batch_log:
-                    w.writerow({k: r.get(k) for k in fieldnames})
+                try:
+                    run_tag = getattr(self.simulation, 'run_tag', None) or os.environ.get('RUN_TAG')
+                except Exception:
+                    run_tag = None
+                if run_tag:
+                    fname = os.path.join(outdir, f'batch_log_n{agent_count}_b{int(batch_size)}_{run_tag}_{ts}.csv')
+                else:
+                    fname = os.path.join(outdir, f'batch_log_n{agent_count}_b{int(batch_size)}_{ts}.csv')
+                with open(fname, 'w', newline='', encoding='utf-8') as fh:
+                    fieldnames = ['start','end','batch_total','time','rss_before','rss_after','n_agents','batch_size','run_tag']
+                    w = csv.DictWriter(fh, fieldnames=fieldnames)
+                    w.writeheader()
+                    for r in self._batch_log:
+                        w.writerow({k: r.get(k) for k in fieldnames})
         except Exception:
             pass
 
@@ -1436,7 +1316,8 @@ class behavior():
                 }
 
             try:
-                print('DBG arbitrate: about to call alignment_cue')
+                if getattr(self.simulation, 'debug_behavior', False):
+                    logging.getLogger(__name__).debug('DBG arbitrate: about to call alignment_cue')
             except Exception:
                 pass
             # ensure rheotaxis is always computed (used downstream)
@@ -1562,7 +1443,7 @@ class behavior():
                     try:
                         n_clip = int(np.sum(norms > cap))
                         if n_clip > 0:
-                            print(f'DBG arbitrate: clipped {n_clip} agents for cue={cue} (cap={cap})')
+                            logging.getLogger(__name__).debug('DBG arbitrate: clipped %d agents for cue=%s (cap=%s)', n_clip, cue, cap)
                     except Exception:
                         pass
             except Exception:
@@ -1583,13 +1464,15 @@ class behavior():
                 vec_sum_migratory = np.where(np.linalg.norm(vec_sum_migratory, axis=-1)[:, np.newaxis] < tolerance,
                                               vec_sum_migratory + vec,
                                               vec_sum_migratory)
-        # immediate unconditional debug prints to reveal raw_vecs and cue_magnitudes
+        # debug prints (guarded) to reveal raw_vecs and cue_magnitudes
         try:
-            print('DBG RAWVECS POST BUILD keys=', list(raw_vecs.keys()))
+            if getattr(self.simulation, 'debug_behavior', False):
+                logging.getLogger(__name__).debug('DBG RAWVECS POST BUILD keys=%s', list(raw_vecs.keys()))
         except Exception:
             pass
         try:
-            print('DBG CUE_MAGS POST BUILD keys=', list(cue_magnitudes.keys()))
+            if getattr(self.simulation, 'debug_behavior', False):
+                logging.getLogger(__name__).debug('DBG CUE_MAGS POST BUILD keys=%s', list(cue_magnitudes.keys()))
         except Exception:
             pass
 
@@ -1604,7 +1487,8 @@ class behavior():
             except Exception:
                 km = {k: None for k in cue_magnitudes.keys()}
             try:
-                print('DBG raw_vecs keys/shapes=', kv, 'cue_magnitudes shapes=', km)
+                if getattr(self.simulation, 'debug_behavior', False):
+                    logging.getLogger(__name__).debug('DBG raw_vecs keys/shapes=%s cue_magnitudes shapes=%s', kv, km)
             except Exception:
                 pass
         except Exception:
@@ -1731,10 +1615,10 @@ class behavior():
 
         try:
             if getattr(self.simulation, 'debug_behavior', False):
-                try:
-                    print('DBG arbitrate: head_vec.shape=', getattr(head_vec, 'shape', None), 'debug_behavior=', getattr(self.simulation, 'debug_behavior', False))
-                except Exception:
-                    pass
+                    try:
+                        logging.getLogger(__name__).debug('DBG arbitrate: head_vec.shape=%s debug_behavior=%s', getattr(head_vec, 'shape', None), getattr(self.simulation, 'debug_behavior', False))
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -1793,7 +1677,6 @@ class behavior():
                 pass
 
             # Robust final assignment: ensure attributes exist, correct shapes, and are serializable.
-            try:
                 n_agents = int(getattr(self.simulation, 'num_agents', 0)) or int(getattr(self.simulation, 'n_agents', 0))
                 if n_agents <= 0:
                     n_agents = int(getattr(self.simulation, 'num_agents', 0))
@@ -1866,315 +1749,42 @@ class behavior():
                             payload[f'{k}_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
 
                     # attempt HDF5 diagnostics writer, fall back to NPZ if configured
-                    self._safe_write_diagnostics(step_i, payload)
+                    try:
+                        self._safe_write_diagnostics(step_i, payload)
+                    except Exception:
+                        pass
 
-                    # Also include battery/physiology diagnostics when available (best-effort)
-                    try:
-                        phys = {}
-                        try:
-                            phys['battery'] = np.asarray(self.simulation.battery).astype(float)
-                        except Exception:
-                            pass
-                        try:
-                            phys['recover_stopwatch'] = np.asarray(self.simulation.recover_stopwatch).astype(float)
-                        except Exception:
-                            pass
-                        try:
-                            phys['swim_behav'] = np.asarray(self.simulation.swim_behav).astype(np.int32)
-                        except Exception:
-                            pass
-                        try:
-                            phys['ideal_sog'] = np.asarray(self.simulation.ideal_sog).astype(float)
-                        except Exception:
-                            pass
-                        if phys:
-                            # write physiology separately; use diagnostics writer if available
-                            self._safe_write_diagnostics(step_i, phys)
-                    except Exception:
-                        pass
-                except Exception:
-                    try:
-                        print('DBG: failed robust final assignment of last_cue_vecs/last_head_vec', file=sys.stderr)
-                    except Exception:
-                        pass
-            except Exception:
+            # optional behavior debugging: simplified dump
+            if getattr(self.simulation, 'debug_behavior', False):
                 try:
-                    print('DBG: failed robust final assignment of last_cue_vecs/last_head_vec', file=sys.stderr)
-                except Exception:
-                    pass
-
-            # optional behavior debugging: dump cue snapshots
-            try:
-                if getattr(self.simulation, 'debug_behavior', False):
                     outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
                     os.makedirs(outdir, exist_ok=True)
-                    import time
-                    fname_npz = os.path.join(outdir, f'behavior_debug_step_{int(getattr(self.simulation, "current_step", t))}_{int(time.time())}.npz')
-                    # safe serializable payload: head_vec (n,2) and cue_magnitudes (per-cue arrays)
-                    # include both magnitudes and the coerced per-agent vectors for inspection
-                    safe_cues = {f'{k}_mag': (np.asarray(v).astype(float) if getattr(v, 'size', 0) > 0 else np.array([])) for k, v in cue_magnitudes.items()}
-                    safe_vecs = {f'{k}_vec': (np.asarray(v).astype(float) if getattr(v, 'size', 0) > 0 else np.zeros((self.simulation.num_agents, 2))) for k, v in raw_vecs.items()}
+                    step_i = int(getattr(self.simulation, 'current_step', t))
+                    payload = {}
                     try:
-                        # include battery and swim state fields when present for fatigue inspection
-                        extra = {}
-                        for bk in ('battery', 'swim_behav', 'swim_mode', 'ideal_sog', 'sog', 'bout_dur', 'dist_per_bout'):
-                            if hasattr(self.simulation, bk):
-                                val = getattr(self.simulation, bk)
-                                extra[bk] = np.asarray(val).astype(float)
-                        # include last sampled velocity (from rheotaxis sampling) when present
-                        if hasattr(self.simulation, 'last_sampled_vel') and self.simulation.last_sampled_vel is not None:
-                            try:
-                                extra['last_sampled_vel'] = np.asarray(self.simulation.last_sampled_vel).astype(float)
-                            except Exception:
-                                pass
-                        # diagnostic: alignment fallback flag
-                        try:
-                            extra['alignment_used_velocity'] = float(getattr(self.simulation, 'alignment_used_velocity', 0.0))
-                        except Exception:
-                            extra['alignment_used_velocity'] = 0.0
-                        # debug: print neighbor diagnostics before writing NPZ
-                        if getattr(self.simulation, 'debug_behavior', False):
-                            try:
-                                nc = neighbor_counts if 'neighbor_counts' in locals() else None
-                                nc_shape = None if nc is None else getattr(nc, 'shape', None)
-                                heading_arr = np.asarray(self.simulation.heading)
-                                heading_sample = list(heading_arr[:10]) if getattr(heading_arr, 'size', 0) > 0 else []
-                                print('NPZ write: neighbor_counts.shape=', nc_shape, 'neighbor_counts_sample=', (nc[:10].tolist() if nc is not None and getattr(nc, "size", 0) > 0 else []))
-                                print('NPZ write: simulation.heading size=', getattr(heading_arr, 'size', 0), 'sample=', heading_sample)
-                            except Exception:
-                                pass
-
-                        # sanitize safe_cues and safe_vecs: convert empty arrays or all-NaN arrays to zeros to avoid
-                        # runtime warnings when consumers compute min/max/mean
-                        def _sanitize(arr):
-                            a = np.asarray(arr)
-                            if a.size == 0:
-                                return np.zeros((self.simulation.num_agents,)) if a.ndim == 1 else np.zeros((self.simulation.num_agents, 2))
-                            if np.all(np.isnan(a)):
-                                # replace all-NaN with zeros
-                                return np.nan_to_num(a, nan=0.0)
-                            return a
-
-                        safe_cues_s = {k: _sanitize(v) for k, v in safe_cues.items()}
-                        safe_vecs_s = {k: _sanitize(v) for k, v in safe_vecs.items()}
-
-                        # Neighbor diagnostics: convert agents_within_buffers (list of arrays)
-                        # into concise serializable arrays: counts per agent and concatenated indices.
-                        neighbor_counts = None
-                        neighbors_concat = None
-                        neighbor_any_within_2bl = None
-                        neighbor_mean_distance = None
-                        try:
-                            if hasattr(self.simulation, 'agents_within_buffers'):
-                                awb = self.simulation.agents_within_buffers
-                                neighbor_counts = np.array([len(x) for x in awb], dtype=np.int32)
-                                if neighbor_counts.sum() > 0:
-                                    neighbors_concat = np.concatenate(awb).astype(np.int32)
-                                    # reconstruct agent indices for each entry in concat
-                                    agent_idx_repeat = np.repeat(np.arange(self.simulation.num_agents), neighbor_counts)
-                                    # compute distances for each neighbor entry
-                                    X = np.asarray(self.simulation.X).flatten()
-                                    Y = np.asarray(self.simulation.Y).flatten()
-                                    nbr_X = X[neighbors_concat]
-                                    nbr_Y = Y[neighbors_concat]
-                                    dx = nbr_X - X[agent_idx_repeat]
-                                    dy = nbr_Y - Y[agent_idx_repeat]
-                                    dists = np.sqrt(dx**2 + dy**2)
-                                    # per-agent mean distance (nan if no neighbors)
-                                    # start from zeros, accumulate distances per-agent, then divide
-                                    mean_per_agent = np.zeros(self.simulation.num_agents, dtype=float)
-                                    np.add.at(mean_per_agent, agent_idx_repeat, dists)
-                                    # divide by counts where >0; mark agents with zero neighbors as NaN
-                                    nonzero = neighbor_counts > 0
-                                    mean_per_agent[nonzero] = mean_per_agent[nonzero] / neighbor_counts[nonzero]
-                                    mean_per_agent[~nonzero] = np.nan
-                                    neighbor_mean_distance = mean_per_agent
-                                    # per-agent minimum neighbor distance
-                                    min_per_agent = np.full(self.simulation.num_agents, np.nan)
-                                    if dists.size > 0:
-                                        # compute min per agent
-                                        # initialize accumulator with +inf
-                                        acc_min = np.full(self.simulation.num_agents, np.inf)
-                                        for idx, ag in enumerate(agent_idx_repeat):
-                                            acc_min[ag] = min(acc_min[ag], dists[idx])
-                                        acc_min[acc_min == np.inf] = np.nan
-                                        min_per_agent = acc_min
-                                    neighbor_min_distance = min_per_agent
-                                    # any neighbor within two body lengths?
-                                    two_bl = 2.0 * (self.simulation.length / 1000.0)
-                                    within_mask = dists <= two_bl[agent_idx_repeat]
-                                    any_within = np.zeros(self.simulation.num_agents, dtype=np.bool_)
-                                    if within_mask.size > 0:
-                                        np.logical_or.at(any_within, agent_idx_repeat[within_mask], True)
-                                    neighbor_any_within_2bl = any_within
-                                    # neighbor headings and relative headings per neighbor entry
-                                    try:
-                                        neighbor_headings = np.asarray(self.simulation.heading)[neighbors_concat]
-                                        neighbor_rel_heading = neighbor_headings - np.asarray(self.simulation.heading)[agent_idx_repeat]
-                                        # normalize to [-pi, pi]
-                                        neighbor_rel_heading = (neighbor_rel_heading + np.pi) % (2 * np.pi) - np.pi
-                                    except Exception:
-                                        neighbor_headings = np.array([], dtype=float)
-                                        neighbor_rel_heading = np.array([], dtype=float)
-                                else:
-                                    neighbors_concat = np.array([], dtype=np.int32)
-                                    neighbor_mean_distance = np.full(self.simulation.num_agents, np.nan)
-                                    neighbor_any_within_2bl = np.zeros(self.simulation.num_agents, dtype=np.bool_)
-                        except Exception:
-                            neighbor_counts = np.zeros(self.simulation.num_agents, dtype=np.int32)
-                            neighbors_concat = np.array([], dtype=np.int32)
-                            neighbor_mean_distance = np.full(self.simulation.num_agents, np.nan)
-                            neighbor_any_within_2bl = np.zeros(self.simulation.num_agents, dtype=np.bool_)
-
-                        try:
-                            nc_shape = None if neighbor_counts is None else getattr(neighbor_counts, 'shape', None)
-                            neigh_concat_shape = None if neighbors_concat is None else getattr(neighbors_concat, 'shape', None)
-                            agent_idx_shape = None if 'agent_idx_repeat' not in locals() else getattr(agent_idx_repeat, 'shape', None)
-                            print('DBG NPZ write: neighbor_counts.shape=', nc_shape, 'neighbors_concat.shape=', neigh_concat_shape, 'agent_idx_repeat.shape=', agent_idx_shape)
-                            if neighbors_concat is not None and getattr(neighbors_concat, 'size', 0) > 0:
-                                print('DBG NPZ write: neighbors_concat sample=', neighbors_concat[:20].tolist())
-                            if 'agent_idx_repeat' in locals() and getattr(agent_idx_repeat, 'size', 0) > 0:
-                                print('DBG NPZ write: agent_idx_repeat sample=', agent_idx_repeat[:20].tolist())
-                        except Exception:
-                            pass
-                    # battery/physiology diagnostics are intentionally omitted here to
-                    # avoid complex nested try/except blocks during import-time parsing.
-                    # They can be written elsewhere once diagnostics_writer is stable.
-
-                        # Prepare alignment_diag fields (prefer per-neighbor diagnostics when present)
-                        alignment_diag_payload = {}
-                        if hasattr(self.simulation, '_alignment_diag'):
-                            try:
-                                ad = self.simulation._alignment_diag
-                                # flatten and convert to serializable numpy arrays
-                                for k in ('raw_headings_neighbors', 'headings_neighbors_used', 'used_velocity_heading', 'neighbor_indices', 'agent_indices'):
-                                    if k in ad:
-                                        val = ad[k]
-                                        # ensure numpy array or scalar
-                                        if isinstance(val, (list, tuple)):
-                                            alignment_diag_payload[k] = np.asarray(val)
-                                        else:
-                                            try:
-                                                alignment_diag_payload[k] = np.asarray(val)
-                                            except Exception:
-                                                alignment_diag_payload[k] = np.array(val)
-                            except Exception:
-                                alignment_diag_payload = {}
-
-                        # Explicitly extract alignment diagnostics into locals to ensure they are written
-                        raw_headings_neighbors_arr = np.array([])
-                        headings_neighbors_used_arr = np.array([])
-                        used_velocity_heading_val = np.float64(0.0)
-                        alignment_neighbor_indices = np.array([], dtype=np.int32)
-                        alignment_agent_indices = np.array([], dtype=np.int32)
-                        if hasattr(self.simulation, '_alignment_diag'):
-                            try:
-                                ad = self.simulation._alignment_diag
-                                raw_headings_neighbors_arr = np.asarray(ad.get('raw_headings_neighbors', np.array([])))
-                                headings_neighbors_used_arr = np.asarray(ad.get('headings_neighbors_used', np.array([])))
-                                try:
-                                    used_velocity_heading_val = np.asarray(ad.get('used_velocity_heading', 0.0))
-                                except Exception:
-                                    used_velocity_heading_val = float(ad.get('used_velocity_heading', 0.0))
-                                alignment_neighbor_indices = np.asarray(ad.get('neighbor_indices', np.array([], dtype=np.int32))).astype(np.int32)
-                                alignment_agent_indices = np.asarray(ad.get('agent_indices', np.array([], dtype=np.int32))).astype(np.int32)
-                            except Exception:
-                                pass
-
-                        try:
-                            print('DBG NPZ write: saving alignment diagnostics shapes:', raw_headings_neighbors_arr.shape, headings_neighbors_used_arr.shape, alignment_neighbor_indices.shape, alignment_agent_indices.shape)
-                        except Exception:
-                            pass
-
-                        # Save NPZ and perform robust post-save verification (absolute paths,
-                        # existence, file size, and explicit key checks) to diagnose missing fields.
-                        try:
-                            abs_fname = os.path.abspath(fname_npz)
-                            print('Saving behavior NPZ ->', abs_fname)
-                        except Exception:
-                            abs_fname = fname_npz
-                        try:
-                            # Ensure head_vec and per-cue vectors are explicitly included
-                            to_write = {}
-                            try:
-                                to_write['head_vec'] = np.asarray(head_vec).astype(float)
-                            except Exception:
-                                to_write['head_vec'] = np.zeros((self.simulation.num_agents, 2))
-                            # include sanitized cue magnitudes and vectors
-                            to_write.update(safe_cues_s)
-                            to_write.update(safe_vecs_s)
-                            # include extras and neighbor diagnostics
-                            to_write.update(extra)
-                            to_write['neighbor_counts'] = neighbor_counts
-                            to_write['neighbors_concat'] = neighbors_concat
-                            to_write['neighbor_mean_distance'] = neighbor_mean_distance
-                            to_write['neighbor_any_within_2bl'] = neighbor_any_within_2bl
-                            # legacy per-agent neighbor summaries (kept for compatibility)
-                            to_write['neighbor_headings'] = (neighbor_headings if 'neighbor_headings' in locals() else np.array([]))
-                            to_write['neighbor_rel_heading'] = (neighbor_rel_heading if 'neighbor_rel_heading' in locals() else np.array([]))
-                            to_write['neighbors_owner'] = (agent_idx_repeat if 'agent_idx_repeat' in locals() else np.array([], dtype=np.int32))
-                            to_write['neighbor_min_distance'] = (neighbor_min_distance if 'neighbor_min_distance' in locals() else np.full(self.simulation.num_agents, np.nan))
-                            to_write['closest_agent'] = (np.asarray(getattr(self.simulation, 'closest_agent', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'closest_agent') else np.array([]))
-                            to_write['nearest_neighbor_distance'] = (np.asarray(getattr(self.simulation, 'nearest_neighbor_distance', np.array([]))).astype(np.float64) if hasattr(self.simulation, 'nearest_neighbor_distance') else np.array([]))
-                            # explicit per-neighbor alignment diagnostics
-                            to_write['raw_headings_neighbors'] = raw_headings_neighbors_arr
-                            to_write['headings_neighbors_used'] = headings_neighbors_used_arr
-                            to_write['alignment_neighbor_indices'] = alignment_neighbor_indices
-                            to_write['alignment_agent_indices'] = alignment_agent_indices
-                            try:
-                                outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                                # prefer diagnostics writer; otherwise NPZ
-                                written = self._safe_write_diagnostics(int(getattr(self.simulation, 'current_step', t)), to_write, outdir=outdir)
-                                if not written:
-                                    self._safe_npz_dump(outdir, f'behavior_debug_step_{int(getattr(self.simulation, "current_step", t))}', to_write)
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            try:
-                                print('Failed writing behavior NPZ:', e)
-                            except Exception:
-                                pass
-
-                        # Post-save verification: check file exists/size and list keys, and explicitly
-                        # report presence/shape of expected alignment fields.
-                            # reduced post-save verification: rely on writer or NPZ
-                            pass
-
-                        # Also write a dedicated alignment dump to ensure per-neighbor arrays are saved
-                        try:
-                            aln_fname = fname_npz.replace('.npz', '_alignment.npz')
-                            aln_abs = os.path.abspath(aln_fname)
-                            import numpy as _np, os as _os
-                            try:
-                                outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                                aln_payload = {
-                                    'raw_headings_neighbors': raw_headings_neighbors_arr,
-                                    'headings_neighbors_used': headings_neighbors_used_arr,
-                                    'alignment_used_velocity': (used_velocity_heading_val if used_velocity_heading_val is not None else 0.0),
-                                    'alignment_neighbor_indices': alignment_neighbor_indices,
-                                    'alignment_agent_indices': alignment_agent_indices,
-                                }
-                                self._safe_npz_dump(outdir, f'behavior_alignment_dump_step_{int(getattr(self.simulation, "current_step", t))}', aln_payload)
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            try:
-                                import traceback
-                                print('Failed writing alignment NPZ:', e)
-                                traceback.print_exc()
-                            except Exception:
-                                pass
+                        payload['head_vec'] = np.asarray(head_vec).astype(float)
                     except Exception:
-                        # fallback: write a small JSON containing head_vec and cue magnitudes
-                        import json
+                        payload['head_vec'] = np.zeros((getattr(self.simulation, 'num_agents', 0) or 0, 2), dtype=float)
+                    try:
+                        for k, v in cue_magnitudes.items():
+                            payload[f'{k}_mag'] = np.asarray(v).astype(float)
+                    except Exception:
+                        pass
+                    try:
+                        self._safe_write_diagnostics(step_i, payload, outdir=outdir)
+                    except Exception:
+                        # best-effort: enqueue small JSON if NPZ/HDF5 fails
                         try:
-                            serial = {'head_vec': (np.asarray(head_vec)).astype(float).tolist(), 'cue_magnitudes': {k: (np.asarray(v).astype(float)).tolist() for k, v in cue_magnitudes.items()}}
-                            outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                            self._enqueue_diag_json(outdir, f'behavior_headvecs_step_{int(getattr(self.simulation, "current_step", t))}', serial)
+                            serial = {'head_vec': payload.get('head_vec', []).tolist(), 'cue_magnitudes': {k: v.tolist() for k, v in payload.items() if k.endswith('_mag')}}
+                            self._enqueue_diag_json(outdir, f'behavior_headvecs_step_{step_i}', serial)
                         except Exception:
                             pass
-            except Exception:
-                pass
+                except Exception:
+                    try:
+                        import logging
+                        logging.getLogger(__name__).debug('simplified behavior debug dump failed')
+                    except Exception:
+                        pass
             return np.arctan2(head_vec[:, 1], head_vec[:, 0])
         else:
             # If head_vec has unexpected shape, try to sanitize: replace NaNs and zero-length vectors
