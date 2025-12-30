@@ -1007,8 +1007,8 @@ class behavior():
                             return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
                     rows, cols = geo_to_pixel(x, y, transform)
-                    rows = np.asarray(rows, dtype=int)
-                    cols = np.asarray(cols, dtype=int)
+                    rows = np.atleast_1d(rows).astype(int)
+                    cols = np.atleast_1d(cols).astype(int)
                     rows = np.clip(rows, 0, shared_refugia.shape[0] - 1)
                     cols = np.clip(cols, 0, shared_refugia.shape[1] - 1)
                     ref_r = np.asarray(cache[0])[rows, cols]
@@ -1089,6 +1089,8 @@ class behavior():
         buff = 2
         x, y = (self.simulation.X, self.simulation.Y)
         rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
+        rows = np.atleast_1d(rows)
+        cols = np.atleast_1d(cols)
 
         xmin = cols - buff
         xmax = cols + buff + 1
@@ -1204,6 +1206,8 @@ class behavior():
         buff = 2
         x, y = (np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y))
         rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
+        rows = np.atleast_1d(rows)
+        cols = np.atleast_1d(cols)
 
         xmin = cols - buff
         xmax = cols + buff + 1
@@ -1309,16 +1313,18 @@ class behavior():
         buff = 2
         x, y = (self.simulation.X, self.simulation.Y)
         rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
+        rows = np.atleast_1d(rows)
+        cols = np.atleast_1d(cols)
 
         xmin = cols - buff
         xmax = cols + buff + 1
         ymin = rows - buff
         ymax = rows + buff + 1
 
-        xmin = xmin.astype(np.int32)
-        xmax = xmax.astype(np.int32)
-        ymin = ymin.astype(np.int32)
-        ymax = ymax.astype(np.int32)
+        xmin = np.atleast_1d(xmin).astype(np.int32)
+        xmax = np.atleast_1d(xmax).astype(np.int32)
+        ymin = np.atleast_1d(ymin).astype(np.int32)
+        ymax = np.atleast_1d(ymax).astype(np.int32)
 
         repulsive_forces = np.zeros((self.simulation.num_agents, 2), dtype=float)
         min_depth = self.simulation.too_shallow
@@ -1360,15 +1366,9 @@ class behavior():
         x_force = ((weight * unit_vector_x) / magnitudes) * depth_multiplier * front_multiplier
         y_force = ((weight * unit_vector_y) / magnitudes) * depth_multiplier * front_multiplier
 
-        if self.simulation.num_agents > 1:
-            total_x_force = np.nansum(x_force, axis=(1, 2))
-            total_y_force = np.nansum(y_force, axis=(1, 2))
-        else:
-            total_x_force = np.nansum(x_force)
-            total_y_force = np.nansum(y_force)
-
-        repulsive_forces = np.array([total_x_force, total_y_force]).T
-        return repulsive_forces
+        total_x_force = np.nansum(x_force, axis=(1, 2))
+        total_y_force = np.nansum(y_force, axis=(1, 2))
+        return np.column_stack((total_x_force, total_y_force))
 
     def wave_drag_multiplier(self):
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/wave_drag_huges_2004_fig3.csv')
@@ -1382,16 +1382,18 @@ class behavior():
         buff = 2
         x, y = (self.simulation.X, self.simulation.Y)
         rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
+        rows = np.atleast_1d(rows)
+        cols = np.atleast_1d(cols)
 
         xmin = cols - buff
         xmax = cols + buff + 1
         ymin = rows - buff
         ymax = rows + buff + 1
 
-        xmin = xmin.astype(np.int32)
-        xmax = xmax.astype(np.int32)
-        ymin = ymin.astype(np.int32)
-        ymax = ymax.astype(np.int32)
+        xmin = np.atleast_1d(xmin).astype(np.int32)
+        xmax = np.atleast_1d(xmax).astype(np.int32)
+        ymin = np.atleast_1d(ymin).astype(np.int32)
+        ymax = np.atleast_1d(ymax).astype(np.int32)
 
         slices = [(agent, slice(y0, y1), slice(x0, x1))
                   for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),

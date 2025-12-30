@@ -96,6 +96,17 @@ class simulation:
         self.swim_mode = np.ones(self.num_agents, dtype=np.int8)
         self.max_s_U = np.repeat(2.77, self.num_agents)
         self.max_p_U = np.repeat(4.43, self.num_agents)
+        # When agents are fatigued (swim_behav == 3), their effective sustainable
+        # swim speed may be reduced. Keep this as a separate array so callers can
+        # tune fatigued capacity without mutating the baseline `max_s_U`.
+        #
+        # Units: body-lengths / second (BL/s), matching legacy usage.
+        self.fatigued_max_s_U_multiplier = float(getattr(self, 'fatigued_max_s_U_multiplier', 1.0))
+        try:
+            base = np.asarray(self.max_s_U, dtype=np.float32)
+        except Exception:
+            base = np.repeat(2.77, self.num_agents).astype(np.float32)
+        self.max_s_U_fatigued = (base * self.fatigued_max_s_U_multiplier).astype(np.float32)
         self.a_p = np.repeat(0.0, self.num_agents)
         self.b_p = np.repeat(-1.0, self.num_agents)
         self.a_s = np.repeat(0.0, self.num_agents)
@@ -165,6 +176,26 @@ class simulation:
                 self.sog = self.ideal_sog.copy()
         except Exception:
             pass
+
+        # Refugia definition (canonical): places where a fatigued fish can hold
+        # station (i.e., water velocity does not exceed sustainable fatigued
+        # capacity). The environment layer is computed relative to a reference
+        # fish length (mm) to avoid per-agent maps.
+        try:
+            ref_len = getattr(self, 'refugia_ref_length_mm', None)
+            if ref_len is None:
+                ref_len = float(np.nanmedian(np.asarray(self.length, dtype=float)))
+            if not np.isfinite(ref_len) or ref_len <= 0:
+                ref_len = 500.0
+            self.refugia_ref_length_mm = float(ref_len)
+        except Exception:
+            self.refugia_ref_length_mm = 500.0
+        # Derive `environment/refugia` automatically when possible.
+        try:
+            self.auto_derive_refugia = bool(getattr(self, 'auto_derive_refugia', True))
+        except Exception:
+            self.auto_derive_refugia = True
+        self._refugia_derived = False
 
         # If a start polygon was provided, sample initial agent positions inside it
         if start_polygon:
@@ -358,6 +389,14 @@ class simulation:
             # tolerate any failures here; behavior will be more limited but simulation can still run
             if getattr(self, 'depth_rast_transform', None) is None:
                 self.depth_rast_transform = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+
+        # Best-effort: derive an environment refugia mask using the canonical
+        # fatigued station-holding definition.
+        try:
+            if getattr(self, 'auto_derive_refugia', False):
+                self.derive_environment_refugia()
+        except Exception:
+            pass
 
         # heading initialization deferred until behavior helper is available
 
@@ -566,6 +605,114 @@ class simulation:
             hdf5_io.write_dataset(h5, key, np.full((avoid_height, avoid_width), np.nan, dtype=np.float32))
         return True
 
+    def _write_map_cell(self, h5, key: str, row: int, col: int, value) -> bool:
+        if h5 is None:
+            return False
+        ds = None
+        try:
+            if key in h5:
+                ds = h5[key]
+        except Exception:
+            ds = None
+        if ds is None:
+            ds = hdf5_io.read_dataset(h5, key, default=None)
+        if ds is None:
+            return False
+        try:
+            ds[row, col] = value
+            return True
+        except Exception:
+            try:
+                arr = np.array(ds)
+                if arr.ndim != 2:
+                    return False
+                arr[row, col] = value
+                hdf5_io.write_dataset(h5, key, arr)
+                return True
+            except Exception:
+                return False
+
+    def derive_environment_refugia(self, ref_length_mm: float | None = None) -> bool:
+        """Create `environment/refugia` (binary) using fatigued station-holding criterion.
+
+        Refugia cells are those where water speed <= max_s_U_fatigued (BL/s) converted
+        to m/s using a reference fish length. This avoids per-agent maps while still
+        encoding the canonical definition.
+        """
+        h5 = hdf5_io.get_hdf5_obj(self)
+        if h5 is None:
+            return False
+        existing = hdf5_io.read_dataset(h5, 'environment/refugia', default=None)
+        if existing is not None:
+            self._refugia_derived = True
+            return True
+
+        vel_mag = hdf5_io.read_dataset(h5, 'environment/vel_mag', default=None)
+        if vel_mag is None:
+            vel_x = hdf5_io.read_dataset(h5, 'environment/vel_x', default=None)
+            vel_y = hdf5_io.read_dataset(h5, 'environment/vel_y', default=None)
+            if vel_x is None or vel_y is None:
+                return False
+            vel_mag_arr = np.sqrt(np.asarray(vel_x, dtype=float) ** 2 + np.asarray(vel_y, dtype=float) ** 2)
+        else:
+            vel_mag_arr = np.asarray(vel_mag, dtype=float)
+
+        if vel_mag_arr.ndim != 2 or vel_mag_arr.size <= 1:
+            return False
+
+        if ref_length_mm is None:
+            ref_length_mm = getattr(self, 'refugia_ref_length_mm', None)
+        try:
+            ref_length_mm = float(ref_length_mm)
+        except Exception:
+            ref_length_mm = float(getattr(self, 'refugia_ref_length_mm', 500.0))
+        if not np.isfinite(ref_length_mm) or ref_length_mm <= 0:
+            ref_length_mm = 500.0
+
+        try:
+            max_s_bl_s = float(np.nanmedian(np.asarray(getattr(self, 'max_s_U_fatigued', self.max_s_U), dtype=float)))
+        except Exception:
+            max_s_bl_s = 2.77
+        thresh_m_s = max_s_bl_s * (ref_length_mm / 1000.0)
+
+        refugia = (vel_mag_arr <= thresh_m_s).astype(np.uint8)
+        hdf5_io.write_dataset(h5, 'environment/refugia', refugia)
+        self._refugia_derived = True
+        return True
+
+    def update_avoid_memory(self, t: float) -> bool:
+        """Write per-agent memory timestamps at current positions for the avoid cue."""
+        h5 = hdf5_io.get_hdf5_obj(self)
+        if h5 is None:
+            return False
+        # ensure memory datasets exist and mental map transform is defined
+        if getattr(self, 'mental_map_transform', None) is None:
+            ok = self.initialize_mental_map()
+            if not ok:
+                return False
+        try:
+            rows, cols = utils.geo_to_pixel(self.X, self.Y, self.mental_map_transform)
+            rows = np.atleast_1d(rows).astype(int)
+            cols = np.atleast_1d(cols).astype(int)
+        except Exception:
+            return False
+
+        for i in range(int(self.num_agents)):
+            r = int(rows[i])
+            c = int(cols[i])
+            key = f'memory/{i}'
+            ds0 = hdf5_io.read_dataset(h5, key, default=None)
+            if ds0 is None:
+                continue
+            try:
+                nrows, ncols = np.asarray(ds0).shape
+            except Exception:
+                continue
+            if r < 0 or c < 0 or r >= nrows or c >= ncols:
+                continue
+            self._write_map_cell(h5, key, r, c, float(t))
+        return True
+
     def timestep(self, t, dt, g=None, pid_controller=None):
         # Advance time and run a single simulation timestep integrating
         # behavior -> fatigue -> movement -> write outputs.
@@ -592,6 +739,13 @@ class simulation:
         y_vel = self.sample_environment(ty, 'vel_y')
         self.x_vel = np.where(np.isnan(x_vel), 0.0, x_vel).astype(np.float32)
         self.y_vel = np.where(np.isnan(y_vel), 0.0, y_vel).astype(np.float32)
+
+        # ensure refugia mask exists when enabled (computed once per run)
+        if getattr(self, 'auto_derive_refugia', False) and not getattr(self, '_refugia_derived', False):
+            try:
+                self.derive_environment_refugia()
+            except Exception:
+                pass
 
         # --- neighbor finding: populate agents_within_buffers, closest_agent, nearest_neighbor_distance
         try:
@@ -698,6 +852,11 @@ class simulation:
             pass
 
         # write minimal outputs back to HDF5 for downstream consumers
+        # update avoid memory after movement so next steps can repel from recently visited areas
+        try:
+            self.update_avoid_memory(t)
+        except Exception:
+            pass
         hdf5_io.write_dataset(self.db, 'X', self.X)
         hdf5_io.write_dataset(self.db, 'Y', self.Y)
         hdf5_io.write_dataset(self.db, 'prev_X', self.prev_X)
