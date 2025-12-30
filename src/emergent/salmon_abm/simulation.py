@@ -759,7 +759,11 @@ class simulation:
                 # convert lists to numpy arrays per-agent
                 self.agents_within_buffers = [np.array([j for j in lst if j != i], dtype=int) for i, lst in enumerate(agents_within)]
                 # nearest neighbor excluding self
-                distances, indices = tree.query(pts, k=2, n_jobs=1)
+                try:
+                    # SciPy cKDTree uses `workers` (not `n_jobs`) in modern versions.
+                    distances, indices = tree.query(pts, k=2, workers=1)
+                except TypeError:
+                    distances, indices = tree.query(pts, k=2)
                 # distances[:,0] == 0 (self), so take 1
                 nearest = np.where(np.isfinite(distances[:, 1]), indices[:, 1], np.nan)
                 nearest_d = np.where(np.isfinite(distances[:, 1]), distances[:, 1], np.nan)

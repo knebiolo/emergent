@@ -695,6 +695,12 @@ class behavior():
                         local_counts[i] = cnt
                         if cnt == 0:
                             local_offsets[i] = 0
+                            # Ensure all per-agent descriptors are initialized so the
+                            # batched kernel never reads uninitialized values.
+                            local_rows_min[i] = 0
+                            local_cols_min[i] = 0
+                            local_nr[i] = 0
+                            local_nc[i] = 0
                             continue
                         rmin, rmax = rows_list[a]
                         cmin, cmax = cols_list[a]
@@ -1972,10 +1978,25 @@ class behavior():
                 except Exception:
                     last_cue_vecs_final[k] = np.zeros((n_agents, 2), dtype=np.float32)
 
-            # Ensure known cues are present even if empty
-            for known in ('cohesion', 'alignment', 'rheo', 'refugia', 'border', 'shallow', 'collision', 'avoid'):
+            # Ensure known cues are present even if empty.
+            # Keep both `rheotaxis` (canonical) and `rheo` (legacy alias).
+            known_cues = (
+                'rheotaxis',
+                'alignment',
+                'cohesion',
+                'low_speed',
+                'wave_drag',
+                'refugia',
+                'border',
+                'shallow',
+                'avoid',
+                'collision',
+            )
+            for known in known_cues:
                 if known not in last_cue_vecs_final:
                     last_cue_vecs_final[known] = np.zeros((n_agents, 2), dtype=np.float32)
+            if 'rheo' not in last_cue_vecs_final:
+                last_cue_vecs_final['rheo'] = last_cue_vecs_final.get('rheotaxis', np.zeros((n_agents, 2), dtype=np.float32))
 
             try:
                 self._safe_set_sim_attr('last_cue_vecs', last_cue_vecs_final)
@@ -1989,9 +2010,11 @@ class behavior():
                     last_cue_mags[k] = np.asarray(v, dtype=np.float32)
                 except Exception:
                     last_cue_mags[k] = np.zeros((n_agents,), dtype=np.float32)
-            for known in ('cohesion', 'alignment', 'rheo', 'refugia', 'border', 'shallow', 'collision', 'avoid'):
+            for known in known_cues:
                 if known not in last_cue_mags:
                     last_cue_mags[known] = np.zeros((n_agents,), dtype=np.float32)
+            if 'rheo' not in last_cue_mags:
+                last_cue_mags['rheo'] = last_cue_mags.get('rheotaxis', np.zeros((n_agents,), dtype=np.float32))
             try:
                 self._safe_set_sim_attr('last_cue_magnitudes', last_cue_mags)
             except Exception:
@@ -2060,7 +2083,6 @@ class behavior():
                             pass
                 except Exception:
                     try:
-                        import logging
                         logging.getLogger(__name__).debug('simplified behavior debug dump failed')
                     except Exception:
                         pass

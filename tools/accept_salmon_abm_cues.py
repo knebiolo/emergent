@@ -111,6 +111,15 @@ def ensure_refugia_layer(sim: simulation, velmag_threshold: float) -> bool:
         except Exception:
             return True
 
+    # Prefer the canonical simulation helper when available (fatigued station-holding).
+    try:
+        if hasattr(sim, "derive_environment_refugia") and callable(getattr(sim, "derive_environment_refugia")):
+            ok = bool(sim.derive_environment_refugia())
+            if ok:
+                return True
+    except Exception:
+        pass
+
     vel_mag = hdf5_io.read_dataset(h5, "environment/vel_mag", default=None)
     if vel_mag is None:
         return False
@@ -141,6 +150,56 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     out = np.full(a.shape[0], np.nan, dtype=float)
     ok = denom > 0
     out[ok] = np.einsum("ij,ij->i", a[ok], b[ok]) / denom[ok]
+    return out
+
+
+def _zero_aware_pass(
+    cue_vec: np.ndarray,
+    exp_vec: np.ndarray,
+    *,
+    zero_tol: float = 1e-12,
+    pass_frac: float = 0.9,
+) -> dict:
+    cue_vec = np.asarray(cue_vec, dtype=float)
+    exp_vec = np.asarray(exp_vec, dtype=float)
+    cue_norm = np.linalg.norm(cue_vec, axis=1)
+    exp_norm = np.linalg.norm(exp_vec, axis=1)
+    cue_zero = cue_norm <= float(zero_tol)
+    exp_zero = exp_norm <= float(zero_tol)
+
+    cos = _cosine(cue_vec, exp_vec)
+
+    # Validity definition:
+    # - If expected direction is non-zero, the cue response must be evaluated;
+    #   a zero cue vector is a failure (not "invalid").
+    # - If expected direction is zero ("already at target"), accept a near-zero
+    #   cue vector as correct.
+    valid = np.ones_like(exp_zero, dtype=bool)
+    correct = np.zeros_like(valid, dtype=bool)
+    exp_nonzero = ~exp_zero
+
+    # Non-zero expected: cosine sign decides correctness; cue-zero yields NaN cosine => incorrect.
+    cos_ok = np.isfinite(cos) & exp_nonzero
+    correct[cos_ok] = cos[cos_ok] > 0
+    # Any exp_nonzero where cosine is not finite remains incorrect (including cue_zero cases).
+
+    # Expected zero: correct iff cue is also (near) zero.
+    correct[exp_zero] = cue_zero[exp_zero]
+
+    valid_frac = float(np.mean(valid))
+    pos_frac = float(np.mean(correct[valid])) if np.any(valid) else float("nan")
+
+    out = {
+        "cos": cos,
+        "valid": valid,
+        "valid_frac": valid_frac,
+        "pos_frac": pos_frac,
+        "mean_cos": float(np.nanmean(cos[cos_ok])) if np.any(cos_ok) else float("nan"),
+        "p10_cos": float(np.nanpercentile(cos[cos_ok], 10)) if np.any(cos_ok) else float("nan"),
+        "pass": bool(pos_frac >= float(pass_frac)) if np.any(valid) else False,
+        "expected_zero_frac": float(np.mean(exp_zero)),
+        "cue_zero_when_expected_zero_frac": float(np.mean(cue_zero[exp_zero])) if np.any(exp_zero) else float("nan"),
+    }
     return out
 
 
@@ -536,7 +595,13 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
             sim.rng = np.random.default_rng(int(seed))
         except Exception:
             pass
-    sim.neighbor_buffer_radius = float(getattr(sim, "neighbor_buffer_radius", 10.0)) * 5.0
+    # Ensure schooling cues (alignment/cohesion/collision) have neighbors in these
+    # acceptance runs even when the start polygons are spatially large.
+    try:
+        base_r = float(getattr(sim, "neighbor_buffer_radius", 10.0)) * 5.0
+    except Exception:
+        base_r = 50.0
+    sim.neighbor_buffer_radius = max(base_r, 200.0)
     sim.max_cue_magnitude = 1e12
 
     import_env_to_h5(sim, env_files)
@@ -598,8 +663,9 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
     cue_vec = np.asarray(cue_vecs.get(case.name, np.zeros((nagents, 2))), dtype=float)
     exp = expected_direction(sim, case.name, x0, y0, heading0)
 
-    cos = _cosine(cue_vec, exp)
-    valid = np.isfinite(cos)
+    score = _zero_aware_pass(cue_vec, exp)
+    cos = score["cos"]
+    valid = score["valid"]
 
     summary = {
         "cue": case.name,
@@ -607,21 +673,20 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
         "start_polygon": os.path.basename(case.start_polygon),
         "nagents": int(nagents),
         "nonzero_frac": float(np.mean(np.linalg.norm(cue_vec, axis=1) > 0)),
-        "valid_frac": float(np.mean(valid)),
+        "valid_frac": float(score["valid_frac"]),
+        "expected_zero_frac": float(score["expected_zero_frac"]),
     }
-    if np.any(valid):
-        summary.update(
-            {
-                "mean_cos": float(np.nanmean(cos)),
-                "pos_frac": float(np.mean(cos[valid] > 0)),
-                "p10_cos": float(np.nanpercentile(cos[valid], 10)),
-            }
-        )
-    else:
-        summary.update({"mean_cos": float("nan"), "pos_frac": float("nan"), "p10_cos": float("nan")})
+    summary.update(
+        {
+            "mean_cos": float(score["mean_cos"]),
+            "pos_frac": float(score["pos_frac"]),
+            "p10_cos": float(score["p10_cos"]),
+            "cue_zero_when_expected_zero_frac": float(score["cue_zero_when_expected_zero_frac"]),
+        }
+    )
 
     # simple pass/fail: sign must be consistent for the majority of valid agents
-    summary["pass"] = bool(summary["pos_frac"] >= 0.9) if np.any(valid) else False
+    summary["pass"] = bool(score["pass"])
 
     try:
         sim.close()

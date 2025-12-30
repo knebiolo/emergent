@@ -16,7 +16,19 @@ def _is_transform_like(obj: Any) -> bool:
         seq = tuple(obj)
     except Exception:
         return False
-    return len(seq) >= 6
+    # Be strict: a transform should look like a 6-tuple (GDAL) or 3x3 Affine (9),
+    # not an arbitrary long coordinate vector.
+    if len(seq) not in (6, 9):
+        return False
+    try:
+        # ensure elements are scalar numbers
+        for v in seq:
+            if hasattr(v, "shape") and getattr(v, "shape", ()) != ():
+                return False
+            float(v)
+    except Exception:
+        return False
+    return True
 
 
 
@@ -82,13 +94,18 @@ def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
         return np.rint(rows).astype(int), np.rint(cols).astype(int)
 
     # fallback: numeric solver and explicit pixel-center handling
-    A = np.array([[a, b], [d, e]], dtype=float)
     x_arr = np.atleast_1d(np.asarray(x, dtype=float))
     y_arr = np.atleast_1d(np.asarray(y, dtype=float))
-    rhs = np.vstack([x_arr - c, y_arr - f])
-    sol = np.linalg.solve(A, rhs)
-    col = sol[0]
-    row = sol[1]
+    # Fast path for common north-up rasters (no shear/rotation).
+    if b == 0 and d == 0 and a != 0 and e != 0:
+        col = (x_arr - c) / a
+        row = (y_arr - f) / e
+    else:
+        A = np.array([[a, b], [d, e]], dtype=float)
+        rhs = np.vstack([x_arr - c, y_arr - f])
+        sol = np.linalg.solve(A, rhs)
+        col = sol[0]
+        row = sol[1]
     # Use pixel-center convention: convert to pixel indices for pixel centers
     col = col - 0.5
     row = row - 0.5
