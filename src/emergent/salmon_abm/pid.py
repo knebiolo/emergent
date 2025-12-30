@@ -6,9 +6,9 @@ GPU-specific code; the controller operates on numpy arrays passed in.
 """
 import os
 import numpy as np
-from scipy.interpolate import CubicSpline
 import pandas as pd
 from scipy.optimize import curve_fit
+from typing import Any, Tuple
 
 
 class PID_controller:
@@ -69,37 +69,43 @@ class PID_controller:
         self.D_params, _ = curve_fit(plane_model, (length, velocity), D)
 
     def PID_func(self, velocity, length):
-        # If trained parameters are not available, fall back to controller gains
-        try:
-            a_P = self.P_params[0]
-            b_P = self.P_params[1]
-            c_P = self.P_params[2]
-            a_I = self.I_params[0]
-            b_I = self.I_params[1]
-            c_I = self.I_params[2]
-            a_D = self.D_params[0]
-            b_D = self.D_params[1]
-            c_D = self.D_params[2]
+        """Return (P, I, D) gains for the given (velocity, length).
+
+        If the controller has been fit via `interp_PID()`, this evaluates the
+        learned plane models. Otherwise it returns the controller's current
+        gains as scalars.
+        """
+        params = self._trained_pid_params()
+        if params is not None:
+            (a_P, b_P, c_P), (a_I, b_I, c_I), (a_D, b_D, c_D) = params
             P = a_P * length + b_P * velocity + c_P
             I = a_I * length + b_I * velocity + c_I
             D = a_D * length + b_D * velocity + c_D
             return P, I, D
-        except Exception:
-            # return the current controller gains (scalars or arrays)
-            # convert to scalars when possible
-            try:
-                kp = float(np.mean(self.k_p))
-            except Exception:
-                kp = 1.0
-            try:
-                ki = float(np.mean(self.k_i))
-            except Exception:
-                ki = 0.0
-            try:
-                kd = float(np.mean(self.k_d))
-            except Exception:
-                kd = 0.0
-            return kp, ki, kd
+        return self._controller_pid_gains()
+
+    def _trained_pid_params(
+        self,
+    ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float], Tuple[float, float, float]] | None:
+        """Return ((aP,bP,cP),(aI,bI,cI),(aD,bD,cD)) or None when untrained."""
+        if not (hasattr(self, "P_params") and hasattr(self, "I_params") and hasattr(self, "D_params")):
+            return None
+
+        P_params = np.asarray(getattr(self, "P_params"))
+        I_params = np.asarray(getattr(self, "I_params"))
+        D_params = np.asarray(getattr(self, "D_params"))
+        if P_params.size < 3 or I_params.size < 3 or D_params.size < 3:
+            return None
+
+        return (
+            (float(P_params[0]), float(P_params[1]), float(P_params[2])),
+            (float(I_params[0]), float(I_params[1]), float(I_params[2])),
+            (float(D_params[0]), float(D_params[1]), float(D_params[2])),
+        )
+
+    def _controller_pid_gains(self) -> Tuple[float, float, float]:
+        """Return controller gains as scalar floats (legacy-friendly fallback)."""
+        return float(np.mean(self.k_p)), float(np.mean(self.k_i)), float(np.mean(self.k_d))
 
 
 __all__ = ["PID_controller"]
