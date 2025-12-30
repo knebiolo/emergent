@@ -14,12 +14,58 @@ from matplotlib import animation as manimation
 from datetime import datetime
 import numpy as np
 from contextlib import contextmanager
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
 from shapely.geometry import LineString
 from shapely.ops import linemerge
 import math
 
 from emergent.salmon_abm import hdf5_io
+
+
+def _try_setattr(obj: Any, name: str, value: Any) -> bool:
+    try:
+        setattr(obj, name, value)
+        return True
+    except Exception:
+        return False
+
+
+def _affine_to_6tuple(transform: Any) -> Optional[Tuple[float, float, float, float, float, float]]:
+    """Return (a,b,c,d,e,f) for rasterio-style Affine transforms, else None."""
+    if transform is None:
+        return None
+
+    try:
+        a = float(getattr(transform, "a"))
+        b = float(getattr(transform, "b"))
+        c = float(getattr(transform, "c"))
+        d = float(getattr(transform, "d"))
+        e = float(getattr(transform, "e"))
+        f = float(getattr(transform, "f"))
+        return (a, b, c, d, e, f)
+    except Exception:
+        pass
+
+    try:
+        seq = tuple(transform)
+        if len(seq) < 6:
+            return None
+        return tuple(float(x) for x in seq[:6])  # type: ignore[return-value]
+    except Exception:
+        return None
+
+
+def _coords_from_affine(
+    tr_tup: Tuple[float, float, float, float, float, float], shape
+) -> Tuple[np.ndarray, np.ndarray]:
+    nrows, ncols = shape[:2]
+    a, b, c, d, e, f = tr_tup
+    cols = np.arange(ncols, dtype=float)
+    rows = np.arange(nrows, dtype=float)
+    col_indices, row_indices = np.meshgrid(cols, rows)
+    x_coords = a * col_indices + b * row_indices + c
+    y_coords = d * col_indices + e * row_indices + f
+    return x_coords, y_coords
 
 
 def output_excel(records, model_dir, model_name):
@@ -30,8 +76,7 @@ def output_excel(records, model_dir, model_name):
     - model_dir: str
     - model_name: str
     """
-    if not os.path.exists(model_dir):
-        os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(model_dir, exist_ok=True)
     output_excel_path = os.path.join(model_dir, f'output_{model_name}.xlsx')
     # Try to write an Excel file; if openpyxl/xlsxwriter are not available,
     # fall back to writing CSV files per sheet.
@@ -42,15 +87,18 @@ def output_excel(records, model_dir, model_name):
                     df.to_excel(writer, sheet_name=str(generation_name))
                 except Exception:
                     pd.DataFrame({'error': ['could not write sheet']}).to_excel(writer, sheet_name=str(generation_name))
+        return
     except Exception:
-        # fallback: write CSVs
-        for generation_name, df in records.items():
-            csv_path = os.path.join(model_dir, f'{model_name}_{generation_name}.csv')
-            try:
-                df.to_csv(csv_path, index=False)
-            except Exception:
-                with open(csv_path + '.error', 'w') as fh:
-                    fh.write('could not write data')
+        pass
+
+    # fallback: write CSVs
+    for generation_name, df in records.items():
+        csv_path = os.path.join(model_dir, f'{model_name}_{generation_name}.csv')
+        try:
+            df.to_csv(csv_path, index=False)
+        except Exception:
+            with open(csv_path + '.error', 'w') as fh:
+                fh.write('could not write data')
 
 
 def movie_maker(directory, model_name, crs, dt, depth_rast_transform, depth_arr, X_arr=None, Y_arr=None):
@@ -60,7 +108,6 @@ def movie_maker(directory, model_name, crs, dt, depth_rast_transform, depth_arr,
     optional agent trajectories. To keep it testable we do not call ffmpeg
     directly here; matplotlib will use the configured writer when available.
     """
-    model_directory = os.path.join(directory, f'{model_name}.h5')
     if not os.path.isdir(directory):
         os.makedirs(directory, exist_ok=True)
 
@@ -70,17 +117,19 @@ def movie_maker(directory, model_name, crs, dt, depth_rast_transform, depth_arr,
 
     # matplotlib's writer registry supports dict-like access but may raise
     # a KeyError if ffmpeg is not configured. Use try/except.
+    WriterClass = None
     try:
         WriterClass = manimation.writers['ffmpeg']
+    except Exception:
+        WriterClass = None
+
+    writer = None
+    if WriterClass is not None:
         try:
             writer = WriterClass(fps=fps, metadata=metadata)
-            writer_available = True
         except Exception:
             writer = None
-            writer_available = False
-    except Exception:
-        writer = None
-        writer_available = False
+    writer_available = writer is not None
 
     return {'out_path': out_path, 'fps': fps, 'writer_available': writer_available}
 
@@ -112,88 +161,32 @@ def write_raster_to_hdf5(h5obj, path, dataset_name=None, sim=None):
     arr, transform, crs = enviro_import(path)
     base = dataset_name or os.path.splitext(os.path.basename(path))[0]
     # write array into HDF5 using hdf5_io helper to support dict-like stores
-    try:
-        from emergent.salmon_abm import hdf5_io
-        hdf5_io.write_dataset(h5obj, f'environment/{base}', arr)
-    except Exception:
-        # best-effort: ignore write errors
-        pass
+    hdf5_io.write_dataset(h5obj, f'environment/{base}', arr)
 
     # convert affine to plain tuple (a,b,c,d,e,f) for compatibility
-    tr_tup = None
-    try:
-        a = float(getattr(transform, 'a', transform[0]))
-        b = float(getattr(transform, 'b', transform[1]))
-        c = float(getattr(transform, 'c', transform[2]))
-        d = float(getattr(transform, 'd', transform[3]))
-        e = float(getattr(transform, 'e', transform[4]))
-        f = float(getattr(transform, 'f', transform[5]))
-        tr_tup = (a, b, c, d, e, f)
-    except Exception:
-        try:
-            tr_tup = tuple([float(x) for x in transform])
-        except Exception:
-            tr_tup = None
+    tr_tup = _affine_to_6tuple(transform)
 
     # set attribute on sim if provided: attach both original transform (when available)
     # and the plain 6-tuple for backward compatibility.
     if sim is not None and tr_tup is not None:
-        try:
-            # prefer to attach the original transform object when it exposes affine attrs
-            transform_obj = transform
-            # use naming: <base>_rast_transform holds the original transform when possible
-            # and <base>_rast_transform_tuple holds the plain 6-tuple
-            attr_obj = f'{base}_rast_transform'
-            attr_tup = f'{base}_rast_transform_tuple'
-            try:
-                setattr(sim, attr_obj, transform_obj)
-            except Exception:
-                try:
-                    setattr(sim, attr_obj, tr_tup)
-                except Exception:
-                    pass
-            try:
-                setattr(sim, attr_tup, tr_tup)
-            except Exception:
-                pass
-        except Exception:
-            pass
+        attr_obj = f'{base}_rast_transform'
+        attr_tup = f'{base}_rast_transform_tuple'
+        if not _try_setattr(sim, attr_obj, transform):
+            _try_setattr(sim, attr_obj, tr_tup)
+        _try_setattr(sim, attr_tup, tr_tup)
 
     # Also write environment x_coords/y_coords for this raster when possible.
     # This helps downstream sampling code locate nearest pixels using a
     # dataset-local coordinate grid instead of relying on separate placeholders.
-    try:
-        # `arr` is a numpy array; use its shape to build x/y coordinate grids
-        # using the affine tuple (a,b,c,d,e,f) mapping (col,row) -> (x,y).
-        if arr is not None and tr_tup is not None:
-            nrows, ncols = arr.shape[:2]
-            a, b, c, d, e, f = tr_tup
-            cols = np.arange(ncols, dtype=float)
-            rows = np.arange(nrows, dtype=float)
-            col_indices, row_indices = np.meshgrid(cols, rows)
-            x_coords = a * col_indices + b * row_indices + c
-            y_coords = d * col_indices + e * row_indices + f
-            # write only if not present or shape differs (do not clobber intentionally set grids)
-            try:
-                existing_x = hdf5_io.read_dataset(h5obj, f'environment/x_coords', default=None)
-            except Exception:
-                existing_x = None
-            write_flag = True
-            if existing_x is not None:
-                try:
-                    existing_shape = np.array(existing_x).shape
-                    if existing_shape == x_coords.shape:
-                        write_flag = False
-                except Exception:
-                    write_flag = True
-            if write_flag:
-                try:
-                    hdf5_io.write_dataset(h5obj, 'environment/x_coords', x_coords)
-                    hdf5_io.write_dataset(h5obj, 'environment/y_coords', y_coords)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    if arr is not None and tr_tup is not None:
+        try:
+            x_coords, y_coords = _coords_from_affine(tr_tup, arr.shape)
+            existing_x = hdf5_io.read_dataset(h5obj, 'environment/x_coords', default=None)
+            if existing_x is None or np.array(existing_x).shape != x_coords.shape:
+                hdf5_io.write_dataset(h5obj, 'environment/x_coords', x_coords)
+                hdf5_io.write_dataset(h5obj, 'environment/y_coords', y_coords)
+        except Exception:
+            pass
 
     return arr, tr_tup, crs
 
@@ -202,7 +195,7 @@ def longitudinal_import(shapefile):
     """Read a longitudinal shapefile and return a GeoDataFrame.
 
     The original code computes linear positions; that logic can be
-    implemented later — here we provide a reliable reader.
+    implemented later; here we provide a reliable reader.
     """
     gdf = gpd.read_file(shapefile)
     return gdf
@@ -216,17 +209,8 @@ def safe_hdf5_open(path_or_file, mode='a'):
     - If an h5py.File is supplied, yields it unchanged.
     - If a dict-like store is supplied (for tests), yields it unchanged.
     """
-    # string path: open via h5py if available
-    try:
-        import h5py as _h5py
-    except Exception:
-        _h5py = None
-
-    # path
     if isinstance(path_or_file, str):
-        if _h5py is None:
-            raise RuntimeError('h5py is required to open file paths')
-        f = _h5py.File(path_or_file, mode)
+        f = h5py.File(path_or_file, mode)
         try:
             yield f
         finally:
@@ -241,14 +225,11 @@ def safe_hdf5_open(path_or_file, mode='a'):
         yield path_or_file
     finally:
         # do not close dict-like stores
-        try:
-            if hasattr(path_or_file, 'close') and not isinstance(path_or_file, dict):
-                try:
-                    path_or_file.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        if hasattr(path_or_file, 'close') and not isinstance(path_or_file, dict):
+            try:
+                path_or_file.close()
+            except Exception:
+                pass
 
 
 def write_sim_initial(h5obj, sim_state_dict: Dict[str, Any], compress: bool = True, compression_opts=None):
@@ -262,9 +243,7 @@ def write_sim_initial(h5obj, sim_state_dict: Dict[str, Any], compress: bool = Tr
     na = int(sim_state_dict.get('num_agents', 0))
     nt = int(sim_state_dict.get('num_timesteps', 0))
 
-    # static per-agent datasets
-    zeros = np.zeros((na,), dtype=np.float32)
-    # prefer provided arrays
+    # static per-agent datasets (prefer provided arrays)
     sex = sim_state_dict.get('sex', np.zeros((na,), dtype=np.int8))
     length = sim_state_dict.get('length', np.zeros((na,), dtype=np.float32))
     weight = sim_state_dict.get('weight', np.zeros((na,), dtype=np.float32))
@@ -288,30 +267,20 @@ def write_sim_initial(h5obj, sim_state_dict: Dict[str, Any], compress: bool = Tr
         hdf5_io.write_dataset(h5obj, key, zero_stack)
 
     # also create legacy top-level position datasets for compatibility
-    try:
-        hdf5_io.write_dataset(h5obj, 'X', np.zeros((na,), dtype=np.float32))
-        hdf5_io.write_dataset(h5obj, 'Y', np.zeros((na,), dtype=np.float32))
-        hdf5_io.write_dataset(h5obj, 'prev_X', np.zeros((na,), dtype=np.float32))
-        hdf5_io.write_dataset(h5obj, 'prev_Y', np.zeros((na,), dtype=np.float32))
-    except Exception:
-        pass
+    hdf5_io.write_dataset(h5obj, 'X', np.zeros((na,), dtype=np.float32))
+    hdf5_io.write_dataset(h5obj, 'Y', np.zeros((na,), dtype=np.float32))
+    hdf5_io.write_dataset(h5obj, 'prev_X', np.zeros((na,), dtype=np.float32))
+    hdf5_io.write_dataset(h5obj, 'prev_Y', np.zeros((na,), dtype=np.float32))
 
     # environment placeholders
-    try:
-        hdf5_io.create_environment_placeholders(h5obj)
-    except Exception:
-        pass
+    hdf5_io.create_environment_placeholders(h5obj)
 
     # small metadata
     metadata = sim_state_dict.get('metadata', {})
     for k, v in metadata.items():
-        try:
-            hdf5_io.write_dataset(h5obj, f'metadata/{k}', np.array(v))
-        except Exception:
-            try:
-                hdf5_io.write_dataset(h5obj, f'metadata/{k}', str(v))
-            except Exception:
-                pass
+        ok = hdf5_io.write_dataset(h5obj, f'metadata/{k}', np.array(v))
+        if not ok:
+            hdf5_io.write_dataset(h5obj, f'metadata/{k}', str(v))
 
     return True
 
