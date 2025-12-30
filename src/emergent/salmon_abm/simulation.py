@@ -7,6 +7,7 @@ weight to remain testable without heavy environment data.
 """
 import os
 import tempfile
+import sys
 import h5py
 import numpy as np
 import logging
@@ -550,46 +551,20 @@ class simulation:
         # ensure memory datasets exist for each agent (create lazily if missing)
         for i in range(int(self.num_agents)):
             key = f'memory/{i}'
-            try:
-                if key in h5:
-                    try:
-                        ds = h5[key]
-                        if getattr(ds, 'shape', None) == (avoid_height, avoid_width):
-                            continue
-                    except Exception:
-                        pass
-            except Exception:
+            existing = None
+            if key in h5:
                 try:
-                    if hdf5_io.read_dataset(h5, key, default=None) is not None:
+                    existing = h5[key]
+                except Exception:
+                    existing = hdf5_io.read_dataset(h5, key, default=None)
+            if existing is not None:
+                try:
+                    if np.asarray(existing).shape == (avoid_height, avoid_width):
                         continue
                 except Exception:
                     pass
-            try:
-                hdf5_io.write_dataset(h5, key, np.full((avoid_height, avoid_width), np.nan, dtype=np.float32))
-            except Exception:
-                pass
+            hdf5_io.write_dataset(h5, key, np.full((avoid_height, avoid_width), np.nan, dtype=np.float32))
         return True
-        # ensure attributes expected by movement/behavior exist with sensible defaults
-        try:
-            self.pid_tuning = pid_tuning
-        except Exception:
-            self.pid_tuning = False
-        try:
-            # wave_drag used by drag calculations
-            self.wave_drag = np.ones(self.num_agents, dtype=float)
-        except Exception:
-            self.wave_drag = np.ones(self.num_agents)
-        try:
-            # Hz used by thrust calculations
-            self.Hz = np.zeros(self.num_agents, dtype=float)
-        except Exception:
-            self.Hz = np.zeros(self.num_agents)
-        # expose drag_coeff on simulation so movement can call it
-        try:
-            self.drag_coeff = self._movement.drag_coeff
-        except Exception:
-            # fallback to a simple interpolation if movement helper not available
-            self.drag_coeff = lambda reynolds: np.interp(reynolds, [2.5e4, 5.0e4, 7.4e4, 9.9e4, 1.2e5, 1.5e5, 1.7e5, 2.0e5], [0.23, 0.19, 0.15, 0.14, 0.12, 0.12, 0.11, 0.10])
 
     def timestep(self, t, dt, g=None, pid_controller=None):
         # Advance time and run a single simulation timestep integrating
@@ -608,17 +583,15 @@ class simulation:
 
         # --- environment sampling: populate water velocities / depth at current positions
         # movement and fatigue modules treat `x_vel/y_vel` as water velocities.
-        try:
-            self.depth = np.asarray(self.sample_environment(getattr(self, 'depth_rast_transform', None), 'depth'), dtype=np.float32)
-        except Exception:
-            pass
-        try:
-            tx = getattr(self, 'vel_x_rast_transform', None) or getattr(self, 'depth_rast_transform', None)
-            ty = getattr(self, 'vel_y_rast_transform', None) or getattr(self, 'depth_rast_transform', None)
-            self.x_vel = np.asarray(self.sample_environment(tx, 'vel_x'), dtype=np.float32)
-            self.y_vel = np.asarray(self.sample_environment(ty, 'vel_y'), dtype=np.float32)
-        except Exception:
-            pass
+        depth = self.sample_environment(getattr(self, 'depth_rast_transform', None), 'depth')
+        self.depth = np.asarray(depth, dtype=np.float32)
+
+        tx = getattr(self, 'vel_x_rast_transform', None) or getattr(self, 'depth_rast_transform', None)
+        ty = getattr(self, 'vel_y_rast_transform', None) or getattr(self, 'depth_rast_transform', None)
+        x_vel = self.sample_environment(tx, 'vel_x')
+        y_vel = self.sample_environment(ty, 'vel_y')
+        self.x_vel = np.where(np.isnan(x_vel), 0.0, x_vel).astype(np.float32)
+        self.y_vel = np.where(np.isnan(y_vel), 0.0, y_vel).astype(np.float32)
 
         # --- neighbor finding: populate agents_within_buffers, closest_agent, nearest_neighbor_distance
         try:
@@ -674,43 +647,23 @@ class simulation:
             # keep existing heading
             pass
 
+        def _movement_call(label, func, *args, default=None):
+            try:
+                return func(*args)
+            except Exception as e:
+                if getattr(self, 'debug_freq', False):
+                    import traceback
+                    print(f'{label} exception:', e)
+                    traceback.print_exc()
+                return default
+
         # calculate movement-related quantities with finer-grained diagnostics
         dxdy = np.zeros((self.num_agents, 2), dtype=np.float32)
         if movement is not None:
-            # frequency
-            try:
-                movement.frequency(mask, t, dt)
-            except Exception as e:
-                if getattr(self, 'debug_freq', False):
-                    import traceback
-                    print('movement.frequency exception:', e)
-                    traceback.print_exc()
-            # thrust
-            try:
-                movement.thrust_fun(mask, t, dt)
-            except Exception as e:
-                if getattr(self, 'debug_freq', False):
-                    import traceback
-                    print('movement.thrust_fun exception:', e)
-                    traceback.print_exc()
-            # drag
-            try:
-                movement.drag_fun(mask, t, dt)
-            except Exception as e:
-                if getattr(self, 'debug_freq', False):
-                    import traceback
-                    print('movement.drag_fun exception:', e)
-                    traceback.print_exc()
-            # swim (returns displacement)
-            try:
-                dxdy = movement.swim(t, dt, pid or pid_controller, mask)
-            except Exception as e:
-                if getattr(self, 'debug_freq', False):
-                    import traceback
-                    print('movement.swim exception:', e)
-                    traceback.print_exc()
-        else:
-            dxdy = np.zeros((self.num_agents, 2), dtype=np.float32)
+            _movement_call('movement.frequency', movement.frequency, mask, t, dt)
+            _movement_call('movement.thrust_fun', movement.thrust_fun, mask, t, dt)
+            _movement_call('movement.drag_fun', movement.drag_fun, mask, t, dt)
+            dxdy = _movement_call('movement.swim', movement.swim, t, dt, pid or pid_controller, mask, default=dxdy)
 
         # If debugging is enabled, print compact diagnostics to help trace zero-values
         if getattr(self, 'debug_freq', False):
@@ -726,14 +679,15 @@ class simulation:
             except Exception:
                 pass
 
-        # apply movement
-        try:
+        # apply movement (support both (N,2) and (N,) displacements)
+        dxdy = np.asarray(dxdy)
+        if dxdy.shape == (self.num_agents, 2):
             self.X = self.X + dxdy[:, 0]
             self.Y = self.Y + dxdy[:, 1]
-        except Exception:
-            # fallback scalar handling
-            self.X = self.X + dxdy
-            self.Y = self.Y + dxdy
+        else:
+            d = dxdy.reshape((-1,))
+            self.X = self.X + d
+            self.Y = self.Y + d
 
         # update fish kinematics (do not overwrite water velocity fields)
         try:
@@ -788,46 +742,43 @@ class simulation:
         using the provided `transform`, then reads the environment dataset via `hdf5_io`.
         Returns a 1-D numpy array of length `num_agents` filled with np.nan for out-of-bounds.
         """
-        try:
-            from emergent.salmon_abm.utils import geo_to_pixel
-            h5 = hdf5_io.get_hdf5_obj(self)
-            ds = hdf5_io.read_dataset(h5, f'environment/{raster_name}', default=None)
-            if ds is None:
-                return np.full(self.num_agents, np.nan)
-            # ensure ds is a numpy array to avoid h5py advanced-index restrictions
-            try:
-                ds_arr = np.array(ds)
-            except Exception:
-                ds_arr = ds
+        h5 = hdf5_io.get_hdf5_obj(self)
+        if h5 is None or transform is None:
+            return np.full(self.num_agents, np.nan)
 
-            # geo_to_pixel accepts arrays and returns (rows, cols)
-            rows, cols = geo_to_pixel(self.X, self.Y, transform)
-            # ensure integer indices and bounds
-            rows = np.asarray(rows, dtype=int)
-            cols = np.asarray(cols, dtype=int)
-            valid = (rows >= 0) & (cols >= 0) & (rows < ds.shape[0]) & (cols < ds.shape[1])
-            out = np.full(self.num_agents, np.nan)
-            if np.any(valid):
-                try:
-                    out[valid] = ds_arr[rows[valid], cols[valid]]
-                except Exception:
-                    # fallback: loop assign to avoid advanced indexing issues
-                    for i in np.where(valid)[0]:
-                        try:
-                            out[i] = ds_arr[rows[i], cols[i]]
-                        except Exception:
-                            out[i] = np.nan
-            # optional debug prints
-            if getattr(self, 'debug_env', False):
-                try:
-                    print('sample_environment debug:', raster_name, 'transform=', transform)
-                    print('rows sample (first 5):', rows[:5], 'cols sample (first 5):', cols[:5])
-                    print('valid count:', int(np.sum(valid)))
-                except Exception:
-                    pass
-            return out
+        ds = hdf5_io.read_dataset(h5, f'environment/{raster_name}', default=None)
+        if ds is None:
+            return np.full(self.num_agents, np.nan)
+
+        ds_arr = np.asarray(ds)
+
+        try:
+            rows, cols = utils.geo_to_pixel(self.X, self.Y, transform)
         except Exception:
             return np.full(self.num_agents, np.nan)
+
+        rows = np.asarray(rows, dtype=int)
+        cols = np.asarray(cols, dtype=int)
+        valid = (rows >= 0) & (cols >= 0) & (rows < ds_arr.shape[0]) & (cols < ds_arr.shape[1])
+        out = np.full(self.num_agents, np.nan)
+        if np.any(valid):
+            try:
+                out[valid] = ds_arr[rows[valid], cols[valid]]
+            except Exception:
+                for i in np.where(valid)[0]:
+                    try:
+                        out[i] = ds_arr[rows[i], cols[i]]
+                    except Exception:
+                        out[i] = np.nan
+
+        if getattr(self, 'debug_env', False):
+            try:
+                print('sample_environment debug:', raster_name, 'transform=', transform)
+                print('rows sample (first 5):', rows[:5], 'cols sample (first 5):', cols[:5])
+                print('valid count:', int(np.sum(valid)))
+            except Exception:
+                pass
+        return out
 
     def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None, return_status: bool = False, video_hook=None, viewer: bool = False, viewer_blocking: bool = False, viewer_live: bool = False, viewer_host: str = '127.0.0.1', viewer_port: int = 50007, viewer_stream_raw: bool = False, viewer_fps: float = 20.0):
         # Enhanced run loop with PID plumbing, write frequency, optional video hook,
@@ -877,7 +828,7 @@ class simulation:
                 status['errors'].append(f'viewer_live_bind_error:{e}')
         if viewer:
             try:
-                import subprocess, shlex
+                import subprocess
                 viewer_cmd = [
                     sys.executable,
                     "-m",
@@ -946,14 +897,11 @@ class simulation:
                 continue
 
         # flush and close viewer process if requested
-        try:
-            if hasattr(self.db, 'flush'):
-                try:
-                    self.db.flush()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        if hasattr(self.db, 'flush'):
+            try:
+                self.db.flush()
+            except Exception:
+                pass
 
         # If we launched the viewer and the user wants blocking behavior, wait
         if viewer and viewer_proc is not None:
@@ -971,28 +919,27 @@ class simulation:
 
     def close(self):
         # close HDF5 and optionally remove temporary DB file if it was created internally
-        try:
-            # stop any background diagnostics thread
+        beh = getattr(self, "_behavior", None)
+        stop_thread = getattr(beh, "_stop_diag_thread", None) if beh is not None else None
+        if callable(stop_thread):
             try:
-                if hasattr(self, '_behavior') and getattr(self._behavior, '_stop_diag_thread', None) is not None:
-                    try:
-                        self._behavior._stop_diag_thread()
-                    except Exception:
-                        pass
+                stop_thread()
             except Exception:
                 pass
-            if hasattr(self, "db") and self.db is not None:
-                try:
-                    self.db.close()
-                except Exception:
-                    pass
-            if getattr(self, "_created_db_file", False):
-                try:
-                    os.remove(self.db_path)
-                except Exception:
-                    pass
-        finally:
-            return True
+
+        db = getattr(self, "db", None)
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+        if getattr(self, "_created_db_file", False):
+            try:
+                os.remove(self.db_path)
+            except Exception:
+                pass
+        return True
 
 
 __all__ = ['simulation']

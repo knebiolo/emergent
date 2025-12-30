@@ -2,6 +2,25 @@
 import numpy as np
 
 
+def _as_1d(a, n: int | None = None) -> np.ndarray:
+    arr = np.asarray(a)
+    if arr.ndim == 0:
+        if n is None:
+            return arr.reshape((1,))
+        return np.full((n,), arr.item(), dtype=float)
+    return arr.reshape((-1,))
+
+
+def _as_1d_mask(mask, n: int) -> np.ndarray:
+    m = np.asarray(mask, dtype=bool)
+    if m.ndim == 0:
+        return np.full((n,), bool(m), dtype=bool)
+    m = m.reshape((-1,))
+    if m.size != n:
+        raise ValueError(f"mask size {m.size} does not match n={n}")
+    return m
+
+
 class fatigue():
     def __init__(self, t, dt, simulation_object):
         self.t = t
@@ -23,11 +42,9 @@ class fatigue():
         return bl_s
 
     def bout_distance(self):
-        dist_travelled = np.sqrt((self.simulation.prev_X - self.simulation.X)**2 + (self.simulation.prev_Y - self.simulation.Y)**2)
-        if len(dist_travelled.shape) == 1:
-            self.simulation.dist_per_bout += dist_travelled
-        else:
-            self.simulation.dist_per_bout += dist_travelled.flatten()
+        dist_travelled = np.hypot(self.simulation.prev_X - self.simulation.X, self.simulation.prev_Y - self.simulation.Y)
+        dist_travelled = np.asarray(dist_travelled)
+        self.simulation.dist_per_bout += dist_travelled if dist_travelled.ndim == 1 else dist_travelled.reshape((-1,))
         self.simulation.bout_dur += self.dt
 
     def time_to_fatigue(self, swim_speeds, mask_dict, method='CastroSantos'):
@@ -37,7 +54,6 @@ class fatigue():
             b_p = self.simulation.b_p
             a_s = self.simulation.a_s
             b_s = self.simulation.b_s
-            lengths = self.simulation.length
 
             ttf = np.where(mask_dict['prolonged'], np.exp(a_p + swim_speeds * b_p), ttf)
             ttf = np.where(mask_dict['sprint'], np.exp(a_s + swim_speeds * b_s), ttf)
@@ -76,11 +92,8 @@ class fatigue():
             rec0 = np.clip(self.simulation.recover_stopwatch * 0.1, 0.0, 100.0) / 100.0
             rec1 = np.clip((self.simulation.recover_stopwatch + self.dt) * 0.1, 0.0, 100.0) / 100.0
         # clamp extremes
-        rec0 = np.asarray(rec0)
-        rec0[rec0 < 0.0] = 0.0
-        rec1 = np.asarray(rec1)
-        rec1[rec1 > 1.0] = 1.0
-        rec1[rec1 < 0.0] = 0.0
+        rec0 = np.clip(np.asarray(rec0, dtype=float), 0.0, 1.0)
+        rec1 = np.clip(np.asarray(rec1, dtype=float), 0.0, 1.0)
         per_rec = rec1 - rec0
         mask_station_holding = self.simulation.swim_behav == 3
         self.simulation.bout_dur[mask_station_holding] = 0.0
@@ -90,44 +103,28 @@ class fatigue():
         return per_rec
 
     def calc_battery(self, per_rec, ttf, mask_dict):
-        mask_sustained = mask_dict['sustained']
-        if mask_sustained.ndim == 2:
-            mask_sustained = mask_sustained.squeeze()
-        if self.simulation.num_agents > 1:
-            self.simulation.battery[mask_sustained] += per_rec[mask_sustained]
-        else:
-            self.simulation.battery[mask_sustained.flatten()] += per_rec[mask_sustained.flatten()]
+        n = int(self.simulation.num_agents)
+        battery = _as_1d(self.simulation.battery, n=n)
+        per_rec = _as_1d(per_rec, n=n)
+        ttf = _as_1d(ttf, n=n)
+
+        mask_sustained = _as_1d_mask(mask_dict['sustained'], n=n)
+        battery[mask_sustained] += per_rec[mask_sustained]
 
         mask_non_sustained = ~mask_sustained
-        if self.simulation.num_agents > 1:
-            ttf0 = ttf[mask_non_sustained] * self.simulation.battery[mask_non_sustained]
-        else:
-            ttf0 = ttf[mask_non_sustained.flatten()] * self.simulation.battery[mask_non_sustained.flatten()]
-
+        ttf0 = ttf[mask_non_sustained] * battery[mask_non_sustained]
         ttf1 = ttf0 - self.dt
-        # avoid divide-by-zero / NaNs (treat invalid ratios as 0 so battery drains)
-        if self.simulation.num_agents > 1:
-            ratio = np.divide(
-                ttf1,
-                ttf0,
-                out=np.zeros_like(ttf1, dtype=float),
-                where=np.isfinite(ttf1) & np.isfinite(ttf0) & (ttf0 != 0),
-            )
-            ratio = np.clip(ratio, 0.0, 1.0)
-            self.simulation.battery[mask_non_sustained] *= ratio
-        else:
-            t0 = ttf0.flatten()
-            t1 = ttf1.flatten()
-            ratio = np.divide(
-                t1,
-                t0,
-                out=np.zeros_like(t1, dtype=float),
-                where=np.isfinite(t1) & np.isfinite(t0) & (t0 != 0),
-            )
-            ratio = np.clip(ratio, 0.0, 1.0)
-            self.simulation.battery[mask_non_sustained.flatten()] *= ratio
 
-        self.simulation.battery = np.clip(self.simulation.battery, 0, 1)
+        ratio = np.divide(
+            ttf1,
+            ttf0,
+            out=np.zeros_like(ttf1, dtype=float),
+            where=np.isfinite(ttf1) & np.isfinite(ttf0) & (ttf0 != 0),
+        )
+        ratio = np.clip(ratio, 0.0, 1.0)
+        battery[mask_non_sustained] *= ratio
+
+        self.simulation.battery = np.clip(battery, 0.0, 1.0)
 
     def set_swim_behavior(self, battery_state_dict):
         mask_low_battery = battery_state_dict['low']
@@ -169,10 +166,11 @@ class fatigue():
         swim_speeds = self.swim_speeds()
         bl_s = self.bl_s(swim_speeds)
 
-        mask_dict = dict()
-        mask_dict['prolonged'] = np.where((self.simulation.max_s_U < bl_s) & (bl_s <= self.simulation.max_p_U), True, False)
-        mask_dict['sprint'] = np.where(bl_s > self.simulation.max_p_U, True, False)
-        mask_dict['sustained'] = bl_s <= self.simulation.max_s_U
+        mask_dict = {
+            'prolonged': (self.simulation.max_s_U < bl_s) & (bl_s <= self.simulation.max_p_U),
+            'sprint': bl_s > self.simulation.max_p_U,
+            'sustained': bl_s <= self.simulation.max_s_U,
+        }
 
         # record bout distance
         self.bout_distance()
