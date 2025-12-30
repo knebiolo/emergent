@@ -416,6 +416,103 @@ class behavior():
         except Exception:
             return default
 
+    def _coerce_agent_vec(self, vec) -> np.ndarray:
+        """Coerce cue output to an array of shape (num_agents, 2)."""
+        arr = np.asarray(vec)
+        n = int(getattr(self.simulation, 'num_agents', 0) or 0)
+
+        if n > 0:
+            try:
+                if arr.shape == (n, 2):
+                    return arr
+            except Exception:
+                pass
+
+            if arr.ndim == 2 and arr.shape[0] == 2 and arr.shape[1] == n:
+                return arr.T
+            if arr.ndim == 1 and arr.size == 2:
+                return np.tile(arr, (n, 1))
+            if arr.ndim == 1 and arr.size == n:
+                return np.column_stack((arr, np.zeros(n)))
+            if arr.ndim >= 2:
+                axes = [i for i, s in enumerate(arr.shape) if s == n]
+                if axes:
+                    axis = axes[0]
+                    moved = np.moveaxis(arr, axis, 0)
+                    collapsed = np.nan_to_num(moved).reshape(n, -1).sum(axis=1)
+                    return np.column_stack((collapsed, np.zeros(n)))
+
+        return np.zeros((n, 2), dtype=float) if n > 0 else np.zeros((0, 2), dtype=float)
+
+    def _record_cue_shapes(self, cue_dict: dict, t) -> None:
+        shapes = {}
+        for k, v in (cue_dict or {}).items():
+            try:
+                arr = np.asarray(v)
+                shapes[str(k)] = {'ndim': int(arr.ndim), 'shape': tuple(arr.shape)}
+            except Exception:
+                shapes[str(k)] = {'error': 'cannot convert to array'}
+
+        self._safe_set_sim_attr('cue_shapes', shapes)
+
+        if getattr(self.simulation, 'debug_behavior', False):
+            outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+            step_i = int(getattr(self.simulation, 'current_step', t))
+            try:
+                self._enqueue_diag_json(outdir, f'cue_shapes_{step_i}', shapes)
+            except Exception:
+                pass
+
+    def _rawvecs_payload(self, raw_vecs: dict, cue_magnitudes: dict) -> dict:
+        payload = {}
+        for k, v in (raw_vecs or {}).items():
+            try:
+                payload[f'{k}_vec'] = np.asarray(v).astype(float)
+            except Exception:
+                pass
+        for k, v in (cue_magnitudes or {}).items():
+            try:
+                payload[f'{k}_mag'] = np.asarray(v).astype(float)
+            except Exception:
+                pass
+
+        try:
+            if hasattr(self.simulation, 'agents_within_buffers'):
+                neighbor_counts = np.array([len(x) for x in self.simulation.agents_within_buffers], dtype=np.int32)
+                payload['neighbor_counts'] = neighbor_counts
+                if neighbor_counts.sum() > 0:
+                    try:
+                        payload['neighbors_concat'] = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
+                    except Exception:
+                        payload['neighbors_concat'] = np.array([], dtype=np.int32)
+        except Exception:
+            pass
+
+        if not payload:
+            payload['marker'] = np.array([1], dtype=np.int8)
+        return payload
+
+    def _maybe_dump_rawvecs(self, t, raw_vecs: dict, cue_magnitudes: dict) -> None:
+        outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
+        step_i = int(getattr(self.simulation, 'current_step', t))
+
+        if getattr(self.simulation, 'debug_behavior', False):
+            payload = self._rawvecs_payload(raw_vecs, cue_magnitudes)
+            try:
+                self._safe_npz_dump(outdir, f'behavior_debug_rawvecs_step_{step_i}', payload)
+            except Exception:
+                pass
+
+        if os.environ.get('FORCE_RAWVECS', '').lower() == 'true':
+            payload = self._rawvecs_payload(raw_vecs, cue_magnitudes)
+            try:
+                self._safe_npz_dump(outdir, f'behavior_debug_rawvecs_FORCE_step_{step_i}', payload)
+            except Exception as e:
+                try:
+                    print('FORCE RAWVECS failed to write NPZ:', e)
+                except Exception:
+                    pass
+
     def _warmup_numba_kernels(self):
         # Call numba kernels with tiny dummy data to force compilation ahead of timed runs
         if not _NUMBA_AVAILABLE:
@@ -1068,30 +1165,23 @@ class behavior():
         return np.column_stack((attract_x, attract_y))
 
     def rheo_cue(self, weight, downstream=False):
-        length_numpy = self.simulation.length
-        # prefer explicit per-component raster transforms when available
+        sampler = getattr(self.simulation, 'sample_environment', None)
+        if not callable(sampler):
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
+
+        sign = -1.0 if not downstream else 1.0
         tx = getattr(self.simulation, 'vel_x_rast_transform', None) or getattr(self.simulation, 'vel_dir_rast_transform', None)
         ty = getattr(self.simulation, 'vel_y_rast_transform', None) or getattr(self.simulation, 'vel_dir_rast_transform', None)
-        # sample vel_x/vel_y using the preferred transforms; apply sign flip if downstream=False
-        try:
-            if not downstream:
-                x_vel = self.simulation.sample_environment(tx, 'vel_x') * -1
-                y_vel = self.simulation.sample_environment(ty, 'vel_y') * -1
-            else:
-                x_vel = self.simulation.sample_environment(tx, 'vel_x')
-                y_vel = self.simulation.sample_environment(ty, 'vel_y')
-        except Exception:
-            # fallback to previous behavior using vel_dir transform if sampling fails
-            try:
-                if not downstream:
-                    x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_x') * -1
-                    y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_y') * -1
-                else:
-                    x_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_x')
-                    y_vel = self.simulation.sample_environment(self.simulation.vel_dir_rast_transform, 'vel_y')
-            except Exception:
-                x_vel = np.full(self.simulation.num_agents, np.nan)
-                y_vel = np.full(self.simulation.num_agents, np.nan)
+
+        x_vel = sign * np.asarray(sampler(tx, 'vel_x'), dtype=float)
+        y_vel = sign * np.asarray(sampler(ty, 'vel_y'), dtype=float)
+
+        # fallback to vel_dir transform if primary transforms produce all-NaN values
+        if not (np.isfinite(x_vel).any() or np.isfinite(y_vel).any()):
+            tdir = getattr(self.simulation, 'vel_dir_rast_transform', None)
+            if tdir is not None:
+                x_vel = sign * np.asarray(sampler(tdir, 'vel_x'), dtype=float)
+                y_vel = sign * np.asarray(sampler(tdir, 'vel_y'), dtype=float)
 
         v = np.column_stack([x_vel, y_vel])
         # store sampled velocities for debugging/inspection by NPZ dumps
@@ -1619,10 +1709,7 @@ class behavior():
                 print(f"arbitrate: simulation.heading size={getattr(h, 'size', 0)}, mean={mean:.4g}, sample={sample}")
             except Exception:
                 pass
-        try:
-            self._safe_set_sim_attr('heading_in', np.asarray(self.simulation.heading, dtype=np.float32))
-        except Exception:
-            pass
+        self._safe_set_sim_attr('heading_in', self._safe_asarray(self.simulation.heading, dtype=np.float32, default=None))
         if self.simulation.pid_tuning:
             # allow test-time override of weights via simulation.test_weights dict
             tw = getattr(self.simulation, 'test_weights', None)
@@ -1659,16 +1746,10 @@ class behavior():
                     'collision': 50000,
                 }
 
-            try:
-                if getattr(self.simulation, 'debug_behavior', False):
-                    logging.getLogger(__name__).debug('DBG arbitrate: about to call alignment_cue')
-            except Exception:
-                pass
             # ensure rheotaxis is always computed (used downstream)
-            try:
-                rheotaxis = self.rheo_cue(default_weights.get('rheotaxis', 25000))
-            except Exception:
-                rheotaxis = np.zeros((self.simulation.num_agents, 2))
+            if getattr(self.simulation, 'debug_behavior', False):
+                logging.getLogger(__name__).debug('DBG arbitrate: about to call alignment_cue')
+            rheotaxis = self.rheo_cue(default_weights.get('rheotaxis', 25000))
             alignment = self.alignment_cue(default_weights['alignment'])
             cohesion = self.cohesion_cue(default_weights['cohesion'])
             low_speed = self.vel_cue(default_weights['low_speed'])
@@ -1704,25 +1785,7 @@ class behavior():
                 'collision': collision,
                 'refugia': refugia}
 
-        # Diagnostic: capture raw cue shapes to help find broadcasting issues
-        try:
-            shapes = {}
-            for k, v in cue_dict.items():
-                try:
-                    arr = np.asarray(v)
-                    shapes[k] = {'ndim': arr.ndim, 'shape': arr.shape}
-                except Exception:
-                    shapes[k] = {'error': 'cannot convert to array'}
-            self.simulation.cue_shapes = shapes
-            if getattr(self.simulation, 'debug_behavior', False):
-                outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                try:
-                    # enqueue JSON snapshot of cue shapes
-                    self._enqueue_diag_json(outdir, f'cue_shapes_{int(getattr(self.simulation, "current_step", t))}', shapes)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        self._record_cue_shapes(cue_dict, t)
 
         low_bat_cue_dict = {0: 'shallow', 1: 'border', 2: 'refugia'}
         try:
@@ -1736,56 +1799,15 @@ class behavior():
 
         cue_magnitudes = {}
         raw_vecs = {}
-        # defensive: ensure simulation exposes last_cue_vecs attribute even if empty
-        try:
-            if getattr(self.simulation, 'debug_behavior', False):
-                try:
-                    self.simulation.last_cue_vecs = {} if not hasattr(self.simulation, 'last_cue_vecs') else getattr(self.simulation, 'last_cue_vecs')
-                except Exception:
-                    try:
-                        setattr(self.simulation, 'last_cue_vecs', {})
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        if getattr(self.simulation, 'debug_behavior', False) and not hasattr(self.simulation, 'last_cue_vecs'):
+            self._safe_set_sim_attr('last_cue_vecs', {})
 
         # helper: coerce cue arrays to shape (num_agents, 2)
-        def _ensure_agent_vec(vec):
-            arr = np.asarray(vec)
-            n = self.simulation.num_agents
-            # common shapes: (n,2) -> OK
-            try:
-                if arr.shape == (n, 2):
-                    return arr
-            except Exception:
-                pass
-            # (2, n) -> transpose
-            if arr.ndim == 2 and arr.shape[0] == 2 and arr.shape[1] == n:
-                return arr.T
-            # 1-D vector of length 2 -> replicate for all agents
-            if arr.ndim == 1 and arr.size == 2:
-                return np.tile(arr, (n, 1))
-            # 1-D per-agent scalar -> use as x component, zero y
-            if arr.ndim == 1 and arr.size == n:
-                return np.column_stack((arr, np.zeros(n)))
-            # 3-D arrays (n, H, W) or similar: collapse spatial dims to scalar per agent
-            if arr.ndim >= 2:
-                # try to find axis equal to n (number of agents)
-                axes = [i for i, s in enumerate(arr.shape) if s == n]
-                if axes:
-                    axis = axes[0]
-                    # move axis to front
-                    moved = np.moveaxis(arr, axis, 0)
-                    # collapse remaining dims to a scalar per agent (sum)
-                    collapsed = np.nan_to_num(moved).reshape(n, -1).sum(axis=1)
-                    return np.column_stack((collapsed, np.zeros(n)))
-            # final fallback: zeros
-            return np.zeros((n, 2), dtype=float)
         for i in order_dict.keys():
             cue = order_dict[i]
             vec = cue_dict[cue]
             # coerce to (n_agents, 2) to avoid accidental broadcasting
-            vec = _ensure_agent_vec(vec)
+            vec = self._coerce_agent_vec(vec)
             # clip per-agent cue magnitudes to avoid single cue domination
             try:
                 cap = float(getattr(self.simulation, 'max_cue_magnitude', 5000.0))
@@ -1822,16 +1844,9 @@ class behavior():
                 vec_sum_migratory,
             )
         # debug prints (guarded) to reveal raw_vecs and cue_magnitudes
-        try:
-            if getattr(self.simulation, 'debug_behavior', False):
-                logging.getLogger(__name__).debug('DBG RAWVECS POST BUILD keys=%s', list(raw_vecs.keys()))
-        except Exception:
-            pass
-        try:
-            if getattr(self.simulation, 'debug_behavior', False):
-                logging.getLogger(__name__).debug('DBG CUE_MAGS POST BUILD keys=%s', list(cue_magnitudes.keys()))
-        except Exception:
-            pass
+        if getattr(self.simulation, 'debug_behavior', False):
+            logging.getLogger(__name__).debug('DBG RAWVECS POST BUILD keys=%s', list(raw_vecs.keys()))
+            logging.getLogger(__name__).debug('DBG CUE_MAGS POST BUILD keys=%s', list(cue_magnitudes.keys()))
 
         # debug: show raw_vecs and cue_magnitudes available at this point
         try:
@@ -1852,111 +1867,15 @@ class behavior():
             pass
 
         # persist raw_vecs unconditionally (best-effort) so external tools can access them
-        try:
-                try:
-                    self._safe_set_sim_attr('last_cue_vecs', {k: np.asarray(v) for k, v in raw_vecs.items()})
-                except Exception:
-                    self._safe_set_sim_attr('last_cue_vecs', {})
-        except Exception:
-            pass
+        self._safe_set_sim_attr('last_cue_vecs', {k: np.asarray(v) for k, v in raw_vecs.items()})
 
-        # Forced NPZ dump of raw per-cue vectors and magnitudes for deterministic debugging.
-        # This is written immediately after raw_vecs and cue_magnitudes are available so
-        # external runners can rely on a consistent payload when `debug_behavior` is True.
-        try:
-            if getattr(self.simulation, 'debug_behavior', False):
-                import time, os, json
-                outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                os.makedirs(outdir, exist_ok=True)
-                step_i = int(getattr(self.simulation, 'current_step', t))
-                ts = int(time.time())
-                fname = os.path.join(outdir, f'behavior_debug_rawvecs_step_{step_i}_{ts}.npz')
-                payload = {}
-                # ensure at least one key so NPZ is non-empty
-                payload_written = False
-                try:
-                    for k, v in raw_vecs.items():
-                        try:
-                            payload[f'{k}_vec'] = np.asarray(v).astype(float)
-                            payload_written = True
-                        except Exception:
-                            # fall through; don't let one bad cue prevent others
-                            pass
-                except Exception:
-                    pass
-                try:
-                    for k, v in cue_magnitudes.items():
-                        try:
-                            payload[f'{k}_mag'] = np.asarray(v).astype(float)
-                            payload_written = True
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self.simulation, 'agents_within_buffers'):
-                        neighbor_counts = np.array([len(x) for x in self.simulation.agents_within_buffers], dtype=np.int32)
-                        payload['neighbor_counts'] = neighbor_counts
-                        payload_written = True
-                        if neighbor_counts.sum() > 0:
-                            try:
-                                payload['neighbors_concat'] = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
-                            except Exception:
-                                payload['neighbors_concat'] = np.array([], dtype=np.int32)
-                except Exception:
-                    pass
-
-                # If payload is empty, include a minimal marker so file exists
-                if not payload_written:
-                    payload['marker'] = np.array([1], dtype=np.int8)
-
-                # Attempt a best-effort NPZ dump for raw_vecs (falls back silently)
-                try:
-                    outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                    self._safe_npz_dump(outdir, f'behavior_debug_rawvecs_step_{step_i}', payload)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # Additional forced writer: if environment variable FORCE_RAWVECS is set to 'true',
-        # write rawvecs unconditionally (useful when debug_behavior isn't toggled).
-        try:
-            if os.environ.get('FORCE_RAWVECS', '').lower() == 'true':
-                try:
-                    import time
-                    outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                    os.makedirs(outdir, exist_ok=True)
-                    step_i = int(getattr(self.simulation, 'current_step', t))
-                    ts = int(time.time())
-                    fname_force = os.path.join(outdir, f'behavior_debug_rawvecs_FORCE_step_{step_i}_{ts}.npz')
-                    payload = {f'{k}_vec': np.asarray(v).astype(float) for k, v in raw_vecs.items()}
-                    for k, v in cue_magnitudes.items():
-                        try:
-                            payload[f'{k}_mag'] = np.asarray(v).astype(float)
-                        except Exception:
-                            pass
-                    try:
-                        absf = os.path.abspath(fname_force)
-                    except Exception:
-                        absf = fname_force
-                    try:
-                        outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                        self._safe_npz_dump(outdir, f'behavior_debug_rawvecs_FORCE_step_{step_i}', payload)
-                    except Exception:
-                        pass
-                except Exception as e:
-                    try:
-                        print('FORCE RAWVECS failed to write NPZ:', e)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        # Optional NPZ dump of raw per-cue vectors and magnitudes for deterministic debugging.
+        self._maybe_dump_rawvecs(t, raw_vecs, cue_magnitudes)
 
         for i in np.arange(0, 3, 1):
             cue = low_bat_cue_dict[i]
             vec = cue_dict[cue]
-            vec = _ensure_agent_vec(vec)
+            vec = self._coerce_agent_vec(vec)
             vec_sum_tired = np.where(np.linalg.norm(vec_sum_tired, axis=-1)[:, np.newaxis] < tolerance,
                                      vec_sum_tired + vec,
                                      vec_sum_tired)
@@ -1966,18 +1885,16 @@ class behavior():
         head_vec = np.where(self.simulation.swim_behav[:, np.newaxis] == 2, vec_sum_tired, head_vec)
         head_vec = np.where(self.simulation.swim_behav[:, np.newaxis] == 3, vec_sum_tired, head_vec)
         # ensure we use coerced (n,2) cue vectors for in-eddy override
-        border_vec = _ensure_agent_vec(cue_dict['border'])
-        shallow_vec = _ensure_agent_vec(cue_dict['shallow'])
+        border_vec = self._coerce_agent_vec(cue_dict['border'])
+        shallow_vec = self._coerce_agent_vec(cue_dict['shallow'])
         head_vec = np.where(self.simulation.in_eddy[:, np.newaxis] == 1, border_vec + shallow_vec, head_vec)
 
-        try:
-            if getattr(self.simulation, 'debug_behavior', False):
-                    try:
-                        logging.getLogger(__name__).debug('DBG arbitrate: head_vec.shape=%s debug_behavior=%s', getattr(head_vec, 'shape', None), getattr(self.simulation, 'debug_behavior', False))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        if getattr(self.simulation, 'debug_behavior', False):
+            logging.getLogger(__name__).debug(
+                'DBG arbitrate: head_vec.shape=%s debug_behavior=%s',
+                getattr(head_vec, 'shape', None),
+                getattr(self.simulation, 'debug_behavior', False),
+            )
 
         if len(head_vec.shape) == 2:
             # debug print of cue magnitudes when debug_behavior is enabled
