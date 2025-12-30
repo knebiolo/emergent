@@ -111,15 +111,30 @@ def create_environment_placeholders(hdf5_obj: Any):
     This function creates shallow minimal datasets so downstream code
     that expects keys like 'environment/depth' or 'memory/0' can proceed.
     """
-    # depth and coordinate placeholders
-    write_dataset(hdf5_obj, "environment/depth", np.zeros((1, 1), dtype=np.float32))
-    write_dataset(hdf5_obj, "environment/x_coords", np.array([0.0], dtype=np.float32))
-    write_dataset(hdf5_obj, "environment/y_coords", np.array([0.0], dtype=np.float32))
+    def _ensure(key: str, arr: np.ndarray) -> None:
+        try:
+            if key in hdf5_obj:
+                return
+        except Exception:
+            # dict-like mocks might not support `in` reliably; fall back to read_dataset
+            try:
+                if read_dataset(hdf5_obj, key, default=None) is not None:
+                    return
+            except Exception:
+                pass
+        try:
+            write_dataset(hdf5_obj, key, arr)
+        except Exception:
+            pass
 
-    # simple memory placeholders
-    # some tests expect memory/0 and memory/1
-    write_dataset(hdf5_obj, "memory/0", np.zeros((1, 1), dtype=np.float32))
-    write_dataset(hdf5_obj, "memory/1", np.zeros((1, 1), dtype=np.float32))
+    # depth and coordinate placeholders (only when missing)
+    _ensure("environment/depth", np.zeros((1, 1), dtype=np.float32))
+    _ensure("environment/x_coords", np.array([0.0], dtype=np.float32))
+    _ensure("environment/y_coords", np.array([0.0], dtype=np.float32))
+
+    # simple memory placeholders (only when missing)
+    _ensure("memory/0", np.zeros((1, 1), dtype=np.float32))
+    _ensure("memory/1", np.zeros((1, 1), dtype=np.float32))
     return True
 
 

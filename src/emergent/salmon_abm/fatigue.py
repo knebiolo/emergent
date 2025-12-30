@@ -105,10 +105,27 @@ class fatigue():
             ttf0 = ttf[mask_non_sustained.flatten()] * self.simulation.battery[mask_non_sustained.flatten()]
 
         ttf1 = ttf0 - self.dt
+        # avoid divide-by-zero / NaNs (treat invalid ratios as 0 so battery drains)
         if self.simulation.num_agents > 1:
-            self.simulation.battery[mask_non_sustained] *= np.nan_to_num(ttf1 / ttf0)
+            ratio = np.divide(
+                ttf1,
+                ttf0,
+                out=np.zeros_like(ttf1, dtype=float),
+                where=np.isfinite(ttf1) & np.isfinite(ttf0) & (ttf0 != 0),
+            )
+            ratio = np.clip(ratio, 0.0, 1.0)
+            self.simulation.battery[mask_non_sustained] *= ratio
         else:
-            self.simulation.battery[mask_non_sustained.flatten()] *= ttf1.flatten() / ttf0.flatten()
+            t0 = ttf0.flatten()
+            t1 = ttf1.flatten()
+            ratio = np.divide(
+                t1,
+                t0,
+                out=np.zeros_like(t1, dtype=float),
+                where=np.isfinite(t1) & np.isfinite(t0) & (t0 != 0),
+            )
+            ratio = np.clip(ratio, 0.0, 1.0)
+            self.simulation.battery[mask_non_sustained.flatten()] *= ratio
 
         self.simulation.battery = np.clip(self.simulation.battery, 0, 1)
 

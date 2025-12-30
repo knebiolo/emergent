@@ -12,6 +12,7 @@ import csv
 
 import numpy as np
 import h5py
+from scipy.ndimage import distance_transform_edt
 
 from emergent.salmon_abm.simulation import simulation
 from emergent.salmon_abm import io, hdf5_io
@@ -58,6 +59,83 @@ def import_env_to_h5(sim, env_files):
             pass
     except Exception as e:
         print('Raster import into HDF5 failed:', e)
+
+
+def ensure_distance_to(sim):
+    """Ensure `environment/distance_to` exists in the sim HDF5 DB.
+
+    Uses depth nodata as the boundary proxy: distance transform is computed on wetted
+    cells and scaled by pixel width.
+    """
+    try:
+        h5 = hdf5_io.get_hdf5_obj(sim)
+        if h5 is None:
+            return False
+        existing = hdf5_io.read_dataset(h5, 'environment/distance_to', default=None)
+        if existing is not None:
+            try:
+                arr = np.asarray(existing)
+                if arr.ndim == 2 and arr.size > 1:
+                    return True
+            except Exception:
+                return True
+        depth = hdf5_io.read_dataset(h5, 'environment/depth', default=None)
+        if depth is None:
+            return False
+        depth_arr = np.asarray(depth, dtype=float)
+        if depth_arr.ndim != 2 or depth_arr.size <= 1:
+            return False
+        wetted = np.isfinite(depth_arr) & (depth_arr != -9999.0)
+        try:
+            tr = getattr(sim, 'depth_rast_transform', None)
+            pw = float(tr[0]) if tr is not None else 1.0
+        except Exception:
+            pw = 1.0
+        dist_to_bound = distance_transform_edt(wetted) * abs(pw)
+        hdf5_io.write_dataset(h5, 'environment/distance_to', dist_to_bound.astype('float32'))
+        return True
+    except Exception:
+        return False
+
+
+def ensure_refugia_layer(sim, velmag_threshold):
+    """Ensure a shared refugia raster exists at `environment/refugia`.
+
+    Cells with `vel_mag <= velmag_threshold` are marked as refugia.
+    """
+    try:
+        h5 = hdf5_io.get_hdf5_obj(sim)
+        if h5 is None:
+            return False
+        existing = hdf5_io.read_dataset(h5, 'environment/refugia', default=None)
+        if existing is not None:
+            try:
+                arr = np.asarray(existing)
+                if arr.ndim == 2 and arr.size > 1:
+                    return True
+            except Exception:
+                return True
+        vel_mag = hdf5_io.read_dataset(h5, 'environment/vel_mag', default=None)
+        if vel_mag is None:
+            return False
+        vel_mag_arr = np.asarray(vel_mag, dtype=float)
+        if vel_mag_arr.ndim != 2 or vel_mag_arr.size <= 1:
+            return False
+        finite = np.isfinite(vel_mag_arr) & (vel_mag_arr != -9999.0)
+        mask = finite & (vel_mag_arr <= float(velmag_threshold))
+        # fallback: if explicit threshold yields none, use a low quantile so the cue is testable
+        if not np.any(mask) and np.any(finite):
+            try:
+                qthr = float(np.nanpercentile(vel_mag_arr[finite], 10))
+                mask = finite & (vel_mag_arr <= qthr)
+            except Exception:
+                pass
+        refugia = np.zeros_like(vel_mag_arr, dtype=np.uint8)
+        refugia[mask] = 1
+        hdf5_io.write_dataset(h5, 'environment/refugia', refugia)
+        return True
+    except Exception:
+        return False
 
 
 def run_headless(args):
@@ -167,6 +245,15 @@ def run_headless(args):
 
     # import rasters into HDF5 for sampling
     import_env_to_h5(sim, env_files)
+    try:
+        ensure_distance_to(sim)
+    except Exception:
+        pass
+    try:
+        if getattr(args, 'derive_refugia', False):
+            ensure_refugia_layer(sim, getattr(args, 'refugia_velmag_threshold', 0.3))
+    except Exception:
+        pass
 
     # After rasters are imported into the HDF5 DB, re-run heading initialization
     # so agents sample the velocity rasters and start with realistic headings
@@ -233,12 +320,11 @@ def run_headless(args):
             vely_vals = sim.sample_environment(getattr(sim, 'vel_y_rast_transform', getattr(sim, 'depth_rast_transform', None)), 'vel_y')
             mag_vals = sim.sample_environment(getattr(sim, 'vel_mag_rast_transform', getattr(sim, 'depth_rast_transform', None)), 'vel_mag')
 
-            # ensure x_vel / y_vel available (sim updates after movement)
-            xvel = getattr(sim, 'x_vel', None)
-            yvel = getattr(sim, 'y_vel', None)
-            if xvel is None:
+            # trace should record fish velocity over ground (not water velocity rasters)
+            xvel = getattr(sim, 'fish_x_vel', None)
+            yvel = getattr(sim, 'fish_y_vel', None)
+            if xvel is None or yvel is None:
                 xvel = (sim.X - sim.prev_X) / dt
-            if yvel is None:
                 yvel = (sim.Y - sim.prev_Y) / dt
 
             # write per-agent rows
@@ -287,6 +373,19 @@ def run_headless(args):
                                     safe_payload[f'{ck}_vec'] = np.asarray(cv).astype(float)
                             except Exception:
                                 pass
+                        if hasattr(sim, 'heading_in'):
+                            try:
+                                safe_payload['heading_in'] = np.asarray(sim.heading_in).astype(float)
+                            except Exception:
+                                pass
+                        # fatigue state for acceptance tests
+                        try:
+                            if hasattr(sim, 'battery'):
+                                safe_payload['battery'] = np.asarray(sim.battery).astype(float)
+                            if hasattr(sim, 'swim_behav'):
+                                safe_payload['swim_behav'] = np.asarray(sim.swim_behav).astype(int)
+                        except Exception:
+                            pass
                         # include alignment diagnostics if present
                         if hasattr(sim, '_alignment_diag'):
                             ad = sim._alignment_diag
@@ -503,9 +602,10 @@ def run_headless(args):
                             for ck, cv in cue_map.items():
                                 try:
                                     arr = np.asarray(cv).astype(float)
-                                    auth_payload[f'{ck}_vec'] = arr
+                                    # Prefix to avoid clobbering per-step vectors captured from `sim.last_cue_vecs`.
+                                    auth_payload[f'auth_{ck}_vec'] = arr
                                     try:
-                                        auth_payload[f'{ck}_mag'] = np.linalg.norm(arr, axis=1)
+                                        auth_payload[f'auth_{ck}_mag'] = np.linalg.norm(arr, axis=1)
                                     except Exception:
                                         pass
                                 except Exception:
@@ -519,7 +619,7 @@ def run_headless(args):
                                         total += np.asarray(v, dtype=float)
                                     except Exception:
                                         pass
-                                auth_payload['head_vec'] = total
+                                auth_payload['auth_head_vec'] = total
                             except Exception:
                                 pass
                             try:
@@ -612,6 +712,8 @@ def main():
     parser.add_argument('--seed', type=int, default=None, help='Optional RNG seed for deterministic runs')
     parser.add_argument('--debug-movement', action='store_true', help='Enable movement debug dumps')
     parser.add_argument('--debug-behavior', action='store_true', help='Enable behavior debug dumps')
+    parser.add_argument('--derive-refugia', action='store_true', help='Create `environment/refugia` from vel_mag threshold')
+    parser.add_argument('--refugia-velmag-threshold', type=float, default=0.3, help='vel_mag threshold for derived refugia (m/s)')
     parser.add_argument('--model-name', dest='model_name', default='nuyakuk_headless')
     parser.add_argument('--out', default=os.path.join('outputs', 'diagnostics'))
     parser.add_argument('--start-polygon', dest='start_polygon', default=None, help='Optional path to start location shapefile')

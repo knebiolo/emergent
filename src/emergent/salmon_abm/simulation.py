@@ -10,6 +10,7 @@ import tempfile
 import h5py
 import numpy as np
 import logging
+from scipy.ndimage import distance_transform_edt
 from typing import Optional
 from emergent.salmon_abm import utils, io, pid, agents, hdf5_io
 from emergent.salmon_abm import movement as movement_mod, behavior as behavior_mod, fatigue as fatigue_mod
@@ -75,6 +76,9 @@ class simulation:
         self.prev_Y = self.Y.copy()
         self.x_vel = np.zeros(self.num_agents, dtype=np.float32)
         self.y_vel = np.zeros(self.num_agents, dtype=np.float32)
+        # fish velocity over ground (distinct from water velocity rasters)
+        self.fish_x_vel = np.zeros(self.num_agents, dtype=np.float32)
+        self.fish_y_vel = np.zeros(self.num_agents, dtype=np.float32)
         self.heading = np.zeros(self.num_agents, dtype=np.float32)
         self.sog = np.zeros(self.num_agents, dtype=np.float32)
         self.ideal_sog = np.zeros(self.num_agents, dtype=np.float32)
@@ -95,9 +99,10 @@ class simulation:
         self.b_p = np.repeat(-1.0, self.num_agents)
         self.a_s = np.repeat(0.0, self.num_agents)
         self.b_s = np.repeat(-1.0, self.num_agents)
-        self.opt_sog = self.length / 1000.
-        self.school_sog = self.length / 1000.
-        self.ucrit = self.length / 1000. * 1.6
+        # derived speeds are initialized after agents.sim_length() populates `self.length`
+        self.opt_sog = np.zeros(self.num_agents, dtype=np.float32)
+        self.school_sog = np.zeros(self.num_agents, dtype=np.float32)
+        self.ucrit = np.zeros(self.num_agents, dtype=np.float32)
         self.is_stuck = np.zeros(self.num_agents, dtype=bool)
         self.agents_within_buffers = [np.array([], dtype=int) for _ in range(self.num_agents)]
         self.nearest_neighbor_distance = np.full(self.num_agents, np.nan)
@@ -145,6 +150,20 @@ class simulation:
         agents.sim_length(self, fish_length)
         agents.sim_weight(self)
         agents.sim_body_depth(self)
+
+        # Derived quantities that depend on agent attributes (length/body_depth, etc.).
+        # These must be computed after the agents module populates the base attributes.
+        try:
+            self.opt_sog = (self.length / 1000.0).astype(np.float32)
+            self.school_sog = (self.length / 1000.0).astype(np.float32)
+            self.ucrit = (self.length / 1000.0 * 1.6).astype(np.float32)
+            # initialize ideal_sog and sog to a non-zero default when unset
+            if not np.any(np.asarray(self.ideal_sog)):
+                self.ideal_sog = self.school_sog.copy()
+            if not np.any(np.asarray(self.sog)):
+                self.sog = self.ideal_sog.copy()
+        except Exception:
+            pass
 
         # If a start polygon was provided, sample initial agent positions inside it
         if start_polygon:
@@ -240,6 +259,26 @@ class simulation:
         # that read environment/* will have something to sample in unit tests
         hdf5_io.create_environment_placeholders(self.db)
 
+        # best-effort: compute `environment/distance_to` when missing and depth exists
+        try:
+            h5 = hdf5_io.get_hdf5_obj(self)
+            dist_ds = hdf5_io.read_dataset(h5, 'environment/distance_to', default=None)
+            if dist_ds is None:
+                depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=None)
+                if depth_ds is not None:
+                    depth_arr = np.asarray(depth_ds, dtype=float)
+                    if depth_arr.ndim == 2 and depth_arr.size > 1:
+                        wetted = np.isfinite(depth_arr) & (depth_arr != -9999.0)
+                        try:
+                            tr = getattr(self, 'depth_rast_transform', None)
+                            pw = float(tr[0]) if tr is not None else 1.0
+                        except Exception:
+                            pw = 1.0
+                        dist_to_bound = distance_transform_edt(wetted) * abs(pw)
+                        hdf5_io.write_dataset(h5, 'environment/distance_to', dist_to_bound.astype('float32'))
+        except Exception:
+            pass
+
         # Movement-related defaults required by movement helpers. Set early so
         # movement.frequency/drag_fun/swim can run safely even if attributes
         # are not later mutated.
@@ -262,51 +301,62 @@ class simulation:
         except Exception:
             self.drag_coeff = lambda reynolds: np.ones_like(reynolds) * 0.12
 
-        # Create x/y coordinate grids and attach simple affine transforms so
-        # behavior and sampling helpers can map geo <-> pixel indices.
+        # Ensure raster transforms and coordinate grids exist without clobbering
+        # real-world transforms written by `io.write_raster_to_hdf5`.
         try:
             h5 = hdf5_io.get_hdf5_obj(self)
-            depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=np.zeros((1, 1)))
-            nrows, ncols = depth_ds.shape
-            # Prefer to use an attached raster transform to compute real-world
-            # x_coords/y_coords (pixel -> geo). If no transform is available
-            # fall back to simple index-based coordinates so tests still run.
-            try:
-                transform = getattr(self, 'depth_rast_transform', None)
-                if transform is not None and not callable(transform):
-                    # Transform expected as a 6-tuple (a, b, c, d, e, f)
-                    # where (col, row) -> (x, y) via affine: x = a*col + b*row + c
-                    # and y = d*col + e*row + f
-                    cols = np.arange(ncols, dtype=float)
-                    rows = np.arange(nrows, dtype=float)
-                    col_indices, row_indices = np.meshgrid(cols, rows)
-                    a, b, c, d, e, f = transform
-                    x_coords = a * col_indices + b * row_indices + c
-                    y_coords = d * col_indices + e * row_indices + f
-                else:
-                    # fallback to index-based coordinates
-                    x_coords = np.tile(np.arange(ncols, dtype=float), (nrows, 1))
-                    y_coords = np.tile(np.arange(nrows, dtype=float)[:, np.newaxis], (1, ncols))
-            except Exception:
-                x_coords = np.tile(np.arange(ncols, dtype=float), (nrows, 1))
-                y_coords = np.tile(np.arange(nrows, dtype=float)[:, np.newaxis], (1, ncols))
-            # write both environment/ prefixed and top-level keys for compatibility
-            hdf5_io.write_dataset(h5, 'environment/x_coords', x_coords)
-            hdf5_io.write_dataset(h5, 'environment/y_coords', y_coords)
-            hdf5_io.write_dataset(h5, 'x_coords', x_coords)
-            hdf5_io.write_dataset(h5, 'y_coords', y_coords)
-            # attach simple identity-like affine transforms (a,b,c,d,e,f)
-            # mapping pixel -> geo as x=col, y=row
-            self.depth_rast_transform = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
-            self.vel_mag_rast_transform = self.depth_rast_transform
-            self.vel_dir_rast_transform = self.depth_rast_transform
-            self.refugia_map_transform = self.depth_rast_transform
+            depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=None)
+            if depth_ds is not None:
+                depth_arr = np.asarray(depth_ds)
+                if depth_arr.ndim == 2 and depth_arr.size > 1:
+                    nrows, ncols = depth_arr.shape
+                    # use existing depth raster transform when available; otherwise fall back
+                    transform = getattr(self, 'depth_rast_transform', None)
+                    if transform is None:
+                        transform = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+                        self.depth_rast_transform = transform
+                    # ensure related transforms exist
+                    for attr in ('vel_mag_rast_transform', 'vel_dir_rast_transform', 'vel_x_rast_transform', 'vel_y_rast_transform', 'refugia_map_transform'):
+                        if getattr(self, attr, None) is None:
+                            try:
+                                setattr(self, attr, transform)
+                            except Exception:
+                                pass
+
+                    # Only write coordinate grids when missing or mismatched shape.
+                    try:
+                        existing_x = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
+                        existing_y = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
+                        have_ok = False
+                        try:
+                            if existing_x is not None and existing_y is not None:
+                                have_ok = (np.asarray(existing_x).shape == (nrows, ncols)) and (np.asarray(existing_y).shape == (nrows, ncols))
+                        except Exception:
+                            have_ok = False
+                        if not have_ok:
+                            # compute from affine transform (supports Affine-like objects or 6-tuples)
+                            try:
+                                a = float(getattr(transform, 'a', transform[0]))
+                                b = float(getattr(transform, 'b', transform[1]))
+                                c = float(getattr(transform, 'c', transform[2]))
+                                d = float(getattr(transform, 'd', transform[3]))
+                                e = float(getattr(transform, 'e', transform[4]))
+                                f = float(getattr(transform, 'f', transform[5]))
+                                cols = np.arange(ncols, dtype=float)
+                                rows = np.arange(nrows, dtype=float)
+                                col_indices, row_indices = np.meshgrid(cols, rows)
+                                x_coords = a * col_indices + b * row_indices + c
+                                y_coords = d * col_indices + e * row_indices + f
+                                hdf5_io.write_dataset(h5, 'environment/x_coords', x_coords)
+                                hdf5_io.write_dataset(h5, 'environment/y_coords', y_coords)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
         except Exception:
             # tolerate any failures here; behavior will be more limited but simulation can still run
-            self.depth_rast_transform = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
-            self.vel_mag_rast_transform = self.depth_rast_transform
-            self.vel_dir_rast_transform = self.depth_rast_transform
-            self.refugia_map_transform = self.depth_rast_transform
+            if getattr(self, 'depth_rast_transform', None) is None:
+                self.depth_rast_transform = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 
         # heading initialization deferred until behavior helper is available
 
@@ -450,6 +500,75 @@ class simulation:
             pass
 
         return heading_set
+
+    def initialize_mental_map(self, avoid_cell_size: float | None = None) -> bool:
+        """Create per-agent memory rasters and `mental_map_transform` for the avoid cue.
+
+        This is a lightweight analogue of sockeye.py's mental map initialization,
+        sized from the depth raster extent and a configurable coarse cell size.
+        """
+        h5 = hdf5_io.get_hdf5_obj(self)
+        if h5 is None:
+            return False
+        if avoid_cell_size is None:
+            avoid_cell_size = float(getattr(self, 'avoid_cell_size', 10.0))
+        if avoid_cell_size <= 0:
+            avoid_cell_size = 10.0
+
+        depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=None)
+        if depth_ds is None:
+            return False
+        depth_arr = np.asarray(depth_ds)
+        if depth_arr.ndim != 2 or depth_arr.size <= 1:
+            return False
+        nrows, ncols = depth_arr.shape
+
+        # infer depth pixel size and origin from the raster transform
+        tr = getattr(self, 'depth_rast_transform', None) or (1.0, 0.0, 0.0, 0.0, -1.0, 0.0)
+        try:
+            a = float(getattr(tr, 'a', tr[0]))
+            b = float(getattr(tr, 'b', tr[1]))
+            c = float(getattr(tr, 'c', tr[2]))
+            d = float(getattr(tr, 'd', tr[3]))
+            e = float(getattr(tr, 'e', tr[4]))
+            f = float(getattr(tr, 'f', tr[5]))
+        except Exception:
+            a, b, c, d, e, f = (1.0, 0.0, 0.0, 0.0, -1.0, 0.0)
+
+        pw = abs(a) if a != 0 else 1.0
+        ph = abs(e) if e != 0 else 1.0
+        width_m = ncols * pw
+        height_m = nrows * ph
+        avoid_width = int(np.ceil(width_m / avoid_cell_size)) + 1
+        avoid_height = int(np.ceil(height_m / avoid_cell_size)) + 1
+        avoid_width = max(1, avoid_width)
+        avoid_height = max(1, avoid_height)
+
+        # north-up coarse grid transform anchored to the depth raster origin
+        self.mental_map_transform = (avoid_cell_size, 0.0, c, 0.0, -avoid_cell_size, f)
+
+        # ensure memory datasets exist for each agent (create lazily if missing)
+        for i in range(int(self.num_agents)):
+            key = f'memory/{i}'
+            try:
+                if key in h5:
+                    try:
+                        ds = h5[key]
+                        if getattr(ds, 'shape', None) == (avoid_height, avoid_width):
+                            continue
+                    except Exception:
+                        pass
+            except Exception:
+                try:
+                    if hdf5_io.read_dataset(h5, key, default=None) is not None:
+                        continue
+                except Exception:
+                    pass
+            try:
+                hdf5_io.write_dataset(h5, key, np.full((avoid_height, avoid_width), np.nan, dtype=np.float32))
+            except Exception:
+                pass
+        return True
         # ensure attributes expected by movement/behavior exist with sensible defaults
         try:
             self.pid_tuning = pid_tuning
@@ -486,6 +605,20 @@ class simulation:
 
         # mask of agents able to move
         mask = np.where(self.dead == 0, True, False)
+
+        # --- environment sampling: populate water velocities / depth at current positions
+        # movement and fatigue modules treat `x_vel/y_vel` as water velocities.
+        try:
+            self.depth = np.asarray(self.sample_environment(getattr(self, 'depth_rast_transform', None), 'depth'), dtype=np.float32)
+        except Exception:
+            pass
+        try:
+            tx = getattr(self, 'vel_x_rast_transform', None) or getattr(self, 'depth_rast_transform', None)
+            ty = getattr(self, 'vel_y_rast_transform', None) or getattr(self, 'depth_rast_transform', None)
+            self.x_vel = np.asarray(self.sample_environment(tx, 'vel_x'), dtype=np.float32)
+            self.y_vel = np.asarray(self.sample_environment(ty, 'vel_y'), dtype=np.float32)
+        except Exception:
+            pass
 
         # --- neighbor finding: populate agents_within_buffers, closest_agent, nearest_neighbor_distance
         try:
@@ -602,10 +735,11 @@ class simulation:
             self.X = self.X + dxdy
             self.Y = self.Y + dxdy
 
-        # update velocities
+        # update fish kinematics (do not overwrite water velocity fields)
         try:
-            self.x_vel = (self.X - self.prev_X) / dt
-            self.y_vel = (self.Y - self.prev_Y) / dt
+            self.fish_x_vel = np.asarray((self.X - self.prev_X) / dt, dtype=np.float32)
+            self.fish_y_vel = np.asarray((self.Y - self.prev_Y) / dt, dtype=np.float32)
+            self.sog = np.asarray(np.sqrt(self.fish_x_vel**2 + self.fish_y_vel**2), dtype=np.float32)
         except Exception:
             pass
 

@@ -13,7 +13,10 @@ def sim_sex(sim):
     This mirrors the `simulation.sim_sex` method in the original
     `sockeye.py` and sets `sim.sex`.
     """
-    if sim.basin == "Nushagak River":
+    basin = str(getattr(sim, "basin", "") or "").lower()
+    # Use the same empirical distribution for Nushagak and the Nuyakuk datasets
+    # bundled with this repo (legacy code keyed this as "Nushagak River").
+    if "nushagak" in basin or "nuyakuk" in basin:
         sim.sex = sim.arr.random.choice([0, 1], size=sim.num_agents, p=[0.503, 0.497])
 
 
@@ -28,10 +31,17 @@ def sim_length(sim, fish_length=None):
         sim.length = np.repeat(fish_length, sim.num_agents)  # testing
 
     else:
-        if sim.basin == "Nushagak River":
-            sim.length = np.where(sim.sex == 'M',
-                                  sim.arr.random.lognormal(mean=6.426, sigma=0.072, size=sim.num_agents),
-                                  sim.arr.random.lognormal(mean=6.349, sigma=0.067, size=sim.num_agents))
+        basin = str(getattr(sim, "basin", "") or "").lower()
+        if "nushagak" in basin or "nuyakuk" in basin:
+            sim.length = np.where(
+                (sim.sex == "M") | (sim.sex == 0),
+                sim.arr.random.lognormal(mean=6.426, sigma=0.072, size=sim.num_agents),
+                sim.arr.random.lognormal(mean=6.349, sigma=0.067, size=sim.num_agents),
+            )
+        else:
+            # Fallback: use the same lognormal family so the model remains usable
+            # even when `basin` naming differs.
+            sim.length = sim.arr.random.lognormal(mean=6.3875, sigma=0.07, size=sim.num_agents)
 
     # we can also set these arrays that contain parameters that are a function of length
     sim.length = np.where(sim.length < 475., 475., sim.length)
@@ -55,10 +65,15 @@ def sim_body_depth(sim):
 
     Sets `sim.body_depth`, `sim.too_shallow`, and `sim.opt_wat_depth`.
     """
-    if sim.basin == "Nushagak River":
-        sim.body_depth = np.where(sim.sex == 'M',
-                                 sim.arr.exp(-1.938 + np.log(sim.length) * 1.084 + 0.0435) / 10.,
-                                 sim.arr.exp(-1.938 + np.log(sim.length) * 1.084) / 10.)
+    basin = str(getattr(sim, "basin", "") or "").lower()
+    if "nushagak" in basin or "nuyakuk" in basin:
+        sim.body_depth = np.where(
+            (sim.sex == "M") | (sim.sex == 0),
+            sim.arr.exp(-1.938 + np.log(sim.length) * 1.084 + 0.0435) / 10.0,
+            sim.arr.exp(-1.938 + np.log(sim.length) * 1.084) / 10.0,
+        )
+    else:
+        sim.body_depth = sim.arr.exp(-1.938 + np.log(sim.length) * 1.084) / 10.0
 
     sim.too_shallow = sim.body_depth / 100. / 2.  # m
     sim.opt_wat_depth = sim.body_depth / 100 * 3.0 + sim.too_shallow

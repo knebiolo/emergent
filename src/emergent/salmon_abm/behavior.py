@@ -1,53 +1,234 @@
 """Behavior helpers extracted from sockeye.py.
 
-            # optional behavior debugging: dump cue snapshots (simplified)
+This includes perception and social cue calculations.
+"""
+import os
+import numpy as np
+import pandas as pd
+import logging
+from scipy.ndimage import distance_transform_edt
+from scipy.interpolate import UnivariateSpline
+import h5py
+import time
+import sys
+import threading
+import queue
+try:
+    import psutil
+    _PSUTIL_AVAILABLE = True
+except Exception:
+    _PSUTIL_AVAILABLE = False
+    
+
+from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, _unpack_affine, standardize_shape, calculate_front_masks, determine_slices_from_vectors, determine_slices_from_headings
+from emergent.salmon_abm import hdf5_io
+
+# Optional Numba JIT: use if available to accelerate inner loops
+try:
+    from numba import njit, prange
+    _NUMBA_AVAILABLE = True
+except Exception:
+    _NUMBA_AVAILABLE = False
+
+
+if _NUMBA_AVAILABLE:
+    @njit(parallel=True, fastmath=True)
+    def _repulsive_core(agent_x, agent_y, world_x, world_y, multiplier, weight):
+        total_x = 0.0
+        total_y = 0.0
+        n = world_x.shape[0]
+        for i in prange(n):
+            dx = agent_x - world_x[i]
+            dy = agent_y - world_y[i]
+            mag = (dx * dx + dy * dy) ** 0.5
+            if mag == 0.0:
+                mag = 1e-6
+            ux = dx / mag
+            uy = dy / mag
+            m = multiplier[i]
+            fx = ((weight * ux) / mag) * m
+            fy = ((weight * uy) / mag) * m
+            total_x += fx
+            total_y += fy
+        return total_x, total_y
+
+    def _repulsive_core_safe(agent_x, agent_y, world_x, world_y, multiplier, weight):
+        # Ensure inputs are contiguous float64 1-D arrays for Numba
+        wx = np.ascontiguousarray(world_x, dtype=np.float64)
+        wy = np.ascontiguousarray(world_y, dtype=np.float64)
+        mult = np.ascontiguousarray(multiplier, dtype=np.float64)
+        return _repulsive_core(agent_x, agent_y, wx, wy, mult, float(weight))
+
+    @njit(parallel=True, fastmath=True)
+    def _repulsive_batched_core(agent_xs, agent_ys, mmap_flat, mmap_offsets, rows_min, cols_min, nr_list, nc_list, affine, weight, t, out_x, out_y):
+        # affine: 6-element array (a,b,c,d,e,f)
+        a = affine[0]
+        b = affine[1]
+        c = affine[2]
+        d = affine[3]
+        e = affine[4]
+        f = affine[5]
+        n_agents = agent_xs.shape[0]
+        for aidx in prange(n_agents):
+            ax = agent_xs[aidx]
+            ay = agent_ys[aidx]
+            start = mmap_offsets[aidx]
+            nr = nr_list[aidx]
+            nc = nc_list[aidx]
+            tx = 0.0
+            ty = 0.0
+            if nr <= 0 or nc <= 0:
+                out_x[aidx] = 0.0
+                out_y[aidx] = 0.0
+                continue
+            # iterate rows and cols
+            for ri in range(nr):
+                for ci in range(nc):
+                    idx = start + ri * nc + ci
+                    val = mmap_flat[idx]
+                    t_since = t - val
+                    m = 0.0
+                    if t_since > 10.0 and t_since < 7200.0:
+                        m = 1.0 - (t_since - 5.0) / 7195.0
+                    row = rows_min[aidx] + ri
+                    col = cols_min[aidx] + ci
+                    wx = a * col + b * row + c
+                    wy = d * col + e * row + f
+                    dx = ax - wx
+                    dy = ay - wy
+                    mag = (dx * dx + dy * dy) ** 0.5
+                    if mag == 0.0:
+                        mag = 1e-6
+                    ux = dx / mag
+                    uy = dy / mag
+                    fx = ((weight * ux) / mag) * m
+                    fy = ((weight * uy) / mag) * m
+                    tx += fx
+                    ty += fy
+            out_x[aidx] = tx
+            out_y[aidx] = ty
+
+    def _repulsive_batched_core_safe(agent_xs, agent_ys, mmap_flat, mmap_offsets, rows_min, cols_min, nr_list, nc_list, affine, weight, t):
+        mf = np.ascontiguousarray(mmap_flat, dtype=np.float64)
+        mo = np.ascontiguousarray(mmap_offsets, dtype=np.int64)
+        rm = np.ascontiguousarray(rows_min, dtype=np.int64)
+        cm = np.ascontiguousarray(cols_min, dtype=np.int64)
+        nr = np.ascontiguousarray(nr_list, dtype=np.int64)
+        nc = np.ascontiguousarray(nc_list, dtype=np.int64)
+        axs = np.ascontiguousarray(agent_xs, dtype=np.float64)
+        ays = np.ascontiguousarray(agent_ys, dtype=np.float64)
+        aff = np.ascontiguousarray(affine, dtype=np.float64)
+        out_x = np.empty(axs.shape[0], dtype=np.float64)
+        out_y = np.empty(axs.shape[0], dtype=np.float64)
+        _repulsive_batched_core(axs, ays, mf, mo, rm, cm, nr, nc, aff, float(weight), float(t), out_x, out_y)
+        return out_x, out_y
+else:
+    def _repulsive_core(agent_x, agent_y, world_x, world_y, multiplier, weight):
+        # fallback Python implementation operating on flattened arrays with minimal temporaries
+        wx = np.asarray(world_x).ravel()
+        wy = np.asarray(world_y).ravel()
+        mult = np.asarray(multiplier).ravel()
+        dx = agent_x - wx
+        dy = agent_y - wy
+        mags = np.sqrt(dx * dx + dy * dy)
+        mags[mags == 0] = 1e-6
+        fx = ((weight * dx) / (mags * mags)) * mult
+        fy = ((weight * dy) / (mags * mags)) * mult
+        return float(np.nansum(fx)), float(np.nansum(fy))
+
+    def _repulsive_batched_python(agent_xs, agent_ys, mmap_flat, mmap_offsets, rows_min, cols_min, nr_list, nc_list, affine, weight, t):
+        # Python fallback: compute multiplier and world coords on the fly
+        a = affine[0]
+        b = affine[1]
+        c = affine[2]
+        d = affine[3]
+        e = affine[4]
+        f = affine[5]
+        n_agents = int(agent_xs.shape[0])
+        out_x = np.empty(n_agents, dtype=np.float64)
+        out_y = np.empty(n_agents, dtype=np.float64)
+        for ai in range(n_agents):
+            ax = float(agent_xs[ai])
+            ay = float(agent_ys[ai])
+            start = int(mmap_offsets[ai])
+            nr = int(nr_list[ai])
+            nc = int(nc_list[ai])
+            if nr <= 0 or nc <= 0:
+                out_x[ai] = 0.0
+                out_y[ai] = 0.0
+                continue
+            tx = 0.0
+            ty = 0.0
+            for ri in range(nr):
+                for ci in range(nc):
+                    idx = start + ri * nc + ci
+                    val = mmap_flat[idx]
+                    t_since = t - val
+                    m = 0.0
+                    if t_since > 10.0 and t_since < 7200.0:
+                        m = 1.0 - (t_since - 5.0) / 7195.0
+                    row = rows_min[ai] + ri
+                    col = cols_min[ai] + ci
+                    wx = a * col + b * row + c
+                    wy = d * col + e * row + f
+                    dx = ax - wx
+                    dy = ay - wy
+                    mag = (dx * dx + dy * dy) ** 0.5
+                    if mag == 0.0:
+                        mag = 1e-6
+                    ux = dx / mag
+                    uy = dy / mag
+                    fx = ((weight * ux) / mag) * m
+                    fy = ((weight * uy) / mag) * m
+                    tx += fx
+                    ty += fy
+            out_x[ai] = tx
+            out_y[ai] = ty
+        return out_x, out_y
+
+
+class behavior():
+    def __init__(self, dt, simulation_object):
+        self.dt = dt
+        self.simulation = simulation_object
+        # Async diagnostics queue and thread
+        self._diag_queue = None
+        self._diag_thread = None
+        self._diag_thread_running = False
+        # Preallocated buffers for batched repulsive computation
+        self._buf_world_x = None
+        self._buf_world_y = None
+        self._buf_mult = None
+        self._buf_offsets = None
+        self._buf_counts = None
+        self._buf_rows_min = None
+        self._buf_cols_min = None
+        self._buf_nr = None
+        self._buf_nc = None
+        # reusable output buffer and scratch arrays to avoid repeated allocations
+        self._repulsive_out = None
+        self._scratch_counts = None
+        self._scratch_offsets = None
+        # per-batch logging entries: list of dicts with keys 'start','end','time','rss_before','rss_after','batch_total'
+        self._batch_log = []
+        # threshold in bytes to consider reducing batch size (default 200MB)
+        self._rss_threshold_bytes = int(getattr(self.simulation, 'behavior_memory_threshold_bytes', 200 * 1024 * 1024))
+        # small cache to reuse world grids for repeated windows
+        self._world_grid_cache = getattr(self, '_world_grid_cache', {})
+        # index / meshgrid cache keyed by (nr,nc)
+        self._meshgrid_cache = {}
+        # cached psutil.Process instance (initialized lazily)
+        self._psutil_proc = None
+        # cached output buffers for batched kernel to avoid per-call allocations
+        self._out_x = None
+        self._out_y = None
+        # Optional pre-sizing knobs: allow environments to set conservative maxima to avoid resizing
+        try:
+            import os as _os
+            max_agents = int(getattr(self.simulation, 'num_agents', int(_os.environ.get('SIM_MAX_AGENTS', 20000))))
+            max_window = int(getattr(self.simulation, 'behavior_max_window', int(_os.environ.get('BEHAVIOR_MAX_WINDOW', 441))))
+            # preallocate common scratch arrays to avoid repeated allocations at runtime
             try:
-                # persist last head_vec and per-cue vectors in a compact, robust way
-                n_agents = int(getattr(self.simulation, 'num_agents', 0)) or 0
-                try:
-                    self._safe_set_sim_attr('last_head_vec', np.asarray(head_vec, dtype=np.float32))
-                except Exception:
-                    pass
-
-                # Build a compact last_cue_vecs mapping with safe shapes
-                last_cue_vecs_final = {}
-                for k, v in raw_vecs.items():
-                    try:
-                        arr = np.asarray(v, dtype=np.float32)
-                        if arr.ndim == 1 and arr.size == 2 and n_agents > 0:
-                            arr = np.tile(arr.reshape(1, 2), (n_agents, 1))
-                        arr = arr.reshape((n_agents, 2)).astype(np.float32) if n_agents > 0 else np.zeros((0, 2), dtype=np.float32)
-                        last_cue_vecs_final[k] = arr
-                    except Exception:
-                        last_cue_vecs_final[k] = np.zeros((n_agents, 2), dtype=np.float32)
-
-                try:
-                    self._safe_set_sim_attr('last_cue_vecs', last_cue_vecs_final)
-                except Exception:
-                    pass
-
-                # If debugging explicitly requested, write a single compact NPZ/JSON via the diagnostics writer
-                if getattr(self.simulation, 'debug_behavior', False) or os.environ.get('FORCE_RAWVECS', '').lower() == 'true':
-                    try:
-                        outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
-                        payload = {'head_vec': np.asarray(head_vec).astype(float)}
-                        for k, arr in last_cue_vecs_final.items():
-                            payload[f'{k}_vec'] = np.asarray(arr).astype(float)
-                        # best-effort write (uses diagnostics_writer if present)
-                        self._safe_write_diagnostics(int(getattr(self.simulation, 'current_step', t)), payload, outdir=outdir)
-                    except Exception:
-                        try:
-                            import logging
-                            logging.getLogger(__name__).debug('Simplified debug dump failed', exc_info=True)
-                        except Exception:
-                            pass
-            except Exception:
-                try:
-                    import logging
-                    logging.getLogger(__name__).debug('Simplified optional debug block failed', exc_info=True)
-                except Exception:
-                    pass
-            return np.arctan2(head_vec[:, 1], head_vec[:, 0])
                 self._scratch_offsets = np.empty(max_agents, dtype=np.int64)
                 self._scratch_counts = np.empty(max_agents, dtype=np.int64)
                 self._repulsive_out = np.empty((max_agents, 2), dtype=np.float64)
@@ -111,6 +292,10 @@
             return None
 
     def _diag_worker(self):
+        # Simple robust diagnostics writer: pop queue items and write JSON or NPZ.
+        import time, os, json
+        import numpy as _np
+        logger = logging.getLogger(__name__)
         while self._diag_thread_running:
             try:
                 item = self._diag_queue.get(timeout=0.5)
@@ -118,38 +303,48 @@
                 continue
             try:
                 outdir, fname_prefix, payload = item
-                import numpy as _np, os, time, json
-                os.makedirs(outdir, exist_ok=True)
+                try:
+                    os.makedirs(outdir, exist_ok=True)
+                except Exception:
+                    logger.debug('diag: failed to make outdir %s', outdir, exc_info=True)
                 ts = int(time.time())
-                # If payload requests JSON format, serialize as JSON
+                # JSON payload requested
                 if isinstance(payload, dict) and payload.get('_fmt') == 'json':
                     fname = os.path.join(outdir, f"{fname_prefix}_{ts}.json")
                     try:
                         with open(fname, 'w', encoding='utf-8') as fh:
                             json.dump(payload.get('obj', {}), fh, indent=2)
                     except Exception:
-                        pass
+                        logger.debug('diag: failed to write json %s', fname, exc_info=True)
                 else:
-                    # default: NPZ compressed of numeric arrays
+                    # default: compressed NPZ of numeric-ish content
                     fname = os.path.join(outdir, f"{fname_prefix}_{ts}.npz")
                     try:
-                        ser = {k: _np.asarray(v).astype(float) for k, v in payload.items()}
-                        _np.savez_compressed(fname, **ser)
+                        ser = {}
+                        if isinstance(payload, dict):
+                            for k, v in payload.items():
+                                try:
+                                    ser[k] = _np.asarray(v).astype(float)
+                                except Exception:
+                                    # try scalar conversion
+                                    try:
+                                        ser[k] = float(v)
+                                    except Exception:
+                                        pass
+                        # write at least something
+                        if ser:
+                            _np.savez_compressed(fname, **ser)
+                        else:
+                            # fallback: write a tiny marker file so callers see an artifact
+                            with open(os.path.join(outdir, f"{fname_prefix}_{ts}.marker"), 'w', encoding='utf-8') as fh:
+                                fh.write('empty')
                     except Exception:
-                        # best-effort: try to convert top-level serializable scalars
-                        try:
-                            simple = {k: float(v) for k, v in payload.items() if isinstance(v, (int, float))}
-                            if simple:
-                                _np.savez_compressed(fname, **simple)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                        logger.debug('diag: failed to write npz %s', fname, exc_info=True)
             finally:
                 try:
                     self._diag_queue.task_done()
                 except Exception:
-                    pass
+                    logger.debug('diag: task_done failed', exc_info=True)
 
     def _start_diag_thread(self):
         if self._diag_thread is not None and self._diag_thread_running:
@@ -260,6 +455,11 @@
         return getattr(self, '_psutil_proc', None)
 
     def already_been_here(self, weight, t):
+        try:
+            if float(weight) == 0.0:
+                return np.zeros((self.simulation.num_agents, 2), dtype=float)
+        except Exception:
+            pass
         x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
 
         # use the mental map transform (coarser avoid-cell grid) when converting
@@ -597,7 +797,7 @@
             h5 = hdf5_io.get_hdf5_obj(self.simulation)
             mmap = hdf5_io.read_dataset(h5, f'memory/{agent_idx}', default=np.zeros((1, 1)))
         mmap_section = mmap[row_min:row_max, col_min:col_max]
-        t_since = mmap_section - t
+        t_since = t - mmap_section
         multiplier = np.where((t_since > 10) & (t_since < 7200), 1 - (t_since - 5) / (7195), 0)
 
         # Convert mental-map pixel indices to world coordinates (pixel centers)
@@ -663,23 +863,98 @@
             return np.array([total_x_force, total_y_force])
 
     def find_nearest_refuge(self, weight):
-        x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
-        refugia_map_rows, refugia_map_cols = geo_to_pixel(x, y, self.simulation.refugia_map_transform)
-        buff = 50
-        # use hdf5_io to support both h5py.File and dict-like mocks
+        """Attract agents toward the nearest refugia cell.
+
+        Preferred data source: `environment/refugia` (shared raster, 1 indicates refuge).
+        Legacy fallback: per-agent `refugia/<agent_idx>` datasets.
+        """
+        x = np.nan_to_num(self.simulation.X)
+        y = np.nan_to_num(self.simulation.Y)
         h5 = hdf5_io.get_hdf5_obj(self.simulation)
-        refugia0 = hdf5_io.read_dataset(h5, 'refugia/0', default=np.zeros((1, 1)))
-        row_min = np.clip(refugia_map_rows - buff, 0, None)
-        row_max = np.clip(refugia_map_rows + buff + 1, None, refugia0.shape[0])
-        col_min = np.clip(refugia_map_cols - buff, 0, None)
-        col_max = np.clip(refugia_map_cols + buff + 1, None, refugia0.shape[1])
 
-        attractive_forces_per_agent = np.array([
-            self._calculate_attractive_force(agent_idx, rmin, rmax, cmin, cmax, weight)
-            for agent_idx, rmin, rmax, cmin, cmax in zip(np.arange(self.simulation.num_agents), row_min, row_max, col_min, col_max)
-        ])
+        # Prefer a shared environment refugia raster when available.
+        shared_refugia = hdf5_io.read_dataset(h5, 'environment/refugia', default=None)
+        if shared_refugia is not None:
+            try:
+                shared_refugia = np.asarray(shared_refugia)
+                if shared_refugia.ndim == 2 and shared_refugia.size > 1:
+                    transform = getattr(self.simulation, 'refugia_map_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
 
-        return attractive_forces_per_agent
+                    # Cache a global "nearest refugia cell" index map so agents
+                    # always get a direction even when no refugia are within a small window.
+                    try:
+                        cache = getattr(self.simulation, '_refugia_nearest_indices', None)
+                    except Exception:
+                        cache = None
+                    need_recompute = True
+                    try:
+                        if cache is not None and isinstance(cache, tuple) and len(cache) == 2:
+                            if np.asarray(cache[0]).shape == shared_refugia.shape and np.asarray(cache[1]).shape == shared_refugia.shape:
+                                need_recompute = False
+                    except Exception:
+                        need_recompute = True
+                    if need_recompute:
+                        refuge_mask = (shared_refugia == 1)
+                        if not np.any(refuge_mask):
+                            return np.zeros((self.simulation.num_agents, 2), dtype=float)
+                        # distance_transform_edt computes distance to nearest zero;
+                        # set refugia cells to 0 by using "non-refugia" as the input mask.
+                        try:
+                            _, inds = distance_transform_edt(~refuge_mask, return_indices=True)
+                            cache = inds
+                            try:
+                                setattr(self.simulation, '_refugia_nearest_indices', cache)
+                            except Exception:
+                                pass
+                        except Exception:
+                            return np.zeros((self.simulation.num_agents, 2), dtype=float)
+
+                    rows, cols = geo_to_pixel(x, y, transform)
+                    rows = np.asarray(rows, dtype=int)
+                    cols = np.asarray(cols, dtype=int)
+                    rows = np.clip(rows, 0, shared_refugia.shape[0] - 1)
+                    cols = np.clip(cols, 0, shared_refugia.shape[1] - 1)
+                    ref_r = np.asarray(cache[0])[rows, cols]
+                    ref_c = np.asarray(cache[1])[rows, cols]
+                    ref_x, ref_y = pixel_to_geo(transform, ref_r, ref_c)
+                    dx = np.asarray(ref_x, dtype=float) - np.asarray(self.simulation.X, dtype=float)
+                    dy = np.asarray(ref_y, dtype=float) - np.asarray(self.simulation.Y, dtype=float)
+                    dist = np.sqrt(dx * dx + dy * dy)
+                    dist_safe = np.where(dist == 0, 1e-6, dist)
+                    out = np.zeros((self.simulation.num_agents, 2), dtype=float)
+                    out[:, 0] = float(weight) * dx / dist_safe
+                    out[:, 1] = float(weight) * dy / dist_safe
+                    out[~np.isfinite(out)] = 0.0
+                    out[dist == 0] = 0.0
+                    return out
+            except Exception:
+                # fall through to legacy method
+                pass
+
+        # Legacy per-agent refugia maps.
+        try:
+            transform = getattr(self.simulation, 'refugia_map_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+            refugia_map_rows, refugia_map_cols = geo_to_pixel(x, y, transform)
+            buff = int(getattr(self.simulation, 'refugia_search_radius_cells', 50))
+            refugia0 = hdf5_io.read_dataset(h5, 'refugia/0', default=np.zeros((1, 1)))
+            row_min = np.clip(refugia_map_rows - buff, 0, None)
+            row_max = np.clip(refugia_map_rows + buff + 1, None, refugia0.shape[0])
+            col_min = np.clip(refugia_map_cols - buff, 0, None)
+            col_max = np.clip(refugia_map_cols + buff + 1, None, refugia0.shape[1])
+
+            attractive_forces_per_agent = np.array([
+                self._calculate_attractive_force(agent_idx, int(rmin), int(rmax), int(cmin), int(cmax), float(weight))
+                for agent_idx, rmin, rmax, cmin, cmax in zip(
+                    np.arange(self.simulation.num_agents),
+                    row_min,
+                    row_max,
+                    col_min,
+                    col_max,
+                )
+            ])
+            return attractive_forces_per_agent
+        except Exception:
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
     def _calculate_attractive_force(self, agent_idx, row_min, row_max, col_min, col_max, weight):
         # ensure we have the hdf5-like object available (works with h5py.File or dict-like mocks)
@@ -687,23 +962,30 @@
         refugia = hdf5_io.read_dataset(h5, f'refugia/{agent_idx}', default=np.zeros((1, 1)))
         refugia_section = refugia[row_min:row_max, col_min:col_max]
         refuge_mask = (refugia_section == 1)
-        if np.any(refuge_mask):
-            distances = distance_transform_edt(~refuge_mask)
-            nearest_refuge_coords = np.unravel_index(np.argmin(distances), distances.shape)
-            ref_xy = pixel_to_geo(self.simulation.refugia_map_transform, nearest_refuge_coords[0], nearest_refuge_coords[1])
-            delta_x = ref_xy[0] - self.simulation.X
-            delta_y = ref_xy[1] - self.simulation.Y
-            magnitudes = np.sqrt(delta_x**2 + delta_y**2)
-            magnitudes[magnitudes == 0] = 0.000001
-            unit_vector_x = delta_x / magnitudes
-            unit_vector_y = delta_y / magnitudes
-            x_force = (weight * unit_vector_x)
-            y_force = (weight * unit_vector_y)
-            attract_x = np.nansum(x_force)
-            attract_y = np.nansum(y_force)
-            return np.array([attract_x, attract_y])
-        else:
-            return np.array([0, 0])
+        if not np.any(refuge_mask):
+            return np.array([0.0, 0.0])
+        try:
+            # find nearest refuge to the agent (in pixel space)
+            rr, cc = np.where(refuge_mask)
+            if rr.size == 0:
+                return np.array([0.0, 0.0])
+            transform = getattr(self.simulation, 'refugia_map_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+            ar, ac = geo_to_pixel(float(self.simulation.X[agent_idx]), float(self.simulation.Y[agent_idx]), transform)
+            ar = int(ar) - int(row_min)
+            ac = int(ac) - int(col_min)
+            d2 = (rr - ar) ** 2 + (cc - ac) ** 2
+            j = int(np.argmin(d2))
+            ref_r = int(rr[j]) + int(row_min)
+            ref_c = int(cc[j]) + int(col_min)
+            ref_x, ref_y = pixel_to_geo(transform, ref_r, ref_c)
+            dx = float(ref_x) - float(self.simulation.X[agent_idx])
+            dy = float(ref_y) - float(self.simulation.Y[agent_idx])
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist <= 0.0 or not np.isfinite(dist):
+                return np.array([0.0, 0.0])
+            return np.array([float(weight) * dx / dist, float(weight) * dy / dist])
+        except Exception:
+            return np.array([0.0, 0.0])
 
     def vel_cue(self, weight):
         length_numpy = self.simulation.length
@@ -733,21 +1015,35 @@
         # read datasets via hdf5_io so this works with h5py.File or dict-like mocks
         h5 = hdf5_io.get_hdf5_obj(self.simulation)
         vel_ds = hdf5_io.read_dataset(h5, 'environment/vel_mag', default=np.zeros((1, 1)))
-        x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
-        y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
+        # Prefer environment-scoped coordinate grids (written by io.write_raster_to_hdf5).
+        # Fall back to legacy top-level keys for backward compatibility.
+        x_coords_ds = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
+        if x_coords_ds is None:
+            x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
+        y_coords_ds = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
+        if y_coords_ds is None:
+            y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
 
-        vel3d = np.stack([standardize_shape(vel_ds[sl[-2:]]) for sl in slices])
-        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]]) for sl in slices])
-        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]]) for sl in slices])
+        target_shape = (2 * buff + 1, 2 * buff + 1)
+        vel3d = np.stack([standardize_shape(vel_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
+        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
+        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
 
-        vel3d_multiplier = calculate_front_masks(self.simulation.heading.flatten(),
-                                                 x_coords,
-                                                 y_coords,
-                                                 np.nan_to_num(self.simulation.X.flatten()),
-                                                 np.nan_to_num(self.simulation.Y.flatten()),
-                                                 behind_value=999.9)
-
-        vel3d = vel3d * vel3d_multiplier
+        # apply "in front" mask by exclusion (not multiplication) so zeros/nodata behind
+        # cannot be selected as the low-speed target
+        front_mask = calculate_front_masks(
+            self.simulation.heading.flatten(),
+            x_coords,
+            y_coords,
+            np.nan_to_num(self.simulation.X.flatten()),
+            np.nan_to_num(self.simulation.Y.flatten()),
+            behind_value=0,
+        )
+        front_any = np.any(front_mask == 1, axis=(1, 2))
+        vel3d_masked = np.where(front_mask == 1, vel3d, np.inf)
+        vel3d = np.where(front_any[:, np.newaxis, np.newaxis], vel3d_masked, vel3d)
+        # exclude nodata / invalid values from argmin candidates
+        vel3d = np.where(np.isfinite(vel3d) & (vel3d > -9990.0), vel3d, np.inf)
 
         num_agents, rows, cols = vel3d.shape
         vel3d = vel3d.reshape(num_agents, rows * cols)
@@ -842,8 +1138,14 @@
                   ]
 
         h5 = hdf5_io.get_hdf5_obj(self.simulation)
-        x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
-        y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
+        # Prefer environment-scoped coordinate grids (written by io.write_raster_to_hdf5).
+        # Fall back to legacy top-level keys for backward compatibility.
+        x_coords_ds = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
+        if x_coords_ds is None:
+            x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
+        y_coords_ds = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
+        if y_coords_ds is None:
+            y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
         x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
         y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
 
@@ -885,11 +1187,31 @@
         current_distances = self.simulation.sample_environment(self.simulation.depth_rast_transform, 'distance_to')
         self.simulation.current_distances = current_distances
 
-        too_close = np.where(current_distances <= 1 * (self.simulation.length / 1000.), 1, 0)
-        too_close = np.where(self.simulation.in_eddy == 1, 1, too_close)
+        # Scale repulsion by distance to boundary so the cue remains meaningful on
+        # coarser rasters (e.g., 1m cells) while preserving legacy behavior when
+        # fish are truly near the edge.
+        try:
+            pw = abs(float(_unpack_affine(self.simulation.depth_rast_transform)[0]))
+        except Exception:
+            pw = 0.0
+        length_m = np.asarray(self.simulation.length, dtype=float) / 1000.0
+        base_influence = getattr(self.simulation, 'border_influence_distance_m', None)
+        if base_influence is None:
+            influence_dist = np.maximum(10.0, np.maximum(10.0 * length_m, pw))
+        else:
+            try:
+                influence_dist = np.full(self.simulation.num_agents, float(base_influence), dtype=float)
+            except Exception:
+                influence_dist = np.asarray(base_influence, dtype=float)
+        influence_dist = np.where(influence_dist <= 0, 10.0, influence_dist)
+        influence = (influence_dist - current_distances) / influence_dist
+        influence = np.clip(influence, 0.0, 1.0)
+        influence = np.where(~np.isfinite(influence), 0.0, influence)
+        influence = np.where(self.simulation.in_eddy == 1, 1.0, influence)
 
-        repulse_x = np.where(too_close, weight * delta_x / dist, np.zeros_like(delta_x))
-        repulse_y = np.where(too_close, weight * delta_y / dist, np.zeros_like(delta_y))
+        dist_safe = np.where(dist == 0, 1e-6, dist)
+        repulse_x = weight * influence * delta_x / dist_safe
+        repulse_y = weight * influence * delta_y / dist_safe
 
         return np.column_stack((repulse_x, repulse_y))
 
@@ -921,8 +1243,14 @@
 
         h5 = hdf5_io.get_hdf5_obj(self.simulation)
         depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=np.zeros((1, 1)))
-        x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
-        y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
+        # Prefer environment-scoped coordinate grids (written by io.write_raster_to_hdf5).
+        # Fall back to legacy top-level keys for backward compatibility.
+        x_coords_ds = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
+        if x_coords_ds is None:
+            x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
+        y_coords_ds = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
+        if y_coords_ds is None:
+            y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
         depths = np.stack([standardize_shape(depth_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
         x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
         y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
@@ -961,7 +1289,7 @@
         self.simulation.wave_drag = np.where(body_depths >= 3, 1, wave_drag_fun(body_depths))
 
     def wave_drag_cue(self, weight):
-        buff = 2.0
+        buff = 2
         x, y = (self.simulation.X, self.simulation.Y)
         rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
 
@@ -985,14 +1313,33 @@
 
         h5 = hdf5_io.get_hdf5_obj(self.simulation)
         depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=np.zeros((1, 1)))
-        x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
-        y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
-        dep3D = np.stack([standardize_shape(depth_ds[sl[-2:]]) for sl in slices])
-        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]]) for sl in slices])
-        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]]) for sl in slices])
+        # Prefer environment-scoped coordinate grids (written by io.write_raster_to_hdf5).
+        # Fall back to legacy top-level keys for backward compatibility.
+        x_coords_ds = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
+        if x_coords_ds is None:
+            x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
+        y_coords_ds = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
+        if y_coords_ds is None:
+            y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
+        target_shape = (2 * buff + 1, 2 * buff + 1)
+        dep3D = np.stack([standardize_shape(depth_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
+        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
+        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
 
-        dep3D_multiplier = calculate_front_masks(self.simulation.heading.flatten(), x_coords, y_coords, self.simulation.X.flatten(), self.simulation.Y.flatten(), behind_value=99999.9)
-        dep3D = dep3D * dep3D_multiplier
+        # apply "in front" mask by exclusion (not multiplication) so zeros/nodata behind
+        # cannot be selected as the target depth
+        front_mask = calculate_front_masks(
+            self.simulation.heading.flatten(),
+            x_coords,
+            y_coords,
+            self.simulation.X.flatten(),
+            self.simulation.Y.flatten(),
+            behind_value=0,
+        )
+        front_any = np.any(front_mask == 1, axis=(1, 2))
+        dep3D_masked = np.where(front_mask == 1, dep3D, np.inf)
+        dep3D = np.where(front_any[:, np.newaxis, np.newaxis], dep3D_masked, dep3D)
+        dep3D = np.where(np.isfinite(dep3D) & (dep3D > -9990.0), dep3D, np.inf)
 
         num_agents, rows, cols = dep3D.shape
         reshaped_dep3D = dep3D.reshape(num_agents, rows * cols)
@@ -1139,22 +1486,15 @@
         counts_safe[counts_safe == 0] = 1
         mean_cos = sum_cos / counts_safe
         mean_sin = sum_sin / counts_safe
-        # resulting desired heading unit vector
+        # resulting desired heading vector (normalize to unit direction)
         avg_vec_x = mean_cos
         avg_vec_y = mean_sin
         no_school = np.where(counts == 0, 0., 1.)
 
-        # current heading unit vector (use stored heading angles for direction)
-        cur_hat_x = np.cos(self.simulation.heading)
-        cur_hat_y = np.sin(self.simulation.heading)
-
-        # vector difference between desired heading unit vector and current heading unit vector
-        vectors_to_heading_x = avg_vec_x - cur_hat_x
-        vectors_to_heading_y = avg_vec_y - cur_hat_y
-        distances = np.sqrt(vectors_to_heading_x**2 + vectors_to_heading_y**2)
-        epsilon = 1e-10
-        v_hat_align_x = np.divide(vectors_to_heading_x, distances + epsilon, out=np.zeros_like(cur_hat_x), where=distances+epsilon != 0)
-        v_hat_align_y = np.divide(vectors_to_heading_y, distances + epsilon, out=np.zeros_like(cur_hat_y), where=distances+epsilon != 0)
+        avg_mag = np.sqrt(avg_vec_x**2 + avg_vec_y**2)
+        avg_mag_safe = np.where(avg_mag == 0, 1e-6, avg_mag)
+        v_hat_align_x = avg_vec_x / avg_mag_safe
+        v_hat_align_y = avg_vec_y / avg_mag_safe
         alignment_array = np.zeros((num_agents, 2))
         alignment_array[:, 0] = weight * v_hat_align_x * no_school
         alignment_array[:, 1] = weight * v_hat_align_y * no_school
@@ -1279,6 +1619,10 @@
                 print(f"arbitrate: simulation.heading size={getattr(h, 'size', 0)}, mean={mean:.4g}, sample={sample}")
             except Exception:
                 pass
+        try:
+            self._safe_set_sim_attr('heading_in', np.asarray(self.simulation.heading, dtype=np.float32))
+        except Exception:
+            pass
         if self.simulation.pid_tuning:
             # allow test-time override of weights via simulation.test_weights dict
             tw = getattr(self.simulation, 'test_weights', None)
@@ -1335,7 +1679,19 @@
             avoid = self.already_been_here(default_weights['avoid'], t)
             collision = self.collision_cue(default_weights['collision'])
 
-        order_dict = {0: 'shallow', 1: 'border', 2: 'avoid', 3: 'collision', 4: 'alignment', 5: 'cohesion', 6: 'low_speed', 7: 'rheotaxis', 8: 'wave_drag'}
+        # cue application / logging order (migratory mode)
+        order_dict = {
+            0: 'shallow',
+            1: 'border',
+            2: 'avoid',
+            3: 'collision',
+            4: 'alignment',
+            5: 'cohesion',
+            6: 'low_speed',
+            7: 'refugia',
+            8: 'rheotaxis',
+            9: 'wave_drag',
+        }
 
         cue_dict = {'rheotaxis': rheotaxis,
                 'shallow': shallow,
@@ -1460,10 +1816,11 @@
                     cue_magnitudes[cue] = np.abs(vec)
                 except Exception:
                     cue_magnitudes[cue] = np.zeros(self.simulation.num_agents)
-            if cue != 'refugia':
-                vec_sum_migratory = np.where(np.linalg.norm(vec_sum_migratory, axis=-1)[:, np.newaxis] < tolerance,
-                                              vec_sum_migratory + vec,
-                                              vec_sum_migratory)
+            vec_sum_migratory = np.where(
+                np.linalg.norm(vec_sum_migratory, axis=-1)[:, np.newaxis] < tolerance,
+                vec_sum_migratory + vec,
+                vec_sum_migratory,
+            )
         # debug prints (guarded) to reveal raw_vecs and cue_magnitudes
         try:
             if getattr(self.simulation, 'debug_behavior', False):
@@ -1677,82 +2034,85 @@
                 pass
 
             # Robust final assignment: ensure attributes exist, correct shapes, and are serializable.
-                n_agents = int(getattr(self.simulation, 'num_agents', 0)) or int(getattr(self.simulation, 'n_agents', 0))
-                if n_agents <= 0:
-                    n_agents = int(getattr(self.simulation, 'num_agents', 0))
+            n_agents = int(getattr(self.simulation, 'num_agents', 0)) or int(getattr(self.simulation, 'n_agents', 0))
+            if n_agents <= 0:
+                n_agents = int(getattr(self.simulation, 'num_agents', 0))
 
-                # Build safe last_cue_vecs with guaranteed shape (n_agents,2)
-                last_cue_vecs_final = {}
-                for k, v in raw_vecs.items():
-                    try:
-                        arr = np.asarray(v, dtype=np.float32)
-                        if arr.ndim == 1 and arr.size == 2:
-                            arr = np.tile(arr.reshape(1, 2), (n_agents, 1))
-                        if arr.ndim == 2 and arr.shape[0] == n_agents and arr.shape[1] == 2:
-                            last_cue_vecs_final[k] = arr
-                        else:
-                            arr = arr.reshape((n_agents, 2)).astype(np.float32)
-                            last_cue_vecs_final[k] = arr
-                    except Exception:
-                        last_cue_vecs_final[k] = np.zeros((n_agents, 2), dtype=np.float32)
-
-                # Ensure known cues are present even if empty
-                for known in ('cohesion', 'alignment', 'rheo', 'refugia', 'border', 'shallow', 'collision', 'avoid'):
-                    if known not in last_cue_vecs_final:
-                        last_cue_vecs_final[known] = np.zeros((n_agents, 2), dtype=np.float32)
-
+            # Build safe last_cue_vecs with guaranteed shape (n_agents,2)
+            last_cue_vecs_final = {}
+            for k, v in raw_vecs.items():
                 try:
-                    self._safe_set_sim_attr('last_cue_vecs', last_cue_vecs_final)
+                    arr = np.asarray(v, dtype=np.float32)
+                    if arr.ndim == 1 and arr.size == 2:
+                        arr = np.tile(arr.reshape(1, 2), (n_agents, 1))
+                    if arr.ndim == 2 and arr.shape[0] == n_agents and arr.shape[1] == 2:
+                        last_cue_vecs_final[k] = arr
+                    else:
+                        arr = arr.reshape((n_agents, 2)).astype(np.float32)
+                        last_cue_vecs_final[k] = arr
+                except Exception:
+                    last_cue_vecs_final[k] = np.zeros((n_agents, 2), dtype=np.float32)
+
+            # Ensure known cues are present even if empty
+            for known in ('cohesion', 'alignment', 'rheo', 'refugia', 'border', 'shallow', 'collision', 'avoid'):
+                if known not in last_cue_vecs_final:
+                    last_cue_vecs_final[known] = np.zeros((n_agents, 2), dtype=np.float32)
+
+            try:
+                self._safe_set_sim_attr('last_cue_vecs', last_cue_vecs_final)
+            except Exception:
+                pass
+
+            # magnitudes
+            last_cue_mags = {}
+            for k, v in cue_magnitudes.items():
+                try:
+                    last_cue_mags[k] = np.asarray(v, dtype=np.float32)
+                except Exception:
+                    last_cue_mags[k] = np.zeros((n_agents,), dtype=np.float32)
+            for known in ('cohesion', 'alignment', 'rheo', 'refugia', 'border', 'shallow', 'collision', 'avoid'):
+                if known not in last_cue_mags:
+                    last_cue_mags[known] = np.zeros((n_agents,), dtype=np.float32)
+            try:
+                self._safe_set_sim_attr('last_cue_magnitudes', last_cue_mags)
+            except Exception:
+                pass
+
+            # head vector
+            try:
+                hv = np.asarray(head_vec, dtype=np.float32)
+                if hv.ndim == 1 and hv.size == 2:
+                    hv = np.tile(hv.reshape(1, 2), (n_agents, 1))
+                hv = hv.reshape((n_agents, 2)).astype(np.float32)
+            except Exception:
+                hv = np.zeros((n_agents, 2), dtype=np.float32)
+            try:
+                self._safe_set_sim_attr('last_head_vec', hv)
+            except Exception:
+                pass
+
+            try:
+                import os
+                step_i = int(getattr(self.simulation, 'current_step', t))
+                payload = {}
+                try:
+                    payload['head_vec'] = np.asarray(hv).astype(float)
+                except Exception:
+                    payload['head_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
+                for k, v in last_cue_vecs_final.items():
+                    try:
+                        payload[f'{k}_vec'] = np.asarray(v).astype(float)
+                    except Exception:
+                        payload[f'{k}_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
+
+                # attempt HDF5 diagnostics writer, fall back to NPZ if configured
+                try:
+                    self._safe_write_diagnostics(step_i, payload)
                 except Exception:
                     pass
-
-                # magnitudes
-                last_cue_mags = {}
-                for k, v in cue_magnitudes.items():
-                    try:
-                        last_cue_mags[k] = np.asarray(v, dtype=np.float32)
-                    except Exception:
-                        last_cue_mags[k] = np.zeros((n_agents,), dtype=np.float32)
-                for known in ('cohesion', 'alignment', 'rheo', 'refugia', 'border', 'shallow', 'collision', 'avoid'):
-                    if known not in last_cue_mags:
-                        last_cue_mags[known] = np.zeros((n_agents,), dtype=np.float32)
-                try:
-                    self._safe_set_sim_attr('last_cue_magnitudes', last_cue_mags)
-                except Exception:
-                    pass
-
-                # head vector
-                try:
-                    hv = np.asarray(head_vec, dtype=np.float32)
-                    if hv.ndim == 1 and hv.size == 2:
-                        hv = np.tile(hv.reshape(1, 2), (n_agents, 1))
-                    hv = hv.reshape((n_agents, 2)).astype(np.float32)
-                except Exception:
-                    hv = np.zeros((n_agents, 2), dtype=np.float32)
-                try:
-                    self._safe_set_sim_attr('last_head_vec', hv)
-                except Exception:
-                    pass
-
-                try:
-                    import os
-                    step_i = int(getattr(self.simulation, 'current_step', t))
-                    payload = {}
-                    try:
-                        payload['head_vec'] = np.asarray(hv).astype(float)
-                    except Exception:
-                        payload['head_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
-                    for k, v in last_cue_vecs_final.items():
-                        try:
-                            payload[f'{k}_vec'] = np.asarray(v).astype(float)
-                        except Exception:
-                            payload[f'{k}_vec'] = np.zeros((n_agents if n_agents else 0, 2), dtype=float)
-
-                    # attempt HDF5 diagnostics writer, fall back to NPZ if configured
-                    try:
-                        self._safe_write_diagnostics(step_i, payload)
-                    except Exception:
-                        pass
+            except Exception:
+                # non-fatal: skip diagnostics on any failure
+                pass
 
             # optional behavior debugging: simplified dump
             if getattr(self.simulation, 'debug_behavior', False):
