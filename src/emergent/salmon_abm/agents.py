@@ -7,6 +7,11 @@ the migration remains behaviorally identical.
 import numpy as np
 
 
+def _basin_is_nushagak_or_nuyakuk(basin: str) -> bool:
+    basin = str(basin or "").lower()
+    return ("nushagak" in basin) or ("nuyakuk" in basin)
+
+
 def sim_sex(sim):
     """Simulate the sex distribution of agents based on the basin.
 
@@ -16,7 +21,7 @@ def sim_sex(sim):
     basin = str(getattr(sim, "basin", "") or "").lower()
     # Use the same empirical distribution for Nushagak and the Nuyakuk datasets
     # bundled with this repo (legacy code keyed this as "Nushagak River").
-    if "nushagak" in basin or "nuyakuk" in basin:
+    if _basin_is_nushagak_or_nuyakuk(basin):
         sim.sex = sim.arr.random.choice([0, 1], size=sim.num_agents, p=[0.503, 0.497])
 
 
@@ -32,7 +37,7 @@ def sim_length(sim, fish_length=None):
 
     else:
         basin = str(getattr(sim, "basin", "") or "").lower()
-        if "nushagak" in basin or "nuyakuk" in basin:
+        if _basin_is_nushagak_or_nuyakuk(basin):
             sim.length = np.where(
                 (sim.sex == "M") | (sim.sex == 0),
                 sim.arr.random.lognormal(mean=6.426, sigma=0.072, size=sim.num_agents),
@@ -66,7 +71,7 @@ def sim_body_depth(sim):
     Sets `sim.body_depth`, `sim.too_shallow`, and `sim.opt_wat_depth`.
     """
     basin = str(getattr(sim, "basin", "") or "").lower()
-    if "nushagak" in basin or "nuyakuk" in basin:
+    if _basin_is_nushagak_or_nuyakuk(basin):
         sim.body_depth = np.where(
             (sim.sex == "M") | (sim.sex == 0),
             sim.arr.exp(-1.938 + np.log(sim.length) * 1.084 + 0.0435) / 10.0,
@@ -77,9 +82,6 @@ def sim_body_depth(sim):
 
     sim.too_shallow = sim.body_depth / 100. / 2.  # m
     sim.opt_wat_depth = sim.body_depth / 100 * 3.0 + sim.too_shallow
-
-
-__all__ = ['sim_sex', 'sim_length', 'sim_weight', 'sim_body_depth']
 
 
 # Compatibility standalone generators (previous API)
@@ -118,7 +120,6 @@ def generate_weight(length_mm):
 
 def generate_body_depth(num_agents_or_lengths, sex=None, basin=None, seed=None):
     """If passed a scalar int, returns array of body depths; if passed lengths array, computes depths from lengths."""
-    rng = np.random.default_rng(seed)
     if isinstance(num_agents_or_lengths, int):
         num = num_agents_or_lengths
         # crude default: generate lengths then compute depth
@@ -137,5 +138,13 @@ def generate_body_depth(num_agents_or_lengths, sex=None, basin=None, seed=None):
     return body_depth
 
 
-__all__ = ['sim_sex', 'sim_length', 'sim_weight', 'sim_body_depth',
-           'generate_sex', 'generate_length', 'generate_weight', 'generate_body_depth']
+__all__ = [
+    'sim_sex',
+    'sim_length',
+    'sim_weight',
+    'sim_body_depth',
+    'generate_sex',
+    'generate_length',
+    'generate_weight',
+    'generate_body_depth',
+]
