@@ -445,15 +445,51 @@ class movement():
 
         ideal_swim_speeds = np.linalg.norm(fish_velocities - water_velocities, axis=-1)
 
-        refugia_mask = (self.simulation.swim_behav == 2) & (ideal_swim_speeds > self.simulation.max_s_U)
-        holding_mask = (self.simulation.swim_behav == 3) & (ideal_swim_speeds > self.simulation.max_s_U)
-        too_fast = refugia_mask + holding_mask
+        # `max_s_U` is stored in body-lengths/second (BL/s) but `ideal_swim_speeds`
+        # is in m/s. Convert per-agent sustainable speeds into m/s using length.
+        try:
+            length_m = np.asarray(self.simulation.length, dtype=float) / 1000.0
+        except Exception:
+            length_m = np.ones_like(ideal_swim_speeds, dtype=float)
+        length_m = np.where(length_m <= 0, 1.0, length_m)
 
-        # ensure proper broadcasting: shape max_s_U as (n,1) so division
-        # yields (n,1) and multiplies correctly with fish_velocities (n,2)
-        # avoid division by zero when ideal_swim_speeds == 0
+        try:
+            max_s_bl_s = np.asarray(self.simulation.max_s_U, dtype=float).reshape((-1,))
+        except Exception:
+            max_s_bl_s = np.full_like(ideal_swim_speeds, 2.77, dtype=float)
+        if max_s_bl_s.size != ideal_swim_speeds.size:
+            try:
+                fill = float(np.nanmedian(max_s_bl_s))
+            except Exception:
+                fill = 2.77
+            max_s_bl_s = np.full_like(ideal_swim_speeds, fill, dtype=float)
+
+        max_s_fatigued_bl_s = max_s_bl_s
+        try:
+            msf = getattr(self.simulation, 'max_s_U_fatigued', None)
+            if msf is not None:
+                max_s_fatigued_bl_s = np.asarray(msf, dtype=float).reshape((-1,))
+                if max_s_fatigued_bl_s.size != ideal_swim_speeds.size:
+                    try:
+                        fill = float(np.nanmedian(max_s_fatigued_bl_s))
+                    except Exception:
+                        fill = float(np.nanmedian(max_s_bl_s))
+                    max_s_fatigued_bl_s = np.full_like(ideal_swim_speeds, fill, dtype=float)
+        except Exception:
+            max_s_fatigued_bl_s = max_s_bl_s
+
+        max_s_m_s = max_s_bl_s * length_m
+        max_s_fatigued_m_s = max_s_fatigued_bl_s * length_m
+
+        refugia_mask = (self.simulation.swim_behav == 2) & (ideal_swim_speeds > max_s_m_s)
+        holding_mask = (self.simulation.swim_behav == 3) & (ideal_swim_speeds > max_s_fatigued_m_s)
+        too_fast = refugia_mask | holding_mask
+        max_allowed = np.where(self.simulation.swim_behav == 3, max_s_fatigued_m_s, max_s_m_s)
+
+        # ensure proper broadcasting: shape max_allowed as (n,1) so division
+        # yields (n,1) and multiplies correctly with fish_velocities (n,2).
         denom = ideal_swim_speeds[:, np.newaxis]
-        ratio = np.divide(self.simulation.max_s_U[:, np.newaxis], denom, out=np.ones_like(denom), where=denom != 0)
+        ratio = np.divide(max_allowed[:, np.newaxis], denom, out=np.ones_like(denom), where=denom != 0)
         fish_velocities = np.where(too_fast[:, np.newaxis], ratio * fish_velocities, fish_velocities)
 
         self.simulation.max_practical_sog = fish_velocities
