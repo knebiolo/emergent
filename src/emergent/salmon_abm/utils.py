@@ -3,8 +3,20 @@
 These are intentionally small, well-documented, and dependency-light so
 unit tests can exercise them without heavy GIS stacks.
 """
-from typing import Tuple, Union
+from typing import Any, Tuple, Union
 import numpy as np
+
+
+def _is_transform_like(obj: Any) -> bool:
+    if obj is None:
+        return False
+    if hasattr(obj, "a") and hasattr(obj, "c") and hasattr(obj, "e") and hasattr(obj, "f"):
+        return True
+    try:
+        seq = tuple(obj)
+    except Exception:
+        return False
+    return len(seq) >= 6
 
 
 
@@ -17,20 +29,20 @@ def _unpack_affine(transform):
     if transform is None:
         raise ValueError("transform must be provided")
     # Prefer attribute access but be permissive: allow missing b/d (assume 0)
-    try:
-        a = getattr(transform, 'a')
-        b = getattr(transform, 'b', 0.0)
-        c = getattr(transform, 'c')
-        d = getattr(transform, 'd', 0.0)
-        e = getattr(transform, 'e')
-        f = getattr(transform, 'f')
+    if hasattr(transform, "a") and hasattr(transform, "c") and hasattr(transform, "e") and hasattr(transform, "f"):
+        a = getattr(transform, "a")
+        b = getattr(transform, "b", 0.0)
+        c = getattr(transform, "c")
+        d = getattr(transform, "d", 0.0)
+        e = getattr(transform, "e")
+        f = getattr(transform, "f")
         return (a, b, c, d, e, f)
-    except Exception:
-        try:
-            a, b, c, d, e, f = transform
-            return (a, b, c, d, e, f)
-        except Exception:
-            raise ValueError("Unsupported transform format")
+
+    try:
+        a, b, c, d, e, f = transform
+    except Exception as exc:
+        raise ValueError("Unsupported transform format") from exc
+    return (a, b, c, d, e, f)
 
 
 def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
@@ -42,8 +54,14 @@ def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
     a, b, c, d, e, f = _unpack_affine(transform)
     # Solve linear system for (col, row): [a b; d e] [col; row] = [x-c; y-f]
     # If transform supports inverse multiplication (~transform * (x,y)), prefer it
-    try:
-        inv = ~transform
+    inv = None
+    if hasattr(transform, "__invert__"):
+        try:
+            inv = ~transform
+        except Exception:
+            inv = None
+
+    if inv is not None:
         # use inverse mapping; support scalar or iterable inputs
         x_arr = np.atleast_1d(np.asarray(x, dtype=float))
         y_arr = np.atleast_1d(np.asarray(y, dtype=float))
@@ -62,24 +80,24 @@ def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
         if rows.size == 1:
             return int(np.rint(rows[0])), int(np.rint(cols[0]))
         return np.rint(rows).astype(int), np.rint(cols).astype(int)
-    except Exception:
-        # fallback: numeric solver and explicit pixel-center handling
-        A = np.array([[a, b], [d, e]], dtype=float)
-        x_arr = np.atleast_1d(np.asarray(x, dtype=float))
-        y_arr = np.atleast_1d(np.asarray(y, dtype=float))
-        rhs = np.vstack([x_arr - c, y_arr - f])
-        sol = np.linalg.solve(A, rhs)
-        col = sol[0]
-        row = sol[1]
-        # Use pixel-center convention: convert to pixel indices for pixel centers
-        col = col - 0.5
-        row = row - 0.5
-        # sanitize NaN/inf and convert to ints safely
-        row = np.nan_to_num(row, nan=0.0, posinf=0.0, neginf=0.0)
-        col = np.nan_to_num(col, nan=0.0, posinf=0.0, neginf=0.0)
-        if row.size == 1:
-            return int(np.floor(row[0] + 0.5)), int(np.floor(col[0] + 0.5))
-        return np.floor(row + 0.5).astype(int), np.floor(col + 0.5).astype(int)
+
+    # fallback: numeric solver and explicit pixel-center handling
+    A = np.array([[a, b], [d, e]], dtype=float)
+    x_arr = np.atleast_1d(np.asarray(x, dtype=float))
+    y_arr = np.atleast_1d(np.asarray(y, dtype=float))
+    rhs = np.vstack([x_arr - c, y_arr - f])
+    sol = np.linalg.solve(A, rhs)
+    col = sol[0]
+    row = sol[1]
+    # Use pixel-center convention: convert to pixel indices for pixel centers
+    col = col - 0.5
+    row = row - 0.5
+    # sanitize NaN/inf and convert to ints safely
+    row = np.nan_to_num(row, nan=0.0, posinf=0.0, neginf=0.0)
+    col = np.nan_to_num(col, nan=0.0, posinf=0.0, neginf=0.0)
+    if row.size == 1:
+        return int(np.floor(row[0] + 0.5)), int(np.floor(col[0] + 0.5))
+    return np.floor(row + 0.5).astype(int), np.floor(col + 0.5).astype(int)
 
 
 def pixel_to_geo(row: int, col: int, transform) -> Tuple[float, float]:
@@ -90,14 +108,8 @@ def pixel_to_geo(row: int, col: int, transform) -> Tuple[float, float]:
     both orders.
     """
     # Detect if caller passed (transform, row, col)
-    try:
-        # If `row` looks like a transform (has length 6 or attributes), treat it accordingly
-        _ = _unpack_affine(row)
-        # row is actually transform, shift arguments
+    if _is_transform_like(row) and not _is_transform_like(transform):
         transform, row, col = row, col, transform
-    except Exception:
-        # `row` was not a transform; assume (row, col, transform) ordering
-        pass
 
     a, b, c, d, e, f = _unpack_affine(transform)
     # vectorized handling: accept scalars or arrays for row/col
