@@ -21,6 +21,34 @@ def _is_h5py_file(obj: Any) -> bool:
     return h5py is not None and isinstance(obj, h5py.File)
 
 
+def _key_exists(hdf5_obj: Any, key: str) -> bool:
+    """Return True if `key` exists in `hdf5_obj`.
+
+    Works for h5py objects and dict-like mocks. Never raises.
+    """
+    if hdf5_obj is None:
+        return False
+    try:
+        return key in hdf5_obj
+    except Exception:
+        # Some dict-like mocks may not implement `in` reliably.
+        try:
+            _ = hdf5_obj[key]
+            return True
+        except Exception:
+            return False
+
+
+def _h5_is_dataset(obj: Any) -> bool:
+    """Return True if `obj` is an h5py.Dataset (when h5py is available)."""
+    if h5py is None:
+        return False
+    try:
+        return isinstance(obj, h5py.Dataset)
+    except Exception:
+        return False
+
+
 @contextmanager
 def open_db(path: str, mode: str = "r"):
     """Context manager that opens an HDF5 file and yields the file object.
@@ -45,20 +73,25 @@ def read_dataset(hdf5_obj: Any, key: str, default: Optional[Any] = None):
 
     Returns the dataset value (copied for h5py datasets) or `default` if missing.
     """
+    if hdf5_obj is None or not hasattr(hdf5_obj, "__getitem__"):
+        return default
+
     try:
-        if hdf5_obj is None:
-            return default
-        if hasattr(hdf5_obj, "__getitem__"):
-            val = hdf5_obj[key]
-            # if this is an h5py dataset, return a numpy copy
-            if hasattr(val, "[:]"):
-                try:
-                    return val[:]
-                except Exception:
-                    return np.array(val)
-            return val
+        val = hdf5_obj[key]
     except Exception:
         return default
+
+    # h5py dataset: always materialize a numpy array for downstream code
+    if _h5_is_dataset(val):
+        try:
+            return val[...]
+        except Exception:
+            try:
+                return np.array(val)
+            except Exception:
+                return default
+
+    return val
 
 
 def write_dataset(hdf5_obj: Any, key: str, data: Any, dtype: Optional[str] = None):
@@ -76,7 +109,7 @@ def write_dataset(hdf5_obj: Any, key: str, data: Any, dtype: Optional[str] = Non
 
     # h5py
     try:
-        if key in hdf5_obj:
+        if _key_exists(hdf5_obj, key):
             del hdf5_obj[key]
         if dtype:
             hdf5_obj.create_dataset(key, data=np.array(data), dtype=dtype)
@@ -98,7 +131,7 @@ def ensure_group(hdf5_obj: Any, group: str):
         return hdf5_obj[group]
 
     try:
-        if group in hdf5_obj:
+        if _key_exists(hdf5_obj, group):
             return hdf5_obj[group]
         return hdf5_obj.create_group(group)
     except Exception:
@@ -112,20 +145,9 @@ def create_environment_placeholders(hdf5_obj: Any):
     that expects keys like 'environment/depth' or 'memory/0' can proceed.
     """
     def _ensure(key: str, arr: np.ndarray) -> None:
-        try:
-            if key in hdf5_obj:
-                return
-        except Exception:
-            # dict-like mocks might not support `in` reliably; fall back to read_dataset
-            try:
-                if read_dataset(hdf5_obj, key, default=None) is not None:
-                    return
-            except Exception:
-                pass
-        try:
-            write_dataset(hdf5_obj, key, arr)
-        except Exception:
-            pass
+        if _key_exists(hdf5_obj, key):
+            return
+        write_dataset(hdf5_obj, key, arr)
 
     # depth and coordinate placeholders (only when missing)
     _ensure("environment/depth", np.zeros((1, 1), dtype=np.float32))
@@ -187,7 +209,7 @@ def create_agent_timeseries(hdf5_obj: Any, sim: Any, nsteps: int):
     shape = (n_agents, int(nsteps))
 
     def _ensure(key, default_arr):
-        if key in hdf5_obj:
+        if _key_exists(hdf5_obj, key):
             return
         try:
             # write_dataset will handle dict-like or h5py objects
@@ -211,15 +233,15 @@ def create_agent_timeseries(hdf5_obj: Any, sim: Any, nsteps: int):
 
     # 1-D per-agent scalars (parity with sockeye.py)
     try:
-        if hasattr(sim, 'length') and 'agent_data/length' not in hdf5_obj:
+        if hasattr(sim, 'length') and not _key_exists(hdf5_obj, 'agent_data/length'):
             write_dataset(hdf5_obj, 'agent_data/length', np.array(getattr(sim, 'length')))
-        if hasattr(sim, 'weight') and 'agent_data/weight' not in hdf5_obj:
+        if hasattr(sim, 'weight') and not _key_exists(hdf5_obj, 'agent_data/weight'):
             write_dataset(hdf5_obj, 'agent_data/weight', np.array(getattr(sim, 'weight')))
-        if hasattr(sim, 'ucrit') and 'agent_data/ucrit' not in hdf5_obj:
+        if hasattr(sim, 'ucrit') and not _key_exists(hdf5_obj, 'agent_data/ucrit'):
             write_dataset(hdf5_obj, 'agent_data/ucrit', np.array(getattr(sim, 'ucrit')))
-        if hasattr(sim, 'too_shallow') and 'agent_data/too_shallow' not in hdf5_obj:
+        if hasattr(sim, 'too_shallow') and not _key_exists(hdf5_obj, 'agent_data/too_shallow'):
             write_dataset(hdf5_obj, 'agent_data/too_shallow', np.array(getattr(sim, 'too_shallow')))
-        if hasattr(sim, 'opt_wat_depth') and 'agent_data/opt_wat_depth' not in hdf5_obj:
+        if hasattr(sim, 'opt_wat_depth') and not _key_exists(hdf5_obj, 'agent_data/opt_wat_depth'):
             write_dataset(hdf5_obj, 'agent_data/opt_wat_depth', np.array(getattr(sim, 'opt_wat_depth')))
     except Exception:
         pass
@@ -251,7 +273,7 @@ def write_agent_timestep(hdf5_obj: Any, sim: Any, col: int):
 
     for key, getter in keys_and_getters:
         try:
-            if key not in hdf5_obj:
+            if not _key_exists(hdf5_obj, key):
                 continue
             val = getter(sim)
             if val is None:
