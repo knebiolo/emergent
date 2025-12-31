@@ -1900,7 +1900,10 @@ class behavior():
         headings_neighbors = raw_headings_neighbors.copy()
         # If headings are all zero (common at initialization), fall back to neighbor velocity directions
         used_velocity_heading = False
-        if headings_neighbors.size > 0 and np.allclose(headings_neighbors, 0.0):
+        # Avoid `np.allclose` here: it is expensive and shows up as a hotspot in
+        # sim profiling. We only need the common init case where headings are
+        # exactly all zeros.
+        if headings_neighbors.size > 0 and (not np.any(headings_neighbors)):
             # compute neighbor velocities' headings where available
             try:
                 vx = np.asarray(self.simulation.x_vel)[neighbor_indices]

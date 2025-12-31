@@ -63,9 +63,9 @@ def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
     Uses the affine transform convention: x = a*col + b*row + c,
     y = d*col + e*row + f.
     """
-    a, b, c, d, e, f = _unpack_affine(transform)
     # Solve linear system for (col, row): [a b; d e] [col; row] = [x-c; y-f]
     # If transform supports inverse multiplication (~transform * (x,y)), prefer it
+    # but do so without per-point `Affine.__mul__` calls (vectorized coefficient math).
     inv = None
     if hasattr(transform, "__invert__"):
         try:
@@ -77,14 +77,20 @@ def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
         # use inverse mapping; support scalar or iterable inputs
         x_arr = np.atleast_1d(np.asarray(x, dtype=float))
         y_arr = np.atleast_1d(np.asarray(y, dtype=float))
-        cols = []
-        rows = []
-        for xi, yi in zip(x_arr, y_arr):
-            col_i, row_i = inv * (xi, yi)
-            cols.append(col_i)
-            rows.append(row_i)
-        cols = np.asarray(cols, dtype=float)
-        rows = np.asarray(rows, dtype=float)
+        # Some test doubles implement `__invert__` by returning `self` and
+        # overriding `__mul__` to include pixel-center offsets. In that case we
+        # must preserve the `inv * (x, y)` semantics.
+        if inv is transform:
+            cols = np.empty_like(x_arr, dtype=float)
+            rows = np.empty_like(y_arr, dtype=float)
+            for i, (xi, yi) in enumerate(zip(x_arr, y_arr)):
+                col_i, row_i = inv * (float(xi), float(yi))
+                cols[i] = col_i
+                rows[i] = row_i
+        else:
+            ia, ib, ic, id_, ie, iff = _unpack_affine(inv)
+            cols = float(ia) * x_arr + float(ib) * y_arr + float(ic)
+            rows = float(id_) * x_arr + float(ie) * y_arr + float(iff)
         # sanitize any NaN/inf results
         cols = np.nan_to_num(cols, nan=0.0, posinf=0.0, neginf=0.0)
         rows = np.nan_to_num(rows, nan=0.0, posinf=0.0, neginf=0.0)
@@ -94,6 +100,7 @@ def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
         return np.rint(rows).astype(int), np.rint(cols).astype(int)
 
     # fallback: numeric solver and explicit pixel-center handling
+    a, b, c, d, e, f = _unpack_affine(transform)
     x_arr = np.atleast_1d(np.asarray(x, dtype=float))
     y_arr = np.atleast_1d(np.asarray(y, dtype=float))
     # Fast path for common north-up rasters (no shear/rotation).
@@ -101,11 +108,17 @@ def geo_to_pixel(x: float, y: float, transform) -> Tuple[int, int]:
         col = (x_arr - c) / a
         row = (y_arr - f) / e
     else:
-        A = np.array([[a, b], [d, e]], dtype=float)
-        rhs = np.vstack([x_arr - c, y_arr - f])
-        sol = np.linalg.solve(A, rhs)
-        col = sol[0]
-        row = sol[1]
+        det = float(a) * float(e) - float(b) * float(d)
+        if det == 0.0:
+            # degenerate transform: return zeros
+            col = np.zeros_like(x_arr, dtype=float)
+            row = np.zeros_like(y_arr, dtype=float)
+        else:
+            x0 = x_arr - float(c)
+            y0 = y_arr - float(f)
+            # inverse([a b; d e]) * [x0; y0]
+            col = (float(e) * x0 - float(b) * y0) / det
+            row = (-float(d) * x0 + float(a) * y0) / det
     # Use pixel-center convention: convert to pixel indices for pixel centers
     col = col - 0.5
     row = row - 0.5
