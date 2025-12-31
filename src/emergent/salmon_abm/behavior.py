@@ -154,6 +154,8 @@ if _NUMBA_AVAILABLE:
                 nb = neighbors_i32[j]
                 if nb < 0:
                     continue
+                if nb == i:
+                    continue
                 if consider_front_only_i8 != 0:
                     dx = X_f64[nb] - ax
                     dy = Y_f64[nb] - ay
@@ -215,6 +217,8 @@ if _NUMBA_AVAILABLE:
             for j in range(start, end):
                 nb = neighbors_i32[j]
                 if nb < 0:
+                    continue
+                if nb == i:
                     continue
                 if consider_front_only_i8 != 0:
                     dx = X_f64[nb] - ax
@@ -706,7 +710,17 @@ class behavior():
                 pass
 
         try:
-            if hasattr(self.simulation, 'agents_within_buffers'):
+            # Prefer CSR neighbors when available (avoids list-of-arrays construction).
+            offs = getattr(self.simulation, 'neighbors_offsets', None)
+            inds = getattr(self.simulation, 'neighbors_indices', None)
+            if offs is not None and inds is not None:
+                offs = np.asarray(offs, dtype=np.int64).reshape((-1,))
+                if offs.size >= 2:
+                    counts = (offs[1:] - offs[:-1]).astype(np.int32, copy=False)
+                    payload['neighbor_counts'] = counts
+                    if int(np.sum(counts)) > 0:
+                        payload['neighbors_concat'] = np.asarray(inds, dtype=np.int32).reshape((-1,))
+            elif hasattr(self.simulation, 'agents_within_buffers'):
                 neighbor_counts = np.array([len(x) for x in self.simulation.agents_within_buffers], dtype=np.int32)
                 payload['neighbor_counts'] = neighbor_counts
                 if neighbor_counts.sum() > 0:
@@ -1786,17 +1800,34 @@ class behavior():
 
     def cohesion_cue(self, weight, consider_front_only=False):
         num_agents = int(self.simulation.num_agents)
-        awb = getattr(self.simulation, 'agents_within_buffers', None) or []
-        if len(awb) != num_agents:
-            return np.zeros((num_agents, 2), dtype=float)
-        lengths = np.fromiter((len(nbrs) for nbrs in awb), count=num_agents, dtype=np.int32)
-        offsets = np.empty(num_agents + 1, dtype=np.int64)
-        offsets[0] = 0
-        offsets[1:] = np.cumsum(lengths, dtype=np.int64)
-        total = int(offsets[-1])
-        if total <= 0:
-            return np.zeros((num_agents, 2), dtype=float)
-        neighbors = np.concatenate(awb).astype(np.int32, copy=False)
+        # Prefer CSR neighbor representation when available (simulation-level)
+        offsets = getattr(self.simulation, 'neighbors_offsets', None)
+        neighbors = getattr(self.simulation, 'neighbors_indices', None)
+        if offsets is not None and neighbors is not None:
+            offsets = np.asarray(offsets, dtype=np.int64).reshape((-1,))
+            neighbors = np.asarray(neighbors, dtype=np.int32).reshape((-1,))
+            if offsets.size != num_agents + 1 or neighbors.size < int(offsets[-1] if offsets.size else 0):
+                offsets = None
+                neighbors = None
+
+        if offsets is None or neighbors is None:
+            awb = getattr(self.simulation, 'agents_within_buffers', None) or []
+            if len(awb) != num_agents:
+                return np.zeros((num_agents, 2), dtype=float)
+            lengths = np.fromiter((len(nbrs) for nbrs in awb), count=num_agents, dtype=np.int32)
+            offsets = np.empty(num_agents + 1, dtype=np.int64)
+            offsets[0] = 0
+            offsets[1:] = np.cumsum(lengths, dtype=np.int64)
+            total = int(offsets[-1])
+            if total <= 0:
+                return np.zeros((num_agents, 2), dtype=float)
+            neighbors = np.concatenate(awb).astype(np.int32, copy=False)
+
+        # Neighbor lengths per agent (used by fallback and for sanity checks)
+        try:
+            lengths = np.diff(np.asarray(offsets, dtype=np.int64)).astype(np.int32, copy=False)
+        except Exception:
+            lengths = np.zeros(num_agents, dtype=np.int32)
 
         X = np.asarray(self.simulation.X, dtype=np.float64).reshape((-1,))
         Y = np.asarray(self.simulation.Y, dtype=np.float64).reshape((-1,))
@@ -1823,8 +1854,12 @@ class behavior():
             return out
 
         # Fallback: keep existing vectorized approach when Numba isn't available.
-        neighbor_indices = neighbors
+        neighbor_indices = np.asarray(neighbors, dtype=np.int32).reshape((-1,))
         agent_indices = np.repeat(np.arange(num_agents), lengths).astype(np.int32, copy=False)
+        valid_nb = (neighbor_indices >= 0) & (neighbor_indices != agent_indices)
+        if np.any(~valid_nb):
+            neighbor_indices = neighbor_indices[valid_nb]
+            agent_indices = agent_indices[valid_nb]
         x_neighbors = X[neighbor_indices]
         y_neighbors = Y[neighbor_indices]
         vectors_to_neighbors_x = x_neighbors - X[agent_indices]
@@ -1868,18 +1903,39 @@ class behavior():
 
     def alignment_cue(self, weight, consider_front_only=False):
         num_agents = int(self.simulation.num_agents)
-        awb = getattr(self.simulation, 'agents_within_buffers', None) or []
-        if len(awb) != num_agents:
-            return np.zeros((num_agents, 2), dtype=float)
-        lengths = np.fromiter((len(nbrs) for nbrs in awb), count=num_agents, dtype=np.int32)
-        offsets = np.empty(num_agents + 1, dtype=np.int64)
-        offsets[0] = 0
-        offsets[1:] = np.cumsum(lengths, dtype=np.int64)
-        total = int(offsets[-1])
-        if total <= 0:
-            self.simulation.school_sog = np.maximum(0.5 * (np.asarray(self.simulation.length, dtype=float) / 1000.0), 0.0)
-            return np.zeros((num_agents, 2), dtype=float)
-        neighbor_indices = np.concatenate(awb).astype(np.int32, copy=False)
+        # Prefer CSR neighbor representation when available (simulation-level)
+        offsets = getattr(self.simulation, 'neighbors_offsets', None)
+        neighbor_indices = getattr(self.simulation, 'neighbors_indices', None)
+        if offsets is not None and neighbor_indices is not None:
+            offsets = np.asarray(offsets, dtype=np.int64).reshape((-1,))
+            neighbor_indices = np.asarray(neighbor_indices, dtype=np.int32).reshape((-1,))
+            total = int(offsets[-1]) if offsets.size else 0
+            if offsets.size != num_agents + 1 or neighbor_indices.size < total:
+                offsets = None
+                neighbor_indices = None
+        if offsets is None or neighbor_indices is None:
+            awb = getattr(self.simulation, 'agents_within_buffers', None) or []
+            if len(awb) != num_agents:
+                return np.zeros((num_agents, 2), dtype=float)
+            lengths = np.fromiter((len(nbrs) for nbrs in awb), count=num_agents, dtype=np.int32)
+            offsets = np.empty(num_agents + 1, dtype=np.int64)
+            offsets[0] = 0
+            offsets[1:] = np.cumsum(lengths, dtype=np.int64)
+            total = int(offsets[-1])
+            if total <= 0:
+                self.simulation.school_sog = np.maximum(0.5 * (np.asarray(self.simulation.length, dtype=float) / 1000.0), 0.0)
+                return np.zeros((num_agents, 2), dtype=float)
+            neighbor_indices = np.concatenate(awb).astype(np.int32, copy=False)
+        else:
+            total = int(offsets[-1]) if offsets.size else 0
+            if total <= 0:
+                self.simulation.school_sog = np.maximum(0.5 * (np.asarray(self.simulation.length, dtype=float) / 1000.0), 0.0)
+                return np.zeros((num_agents, 2), dtype=float)
+        # Neighbor lengths per agent (needed for fallback and for diagnostic sanity)
+        try:
+            lengths = np.diff(np.asarray(offsets, dtype=np.int64)).astype(np.int32, copy=False)
+        except Exception:
+            lengths = np.zeros(num_agents, dtype=np.int32)
         # capture raw neighbor headings (may be all zeros at init)
         if getattr(self.simulation, 'debug_behavior', False):
             try:
@@ -1929,7 +1985,7 @@ class behavior():
                 'headings_neighbors_used': self._safe_asarray(headings_neighbors, dtype=float, default=np.array([])),
                 'used_velocity_heading': bool(used_velocity_heading),
                 'neighbor_indices': self._safe_asarray(neighbor_indices, dtype=np.int32, default=np.array([], dtype=np.int32)),
-                'agent_indices': self._safe_asarray(agent_indices, dtype=np.int32, default=np.array([], dtype=np.int32)),
+                'agent_indices': np.array([], dtype=np.int32),
             }
             self._safe_set_sim_attr('_alignment_diag', ad)
 
@@ -1965,6 +2021,11 @@ class behavior():
         else:
             # Fallback: previous vectorized implementation.
             agent_indices = np.repeat(np.arange(num_agents), lengths).astype(np.int32, copy=False)
+            neighbor_indices = np.asarray(neighbor_indices, dtype=np.int32).reshape((-1,))
+            valid_nb = (neighbor_indices >= 0) & (neighbor_indices != agent_indices)
+            if np.any(~valid_nb):
+                neighbor_indices = neighbor_indices[valid_nb]
+                agent_indices = agent_indices[valid_nb]
             vectors_to_neighbors_x = X[neighbor_indices] - X[agent_indices]
             vectors_to_neighbors_y = Y[neighbor_indices] - Y[agent_indices]
             if consider_front_only:
@@ -2459,7 +2520,6 @@ class behavior():
                 pass
 
             try:
-                import os
                 step_i = int(getattr(self.simulation, 'current_step', t))
                 payload = {}
                 try:

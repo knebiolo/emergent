@@ -446,12 +446,41 @@ def _expected_shallow(sim: simulation, x0: np.ndarray, y0: np.ndarray, heading0:
 
 def _expected_cohesion(sim: simulation, x0: np.ndarray, y0: np.ndarray) -> np.ndarray:
     out = np.zeros((sim.num_agents, 2), dtype=float)
-    awb = getattr(sim, "agents_within_buffers", None)
-    if awb is None:
-        return out
+
+    def _nbrs(i: int) -> np.ndarray:
+        awb = getattr(sim, "agents_within_buffers", None)
+        if awb is not None:
+            try:
+                nbrs = awb[i]
+            except Exception:
+                return np.array([], dtype=int)
+            if nbrs is None:
+                nbrs = np.array([], dtype=int)
+            nbrs = np.asarray(nbrs, dtype=int)
+            # `agents_within_buffers` always exists on the simulation, but may not
+            # be populated when the runtime uses CSR neighbors; fall through to
+            # CSR when this row is empty.
+            if nbrs.size > 0:
+                return nbrs
+        offsets = getattr(sim, "neighbors_offsets", None)
+        indices = getattr(sim, "neighbors_indices", None)
+        if offsets is None or indices is None:
+            return np.array([], dtype=int)
+        try:
+            start = int(np.asarray(offsets)[i])
+            end = int(np.asarray(offsets)[i + 1])
+        except Exception:
+            return np.array([], dtype=int)
+        if end <= start:
+            return np.array([], dtype=int)
+        return np.asarray(indices, dtype=int)[start:end]
+
     for i in range(sim.num_agents):
-        nbrs = awb[i]
-        if nbrs is None or len(nbrs) == 0:
+        nbrs = _nbrs(i)
+        if nbrs.size == 0:
+            continue
+        nbrs = nbrs[nbrs != i]
+        if nbrs.size == 0:
             continue
         cx = float(np.mean(x0[nbrs]))
         cy = float(np.mean(y0[nbrs]))
@@ -485,12 +514,41 @@ def _expected_collision(sim: simulation, x0: np.ndarray, y0: np.ndarray) -> np.n
 
 def _expected_alignment(sim: simulation, heading0: np.ndarray) -> np.ndarray:
     out = np.zeros((sim.num_agents, 2), dtype=float)
-    awb = getattr(sim, "agents_within_buffers", None)
-    if awb is None:
-        return out
+
+    def _nbrs(i: int) -> np.ndarray:
+        awb = getattr(sim, "agents_within_buffers", None)
+        if awb is not None:
+            try:
+                nbrs = awb[i]
+            except Exception:
+                return np.array([], dtype=int)
+            if nbrs is None:
+                nbrs = np.array([], dtype=int)
+            nbrs = np.asarray(nbrs, dtype=int)
+            # `agents_within_buffers` always exists on the simulation, but may not
+            # be populated when the runtime uses CSR neighbors; fall through to
+            # CSR when this row is empty.
+            if nbrs.size > 0:
+                return nbrs
+        offsets = getattr(sim, "neighbors_offsets", None)
+        indices = getattr(sim, "neighbors_indices", None)
+        if offsets is None or indices is None:
+            return np.array([], dtype=int)
+        try:
+            start = int(np.asarray(offsets)[i])
+            end = int(np.asarray(offsets)[i + 1])
+        except Exception:
+            return np.array([], dtype=int)
+        if end <= start:
+            return np.array([], dtype=int)
+        return np.asarray(indices, dtype=int)[start:end]
+
     for i in range(sim.num_agents):
-        nbrs = awb[i]
-        if nbrs is None or len(nbrs) == 0:
+        nbrs = _nbrs(i)
+        if nbrs.size == 0:
+            continue
+        nbrs = nbrs[nbrs != i]
+        if nbrs.size == 0:
             continue
         hs = np.asarray(heading0[nbrs], dtype=float)
         mx = float(np.mean(np.cos(hs)))
@@ -588,6 +646,13 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
         num_agents=nagents,
         db_path=os.path.join(outdir, f"accept_{case.name}.h5"),
     )
+    # Ensure behavior arbitration records per-cue vectors for evaluation.
+    # The optimized runtime path may skip building `last_cue_vecs` unless
+    # explicitly requested.
+    try:
+        sim.record_behavior_state = True
+    except Exception:
+        pass
 
     # deterministic placement and any random choices (best-effort)
     if seed is not None:

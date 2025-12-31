@@ -872,9 +872,38 @@ class simulation:
                 tree = cKDTree(pts)
                 # buffer radius in meters (use a simulation attribute or default)
                 radius = getattr(self, 'neighbor_buffer_radius', max(10.0, (self.length.mean() / 100.0) * 5.0))
-                agents_within = tree.query_ball_tree(tree, r=radius)
-                # convert lists to numpy arrays per-agent
-                self.agents_within_buffers = [np.array([j for j in lst if j != i], dtype=int) for i, lst in enumerate(agents_within)]
+                # Build a flat neighbor list + offsets (CSR) to avoid per-agent numpy
+                # array allocations. Prefer per-row neighborhood queries so we don't
+                # need to sort large edge lists each timestep.
+                n = int(pts.shape[0])
+                neighbors_lists = tree.query_ball_point(pts, r=radius)
+                lens = np.fromiter((len(lst) for lst in neighbors_lists), dtype=np.int32, count=n)
+                total = int(lens.sum())
+                neighbors_offsets = np.empty(n + 1, dtype=np.int64)
+                neighbors_offsets[0] = 0
+                neighbors_indices = np.empty(total, dtype=np.int32)
+
+                pos = 0
+                for i, lst in enumerate(neighbors_lists):
+                    k = int(len(lst))
+                    end = pos + k
+                    if k > 0:
+                        neighbors_indices[pos:end] = lst
+                    pos = end
+                    neighbors_offsets[i + 1] = pos
+
+                self.neighbors_offsets = neighbors_offsets
+                self.neighbors_indices = neighbors_indices
+                # Count neighbors excluding the self entry (assumes each list includes self).
+                self.neighbor_counts = np.maximum(0, lens - 1).astype(np.int32, copy=False)
+
+                # Legacy compatibility: only build per-agent buffers when requested.
+                build_buffers = bool(getattr(self, 'build_agents_within_buffers', False)) or bool(getattr(self, 'debug_behavior', False))
+                if build_buffers:
+                    self.agents_within_buffers = [
+                        neighbors_indices[neighbors_offsets[i] : neighbors_offsets[i + 1]]
+                        for i in range(n)
+                    ]
                 # nearest neighbor excluding self
                 try:
                     # SciPy cKDTree uses `workers` (not `n_jobs`) in modern versions.
