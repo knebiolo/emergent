@@ -109,12 +109,79 @@ def write_dataset(hdf5_obj: Any, key: str, data: Any, dtype: Optional[str] = Non
 
     # h5py
     try:
+        arr = np.array(data)
         if _key_exists(hdf5_obj, key):
-            del hdf5_obj[key]
+            try:
+                existing = hdf5_obj[key]
+            except Exception:
+                existing = None
+
+            # Prefer in-place overwrite for existing datasets when shape/dtype match.
+            if _h5_is_dataset(existing):
+                try:
+                    if existing.shape == arr.shape:
+                        if dtype is None or existing.dtype == np.dtype(dtype):
+                            existing[...] = arr.astype(existing.dtype, copy=False)
+                            return True
+                except Exception:
+                    # fall back to delete/recreate below
+                    pass
+
+            try:
+                del hdf5_obj[key]
+            except Exception:
+                # If we can't delete, fall through to create (may raise)
+                pass
+
         if dtype:
-            hdf5_obj.create_dataset(key, data=np.array(data), dtype=dtype)
+            hdf5_obj.create_dataset(key, data=arr, dtype=dtype)
         else:
-            hdf5_obj.create_dataset(key, data=np.array(data))
+            hdf5_obj.create_dataset(key, data=arr)
+        return True
+    except Exception:
+        return False
+
+
+def write_timeseries_step(hdf5_obj: Any, key: str, step: int, values: Any) -> bool:
+    """Write a single timestep column into a 2D (agents x timesteps) dataset.
+
+    This avoids materializing and rewriting the full 2D array each timestep.
+
+    - For h5py datasets: assigns `ds[:, step] = values` in-place.
+    - For dict-like stores: assigns into the existing numpy array when present.
+
+    Returns False if the dataset is missing or cannot be written.
+    """
+    if hdf5_obj is None:
+        return False
+    step_i = int(step)
+    vals = np.asarray(values)
+
+    if isinstance(hdf5_obj, dict):
+        arr = hdf5_obj.get(key)
+        if arr is None:
+            return False
+        try:
+            arr = np.asarray(arr)
+            if arr.ndim != 2 or step_i < 0 or step_i >= arr.shape[1]:
+                return False
+            arr[:, step_i] = vals.reshape((-1,))
+            hdf5_obj[key] = arr
+            return True
+        except Exception:
+            return False
+
+    # h5py-backed: write column slice without copying full dataset
+    try:
+        ds = hdf5_obj[key]
+    except Exception:
+        return False
+    if not _h5_is_dataset(ds):
+        return False
+    try:
+        if ds.ndim != 2 or step_i < 0 or step_i >= ds.shape[1]:
+            return False
+        ds[:, step_i] = vals.reshape((-1,)).astype(ds.dtype, copy=False)
         return True
     except Exception:
         return False

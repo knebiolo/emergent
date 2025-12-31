@@ -47,6 +47,15 @@ class simulation:
         self.cumulative_time = 0.0
         self.env_files = env_files or []
         self.longitudinal_profile = longitudinal_profile
+        # Output write cadence (timesteps). Defaults preserve existing behavior.
+        # - write_frequency <= 0: skip writing agent_data/* time-series each step.
+        # - flush_frequency <= 0: never flush each step (caller can flush/close).
+        self.write_frequency = int(getattr(self, 'write_frequency', 1) or 0)
+        # Leave `flush_frequency` unset by default so it can follow `write_frequency`
+        # when callers change cadence after initialization (e.g. profiling harness).
+        self.flush_frequency = getattr(self, 'flush_frequency', None)
+        # Cache for h5py dataset handles used in per-step writes
+        self._timeseries_ds_cache = {}
         # Cache for static dataset arrays (e.g., environment rasters) to avoid
         # repeatedly reading large HDF5 datasets each timestep.
         self._dataset_cache = {}
@@ -253,14 +262,8 @@ class simulation:
                 try:
                     hdf5_io.write_dataset(self.db, 'X', self.X)
                     hdf5_io.write_dataset(self.db, 'Y', self.Y)
-                    arrX = hdf5_io.read_dataset(self.db, 'agent_data/X', default=None)
-                    arrY = hdf5_io.read_dataset(self.db, 'agent_data/Y', default=None)
-                    if arrX is not None:
-                        arrX[:, 0] = self.X
-                        hdf5_io.write_dataset(self.db, 'agent_data/X', arrX)
-                    if arrY is not None:
-                        arrY[:, 0] = self.Y
-                        hdf5_io.write_dataset(self.db, 'agent_data/Y', arrY)
+                    hdf5_io.write_timeseries_step(self.db, 'agent_data/X', 0, self.X)
+                    hdf5_io.write_timeseries_step(self.db, 'agent_data/Y', 0, self.Y)
                 except Exception:
                     pass
                 # record that start polygon was used
@@ -984,28 +987,40 @@ class simulation:
         # write per-timestep slices into time-indexed agent_data arrays
         h5 = hdf5_io.get_hdf5_obj(self)
         ts = int(max(0, min(int(self.cumulative_time) - 1, self.num_timesteps - 1)))
-        tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz')
-        for key in tracked:
-            arr = hdf5_io.read_dataset(h5, key, default=None)
-            if arr is None:
-                logging.getLogger(__name__).debug('Dataset %s missing; skipping timestep write', key)
-                continue
-            attr_key = key.split('/')[-1]
-            # try direct attribute, then lowercase, then capitalized
-            if hasattr(self, attr_key):
-                val = getattr(self, attr_key)
-            elif hasattr(self, attr_key.lower()):
-                val = getattr(self, attr_key.lower())
-            elif hasattr(self, attr_key.capitalize()):
-                val = getattr(self, attr_key.capitalize())
-            else:
-                logging.getLogger(__name__).debug('No matching attribute for %s; skipping', attr_key)
-                continue
-            arr[:, ts] = np.array(val)
-            hdf5_io.write_dataset(h5, key, arr)
+        try:
+            t_int = int(t)
+            if 0 <= t_int < int(self.num_timesteps):
+                ts = t_int
+        except Exception:
+            pass
+
+        write_frequency = int(getattr(self, 'write_frequency', 1) or 0)
+        do_timeseries_write = write_frequency > 0 and (ts % write_frequency == 0)
+        if do_timeseries_write:
+            tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz')
+            for key in tracked:
+                attr_key = key.split('/')[-1]
+                # try direct attribute, then lowercase, then capitalized
+                if hasattr(self, attr_key):
+                    val = getattr(self, attr_key)
+                elif hasattr(self, attr_key.lower()):
+                    val = getattr(self, attr_key.lower())
+                elif hasattr(self, attr_key.capitalize()):
+                    val = getattr(self, attr_key.capitalize())
+                else:
+                    logging.getLogger(__name__).debug('No matching attribute for %s; skipping', attr_key)
+                    continue
+                ok = hdf5_io.write_timeseries_step(h5, key, ts, val)
+                if not ok:
+                    logging.getLogger(__name__).debug('Dataset %s missing/unwritable; skipping timestep write', key)
 
         # flush when supported (best-effort)
-        if hasattr(self.db, 'flush'):
+        flush_frequency_raw = getattr(self, 'flush_frequency', None)
+        if flush_frequency_raw is None:
+            flush_frequency_raw = getattr(self, 'write_frequency', 1)
+        flush_frequency = int(flush_frequency_raw or 0)
+        do_flush = flush_frequency > 0 and (ts % flush_frequency == 0)
+        if do_flush and hasattr(self.db, 'flush'):
             try:
                 self.db.flush()
             except Exception:
