@@ -163,6 +163,9 @@ def standardize_shape(arr_or_shape: Union[np.ndarray, Tuple[int, int]], target_s
         raise ValueError("arr must be an array when target_shape is provided")
     tr, tc = target_shape
     r, c = arr.shape[:2]
+    # Fast path: already the desired shape (avoid allocation/copy in tight loops).
+    if r == tr and c == tc:
+        return arr
     out = np.full((tr, tc), fill_value, dtype=arr.dtype)
     nr = min(tr, r)
     nc = min(tc, c)
@@ -181,6 +184,8 @@ def standardize_shape_pad(arr: np.ndarray, target_shape=(5, 5), fill_value=np.na
         raise ValueError("arr must be an array")
     tr, tc = target_shape
     r, c = arr.shape[:2]
+    if r == tr and c == tc:
+        return arr
     out = np.full((tr, tc), fill_value, dtype=arr.dtype)
     nr = min(tr, r)
     nc = min(tc, c)

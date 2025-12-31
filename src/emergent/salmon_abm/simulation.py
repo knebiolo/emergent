@@ -47,6 +47,9 @@ class simulation:
         self.cumulative_time = 0.0
         self.env_files = env_files or []
         self.longitudinal_profile = longitudinal_profile
+        # Cache for static dataset arrays (e.g., environment rasters) to avoid
+        # repeatedly reading large HDF5 datasets each timestep.
+        self._dataset_cache = {}
 
         # Avoid/mental-map configuration. In non-debug runs, prefer a sparse,
         # per-agent history representation to avoid per-agent HDF5 raster costs.
@@ -1021,11 +1024,10 @@ class simulation:
         if h5 is None or transform is None:
             return np.full(self.num_agents, np.nan)
 
-        ds = hdf5_io.read_dataset(h5, f'environment/{raster_name}', default=None)
-        if ds is None:
+        ds_arr = self.get_cached_dataset(f'environment/{raster_name}', default=None)
+        if ds_arr is None:
             return np.full(self.num_agents, np.nan)
-
-        ds_arr = np.asarray(ds)
+        ds_arr = np.asarray(ds_arr)
 
         try:
             rows, cols = utils.geo_to_pixel(self.X, self.Y, transform)
@@ -1054,6 +1056,36 @@ class simulation:
             except Exception:
                 pass
         return out
+
+    def get_cached_dataset(self, key: str, default=None):
+        """Return a cached numpy array for static datasets (primarily environment/*).
+
+        For h5py-backed runs, this avoids re-reading large rasters each timestep.
+        Only keys under `environment/` are cached to prevent stale writes for
+        mutable datasets.
+        """
+        try:
+            key = str(key)
+        except Exception:
+            return default
+        cacheable = key.startswith('environment/')
+        if not cacheable:
+            return hdf5_io.read_dataset(hdf5_io.get_hdf5_obj(self), key, default=default)
+        try:
+            cache = getattr(self, '_dataset_cache', None)
+            if isinstance(cache, dict) and key in cache:
+                return cache[key]
+        except Exception:
+            cache = None
+        h5 = hdf5_io.get_hdf5_obj(self)
+        val = hdf5_io.read_dataset(h5, key, default=default)
+        try:
+            if not isinstance(getattr(self, '_dataset_cache', None), dict):
+                self._dataset_cache = {}
+            self._dataset_cache[key] = val
+        except Exception:
+            pass
+        return val
 
     def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None, return_status: bool = False, video_hook=None, viewer: bool = False, viewer_blocking: bool = False, viewer_live: bool = False, viewer_host: str = '127.0.0.1', viewer_port: int = 50007, viewer_stream_raw: bool = False, viewer_fps: float = 20.0):
         # Enhanced run loop with PID plumbing, write frequency, optional video hook,

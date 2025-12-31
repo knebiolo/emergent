@@ -124,6 +124,126 @@ if _NUMBA_AVAILABLE:
         return out_x, out_y
 
     @njit(parallel=True, fastmath=True)
+    def _cohesion_from_neighbors_offsets(
+        offsets_i64,
+        neighbors_i32,
+        X_f64,
+        Y_f64,
+        x_vel_f64,
+        y_vel_f64,
+        consider_front_only_i8,
+        out_unit_x_f64,
+        out_unit_y_f64,
+    ):
+        n = offsets_i64.shape[0] - 1
+        for i in prange(n):
+            start = offsets_i64[i]
+            end = offsets_i64[i + 1]
+            if start >= end:
+                out_unit_x_f64[i] = 0.0
+                out_unit_y_f64[i] = 0.0
+                continue
+            ax = X_f64[i]
+            ay = Y_f64[i]
+            vx_i = x_vel_f64[i]
+            vy_i = y_vel_f64[i]
+            sx = 0.0
+            sy = 0.0
+            cnt = 0
+            for j in range(start, end):
+                nb = neighbors_i32[j]
+                if nb < 0:
+                    continue
+                if consider_front_only_i8 != 0:
+                    dx = X_f64[nb] - ax
+                    dy = Y_f64[nb] - ay
+                    if (dx * vx_i + dy * vy_i) <= 0.0:
+                        continue
+                sx += X_f64[nb]
+                sy += Y_f64[nb]
+                cnt += 1
+            if cnt <= 0:
+                out_unit_x_f64[i] = 0.0
+                out_unit_y_f64[i] = 0.0
+                continue
+            cx = sx / cnt
+            cy = sy / cnt
+            dx = cx - ax
+            dy = cy - ay
+            mag = (dx * dx + dy * dy) ** 0.5
+            if mag == 0.0:
+                out_unit_x_f64[i] = 0.0
+                out_unit_y_f64[i] = 0.0
+            else:
+                out_unit_x_f64[i] = dx / mag
+                out_unit_y_f64[i] = dy / mag
+
+    @njit(parallel=True, fastmath=True)
+    def _alignment_from_neighbors_offsets(
+        offsets_i64,
+        neighbors_i32,
+        headings_neighbors_f64,
+        X_f64,
+        Y_f64,
+        x_vel_f64,
+        y_vel_f64,
+        sog_f64,
+        consider_front_only_i8,
+        out_unit_x_f64,
+        out_unit_y_f64,
+        out_mean_sog_f64,
+        out_counts_i32,
+    ):
+        n = offsets_i64.shape[0] - 1
+        for i in prange(n):
+            start = offsets_i64[i]
+            end = offsets_i64[i + 1]
+            if start >= end:
+                out_unit_x_f64[i] = 0.0
+                out_unit_y_f64[i] = 0.0
+                out_mean_sog_f64[i] = np.nan
+                out_counts_i32[i] = 0
+                continue
+            ax = X_f64[i]
+            ay = Y_f64[i]
+            vx_i = x_vel_f64[i]
+            vy_i = y_vel_f64[i]
+            sum_cos = 0.0
+            sum_sin = 0.0
+            sum_sog = 0.0
+            cnt = 0
+            for j in range(start, end):
+                nb = neighbors_i32[j]
+                if nb < 0:
+                    continue
+                if consider_front_only_i8 != 0:
+                    dx = X_f64[nb] - ax
+                    dy = Y_f64[nb] - ay
+                    if (dx * vx_i + dy * vy_i) <= 0.0:
+                        continue
+                h = headings_neighbors_f64[j]
+                sum_cos += np.cos(h)
+                sum_sin += np.sin(h)
+                sum_sog += sog_f64[nb]
+                cnt += 1
+            out_counts_i32[i] = cnt
+            if cnt <= 0:
+                out_unit_x_f64[i] = 0.0
+                out_unit_y_f64[i] = 0.0
+                out_mean_sog_f64[i] = np.nan
+                continue
+            mean_cos = sum_cos / cnt
+            mean_sin = sum_sin / cnt
+            mag = (mean_cos * mean_cos + mean_sin * mean_sin) ** 0.5
+            if mag == 0.0:
+                out_unit_x_f64[i] = 0.0
+                out_unit_y_f64[i] = 0.0
+            else:
+                out_unit_x_f64[i] = mean_cos / mag
+                out_unit_y_f64[i] = mean_sin / mag
+            out_mean_sog_f64[i] = sum_sog / cnt
+
+    @njit(parallel=True, fastmath=True)
     def _already_been_here_sparse_core_affine(
         agent_x_f64,
         agent_y_f64,
@@ -303,16 +423,24 @@ class behavior():
         try:
             if _NUMBA_AVAILABLE:
                 import os
-                if 'NUMBA_NUM_THREADS' not in os.environ:
-                    try:
-                        from multiprocessing import cpu_count
-                        from numba import set_num_threads
-                        set_num_threads(cpu_count())
-                    except Exception:
-                        pass
-                # warmup numba kernels to avoid JIT overhead in timed runs
+                # Initialize Numba configuration and warm JIT kernels once per process.
                 try:
-                    self._warmup_numba_kernels()
+                    if not getattr(self.__class__, '_numba_initialized', False):
+                        if 'NUMBA_NUM_THREADS' not in os.environ:
+                            try:
+                                from multiprocessing import cpu_count
+                                from numba import set_num_threads
+                                set_num_threads(cpu_count())
+                            except Exception:
+                                pass
+                        try:
+                            self._warmup_numba_kernels()
+                        except Exception:
+                            pass
+                        try:
+                            setattr(self.__class__, '_numba_initialized', True)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
         except Exception:
@@ -466,6 +594,57 @@ class behavior():
         except Exception:
             return default
 
+    def _get_env(self, key: str, default=None):
+        """Get an environment dataset, using simulation caching when available."""
+        sim = self.simulation
+        try:
+            key = str(key)
+        except Exception:
+            return default
+        try:
+            getter = getattr(sim, 'get_cached_dataset', None)
+            if callable(getter) and key.startswith('environment/'):
+                return getter(key, default=default)
+        except Exception:
+            pass
+        h5 = hdf5_io.get_hdf5_obj(sim)
+        return hdf5_io.read_dataset(h5, key, default=default)
+
+    def _window_rc(self, rows: np.ndarray, cols: np.ndarray, buff: int, shape: tuple[int, int]):
+        """Build per-agent window indices (rows, cols) and validity mask.
+
+        Returns `(rr_clip, cc_clip, valid)` each shaped (n_agents, 2*buff+1, 2*buff+1).
+        """
+        rows = np.asarray(rows, dtype=np.int32).reshape((-1,))
+        cols = np.asarray(cols, dtype=np.int32).reshape((-1,))
+        H, W = int(shape[0]), int(shape[1])
+        buff = int(buff)
+        if buff < 0:
+            buff = 0
+
+        if not hasattr(self, "_offset_cache"):
+            self._offset_cache = {}
+        offs = self._offset_cache.get(buff)
+        if offs is None:
+            offs = np.arange(-buff, buff + 1, dtype=np.int32)
+            self._offset_cache[buff] = offs
+
+        rr = rows[:, np.newaxis, np.newaxis] + offs[np.newaxis, :, np.newaxis]
+        cc = cols[:, np.newaxis, np.newaxis] + offs[np.newaxis, np.newaxis, :]
+        valid = (rr >= 0) & (cc >= 0) & (rr < H) & (cc < W)
+        rr_clip = np.clip(rr, 0, max(0, H - 1)).astype(np.int32, copy=False)
+        cc_clip = np.clip(cc, 0, max(0, W - 1)).astype(np.int32, copy=False)
+        return rr_clip, cc_clip, valid
+
+    def _window_dxdy(self, rr: np.ndarray, cc: np.ndarray, transform, agent_x: np.ndarray, agent_y: np.ndarray):
+        """Compute dx,dy from agent positions to window cell centers."""
+        a, b, c, d, e, f = _unpack_affine(transform)
+        x_cell = float(a) * cc + float(b) * rr + float(c)
+        y_cell = float(d) * cc + float(e) * rr + float(f)
+        dx = x_cell - agent_x[:, np.newaxis, np.newaxis]
+        dy = y_cell - agent_y[:, np.newaxis, np.newaxis]
+        return dx, dy
+
     def _coerce_agent_vec(self, vec) -> np.ndarray:
         """Coerce cue output to an array of shape (num_agents, 2)."""
         arr = np.asarray(vec)
@@ -598,6 +777,25 @@ class behavior():
                 out_fx = _np.zeros(2, dtype=_np.float64)
                 out_fy = _np.zeros(2, dtype=_np.float64)
                 _already_been_here_sparse_core_affine(ax, ay, hr, hc, ht, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 20.0, 7200.0, out_fx, out_fy)
+            except Exception:
+                pass
+            try:
+                # Warm up schooling kernels (cohesion/alignment) with a tiny graph.
+                offsets = _np.array([0, 1, 2], dtype=_np.int64)  # 2 agents, 1 neighbor each
+                neighbors = _np.array([1, 0], dtype=_np.int32)
+                X = _np.array([0.0, 1.0], dtype=_np.float64)
+                Y = _np.array([0.0, 0.0], dtype=_np.float64)
+                x_vel = _np.array([1.0, 1.0], dtype=_np.float64)
+                y_vel = _np.array([0.0, 0.0], dtype=_np.float64)
+                headings = _np.array([0.0, 0.0], dtype=_np.float64)
+                headings_neighbors = headings[neighbors].astype(_np.float64)
+                sog = _np.array([0.2, 0.2], dtype=_np.float64)
+                outx = _np.zeros(2, dtype=_np.float64)
+                outy = _np.zeros(2, dtype=_np.float64)
+                _cohesion_from_neighbors_offsets(offsets, neighbors, X, Y, x_vel, y_vel, _np.int8(0), outx, outy)
+                mean_sog = _np.full(2, _np.nan, dtype=_np.float64)
+                counts = _np.zeros(2, dtype=_np.int32)
+                _alignment_from_neighbors_offsets(offsets, neighbors, headings_neighbors, X, Y, x_vel, y_vel, sog, _np.int8(0), outx, outy, mean_sog, counts)
             except Exception:
                 pass
         except Exception:
@@ -1200,10 +1398,8 @@ class behavior():
         """
         x = np.nan_to_num(self.simulation.X)
         y = np.nan_to_num(self.simulation.Y)
-        h5 = hdf5_io.get_hdf5_obj(self.simulation)
-
         # Prefer a shared environment refugia raster when available.
-        shared_refugia = hdf5_io.read_dataset(h5, 'environment/refugia', default=None)
+        shared_refugia = self._get_env('environment/refugia', default=None)
         if shared_refugia is not None:
             try:
                 shared_refugia = np.asarray(shared_refugia)
@@ -1218,8 +1414,18 @@ class behavior():
                         cache = None
                     need_recompute = True
                     try:
-                        if cache is not None and isinstance(cache, tuple) and len(cache) == 2:
-                            if np.asarray(cache[0]).shape == shared_refugia.shape and np.asarray(cache[1]).shape == shared_refugia.shape:
+                        if cache is not None:
+                            # Preferred cache format: (rows, cols) tuple
+                            if isinstance(cache, tuple) and len(cache) == 2:
+                                if np.asarray(cache[0]).shape == shared_refugia.shape and np.asarray(cache[1]).shape == shared_refugia.shape:
+                                    need_recompute = False
+                            # Back-compat: old cache stored as ndarray shaped (2, H, W)
+                            elif isinstance(cache, np.ndarray) and cache.ndim == 3 and cache.shape[0] == 2 and cache.shape[1:] == shared_refugia.shape:
+                                cache = (np.asarray(cache[0]), np.asarray(cache[1]))
+                                try:
+                                    setattr(self.simulation, '_refugia_nearest_indices', cache)
+                                except Exception:
+                                    pass
                                 need_recompute = False
                     except Exception:
                         need_recompute = True
@@ -1231,7 +1437,9 @@ class behavior():
                         # set refugia cells to 0 by using "non-refugia" as the input mask.
                         try:
                             _, inds = distance_transform_edt(~refuge_mask, return_indices=True)
-                            cache = inds
+                            # `return_indices=True` returns an array shaped (ndim, H, W);
+                            # store as a tuple for stable shape checks.
+                            cache = (np.asarray(inds[0]), np.asarray(inds[1]))
                             try:
                                 setattr(self.simulation, '_refugia_nearest_indices', cache)
                             except Exception:
@@ -1322,81 +1530,52 @@ class behavior():
         buff = 2
         x, y = (self.simulation.X, self.simulation.Y)
         rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
-        rows = np.atleast_1d(rows)
-        cols = np.atleast_1d(cols)
+        rows = np.atleast_1d(rows).astype(np.int32, copy=False)
+        cols = np.atleast_1d(cols).astype(np.int32, copy=False)
 
-        xmin = cols - buff
-        xmax = cols + buff + 1
-        ymin = rows - buff
-        ymax = rows + buff + 1
+        vel_ds = np.asarray(self._get_env('environment/vel_mag', default=np.zeros((1, 1))), dtype=float)
+        if vel_ds.ndim != 2 or vel_ds.size <= 1:
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        # sanitize numeric arrays before casting to int to avoid invalid-cast runtime warnings
-        xmin = np.nan_to_num(xmin, nan=0, posinf=0, neginf=0).astype(np.int32)
-        xmax = np.nan_to_num(xmax, nan=0, posinf=0, neginf=0).astype(np.int32)
-        ymin = np.nan_to_num(ymin, nan=0, posinf=0, neginf=0).astype(np.int32)
-        ymax = np.nan_to_num(ymax, nan=0, posinf=0, neginf=0).astype(np.int32)
+        rr, cc, valid = self._window_rc(rows, cols, buff, vel_ds.shape)
+        rr0 = np.clip(rr, 0, vel_ds.shape[0] - 1)
+        cc0 = np.clip(cc, 0, vel_ds.shape[1] - 1)
+        vel3d = vel_ds[rr0, cc0]
+        # exclude out-of-bounds and nodata / invalid values
+        vel3d = np.where(valid & np.isfinite(vel3d) & (vel3d > -9990.0), vel3d, np.inf)
 
-        slices = [(agent, slice(y0, y1), slice(x0, x1))
-                  for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),
-                                                   ymin.flatten(),
-                                                   ymax.flatten(),
-                                                   xmin.flatten(),
-                                                   xmax.flatten()
-                                                   )
-                  ]
-        # read datasets via hdf5_io so this works with h5py.File or dict-like mocks
-        h5 = hdf5_io.get_hdf5_obj(self.simulation)
-        vel_ds = hdf5_io.read_dataset(h5, 'environment/vel_mag', default=np.zeros((1, 1)))
-        # Prefer environment-scoped coordinate grids (written by io.write_raster_to_hdf5).
-        # Fall back to legacy top-level keys for backward compatibility.
-        x_coords_ds = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
-        if x_coords_ds is None:
-            x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
-        y_coords_ds = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
-        if y_coords_ds is None:
-            y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
+        # compute dx,dy to each candidate cell (world coords) and front mask
+        agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
+        agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
+        heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
+        transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+        dx, dy = self._window_dxdy(rr0, cc0, transform, agent_x, agent_y)
+        hx = np.cos(heading)[:, np.newaxis, np.newaxis]
+        hy = np.sin(heading)[:, np.newaxis, np.newaxis]
+        front = (dx * hx + dy * hy) > 0
+        front_any = np.any(front & valid, axis=(1, 2))
+        vel3d = np.where(front_any[:, np.newaxis, np.newaxis], np.where(front, vel3d, np.inf), vel3d)
 
-        target_shape = (2 * buff + 1, 2 * buff + 1)
-        vel3d = np.stack([standardize_shape(vel_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
-        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
-        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
+        # If there are no finite candidates, return zero vector.
+        best_val = np.min(vel3d, axis=(1, 2))
+        ok = np.isfinite(best_val)
+        if not np.any(ok):
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        # apply "in front" mask by exclusion (not multiplication) so zeros/nodata behind
-        # cannot be selected as the low-speed target
-        front_mask = calculate_front_masks(
-            self.simulation.heading.flatten(),
-            x_coords,
-            y_coords,
-            np.nan_to_num(self.simulation.X.flatten()),
-            np.nan_to_num(self.simulation.Y.flatten()),
-            behind_value=0,
-        )
-        front_any = np.any(front_mask == 1, axis=(1, 2))
-        vel3d_masked = np.where(front_mask == 1, vel3d, np.inf)
-        vel3d = np.where(front_any[:, np.newaxis, np.newaxis], vel3d_masked, vel3d)
-        # exclude nodata / invalid values from argmin candidates
-        vel3d = np.where(np.isfinite(vel3d) & (vel3d > -9990.0), vel3d, np.inf)
+        flat = vel3d.reshape((vel3d.shape[0], -1))
+        best_idx = np.argmin(flat, axis=1)
+        H = 2 * buff + 1
+        rr_i = best_idx // H
+        cc_i = best_idx % H
 
-        num_agents, rows, cols = vel3d.shape
-        vel3d = vel3d.reshape(num_agents, rows * cols)
-
-        flat_indices = np.argmin(vel3d, axis=1)
-        min_row_indices = flat_indices // cols
-        min_col_indices = flat_indices % cols
-
-        min_x, min_y = pixel_to_geo(self.simulation.vel_mag_rast_transform,
-                                    min_row_indices + ymin,
-                                    min_col_indices + xmin)
-
-        delta_x = min_x - self.simulation.X
-        delta_y = min_y - self.simulation.Y
-        dist = np.sqrt(np.power(delta_x, 2) + np.power(delta_y, 2))
+        sel_dx = dx[np.arange(dx.shape[0]), rr_i, cc_i]
+        sel_dy = dy[np.arange(dy.shape[0]), rr_i, cc_i]
+        dist = np.sqrt(sel_dx * sel_dx + sel_dy * sel_dy)
         dist_safe = np.where(dist == 0, 1e-6, dist)
-        attract_x = weight * delta_x / dist_safe
-        attract_y = weight * delta_y / dist_safe
-        # where distance was zero, set attraction to zero to avoid NaNs
-        attract_x = np.where(dist == 0, 0.0, attract_x)
-        attract_y = np.where(dist == 0, 0.0, attract_y)
+        attract_x = float(weight) * sel_dx / dist_safe
+        attract_y = float(weight) * sel_dy / dist_safe
+        attract_x = np.where(ok & (dist != 0), attract_x, 0.0)
+        attract_y = np.where(ok & (dist != 0), attract_y, 0.0)
         return np.column_stack((attract_x, attract_y))
 
     def rheo_cue(self, weight, downstream=False):
@@ -1439,77 +1618,39 @@ class behavior():
         buff = 2
         x, y = (np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y))
         rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
-        rows = np.atleast_1d(rows)
-        cols = np.atleast_1d(cols)
+        rows = np.atleast_1d(rows).astype(np.int32, copy=False)
+        cols = np.atleast_1d(cols).astype(np.int32, copy=False)
 
-        xmin = cols - buff
-        xmax = cols + buff + 1
-        ymin = rows - buff
-        ymax = rows + buff + 1
+        dist_ds = np.asarray(self._get_env('environment/distance_to', default=np.zeros((1, 1))), dtype=float)
+        if dist_ds.ndim != 2 or dist_ds.size <= 1:
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        # ensure indices within dataset bounds using hdf5_io
-        h5 = hdf5_io.get_hdf5_obj(self.simulation)
-        dist_ds = hdf5_io.read_dataset(h5, 'environment/distance_to', default=np.zeros((1, 1)))
-        xmin = np.clip(xmin, 0, dist_ds.shape[1] - 1)
-        xmax = np.clip(xmax, 0, dist_ds.shape[1])
-        ymin = np.clip(ymin, 0, dist_ds.shape[0] - 1)
-        ymax = np.clip(ymax, 0, dist_ds.shape[0])
+        rr, cc, valid = self._window_rc(rows, cols, buff, dist_ds.shape)
+        rr0 = np.clip(rr, 0, dist_ds.shape[0] - 1)
+        cc0 = np.clip(cc, 0, dist_ds.shape[1] - 1)
+        dist3d = dist_ds[rr0, cc0]
+        dist3d = np.where(valid & np.isfinite(dist3d), dist3d, -np.inf)
 
-        slices = [(agent, slice(y0, y1), slice(x0, x1))
-                  for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),
-                                                   ymin.flatten(),
-                                                   ymax.flatten(),
-                                                   xmin.flatten(),
-                                                   xmax.flatten()
-                                                   )
-                  ]
+        agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
+        agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
+        heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
+        transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+        dx, dy = self._window_dxdy(rr0, cc0, transform, agent_x, agent_y)
+        hx = np.cos(heading)[:, np.newaxis, np.newaxis]
+        hy = np.sin(heading)[:, np.newaxis, np.newaxis]
+        front = (dx * hx + dy * hy) > 0
+        front_any = np.any(front & valid, axis=(1, 2))
+        dist3d = np.where(front_any[:, np.newaxis, np.newaxis], np.where(front, dist3d, -np.inf), dist3d)
 
-        h5 = hdf5_io.get_hdf5_obj(self.simulation)
-        # Prefer environment-scoped coordinate grids (written by io.write_raster_to_hdf5).
-        # Fall back to legacy top-level keys for backward compatibility.
-        x_coords_ds = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
-        if x_coords_ds is None:
-            x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
-        y_coords_ds = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
-        if y_coords_ds is None:
-            y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
-        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
-        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
+        flat = dist3d.reshape((dist3d.shape[0], -1))
+        best_idx = np.argmax(flat, axis=1)
+        H = 2 * buff + 1
+        rr_i = best_idx // H
+        cc_i = best_idx % H
 
-        # calculate_front_masks expects 1D headings and per-agent (n,H,W) coords
-        front_multiplier = calculate_front_masks(np.asarray(self.simulation.heading).flatten(),
-                             x_coords,
-                             y_coords,
-                             np.nan_to_num(np.asarray(self.simulation.X).flatten()),
-                             np.nan_to_num(np.asarray(self.simulation.Y).flatten()))
-
-        h5 = hdf5_io.get_hdf5_obj(self.simulation)
-        dist_ds = hdf5_io.read_dataset(h5, 'environment/distance_to', default=np.zeros((1, 1)))
-        dist3d = np.stack([standardize_shape(dist_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
-        # ensure front_multiplier can broadcast to dist3d shape
-        try:
-            dist3d = dist3d * front_multiplier
-        except Exception:
-            try:
-                front_multiplier_b = np.broadcast_to(front_multiplier, dist3d.shape)
-                dist3d = dist3d * front_multiplier_b
-            except Exception:
-                # fallback: ignore front mask if broadcasting fails
-                pass
-
-        num_agents, rows, cols = dist3d.shape
-        dist3d = dist3d.reshape(num_agents, rows * cols)
-        flat_indices = np.argmax(dist3d, axis=1)
-        max_row_indices = flat_indices // cols
-        max_col_indices = flat_indices % cols
-
-        max_x, max_y = pixel_to_geo(self.simulation.vel_mag_rast_transform,
-                                    max_row_indices + ymin,
-                                    max_col_indices + xmin)
-
-        delta_x = max_x - self.simulation.X
-        delta_y = max_y - self.simulation.Y
-        dist = np.sqrt(np.power(delta_x, 2) + np.power(delta_y, 2))
+        sel_dx = dx[np.arange(dx.shape[0]), rr_i, cc_i]
+        sel_dy = dy[np.arange(dy.shape[0]), rr_i, cc_i]
+        dist = np.sqrt(sel_dx * sel_dx + sel_dy * sel_dy)
 
         current_distances = self.simulation.sample_environment(self.simulation.depth_rast_transform, 'distance_to')
         self.simulation.current_distances = current_distances
@@ -1537,8 +1678,8 @@ class behavior():
         influence = np.where(self.simulation.in_eddy == 1, 1.0, influence)
 
         dist_safe = np.where(dist == 0, 1e-6, dist)
-        repulse_x = weight * influence * delta_x / dist_safe
-        repulse_y = weight * influence * delta_y / dist_safe
+        repulse_x = float(weight) * influence * sel_dx / dist_safe
+        repulse_y = float(weight) * influence * sel_dy / dist_safe
 
         return np.column_stack((repulse_x, repulse_y))
 
@@ -1546,59 +1687,41 @@ class behavior():
         buff = 2
         x, y = (self.simulation.X, self.simulation.Y)
         rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
-        rows = np.atleast_1d(rows)
-        cols = np.atleast_1d(cols)
+        rows = np.atleast_1d(rows).astype(np.int32, copy=False)
+        cols = np.atleast_1d(cols).astype(np.int32, copy=False)
 
-        xmin = cols - buff
-        xmax = cols + buff + 1
-        ymin = rows - buff
-        ymax = rows + buff + 1
+        depth_ds = np.asarray(self._get_env('environment/depth', default=np.zeros((1, 1))), dtype=float)
+        if depth_ds.ndim != 2 or depth_ds.size <= 1:
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        xmin = np.atleast_1d(xmin).astype(np.int32)
-        xmax = np.atleast_1d(xmax).astype(np.int32)
-        ymin = np.atleast_1d(ymin).astype(np.int32)
-        ymax = np.atleast_1d(ymax).astype(np.int32)
+        rr, cc, valid = self._window_rc(rows, cols, buff, depth_ds.shape)
+        rr0 = np.clip(rr, 0, depth_ds.shape[0] - 1)
+        cc0 = np.clip(cc, 0, depth_ds.shape[1] - 1)
+        depths = depth_ds[rr0, cc0]
 
-        repulsive_forces = np.zeros((self.simulation.num_agents, 2), dtype=float)
-        min_depth = self.simulation.too_shallow
+        agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
+        agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
+        heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
+        transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+        dx_cell, dy_cell = self._window_dxdy(rr0, cc0, transform, agent_x, agent_y)
+        # for repulsion, use vector from cell->agent
+        dx = -dx_cell
+        dy = -dy_cell
 
-        slices = [(agent, slice(y0, y1), slice(x0, x1))
-                  for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),
-                                                   ymin.flatten(),
-                                                   ymax.flatten(),
-                                                   xmin.flatten(),
-                                                   xmax.flatten())
-                  ]
+        hx = np.cos(heading)[:, np.newaxis, np.newaxis]
+        hy = np.sin(heading)[:, np.newaxis, np.newaxis]
+        front = (dx_cell * hx + dy_cell * hy) > 0
+        front_any = np.any(front & valid, axis=(1, 2))
+        front_mult = np.where(front_any[:, np.newaxis, np.newaxis], front, True).astype(np.float64)
 
-        h5 = hdf5_io.get_hdf5_obj(self.simulation)
-        depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=np.zeros((1, 1)))
-        # Prefer environment-scoped coordinate grids (written by io.write_raster_to_hdf5).
-        # Fall back to legacy top-level keys for backward compatibility.
-        x_coords_ds = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
-        if x_coords_ds is None:
-            x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
-        y_coords_ds = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
-        if y_coords_ds is None:
-            y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
-        depths = np.stack([standardize_shape(depth_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
-        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
-        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=(2 * buff + 1, 2 * buff + 1)) for sl in slices])
+        min_depth = np.asarray(self.simulation.too_shallow, dtype=float).reshape((-1,))
+        depth_mult = (depths < min_depth[:, np.newaxis, np.newaxis]).astype(np.float64)
+        depth_mult *= valid.astype(np.float64)
 
-        front_multiplier = calculate_front_masks(self.simulation.heading, x_coords, y_coords, self.simulation.X, self.simulation.Y)
-
-        depth_multiplier = np.where(depths < min_depth[:, np.newaxis, np.newaxis], 1, 0)
-
-        delta_x = self.simulation.X[:, np.newaxis, np.newaxis] - x_coords
-        delta_y = self.simulation.Y[:, np.newaxis, np.newaxis] - y_coords
-        magnitudes = np.sqrt(np.power(delta_x, 2) + np.power(delta_y, 2))
-        magnitudes = np.where(magnitudes == 0, 0.000001, magnitudes)
-
-        unit_vector_x = delta_x / magnitudes
-        unit_vector_y = delta_y / magnitudes
-
-        x_force = ((weight * unit_vector_x) / magnitudes) * depth_multiplier * front_multiplier
-        y_force = ((weight * unit_vector_y) / magnitudes) * depth_multiplier * front_multiplier
-
+        dist2 = dx * dx + dy * dy
+        dist2 = np.where(dist2 == 0, 1e-6, dist2)
+        x_force = (float(weight) * dx / dist2) * depth_mult * front_mult
+        y_force = (float(weight) * dy / dist2) * depth_mult * front_mult
         total_x_force = np.nansum(x_force, axis=(1, 2))
         total_y_force = np.nansum(y_force, axis=(1, 2))
         return np.column_stack((total_x_force, total_y_force))
@@ -1615,87 +1738,101 @@ class behavior():
         buff = 2
         x, y = (self.simulation.X, self.simulation.Y)
         rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
-        rows = np.atleast_1d(rows)
-        cols = np.atleast_1d(cols)
+        rows = np.atleast_1d(rows).astype(np.int32, copy=False)
+        cols = np.atleast_1d(cols).astype(np.int32, copy=False)
 
-        xmin = cols - buff
-        xmax = cols + buff + 1
-        ymin = rows - buff
-        ymax = rows + buff + 1
+        depth_ds = np.asarray(self._get_env('environment/depth', default=np.zeros((1, 1))), dtype=float)
+        if depth_ds.ndim != 2 or depth_ds.size <= 1:
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        xmin = np.atleast_1d(xmin).astype(np.int32)
-        xmax = np.atleast_1d(xmax).astype(np.int32)
-        ymin = np.atleast_1d(ymin).astype(np.int32)
-        ymax = np.atleast_1d(ymax).astype(np.int32)
+        rr, cc, valid = self._window_rc(rows, cols, buff, depth_ds.shape)
+        rr0 = np.clip(rr, 0, depth_ds.shape[0] - 1)
+        cc0 = np.clip(cc, 0, depth_ds.shape[1] - 1)
+        dep3d = depth_ds[rr0, cc0]
+        dep3d = np.where(valid & np.isfinite(dep3d) & (dep3d > -9990.0), dep3d, np.inf)
 
-        slices = [(agent, slice(y0, y1), slice(x0, x1))
-                  for agent, y0, y1, x0, x1 in zip(np.arange(self.simulation.num_agents),
-                                                   ymin.flatten(),
-                                                   ymax.flatten(),
-                                                   xmin.flatten(),
-                                                   xmax.flatten())
-                  ]
+        agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
+        agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
+        heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
+        transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+        dx, dy = self._window_dxdy(rr0, cc0, transform, agent_x, agent_y)
+        hx = np.cos(heading)[:, np.newaxis, np.newaxis]
+        hy = np.sin(heading)[:, np.newaxis, np.newaxis]
+        front = (dx * hx + dy * hy) > 0
+        front_any = np.any(front & valid, axis=(1, 2))
+        dep3d = np.where(front_any[:, np.newaxis, np.newaxis], np.where(front, dep3d, np.inf), dep3d)
 
-        h5 = hdf5_io.get_hdf5_obj(self.simulation)
-        depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=np.zeros((1, 1)))
-        # Prefer environment-scoped coordinate grids (written by io.write_raster_to_hdf5).
-        # Fall back to legacy top-level keys for backward compatibility.
-        x_coords_ds = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
-        if x_coords_ds is None:
-            x_coords_ds = hdf5_io.read_dataset(h5, 'x_coords', default=np.zeros((1, 1)))
-        y_coords_ds = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
-        if y_coords_ds is None:
-            y_coords_ds = hdf5_io.read_dataset(h5, 'y_coords', default=np.zeros((1, 1)))
-        target_shape = (2 * buff + 1, 2 * buff + 1)
-        dep3D = np.stack([standardize_shape(depth_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
-        x_coords = np.stack([standardize_shape(x_coords_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
-        y_coords = np.stack([standardize_shape(y_coords_ds[sl[-2:]], target_shape=target_shape) for sl in slices])
+        opt = np.asarray(self.simulation.opt_wat_depth, dtype=float).reshape((-1, 1, 1))
+        score = np.abs(dep3d - opt)
+        best_val = np.min(score, axis=(1, 2))
+        ok = np.isfinite(best_val)
+        if not np.any(ok):
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        # apply "in front" mask by exclusion (not multiplication) so zeros/nodata behind
-        # cannot be selected as the target depth
-        front_mask = calculate_front_masks(
-            self.simulation.heading.flatten(),
-            x_coords,
-            y_coords,
-            self.simulation.X.flatten(),
-            self.simulation.Y.flatten(),
-            behind_value=0,
-        )
-        front_any = np.any(front_mask == 1, axis=(1, 2))
-        dep3D_masked = np.where(front_mask == 1, dep3D, np.inf)
-        dep3D = np.where(front_any[:, np.newaxis, np.newaxis], dep3D_masked, dep3D)
-        dep3D = np.where(np.isfinite(dep3D) & (dep3D > -9990.0), dep3D, np.inf)
-
-        num_agents, rows, cols = dep3D.shape
-        reshaped_dep3D = dep3D.reshape(num_agents, rows * cols)
-        optimal_depth_diff = np.abs(reshaped_dep3D - self.simulation.opt_wat_depth[:, np.newaxis])
-        flat_indices = np.argmin(optimal_depth_diff, axis=1)
-        min_row_indices = flat_indices // cols
-        min_col_indices = flat_indices % cols
-
-        min_x, min_y = pixel_to_geo(self.simulation.vel_mag_rast_transform, min_row_indices + ymin, min_col_indices + xmin)
-        delta_x = min_x - self.simulation.X
-        delta_y = min_y - self.simulation.Y
-        dist = np.sqrt(delta_x**2 + delta_y**2)
+        flat = score.reshape((score.shape[0], -1))
+        best_idx = np.argmin(flat, axis=1)
+        H = 2 * buff + 1
+        rr_i = best_idx // H
+        cc_i = best_idx % H
+        sel_dx = dx[np.arange(dx.shape[0]), rr_i, cc_i]
+        sel_dy = dy[np.arange(dy.shape[0]), rr_i, cc_i]
+        dist = np.sqrt(sel_dx * sel_dx + sel_dy * sel_dy)
         dist_safe = np.where(dist == 0, 1e-6, dist)
-        attract_x = weight * delta_x / dist_safe
-        attract_y = weight * delta_y / dist_safe
-        attract_x = np.where(dist == 0, 0.0, attract_x)
-        attract_y = np.where(dist == 0, 0.0, attract_y)
+        attract_x = float(weight) * sel_dx / dist_safe
+        attract_y = float(weight) * sel_dy / dist_safe
+        attract_x = np.where(ok & (dist != 0), attract_x, 0.0)
+        attract_y = np.where(ok & (dist != 0), attract_y, 0.0)
         return np.column_stack((attract_x, attract_y))
 
     def cohesion_cue(self, weight, consider_front_only=False):
-        num_agents = self.simulation.num_agents
-        neighbor_indices = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
-        agent_indices = np.repeat(np.arange(num_agents), [len(neighbors) for neighbors in self.simulation.agents_within_buffers]).astype(np.int32)
-        x_neighbors = self.simulation.X[neighbor_indices]
-        y_neighbors = self.simulation.Y[neighbor_indices]
-        vectors_to_neighbors_x = x_neighbors - self.simulation.X[agent_indices]
-        vectors_to_neighbors_y = y_neighbors - self.simulation.Y[agent_indices]
+        num_agents = int(self.simulation.num_agents)
+        awb = getattr(self.simulation, 'agents_within_buffers', None) or []
+        if len(awb) != num_agents:
+            return np.zeros((num_agents, 2), dtype=float)
+        lengths = np.fromiter((len(nbrs) for nbrs in awb), count=num_agents, dtype=np.int32)
+        offsets = np.empty(num_agents + 1, dtype=np.int64)
+        offsets[0] = 0
+        offsets[1:] = np.cumsum(lengths, dtype=np.int64)
+        total = int(offsets[-1])
+        if total <= 0:
+            return np.zeros((num_agents, 2), dtype=float)
+        neighbors = np.concatenate(awb).astype(np.int32, copy=False)
+
+        X = np.asarray(self.simulation.X, dtype=np.float64).reshape((-1,))
+        Y = np.asarray(self.simulation.Y, dtype=np.float64).reshape((-1,))
+        x_vel = np.asarray(getattr(self.simulation, 'x_vel', np.zeros(num_agents)), dtype=np.float64).reshape((-1,))
+        y_vel = np.asarray(getattr(self.simulation, 'y_vel', np.zeros(num_agents)), dtype=np.float64).reshape((-1,))
+
+        if _NUMBA_AVAILABLE:
+            outx = np.zeros(num_agents, dtype=np.float64)
+            outy = np.zeros(num_agents, dtype=np.float64)
+            _cohesion_from_neighbors_offsets(
+                np.ascontiguousarray(offsets, dtype=np.int64),
+                np.ascontiguousarray(neighbors, dtype=np.int32),
+                np.ascontiguousarray(X, dtype=np.float64),
+                np.ascontiguousarray(Y, dtype=np.float64),
+                np.ascontiguousarray(x_vel, dtype=np.float64),
+                np.ascontiguousarray(y_vel, dtype=np.float64),
+                np.int8(1 if consider_front_only else 0),
+                outx,
+                outy,
+            )
+            out = np.column_stack((outx, outy))
+            out *= float(weight)
+            out[~np.isfinite(out)] = 0.0
+            return out
+
+        # Fallback: keep existing vectorized approach when Numba isn't available.
+        neighbor_indices = neighbors
+        agent_indices = np.repeat(np.arange(num_agents), lengths).astype(np.int32, copy=False)
+        x_neighbors = X[neighbor_indices]
+        y_neighbors = Y[neighbor_indices]
+        vectors_to_neighbors_x = x_neighbors - X[agent_indices]
+        vectors_to_neighbors_y = y_neighbors - Y[agent_indices]
 
         if consider_front_only:
-            agent_velocities_x = self.simulation.x_vel[agent_indices]
-            agent_velocities_y = self.simulation.y_vel[agent_indices]
+            agent_velocities_x = x_vel[agent_indices]
+            agent_velocities_y = y_vel[agent_indices]
             dot_products = vectors_to_neighbors_x * agent_velocities_x + vectors_to_neighbors_y * agent_velocities_y
             valid_neighbors_mask = dot_products > 0
         else:
@@ -1709,33 +1846,40 @@ class behavior():
         np.add.at(center_x, valid_agent_indices, x_neighbors[valid_neighbors_mask])
         np.add.at(center_y, valid_agent_indices, y_neighbors[valid_neighbors_mask])
         counts = np.bincount(valid_agent_indices, minlength=num_agents)
-        # avoid creating spurious attraction to origin for agents with zero neighbors
         counts_safe = counts.copy()
         counts_safe[counts_safe == 0] = 1
         center_x = center_x / counts_safe
         center_y = center_y / counts_safe
-
-        # for agents with no neighbors, force the center to the agent position so vectors_to_center==0
         no_neighbors = counts == 0
         if np.any(no_neighbors):
-            center_x[no_neighbors] = self.simulation.X[no_neighbors]
-            center_y[no_neighbors] = self.simulation.Y[no_neighbors]
+            center_x[no_neighbors] = X[no_neighbors]
+            center_y[no_neighbors] = Y[no_neighbors]
 
-        vectors_to_center_x = center_x - self.simulation.X
-        vectors_to_center_y = center_y - self.simulation.Y
+        vectors_to_center_x = center_x - X
+        vectors_to_center_y = center_y - Y
         distances_to_center = np.sqrt(vectors_to_center_x**2 + vectors_to_center_y**2)
         epsilon = 1e-10
-        v_hat_center_x = np.divide(vectors_to_center_x, distances_to_center + epsilon, out=np.zeros_like(self.simulation.x_vel), where=distances_to_center+epsilon != 0)
-        v_hat_center_y = np.divide(vectors_to_center_y, distances_to_center + epsilon, out=np.zeros_like(self.simulation.y_vel), where=distances_to_center+epsilon != 0)
+        v_hat_center_x = np.divide(vectors_to_center_x, distances_to_center + epsilon, out=np.zeros_like(x_vel), where=distances_to_center + epsilon != 0)
+        v_hat_center_y = np.divide(vectors_to_center_y, distances_to_center + epsilon, out=np.zeros_like(y_vel), where=distances_to_center + epsilon != 0)
         cohesion_array = np.zeros((num_agents, 2))
-        cohesion_array[:, 0] = weight * v_hat_center_x
-        cohesion_array[:, 1] = weight * v_hat_center_y
+        cohesion_array[:, 0] = float(weight) * v_hat_center_x
+        cohesion_array[:, 1] = float(weight) * v_hat_center_y
         return np.nan_to_num(cohesion_array)
 
     def alignment_cue(self, weight, consider_front_only=False):
-        num_agents = self.simulation.num_agents
-        neighbor_indices = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
-        agent_indices = np.repeat(np.arange(num_agents), [len(neighbors) for neighbors in self.simulation.agents_within_buffers]).astype(np.int32)
+        num_agents = int(self.simulation.num_agents)
+        awb = getattr(self.simulation, 'agents_within_buffers', None) or []
+        if len(awb) != num_agents:
+            return np.zeros((num_agents, 2), dtype=float)
+        lengths = np.fromiter((len(nbrs) for nbrs in awb), count=num_agents, dtype=np.int32)
+        offsets = np.empty(num_agents + 1, dtype=np.int64)
+        offsets[0] = 0
+        offsets[1:] = np.cumsum(lengths, dtype=np.int64)
+        total = int(offsets[-1])
+        if total <= 0:
+            self.simulation.school_sog = np.maximum(0.5 * (np.asarray(self.simulation.length, dtype=float) / 1000.0), 0.0)
+            return np.zeros((num_agents, 2), dtype=float)
+        neighbor_indices = np.concatenate(awb).astype(np.int32, copy=False)
         # capture raw neighbor headings (may be all zeros at init)
         if getattr(self.simulation, 'debug_behavior', False):
             try:
@@ -1750,9 +1894,8 @@ class behavior():
         # read raw headings; if unavailable, use empty array
         raw_headings_neighbors = np.array([], dtype=float)
         try:
-            raw_headings_neighbors = np.asarray(self.simulation.heading)[neighbor_indices]
+            raw_headings_neighbors = np.asarray(self.simulation.heading, dtype=float)[neighbor_indices]
         except Exception:
-            # keep empty fallback
             raw_headings_neighbors = np.array([], dtype=float)
         headings_neighbors = raw_headings_neighbors.copy()
         # If headings are all zero (common at initialization), fall back to neighbor velocity directions
@@ -1775,62 +1918,92 @@ class behavior():
             except Exception:
                 # do not propagate; leave headings_neighbors as-is
                 pass
-        # store diagnostics for NPZ writer to include
-        # set diagnostic alignment structure on simulation (best-effort)
-        # set diagnostic alignment structure on simulation (best-effort)
-        ad = {
-            'raw_headings_neighbors': self._safe_asarray(raw_headings_neighbors, dtype=float, default=np.array([])),
-            'headings_neighbors_used': self._safe_asarray(headings_neighbors, dtype=float, default=np.array([])),
-            'used_velocity_heading': bool(used_velocity_heading),
-            'neighbor_indices': self._safe_asarray(neighbor_indices, dtype=np.int32, default=np.array([], dtype=np.int32)),
-            'agent_indices': self._safe_asarray(agent_indices, dtype=np.int32, default=np.array([], dtype=np.int32)),
-        }
-        self._safe_set_sim_attr('_alignment_diag', ad)
-        vectors_to_neighbors_x = self.simulation.X[neighbor_indices] - self.simulation.X[agent_indices]
-        vectors_to_neighbors_y = self.simulation.Y[neighbor_indices] - self.simulation.Y[agent_indices]
+        # Only build heavy diagnostics when explicitly requested.
+        want_diag = bool(getattr(self.simulation, 'debug_behavior', False)) or (os.environ.get('FORCE_RAWVECS', '').lower() == 'true')
+        if want_diag:
+            ad = {
+                'raw_headings_neighbors': self._safe_asarray(raw_headings_neighbors, dtype=float, default=np.array([])),
+                'headings_neighbors_used': self._safe_asarray(headings_neighbors, dtype=float, default=np.array([])),
+                'used_velocity_heading': bool(used_velocity_heading),
+                'neighbor_indices': self._safe_asarray(neighbor_indices, dtype=np.int32, default=np.array([], dtype=np.int32)),
+                'agent_indices': self._safe_asarray(agent_indices, dtype=np.int32, default=np.array([], dtype=np.int32)),
+            }
+            self._safe_set_sim_attr('_alignment_diag', ad)
 
-        if consider_front_only:
-            agent_velocities_x = self.simulation.x_vel[agent_indices]
-            agent_velocities_y = self.simulation.y_vel[agent_indices]
-            dot_products = vectors_to_neighbors_x * agent_velocities_x + vectors_to_neighbors_y * agent_velocities_y
-            valid_neighbors_mask = dot_products > 0
+        # Fast path: Numba kernel over per-agent neighbor slices.
+        X = np.asarray(self.simulation.X, dtype=np.float64).reshape((-1,))
+        Y = np.asarray(self.simulation.Y, dtype=np.float64).reshape((-1,))
+        x_vel = np.asarray(getattr(self.simulation, 'x_vel', np.zeros(num_agents)), dtype=np.float64).reshape((-1,))
+        y_vel = np.asarray(getattr(self.simulation, 'y_vel', np.zeros(num_agents)), dtype=np.float64).reshape((-1,))
+        sog = np.asarray(getattr(self.simulation, 'sog', np.zeros(num_agents)), dtype=np.float64).reshape((-1,))
+
+        if _NUMBA_AVAILABLE:
+            unit_x = np.zeros(num_agents, dtype=np.float64)
+            unit_y = np.zeros(num_agents, dtype=np.float64)
+            mean_sog = np.full(num_agents, np.nan, dtype=np.float64)
+            counts = np.zeros(num_agents, dtype=np.int32)
+            _alignment_from_neighbors_offsets(
+                np.ascontiguousarray(offsets, dtype=np.int64),
+                np.ascontiguousarray(neighbor_indices, dtype=np.int32),
+                np.ascontiguousarray(np.asarray(headings_neighbors, dtype=np.float64), dtype=np.float64),
+                np.ascontiguousarray(X, dtype=np.float64),
+                np.ascontiguousarray(Y, dtype=np.float64),
+                np.ascontiguousarray(x_vel, dtype=np.float64),
+                np.ascontiguousarray(y_vel, dtype=np.float64),
+                np.ascontiguousarray(sog, dtype=np.float64),
+                np.int8(1 if consider_front_only else 0),
+                unit_x,
+                unit_y,
+                mean_sog,
+                counts,
+            )
+            alignment_array = np.column_stack((unit_x, unit_y)) * float(weight)
+            alignment_array[~np.isfinite(alignment_array)] = 0.0
         else:
-            valid_neighbors_mask = np.ones_like(neighbor_indices, dtype=bool)
+            # Fallback: previous vectorized implementation.
+            agent_indices = np.repeat(np.arange(num_agents), lengths).astype(np.int32, copy=False)
+            vectors_to_neighbors_x = X[neighbor_indices] - X[agent_indices]
+            vectors_to_neighbors_y = Y[neighbor_indices] - Y[agent_indices]
+            if consider_front_only:
+                agent_velocities_x = x_vel[agent_indices]
+                agent_velocities_y = y_vel[agent_indices]
+                dot_products = vectors_to_neighbors_x * agent_velocities_x + vectors_to_neighbors_y * agent_velocities_y
+                valid_neighbors_mask = dot_products > 0
+            else:
+                valid_neighbors_mask = np.ones_like(neighbor_indices, dtype=bool)
+            valid_agent_indices = agent_indices[valid_neighbors_mask]
+            sum_cos = np.zeros(num_agents)
+            sum_sin = np.zeros(num_agents)
+            np.add.at(sum_cos, valid_agent_indices, np.cos(headings_neighbors[valid_neighbors_mask]))
+            np.add.at(sum_sin, valid_agent_indices, np.sin(headings_neighbors[valid_neighbors_mask]))
+            counts = np.bincount(valid_agent_indices, minlength=num_agents)
+            counts_safe = counts.copy()
+            counts_safe[counts_safe == 0] = 1
+            mean_cos = sum_cos / counts_safe
+            mean_sin = sum_sin / counts_safe
+            avg_mag = np.sqrt(mean_cos**2 + mean_sin**2)
+            avg_mag_safe = np.where(avg_mag == 0, 1e-6, avg_mag)
+            v_hat_align_x = mean_cos / avg_mag_safe
+            v_hat_align_y = mean_sin / avg_mag_safe
+            no_school = np.where(counts == 0, 0.0, 1.0)
+            alignment_array = np.zeros((num_agents, 2))
+            alignment_array[:, 0] = float(weight) * v_hat_align_x * no_school
+            alignment_array[:, 1] = float(weight) * v_hat_align_y * no_school
+            # mean neighbor sog
+            sum_sog = np.zeros(num_agents, dtype=float)
+            np.add.at(sum_sog, valid_agent_indices, sog[neighbor_indices[valid_neighbors_mask]])
+            mean_sog = sum_sog / counts_safe
 
-        valid_neighbor_indices = neighbor_indices[valid_neighbors_mask]
-        valid_agent_indices = agent_indices[valid_neighbors_mask]
-
-        # compute circular mean of neighbor headings per-agent using sum of unit vectors
-        sum_cos = np.zeros(num_agents)
-        sum_sin = np.zeros(num_agents)
-        np.add.at(sum_cos, valid_agent_indices, np.cos(headings_neighbors[valid_neighbors_mask]))
-        np.add.at(sum_sin, valid_agent_indices, np.sin(headings_neighbors[valid_neighbors_mask]))
-        counts = np.bincount(valid_agent_indices, minlength=num_agents)
-        # avoid divide-by-zero
-        counts_safe = counts.copy()
-        counts_safe[counts_safe == 0] = 1
-        mean_cos = sum_cos / counts_safe
-        mean_sin = sum_sin / counts_safe
-        # resulting desired heading vector (normalize to unit direction)
-        avg_vec_x = mean_cos
-        avg_vec_y = mean_sin
-        no_school = np.where(counts == 0, 0., 1.)
-
-        avg_mag = np.sqrt(avg_vec_x**2 + avg_vec_y**2)
-        avg_mag_safe = np.where(avg_mag == 0, 1e-6, avg_mag)
-        v_hat_align_x = avg_vec_x / avg_mag_safe
-        v_hat_align_y = avg_vec_y / avg_mag_safe
-        alignment_array = np.zeros((num_agents, 2))
-        alignment_array[:, 0] = weight * v_hat_align_x * no_school
-        alignment_array[:, 1] = weight * v_hat_align_y * no_school
-
-        sogs = np.array([np.mean(self.simulation.sog[neighbor_indices[np.where(agent_indices == agent)]]) for agent in np.arange(num_agents)])
-        sogs = np.where(sogs < 0.5 * self.simulation.length / 1000,
-                        0.5 * self.simulation.length / 1000,
-                        sogs)
-        self.simulation.school_sog = sogs
+        try:
+            min_sog = 0.5 * (np.asarray(self.simulation.length, dtype=float) / 1000.0)
+        except Exception:
+            min_sog = 0.0
+        mean_sog = np.where(np.isfinite(mean_sog), mean_sog, min_sog)
+        mean_sog = np.where(counts == 0, min_sog, mean_sog)
+        self.simulation.school_sog = np.maximum(mean_sog, min_sog)
         # record whether alignment used velocity-derived headings for diagnostics
-        self._safe_set_sim_attr('alignment_used_velocity', bool(used_velocity_heading))
+        if want_diag:
+            self._safe_set_sim_attr('alignment_used_velocity', bool(used_velocity_heading))
         return np.nan_to_num(alignment_array)
 
     def collision_cue(self, weight):

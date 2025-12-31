@@ -21,6 +21,7 @@ import numpy as np
 
 from emergent.salmon_abm.behavior import behavior
 from emergent.salmon_abm import simulation as simmod
+from emergent.salmon_abm import hdf5_io, io as salmon_io
 import os
 
 
@@ -144,6 +145,87 @@ def profile_hotspot(n_agents=1000, iters=100, *, avoid_mode: str = "dense", hist
 
     print(f'Wrote profiling output to outputs/profiling/{fname}')
 
+def _data_dir() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "salmon_abm"))
+
+
+def _discover_env_files(base_dir: str) -> list[str]:
+    keys = ["depth.tif", "vel_x.tif", "vel_y.tif", "vel_mag.tif", "vel_dir.tif"]
+    out: list[str] = []
+    for fn in keys:
+        p = os.path.join(base_dir, fn)
+        if os.path.exists(p):
+            out.append(p)
+    return out
+
+
+def profile_sim(*, n_agents: int, steps: int, dt: float, write_frequency: int, tag: str | None) -> str:
+    """Profile a short real simulation loop (timestep calls only)."""
+    base = _data_dir()
+    outdir = os.path.join("outputs", "profiling")
+    os.makedirs(outdir, exist_ok=True)
+
+    run_tag = tag or os.environ.get("RUN_TAG") or "sim"
+    db_path = os.path.join(outdir, f"sim_profile_{run_tag}.h5")
+
+    env_files = _discover_env_files(base)
+    start_poly = os.path.join(base, "near_shore.shp")
+    if not os.path.exists(start_poly):
+        start_poly = None
+
+    sim = simmod.simulation(
+        model_dir=outdir,
+        model_name=f"sim_profile_{run_tag}",
+        crs=None,
+        basin="nuyakuk",
+        water_temp=10.0,
+        start_polygon=start_poly,
+        env_files=env_files,
+        longitudinal_profile=os.path.join(base, "longitudinal.shp") if os.path.exists(os.path.join(base, "longitudinal.shp")) else None,
+        num_timesteps=max(1, int(steps) + 1),
+        num_agents=int(n_agents),
+        db_path=db_path,
+    )
+
+    # Prefer sparse avoid memory (avoid raster I/O).
+    sim.use_sparse_avoid_memory = True
+    sim.write_frequency = int(write_frequency)
+
+    # Import environment rasters once (outside the profiled loop).
+    h5 = hdf5_io.get_hdf5_obj(sim)
+    for ef in env_files:
+        try:
+            salmon_io.write_raster_to_hdf5(h5, ef, dataset_name=None, sim=sim)
+        except Exception:
+            continue
+
+    # Profile timestep loop only.
+    pr = cProfile.Profile()
+    pr.enable()
+    t0 = time.perf_counter()
+    for i in range(int(steps)):
+        sim.timestep(i, float(dt))
+    t1 = time.perf_counter()
+    pr.disable()
+
+    s = io.StringIO()
+    ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
+    ps.print_stats(50)
+    profile_text = s.getvalue()
+
+    summary = f"steps={steps}, n_agents={n_agents}, dt={dt}, write_frequency={write_frequency}, wallclock={t1-t0:.3f}s\n"
+    txt_name = f"sim_profile_{run_tag}.txt"
+    with open(os.path.join(outdir, txt_name), "w", encoding="utf-8") as fh:
+        fh.write(summary)
+        fh.write(profile_text)
+
+    try:
+        sim.close()
+    except Exception:
+        pass
+
+    return os.path.join(outdir, txt_name)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -151,6 +233,7 @@ if __name__ == '__main__':
     parser.add_argument('--iters', type=int, default=100)
     parser.add_argument('--nagents', type=int, default=500)
     parser.add_argument('--steps', type=int, default=10)
+    parser.add_argument('--dt', type=float, default=1.0, help='(sim mode) timestep size')
     parser.add_argument('--debug-behavior', action='store_true',
                         help='Enable debug_behavior on the mock simulation to force non-empty windows and richer batch logs')
     parser.add_argument('--avoid-mode', choices=('dense', 'sparse'), default='sparse',
@@ -159,6 +242,8 @@ if __name__ == '__main__':
                         help='Sparse history length per agent (only used when --avoid-mode=sparse)')
     parser.add_argument('--avoid-seed-k', type=int, default=64,
                         help='How many history entries to seed per agent (only used when --avoid-mode=sparse)')
+    parser.add_argument('--write-frequency', type=int, default=0,
+                        help='(sim mode) timestep write frequency; 0 disables per-step HDF5 writes')
     parser.add_argument('--tag', type=str, default=None, help='Optional run tag to annotate output files')
     args = parser.parse_args()
 
@@ -176,4 +261,11 @@ if __name__ == '__main__':
             seed_k=int(args.avoid_seed_k),
         )
     else:
-        print('sim mode not implemented in this harness yet')
+        out = profile_sim(
+            n_agents=int(args.nagents),
+            steps=int(args.steps),
+            dt=float(args.dt),
+            write_frequency=int(args.write_frequency),
+            tag=args.tag,
+        )
+        print(f"Wrote profiling output to {out}")
