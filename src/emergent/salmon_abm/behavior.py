@@ -254,6 +254,7 @@ if _NUMBA_AVAILABLE:
         hist_r_i16,
         hist_c_i16,
         hist_t_f32,
+        hist_pos_i32,
         a_f64,
         e_f64,
         b_f64,
@@ -263,6 +264,7 @@ if _NUMBA_AVAILABLE:
         weight_f64,
         t_now_f64,
         horizon_f64,
+        max_steps_i32,
         out_fx_f64,
         out_fy_f64,
     ):
@@ -273,16 +275,40 @@ if _NUMBA_AVAILABLE:
             fy = 0.0
             ax = agent_x_f64[i]
             ay = agent_y_f64[i]
-            for j in range(K):
+            steps = K
+            if max_steps_i32 > 0 and max_steps_i32 < K:
+                steps = max_steps_i32
+
+            # The sparse avoid history is a ring buffer; iterate from newest to
+            # oldest so we can early-stop once entries fall outside the time
+            # horizon or become uninitialized.
+            pos = hist_pos_i32[i]
+            if pos < 0:
+                pos = 0
+            pos = pos % K
+            idx = pos - 1
+            if idx < 0:
+                idx += K
+
+            for k in range(steps):
+                j = idx - k
+                if j < 0:
+                    j += K
+
                 rr = hist_r_i16[i, j]
                 cc = hist_c_i16[i, j]
-                if rr < 0 or cc < 0:
-                    continue
                 tt = hist_t_f32[i, j]
-                if not np.isfinite(tt):
-                    continue
+                if rr < 0 or cc < 0 or (not np.isfinite(tt)):
+                    # When the buffer is not yet full, older entries are
+                    # uninitialized; since we're scanning oldestward, break.
+                    break
+
                 t_since = t_now_f64 - float(tt)
-                if t_since <= 10.0 or t_since >= horizon_f64:
+                # Scanning from newest->oldest means once we're outside the
+                # horizon we can stop.
+                if t_since >= horizon_f64:
+                    break
+                if t_since <= 10.0:
                     continue
                 mult = 1.0 - (t_since - 5.0) / 7195.0
                 wx = a_f64 * float(cc) + b_f64 * float(rr) + c_f64
@@ -786,11 +812,12 @@ class behavior():
                 hr = _np.array([[0, -1], [1, -1]], dtype=_np.int16)
                 hc = _np.array([[1, -1], [0, -1]], dtype=_np.int16)
                 ht = _np.array([[0.0, _np.nan], [0.0, _np.nan]], dtype=_np.float32)
+                hp = _np.array([0, 0], dtype=_np.int32)
                 ax = _np.array([0.0, 1.0], dtype=_np.float64)
                 ay = _np.array([0.0, 1.0], dtype=_np.float64)
                 out_fx = _np.zeros(2, dtype=_np.float64)
                 out_fy = _np.zeros(2, dtype=_np.float64)
-                _already_been_here_sparse_core_affine(ax, ay, hr, hc, ht, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 20.0, 7200.0, out_fx, out_fy)
+                _already_been_here_sparse_core_affine(ax, ay, hr, hc, ht, hp, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 20.0, 7200.0, 1, out_fx, out_fy)
             except Exception:
                 pass
             try:
@@ -880,8 +907,10 @@ class behavior():
             return None
 
         horizon = float(getattr(sim, 'avoid_memory_horizon_s', 7200.0))
-        chunk = int(getattr(sim, 'avoid_history_chunk', 32))
-        chunk = max(1, chunk)
+        # Cap how many most-recent entries we examine per agent when computing
+        # avoid force. This keeps the per-step cost bounded even when the ring
+        # buffer is large.
+        max_steps = int(getattr(sim, 'avoid_force_history_len', 0) or 0)
 
         t_now = float(t)
         fx = np.zeros(n, dtype=np.float64)
@@ -896,12 +925,16 @@ class behavior():
                 hr = np.ascontiguousarray(rows_hist, dtype=np.int16)
                 hc = np.ascontiguousarray(cols_hist, dtype=np.int16)
                 ht = np.ascontiguousarray(t_hist, dtype=np.float32)
+                hp = np.ascontiguousarray(getattr(sim, 'avoid_hist_pos', np.zeros(n, dtype=np.int32)), dtype=np.int32).reshape((-1,))
+                if hp.size != n:
+                    hp = np.zeros(n, dtype=np.int32)
                 _already_been_here_sparse_core_affine(
                     ax,
                     ay,
                     hr,
                     hc,
                     ht,
+                    hp,
                     float(a),
                     float(e),
                     float(b),
@@ -911,6 +944,7 @@ class behavior():
                     float(weight),
                     float(t_now),
                     float(horizon),
+                    int(max_steps),
                     fx,
                     fy,
                 )
@@ -919,64 +953,54 @@ class behavior():
                 # Fall back to the vectorized implementation below.
                 pass
 
-        # Fast path for the common north-up mental map transform (b == d == 0):
-        # compute in pixel-index space and scale by (a,e) to get meters, which
-        # avoids per-chunk float casting of the history arrays.
-        use_pixel_space = False
-        agent_r = agent_c = None
+        # Fallback when Numba isn't available: iterate the ring buffer from
+        # newest to oldest, with the same early-stop semantics as the JIT kernel.
         try:
-            use_pixel_space = (abs(float(b)) < 1e-12) and (abs(float(d)) < 1e-12)
+            pos = np.asarray(getattr(sim, 'avoid_hist_pos', np.zeros(n, dtype=int)), dtype=int).reshape((-1,))
         except Exception:
-            use_pixel_space = False
-        if use_pixel_space:
-            try:
-                r0, c0 = geo_to_pixel(agent_x, agent_y, getattr(sim, 'mental_map_transform', getattr(sim, 'depth_rast_transform', None)))
-                agent_r = np.asarray(r0, dtype=np.int32).reshape((-1,))
-                agent_c = np.asarray(c0, dtype=np.int32).reshape((-1,))
-                if agent_r.size != n or agent_c.size != n:
-                    use_pixel_space = False
-            except Exception:
-                use_pixel_space = False
+            pos = np.zeros(n, dtype=int)
+        if pos.size != n:
+            pos = np.zeros(n, dtype=int)
 
         K = int(rows_hist.shape[1])
-        for start in range(0, K, chunk):
-            end = min(K, start + chunk)
-            rr = rows_hist[:, start:end]
-            cc = cols_hist[:, start:end]
-            tt = t_hist[:, start:end]
+        steps = K
+        if max_steps > 0 and max_steps < K:
+            steps = int(max_steps)
 
-            valid_rc = (rr >= 0) & (cc >= 0)
-            if not np.any(valid_rc):
-                continue
-
-            # Keep invalid entries as zero multiplier so we can use fast `sum`
-            # rather than `nansum` and avoid NaN replacement overhead.
-            t_since = t_now - tt
-            in_range = valid_rc & np.isfinite(tt) & (t_since > 10.0) & (t_since < horizon)
-            if not np.any(in_range):
-                continue
-            mult = np.zeros(tt.shape, dtype=np.float64)
-            mult[in_range] = 1.0 - (t_since[in_range] - 5.0) / 7195.0
-
-            if use_pixel_space and agent_r is not None and agent_c is not None:
-                # dx = a * (agent_col - hist_col); dy = e * (agent_row - hist_row)
-                dcol = (agent_c[:, np.newaxis] - cc)
-                drow = (agent_r[:, np.newaxis] - rr)
-                dx = float(a) * dcol
-                dy = float(e) * drow
-            else:
-                wx = a * cc + b * rr + c
-                wy = d * cc + e * rr + f
-                dx = agent_x[:, np.newaxis] - wx
-                dy = agent_y[:, np.newaxis] - wy
-
-            dist2 = dx * dx + dy * dy
-            dist2 = np.where(dist2 == 0, 1e-6, dist2)
-
-            dx_over_dist2 = dx / dist2
-            dy_over_dist2 = dy / dist2
-            fx += float(weight) * np.sum(dx_over_dist2 * mult, axis=1)
-            fy += float(weight) * np.sum(dy_over_dist2 * mult, axis=1)
+        for i in range(n):
+            p = int(pos[i])
+            if p < 0:
+                p = 0
+            p = p % K
+            idx = p - 1
+            if idx < 0:
+                idx += K
+            ax = float(agent_x[i])
+            ay = float(agent_y[i])
+            for k in range(steps):
+                j = idx - k
+                if j < 0:
+                    j += K
+                rr = int(rows_hist[i, j])
+                cc = int(cols_hist[i, j])
+                tt = float(t_hist[i, j])
+                if rr < 0 or cc < 0 or (not np.isfinite(tt)):
+                    break
+                t_since = float(t_now) - tt
+                if t_since >= float(horizon):
+                    break
+                if t_since <= 10.0:
+                    continue
+                mult = 1.0 - (t_since - 5.0) / 7195.0
+                wx = float(a) * float(cc) + float(b) * float(rr) + float(c)
+                wy = float(d) * float(cc) + float(e) * float(rr) + float(f)
+                dx = ax - wx
+                dy = ay - wy
+                dist2 = dx * dx + dy * dy
+                if dist2 == 0.0:
+                    dist2 = 1e-6
+                fx[i] += (float(weight) * dx / dist2) * mult
+                fy[i] += (float(weight) * dy / dist2) * mult
 
         return np.column_stack((fx, fy))
 

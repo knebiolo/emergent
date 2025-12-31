@@ -64,6 +64,9 @@ class simulation:
         # per-agent history representation to avoid per-agent HDF5 raster costs.
         self.use_sparse_avoid_memory = bool(getattr(self, 'use_sparse_avoid_memory', True))
         self.avoid_history_len = int(getattr(self, 'avoid_history_len', 1024))
+        # Cap the number of history entries considered when computing the avoid
+        # ("already_been_here") repulsion force. Set <=0 to consider all entries.
+        self.avoid_force_history_len = int(getattr(self, 'avoid_force_history_len', 128))
         self.avoid_memory_horizon_s = float(getattr(self, 'avoid_memory_horizon_s', 7200.0))
         # Only persist dense per-agent memory rasters when explicitly requested.
         self.persist_avoid_memory_hdf5 = bool(getattr(self, 'persist_avoid_memory_hdf5', False))
