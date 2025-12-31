@@ -625,12 +625,23 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
     t0 = 0.0
     if case.name == "avoid":
         try:
-            sim.initialize_mental_map()
-            h5 = hdf5_io.get_hdf5_obj(sim)
+            # For avoid, prefer seeding the sparse per-agent history (default in
+            # the extracted simulation) and only fall back to dense HDF5 rasters
+            # when present.
+            sim.initialize_mental_map(create_datasets=False)
+            mh = mw = None
             try:
-                mh, mw = h5["memory/0"].shape
+                shp = getattr(sim, "_avoid_map_shape", None)
+                if shp is not None and len(shp) == 2:
+                    mh, mw = int(shp[0]), int(shp[1])
             except Exception:
-                mh, mw = (1, 1)
+                mh = mw = None
+            if mh is None or mw is None:
+                try:
+                    h5 = hdf5_io.get_hdf5_obj(sim)
+                    mh, mw = h5["memory/0"].shape
+                except Exception:
+                    mh, mw = (1, 1)
             rows, cols = geo_to_pixel(x0, y0, getattr(sim, "mental_map_transform"))
             rows = np.asarray(rows, dtype=int)
             cols = np.asarray(cols, dtype=int)
@@ -644,15 +655,28 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
             mag = np.sqrt(dx * dx + dy * dy)
             mag_safe = np.where(mag == 0, 1.0, mag)
             sim._avoid_expected_unit = np.column_stack((dx / mag_safe, dy / mag_safe))
-            # write timestamps into memory maps
-            for i in range(sim.num_agents):
-                try:
-                    ds = h5[f"memory/{i}"]
-                    rr = int(np.clip(seed_r[i], 0, ds.shape[0] - 1))
-                    cc = int(np.clip(seed_c[i], 0, ds.shape[1] - 1))
-                    ds[rr, cc] = 0.0
-                except Exception:
-                    pass
+
+            # Seed sparse avoid history (preferred).
+            try:
+                if hasattr(sim, "seed_avoid_history") and callable(getattr(sim, "seed_avoid_history")):
+                    sim.seed_avoid_history(seed_r, seed_c, t=0.0)
+            except Exception:
+                pass
+
+            # Best-effort: also seed dense per-agent HDF5 rasters if they exist.
+            try:
+                h5 = hdf5_io.get_hdf5_obj(sim)
+                if h5 is not None and "memory/0" in h5:
+                    for i in range(sim.num_agents):
+                        try:
+                            ds = h5[f"memory/{i}"]
+                            rr = int(np.clip(seed_r[i], 0, ds.shape[0] - 1))
+                            cc = int(np.clip(seed_c[i], 0, ds.shape[1] - 1))
+                            ds[rr, cc] = 0.0
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         except Exception:
             pass
         t0 = 20.0

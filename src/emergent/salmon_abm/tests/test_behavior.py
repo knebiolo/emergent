@@ -259,6 +259,32 @@ def test_avoid_repulsive_points_away_from_recent_memory():
     assert vec[0, 0] < 0
 
 
+def test_avoid_sparse_repulsive_points_away_from_recent_history():
+    class Sim:
+        pass
+
+    sim = Sim()
+    sim.num_agents = 1
+    sim.X = np.array([12.0])
+    sim.Y = np.array([12.0])
+    sim.use_sparse_avoid_memory = True
+    sim.avoid_memory_horizon_s = 7200.0
+    sim.avoid_history_chunk = 8
+    sim.mental_map_transform = (1, 0, 0, 0, 1, 0)
+
+    t = 1000.0
+    sim.avoid_hist_rows = np.array([[12]], dtype=np.int16)
+    sim.avoid_hist_cols = np.array([[13]], dtype=np.int16)
+    sim.avoid_hist_t = np.array([[t - 100.0]], dtype=np.float32)
+    sim.avoid_hist_pos = np.array([1], dtype=np.int32)
+
+    beh = behavior(dt=1.0, simulation_object=sim)
+    vec = beh.already_been_here(weight=10.0, t=t)
+    assert vec.shape == (1, 2)
+    # visited cell is to the +x direction; repulsive should point -x
+    assert vec[0, 0] < 0
+
+
 def test_low_speed_attractive_points_toward_low_velocity_cell_ahead():
     class Sim:
         pass

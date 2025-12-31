@@ -48,6 +48,20 @@ class simulation:
         self.env_files = env_files or []
         self.longitudinal_profile = longitudinal_profile
 
+        # Avoid/mental-map configuration. In non-debug runs, prefer a sparse,
+        # per-agent history representation to avoid per-agent HDF5 raster costs.
+        self.use_sparse_avoid_memory = bool(getattr(self, 'use_sparse_avoid_memory', True))
+        self.avoid_history_len = int(getattr(self, 'avoid_history_len', 1024))
+        self.avoid_memory_horizon_s = float(getattr(self, 'avoid_memory_horizon_s', 7200.0))
+        # Only persist dense per-agent memory rasters when explicitly requested.
+        self.persist_avoid_memory_hdf5 = bool(getattr(self, 'persist_avoid_memory_hdf5', False))
+        # Internal sparse history storage (allocated lazily)
+        self.avoid_hist_rows = None
+        self.avoid_hist_cols = None
+        self.avoid_hist_t = None
+        self.avoid_hist_pos = None
+        self._avoid_map_shape = None
+
         # prepare simple RNG to keep behavior deterministic when seed used
         try:
             # agents may set RNG via self.rng if needed
@@ -541,7 +555,7 @@ class simulation:
 
         return heading_set
 
-    def initialize_mental_map(self, avoid_cell_size: float | None = None) -> bool:
+    def initialize_mental_map(self, avoid_cell_size: float | None = None, *, create_datasets: bool = True) -> bool:
         """Create per-agent memory rasters and `mental_map_transform` for the avoid cue.
 
         This is a lightweight analogue of sockeye.py's mental map initialization,
@@ -586,23 +600,70 @@ class simulation:
 
         # north-up coarse grid transform anchored to the depth raster origin
         self.mental_map_transform = (avoid_cell_size, 0.0, c, 0.0, -avoid_cell_size, f)
+        self._avoid_map_shape = (avoid_height, avoid_width)
 
-        # ensure memory datasets exist for each agent (create lazily if missing)
-        for i in range(int(self.num_agents)):
-            key = f'memory/{i}'
-            existing = None
-            if key in h5:
-                try:
-                    existing = h5[key]
-                except Exception:
-                    existing = hdf5_io.read_dataset(h5, key, default=None)
-            if existing is not None:
-                try:
-                    if np.asarray(existing).shape == (avoid_height, avoid_width):
-                        continue
-                except Exception:
-                    pass
-            hdf5_io.write_dataset(h5, key, np.full((avoid_height, avoid_width), np.nan, dtype=np.float32))
+        if create_datasets:
+            # ensure memory datasets exist for each agent (create lazily if missing)
+            for i in range(int(self.num_agents)):
+                key = f'memory/{i}'
+                existing = None
+                if key in h5:
+                    try:
+                        existing = h5[key]
+                    except Exception:
+                        existing = hdf5_io.read_dataset(h5, key, default=None)
+                if existing is not None:
+                    try:
+                        if np.asarray(existing).shape == (avoid_height, avoid_width):
+                            continue
+                    except Exception:
+                        pass
+                hdf5_io.write_dataset(h5, key, np.full((avoid_height, avoid_width), np.nan, dtype=np.float32))
+        return True
+
+    def ensure_avoid_history(self, history_len: int | None = None) -> bool:
+        n = int(getattr(self, 'num_agents', 0) or 0)
+        if n <= 0:
+            return False
+        if history_len is None:
+            history_len = int(getattr(self, 'avoid_history_len', 1024))
+        history_len = max(1, int(history_len))
+        # allocate or resize (best-effort)
+        try:
+            rows = getattr(self, 'avoid_hist_rows', None)
+            cols = getattr(self, 'avoid_hist_cols', None)
+            ts = getattr(self, 'avoid_hist_t', None)
+            pos = getattr(self, 'avoid_hist_pos', None)
+            if rows is not None and cols is not None and ts is not None and pos is not None:
+                if np.asarray(rows).shape == (n, history_len):
+                    return True
+        except Exception:
+            pass
+
+        try:
+            self.avoid_hist_rows = np.full((n, history_len), -1, dtype=np.int16)
+            self.avoid_hist_cols = np.full((n, history_len), -1, dtype=np.int16)
+            self.avoid_hist_t = np.full((n, history_len), np.nan, dtype=np.float32)
+            self.avoid_hist_pos = np.zeros((n,), dtype=np.int32)
+            return True
+        except Exception:
+            return False
+
+    def seed_avoid_history(self, rows: np.ndarray, cols: np.ndarray, t: float) -> bool:
+        """Seed sparse avoid history at the current write position for each agent."""
+        if not self.ensure_avoid_history():
+            return False
+        rows = np.asarray(rows, dtype=int).reshape((-1,))
+        cols = np.asarray(cols, dtype=int).reshape((-1,))
+        n = int(self.num_agents)
+        if rows.size != n or cols.size != n:
+            return False
+        idx = np.arange(n, dtype=int)
+        pos = np.asarray(self.avoid_hist_pos, dtype=int)
+        self.avoid_hist_rows[idx, pos] = rows.astype(np.int16)
+        self.avoid_hist_cols[idx, pos] = cols.astype(np.int16)
+        self.avoid_hist_t[idx, pos] = float(t)
+        self.avoid_hist_pos = ((pos + 1) % self.avoid_hist_rows.shape[1]).astype(np.int32)
         return True
 
     def _write_map_cell(self, h5, key: str, row: int, col: int, value) -> bool:
@@ -681,13 +742,20 @@ class simulation:
         return True
 
     def update_avoid_memory(self, t: float) -> bool:
-        """Write per-agent memory timestamps at current positions for the avoid cue."""
+        """Update avoid memory at current positions.
+
+        Non-debug default: update sparse per-agent visit history (fast, no per-agent HDF5 writes).
+        Debug/explicit: also write into per-agent HDF5 rasters under `memory/<i>`.
+        """
         h5 = hdf5_io.get_hdf5_obj(self)
         if h5 is None:
             return False
-        # ensure memory datasets exist and mental map transform is defined
+
+        persist_dense = bool(getattr(self, 'persist_avoid_memory_hdf5', False) or getattr(self, 'debug_behavior', False))
+
+        # ensure transform is defined; only create dense datasets when persisting
         if getattr(self, 'mental_map_transform', None) is None:
-            ok = self.initialize_mental_map()
+            ok = self.initialize_mental_map(create_datasets=persist_dense)
             if not ok:
                 return False
         try:
@@ -697,20 +765,63 @@ class simulation:
         except Exception:
             return False
 
-        for i in range(int(self.num_agents)):
-            r = int(rows[i])
-            c = int(cols[i])
-            key = f'memory/{i}'
-            ds0 = hdf5_io.read_dataset(h5, key, default=None)
-            if ds0 is None:
-                continue
-            try:
-                nrows, ncols = np.asarray(ds0).shape
-            except Exception:
-                continue
-            if r < 0 or c < 0 or r >= nrows or c >= ncols:
-                continue
-            self._write_map_cell(h5, key, r, c, float(t))
+        # sparse history update (preferred)
+        if bool(getattr(self, 'use_sparse_avoid_memory', True)):
+            if self._avoid_map_shape is None:
+                # best-effort infer from existing datasets or initialize_mental_map metadata
+                try:
+                    if hasattr(self, '_avoid_map_shape') and self._avoid_map_shape is not None:
+                        pass
+                except Exception:
+                    pass
+            if not self.ensure_avoid_history():
+                return False
+            n = int(self.num_agents)
+            idx = np.arange(n, dtype=int)
+            pos = np.asarray(self.avoid_hist_pos, dtype=int)
+            k = int(self.avoid_hist_rows.shape[1])
+            last_pos = (pos - 1) % k
+            last_r = np.asarray(self.avoid_hist_rows[idx, last_pos], dtype=int)
+            last_c = np.asarray(self.avoid_hist_cols[idx, last_pos], dtype=int)
+            changed = (rows != last_r) | (cols != last_c)
+            # validity within avoid grid when known
+            if self._avoid_map_shape is not None:
+                ah, aw = self._avoid_map_shape
+                valid = (rows >= 0) & (cols >= 0) & (rows < int(ah)) & (cols < int(aw))
+            else:
+                valid = (rows >= 0) & (cols >= 0)
+            mask = changed & valid
+            if np.any(mask):
+                sel = idx[mask]
+                psel = pos[mask]
+                self.avoid_hist_rows[sel, psel] = rows[mask].astype(np.int16)
+                self.avoid_hist_cols[sel, psel] = cols[mask].astype(np.int16)
+                self.avoid_hist_t[sel, psel] = float(t)
+                pos2 = pos.copy()
+                pos2[mask] = (pos2[mask] + 1) % k
+                self.avoid_hist_pos = pos2.astype(np.int32)
+
+        # Optional dense HDF5 write (debug / explicit)
+        if persist_dense:
+            # ensure datasets exist
+            if getattr(self, 'mental_map_transform', None) is None:
+                return False
+            if not self.initialize_mental_map(create_datasets=True):
+                return False
+            for i in range(int(self.num_agents)):
+                r = int(rows[i])
+                c = int(cols[i])
+                key = f'memory/{i}'
+                ds0 = hdf5_io.read_dataset(h5, key, default=None)
+                if ds0 is None:
+                    continue
+                try:
+                    nrows, ncols = np.asarray(ds0).shape
+                except Exception:
+                    continue
+                if r < 0 or c < 0 or r >= nrows or c >= ncols:
+                    continue
+                self._write_map_cell(h5, key, r, c, float(t))
         return True
 
     def timestep(self, t, dt, g=None, pid_controller=None):
@@ -810,9 +921,10 @@ class simulation:
                 return func(*args)
             except Exception as e:
                 if getattr(self, 'debug_freq', False):
-                    import traceback
-                    print(f'{label} exception:', e)
-                    traceback.print_exc()
+                    try:
+                        logging.getLogger(__name__).exception('%s exception: %s', label, e)
+                    except Exception:
+                        pass
                 return default
 
         # calculate movement-related quantities with finer-grained diagnostics
@@ -826,14 +938,14 @@ class simulation:
         # If debugging is enabled, print compact diagnostics to help trace zero-values
         if getattr(self, 'debug_freq', False):
             try:
-                print('DEBUG movement: Hz[:10]=', self.Hz[:10])
-                print('DEBUG movement: thrust[:5]=', self.thrust[:5])
-                print('DEBUG movement: drag[:5]=', self.drag[:5])
-                print('DEBUG movement: length[:5]=', self.length[:5])
-                print('DEBUG movement: weight[:5]=', self.weight[:5])
-                print('DEBUG movement: swim_behav[:10]=', self.swim_behav[:10])
-                print('DEBUG movement: is_stuck[:10]=', self.is_stuck[:10])
-                print('DEBUG movement: prev_Hz[:10]=', self.prev_Hz[:10])
+                logging.getLogger(__name__).debug('DEBUG movement: Hz[:10]=%s', self.Hz[:10])
+                logging.getLogger(__name__).debug('DEBUG movement: thrust[:5]=%s', self.thrust[:5])
+                logging.getLogger(__name__).debug('DEBUG movement: drag[:5]=%s', self.drag[:5])
+                logging.getLogger(__name__).debug('DEBUG movement: length[:5]=%s', self.length[:5])
+                logging.getLogger(__name__).debug('DEBUG movement: weight[:5]=%s', self.weight[:5])
+                logging.getLogger(__name__).debug('DEBUG movement: swim_behav[:10]=%s', self.swim_behav[:10])
+                logging.getLogger(__name__).debug('DEBUG movement: is_stuck[:10]=%s', self.is_stuck[:10])
+                logging.getLogger(__name__).debug('DEBUG movement: prev_Hz[:10]=%s', self.prev_Hz[:10])
             except Exception:
                 pass
 
@@ -936,9 +1048,9 @@ class simulation:
 
         if getattr(self, 'debug_env', False):
             try:
-                print('sample_environment debug:', raster_name, 'transform=', transform)
-                print('rows sample (first 5):', rows[:5], 'cols sample (first 5):', cols[:5])
-                print('valid count:', int(np.sum(valid)))
+                logging.getLogger(__name__).debug('sample_environment debug: raster=%s transform=%s', raster_name, transform)
+                logging.getLogger(__name__).debug('rows sample (first 5): %s cols sample (first 5): %s', rows[:5], cols[:5])
+                logging.getLogger(__name__).debug('valid count: %s', int(np.sum(valid)))
             except Exception:
                 pass
         return out

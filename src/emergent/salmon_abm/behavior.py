@@ -509,7 +509,7 @@ class behavior():
                 self._safe_npz_dump(outdir, f'behavior_debug_rawvecs_FORCE_step_{step_i}', payload)
             except Exception as e:
                 try:
-                    print('FORCE RAWVECS failed to write NPZ:', e)
+                    logging.getLogger(__name__).debug('FORCE_RAWVECS failed to write NPZ: %s', e)
                 except Exception:
                     pass
 
@@ -551,12 +551,101 @@ class behavior():
                 self._psutil_proc = None
         return getattr(self, '_psutil_proc', None)
 
+    def _already_been_here_sparse(self, weight: float, t: float):
+        """Sparse avoid-memory variant of `already_been_here`.
+
+        Uses per-agent ring-buffer history (`simulation.avoid_hist_*`) instead of
+        dense per-agent HDF5 rasters, avoiding per-agent dataset reads and writes.
+        Returns None when sparse history is unavailable.
+        """
+        sim = self.simulation
+        rows_hist = getattr(sim, 'avoid_hist_rows', None)
+        cols_hist = getattr(sim, 'avoid_hist_cols', None)
+        t_hist = getattr(sim, 'avoid_hist_t', None)
+        if rows_hist is None or cols_hist is None or t_hist is None:
+            return None
+
+        try:
+            rows_hist = np.asarray(rows_hist)
+            cols_hist = np.asarray(cols_hist)
+            t_hist = np.asarray(t_hist, dtype=float)
+        except Exception:
+            return None
+
+        n = int(getattr(sim, 'num_agents', 0) or 0)
+        if n <= 0:
+            return None
+        if rows_hist.ndim != 2 or cols_hist.ndim != 2 or t_hist.ndim != 2:
+            return None
+        if rows_hist.shape[0] != n or cols_hist.shape[0] != n or t_hist.shape[0] != n:
+            return None
+        if rows_hist.shape != cols_hist.shape or rows_hist.shape != t_hist.shape:
+            return None
+
+        try:
+            affine = _unpack_affine(getattr(sim, 'mental_map_transform', getattr(sim, 'depth_rast_transform', None)))
+        except Exception:
+            return None
+        a, b, c, d, e, f = [float(x) for x in affine]
+
+        agent_x = np.nan_to_num(np.asarray(sim.X, dtype=float)).reshape((-1,))
+        agent_y = np.nan_to_num(np.asarray(sim.Y, dtype=float)).reshape((-1,))
+        if agent_x.size != n or agent_y.size != n:
+            return None
+
+        horizon = float(getattr(sim, 'avoid_memory_horizon_s', 7200.0))
+        chunk = int(getattr(sim, 'avoid_history_chunk', 32))
+        chunk = max(1, chunk)
+
+        t_now = float(t)
+        fx = np.zeros(n, dtype=float)
+        fy = np.zeros(n, dtype=float)
+
+        K = int(rows_hist.shape[1])
+        for start in range(0, K, chunk):
+            end = min(K, start + chunk)
+            rr = rows_hist[:, start:end].astype(float, copy=False)
+            cc = cols_hist[:, start:end].astype(float, copy=False)
+            tt = t_hist[:, start:end]
+
+            valid = (rr >= 0) & (cc >= 0) & np.isfinite(tt)
+            if not np.any(valid):
+                continue
+
+            t_since = t_now - tt
+            mult = np.where((t_since > 10.0) & (t_since < horizon), 1.0 - (t_since - 5.0) / 7195.0, 0.0)
+            mult = np.where(valid, mult, 0.0)
+            if not np.any(mult):
+                continue
+
+            wx = a * cc + b * rr + c
+            wy = d * cc + e * rr + f
+            dx = agent_x[:, np.newaxis] - wx
+            dy = agent_y[:, np.newaxis] - wy
+            dist2 = dx * dx + dy * dy
+            dist2 = np.where(dist2 == 0, 1e-6, dist2)
+
+            fx += np.nansum((float(weight) * dx / dist2) * mult, axis=1)
+            fy += np.nansum((float(weight) * dy / dist2) * mult, axis=1)
+
+        return np.column_stack((fx, fy))
+
     def already_been_here(self, weight, t):
         try:
             if float(weight) == 0.0:
                 return np.zeros((self.simulation.num_agents, 2), dtype=float)
         except Exception:
             pass
+
+        # Fast path: sparse avoid history (no per-agent HDF5 memory rasters).
+        try:
+            if bool(getattr(self.simulation, 'use_sparse_avoid_memory', False)):
+                out = self._already_been_here_sparse(weight=float(weight), t=float(t))
+                if out is not None:
+                    return out
+        except Exception:
+            pass
+
         x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
 
         # use the mental map transform (coarser avoid-cell grid) when converting
@@ -1707,14 +1796,19 @@ class behavior():
         self.simulation.time_since_eddy_escape[self.simulation.in_eddy == True] += 1
 
     def arbitrate(self, t):
-        # debug: print a concise summary of current headings at start of arbitration
+        # debug: log a concise summary of current headings at start of arbitration
         if getattr(self.simulation, 'debug_behavior', False):
             try:
                 h = np.asarray(self.simulation.heading)
                 # show size, mean, and a short sample (first 10 entries) instead of whole array
                 sample = list(h[:10]) if getattr(h, 'size', 0) > 0 else []
                 mean = float(np.nanmean(h)) if getattr(h, 'size', 0) > 0 else float('nan')
-                print(f"arbitrate: simulation.heading size={getattr(h, 'size', 0)}, mean={mean:.4g}, sample={sample}")
+                logging.getLogger(__name__).debug(
+                    "arbitrate: heading size=%s mean=%s sample=%s",
+                    getattr(h, 'size', 0),
+                    mean,
+                    sample,
+                )
             except Exception:
                 pass
         self._safe_set_sim_attr('heading_in', self._safe_asarray(self.simulation.heading, dtype=np.float32, default=None))
@@ -1905,11 +1999,10 @@ class behavior():
             )
 
         if len(head_vec.shape) == 2:
-            # debug print of cue magnitudes when debug_behavior is enabled
+            # debug snapshot of cue magnitudes when debug_behavior is enabled
             if getattr(self.simulation, 'debug_behavior', False):
                 try:
                     import json, time
-                    print(f'behavior cue summary at step={int(getattr(self.simulation, "current_step", t))}')
                     # show mean, max, and nonzero counts per cue
                     cue_summary = {}
                     for k, v in cue_magnitudes.items():
@@ -1918,18 +2011,9 @@ class behavior():
                         mean = float(np.nanmean(arr)) if arr.size > 0 else float('nan')
                         mx = float(np.nanmax(arr)) if arr.size > 0 else float('nan')
                         cue_summary[k] = {'mean': mean, 'max': mx, 'nonzero_count': nonzero}
-                        try:
-                            print(f' - {k}: mean={mean:.4g}, max={mx:.4g}, nonzero={nonzero}')
-                        except Exception:
-                            pass
 
                     # include test_weights overview when present
                     tw = getattr(self.simulation, 'test_weights', None)
-                    if tw:
-                        try:
-                            print(' - test_weights overrides:', {k: float(v) for k, v in tw.items()})
-                        except Exception:
-                            print(' - test_weights overrides present')
 
                     # enqueue a compact JSON snapshot for this step for later parsing
                     outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')

@@ -7,12 +7,15 @@ from `emergent.salmon_abm.utils` so callers can migrate to the new module.
 import os
 import time
 import csv
+import logging
 import numpy as np
 import pandas as pd
 from scipy.interpolate import UnivariateSpline
 from scipy.ndimage import distance_transform_edt
 
 from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo, standardize_shape, calculate_front_masks
+
+logger = logging.getLogger(__name__)
 
 # Try to prepare a SymPy-backed numeric evaluator for the symbolic frequency expression.
 # If SymPy is not available or lambdify fails, fall back to numeric implementation.
@@ -121,9 +124,9 @@ class movement():
         try:
             if getattr(self.simulation, 'debug_freq', False):
                 n_dbg = min(5, thrust_N.size)
-                print('THRUST debug: W[:5]=', (W[:n_dbg] if hasattr(W, '__len__') else W))
-                print('THRUST debug: w[:5]=', (w[:n_dbg] if hasattr(w, '__len__') else w))
-                print('THRUST debug: thrust_N[:5]=', thrust_N[:n_dbg])
+                logger.debug('THRUST debug: W[:5]= %s', (W[:n_dbg] if hasattr(W, '__len__') else W))
+                logger.debug('THRUST debug: w[:5]= %s', (w[:n_dbg] if hasattr(w, '__len__') else w))
+                logger.debug('THRUST debug: thrust_N[:5]= %s', thrust_N[:n_dbg])
         except Exception:
             pass
 
@@ -321,7 +324,7 @@ class movement():
                                         float(Hz_raw[ai]) if ai < len(Hz_raw) else None,
                                         float(Hz[ai]) if ai < len(Hz) else None,
                                     ])
-                            print('Wrote probe CSV:', fname)
+                            logger.info('Wrote probe CSV: %s', fname)
                     except Exception:
                         pass
         except Exception:
