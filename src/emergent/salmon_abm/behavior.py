@@ -391,6 +391,10 @@ class behavior():
     def __init__(self, dt, simulation_object):
         self.dt = dt
         self.simulation = simulation_object
+        # Per-step caches (used only within arbitrate to avoid repeated window/index work)
+        self._window_cache_enabled = False
+        self._window_cache_t = None
+        self._window_cache = {}
         # Async diagnostics queue and thread
         self._diag_queue = None
         self._diag_thread = None
@@ -674,6 +678,71 @@ class behavior():
         dx = x_cell - agent_x[:, np.newaxis, np.newaxis]
         dy = y_cell - agent_y[:, np.newaxis, np.newaxis]
         return dx, dy
+
+    def _window_common(self, buff: int, shape: tuple[int, int], transform):
+        """Return shared window context for window-based cues.
+
+        This avoids recomputing geo_to_pixel, window indices, dx/dy, and front masks
+        separately for vel/border/shallow/wave cues within a single arbitration.
+        """
+        if not getattr(self, '_window_cache_enabled', False):
+            cache = None
+        else:
+            cache = getattr(self, '_window_cache', None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._window_cache = cache
+
+        # agent pixel indices (depth grid)
+        rows_cols = None
+        if cache is not None:
+            rows_cols = cache.get(('rows_cols_depth',))
+        if rows_cols is None:
+            rows, cols = geo_to_pixel(self.simulation.X, self.simulation.Y, self.simulation.depth_rast_transform)
+            rows = np.asarray(np.atleast_1d(rows), dtype=np.int32)
+            cols = np.asarray(np.atleast_1d(cols), dtype=np.int32)
+            rows_cols = (rows, cols)
+            if cache is not None:
+                cache[('rows_cols_depth',)] = rows_cols
+        else:
+            rows, cols = rows_cols
+
+        # agent state
+        agent_state = None
+        if cache is not None:
+            agent_state = cache.get(('agent_state',))
+        if agent_state is None:
+            agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
+            agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
+            heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
+            hx = np.cos(heading)[:, np.newaxis, np.newaxis]
+            hy = np.sin(heading)[:, np.newaxis, np.newaxis]
+            agent_state = (agent_x, agent_y, heading, hx, hy)
+            if cache is not None:
+                cache[('agent_state',)] = agent_state
+        agent_x, agent_y, heading, hx, hy = agent_state
+
+        # window indices for this buff/shape
+        key_rc = ('window_rc', int(buff), int(shape[0]), int(shape[1]))
+        rc = cache.get(key_rc) if cache is not None else None
+        if rc is None:
+            rr, cc, valid = self._window_rc(rows, cols, int(buff), shape)
+            rc = (rr, cc, valid)
+            if cache is not None:
+                cache[key_rc] = rc
+        rr, cc, valid = rc
+
+        # dx/dy and front mask depend on the transform used for pixel->geo
+        key_dxdy = ('window_dxdy_front', int(buff), int(shape[0]), int(shape[1]), int(id(transform)))
+        dxdy_front = cache.get(key_dxdy) if cache is not None else None
+        if dxdy_front is None:
+            dx, dy = self._window_dxdy(rr, cc, transform, agent_x, agent_y)
+            front = (dx * hx + dy * hy) > 0
+            dxdy_front = (dx, dy, front)
+            if cache is not None:
+                cache[key_dxdy] = dxdy_front
+        dx, dy, front = dxdy_front
+        return rows, cols, rr, cc, valid, dx, dy, front
 
     def _coerce_agent_vec(self, vec) -> np.ndarray:
         """Coerce cue output to an array of shape (num_agents, 2)."""
@@ -1434,8 +1503,16 @@ class behavior():
         Preferred data source: `environment/refugia` (shared raster, 1 indicates refuge).
         Legacy fallback: per-agent `refugia/<agent_idx>` datasets.
         """
-        x = np.nan_to_num(self.simulation.X)
-        y = np.nan_to_num(self.simulation.Y)
+        try:
+            if float(weight) == 0.0:
+                return np.zeros((self.simulation.num_agents, 2), dtype=float)
+        except Exception:
+            pass
+
+        # Avoid forcing float64 copies for large agent arrays; we only need
+        # stable numeric values for vector direction.
+        x = np.asarray(self.simulation.X)
+        y = np.asarray(self.simulation.Y)
         # Prefer a shared environment refugia raster when available.
         shared_refugia = self._get_env('environment/refugia', default=None)
         if shared_refugia is not None:
@@ -1477,7 +1554,10 @@ class behavior():
                             _, inds = distance_transform_edt(~refuge_mask, return_indices=True)
                             # `return_indices=True` returns an array shaped (ndim, H, W);
                             # store as a tuple for stable shape checks.
-                            cache = (np.asarray(inds[0]), np.asarray(inds[1]))
+                            cache = (
+                                np.ascontiguousarray(np.asarray(inds[0]), dtype=np.int32),
+                                np.ascontiguousarray(np.asarray(inds[1]), dtype=np.int32),
+                            )
                             try:
                                 setattr(self.simulation, '_refugia_nearest_indices', cache)
                             except Exception:
@@ -1486,22 +1566,46 @@ class behavior():
                             return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
                     rows, cols = geo_to_pixel(x, y, transform)
-                    rows = np.atleast_1d(rows).astype(int)
-                    cols = np.atleast_1d(cols).astype(int)
-                    rows = np.clip(rows, 0, shared_refugia.shape[0] - 1)
-                    cols = np.clip(cols, 0, shared_refugia.shape[1] - 1)
-                    ref_r = np.asarray(cache[0])[rows, cols]
-                    ref_c = np.asarray(cache[1])[rows, cols]
+                    rows = np.asarray(np.atleast_1d(rows), dtype=np.int32)
+                    cols = np.asarray(np.atleast_1d(cols), dtype=np.int32)
+                    rows = np.clip(rows, 0, shared_refugia.shape[0] - 1).astype(np.int32, copy=False)
+                    cols = np.clip(cols, 0, shared_refugia.shape[1] - 1).astype(np.int32, copy=False)
+                    cache_r = cache[0]
+                    cache_c = cache[1]
+                    ref_r = cache_r[rows, cols]
+                    ref_c = cache_c[rows, cols]
                     ref_x, ref_y = pixel_to_geo(transform, ref_r, ref_c)
-                    dx = np.asarray(ref_x, dtype=float) - np.asarray(self.simulation.X, dtype=float)
-                    dy = np.asarray(ref_y, dtype=float) - np.asarray(self.simulation.Y, dtype=float)
-                    dist = np.sqrt(dx * dx + dy * dy)
-                    dist_safe = np.where(dist == 0, 1e-6, dist)
-                    out = np.zeros((self.simulation.num_agents, 2), dtype=float)
-                    out[:, 0] = float(weight) * dx / dist_safe
-                    out[:, 1] = float(weight) * dy / dist_safe
+                    # Use float32 math for speed and reduced memory bandwidth.
+                    x32 = np.asarray(x, dtype=np.float32)
+                    y32 = np.asarray(y, dtype=np.float32)
+                    ref_x32 = np.asarray(ref_x, dtype=np.float32)
+                    ref_y32 = np.asarray(ref_y, dtype=np.float32)
+                    dx = ref_x32 - x32
+                    dy = ref_y32 - y32
+
+                    dist2 = dx * dx + dy * dy
+                    ok = np.isfinite(dist2) & (dist2 > 0.0)
+                    # Optional sensing range: outside radius, no refugia cue.
+                    try:
+                        r_m = float(getattr(self.simulation, 'refugia_search_radius_m', 0.0) or 0.0)
+                    except Exception:
+                        r_m = 0.0
+                    if np.isfinite(r_m) and r_m > 0.0:
+                        ok = ok & (dist2 <= np.float32(r_m * r_m))
+                    inv = np.zeros_like(dist2, dtype=np.float32)
+                    # inv = 1/sqrt(dist2) for valid entries
+                    np.sqrt(dist2, out=inv, where=ok)
+                    inv[ok] = 1.0 / inv[ok]
+
+                    out = np.zeros((self.simulation.num_agents, 2), dtype=np.float32)
+                    out_x = out[:, 0]
+                    out_y = out[:, 1]
+                    np.multiply(dx, inv, out=out_x, where=ok)
+                    np.multiply(dy, inv, out=out_y, where=ok)
+                    w = np.float32(weight)
+                    out_x *= w
+                    out_y *= w
                     out[~np.isfinite(out)] = 0.0
-                    out[dist == 0] = 0.0
                     return out
             except Exception:
                 # fall through to legacy method
@@ -1564,33 +1668,24 @@ class behavior():
             return np.array([0.0, 0.0])
 
     def vel_cue(self, weight):
+        try:
+            if float(weight) == 0.0:
+                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        except Exception:
+            pass
         length_numpy = self.simulation.length
         buff = 2
-        x, y = (self.simulation.X, self.simulation.Y)
-        rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
-        rows = np.atleast_1d(rows).astype(np.int32, copy=False)
-        cols = np.atleast_1d(cols).astype(np.int32, copy=False)
-
         vel_ds = np.asarray(self._get_env('environment/vel_mag', default=np.zeros((1, 1))), dtype=float)
         if vel_ds.ndim != 2 or vel_ds.size <= 1:
             return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        rr, cc, valid = self._window_rc(rows, cols, buff, vel_ds.shape)
-        rr0 = np.clip(rr, 0, vel_ds.shape[0] - 1)
-        cc0 = np.clip(cc, 0, vel_ds.shape[1] - 1)
-        vel3d = vel_ds[rr0, cc0]
+        transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+        _, _, rr, cc, valid, dx, dy, front = self._window_common(buff, vel_ds.shape, transform)
+
+        vel3d = vel_ds[rr, cc]
         # exclude out-of-bounds and nodata / invalid values
         vel3d = np.where(valid & np.isfinite(vel3d) & (vel3d > -9990.0), vel3d, np.inf)
 
-        # compute dx,dy to each candidate cell (world coords) and front mask
-        agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
-        agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
-        heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
-        transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
-        dx, dy = self._window_dxdy(rr0, cc0, transform, agent_x, agent_y)
-        hx = np.cos(heading)[:, np.newaxis, np.newaxis]
-        hy = np.sin(heading)[:, np.newaxis, np.newaxis]
-        front = (dx * hx + dy * hy) > 0
         front_any = np.any(front & valid, axis=(1, 2))
         vel3d = np.where(front_any[:, np.newaxis, np.newaxis], np.where(front, vel3d, np.inf), vel3d)
 
@@ -1618,20 +1713,40 @@ class behavior():
 
     def rheo_cue(self, weight, downstream=False):
         sampler = getattr(self.simulation, 'sample_environment', None)
-        if not callable(sampler):
-            return np.zeros((self.simulation.num_agents, 2), dtype=float)
-
         sign = -1.0 if not downstream else 1.0
-        tx = getattr(self.simulation, 'vel_x_rast_transform', None) or getattr(self.simulation, 'vel_dir_rast_transform', None)
-        ty = getattr(self.simulation, 'vel_y_rast_transform', None) or getattr(self.simulation, 'vel_dir_rast_transform', None)
+        x_vel = None
+        y_vel = None
 
-        x_vel = sign * np.asarray(sampler(tx, 'vel_x'), dtype=float)
-        y_vel = sign * np.asarray(sampler(ty, 'vel_y'), dtype=float)
+        # Fast path: when called from `simulation.timestep`, water velocities were
+        # already sampled and stored on the simulation as `x_vel/y_vel`.
+        try:
+            xv = getattr(self.simulation, 'x_vel', None)
+            yv = getattr(self.simulation, 'y_vel', None)
+            if xv is not None and yv is not None:
+                xv = np.asarray(xv, dtype=float).reshape((-1,))
+                yv = np.asarray(yv, dtype=float).reshape((-1,))
+                n = int(getattr(self.simulation, 'num_agents', len(xv)))
+                if xv.shape[0] == n and yv.shape[0] == n and (np.isfinite(xv).any() or np.isfinite(yv).any()):
+                    x_vel = sign * xv
+                    y_vel = sign * yv
+        except Exception:
+            x_vel = None
+            y_vel = None
+
+        # Fallback: sample rasters directly (standalone calls/tests).
+        if x_vel is None or y_vel is None:
+            if not callable(sampler):
+                return np.zeros((self.simulation.num_agents, 2), dtype=float)
+            tx = getattr(self.simulation, 'vel_x_rast_transform', None) or getattr(self.simulation, 'vel_dir_rast_transform', None)
+            ty = getattr(self.simulation, 'vel_y_rast_transform', None) or getattr(self.simulation, 'vel_dir_rast_transform', None)
+
+            x_vel = sign * np.asarray(sampler(tx, 'vel_x'), dtype=float)
+            y_vel = sign * np.asarray(sampler(ty, 'vel_y'), dtype=float)
 
         # fallback to vel_dir transform if primary transforms produce all-NaN values
         if not (np.isfinite(x_vel).any() or np.isfinite(y_vel).any()):
             tdir = getattr(self.simulation, 'vel_dir_rast_transform', None)
-            if tdir is not None:
+            if tdir is not None and callable(sampler):
                 x_vel = sign * np.asarray(sampler(tdir, 'vel_x'), dtype=float)
                 y_vel = sign * np.asarray(sampler(tdir, 'vel_y'), dtype=float)
 
@@ -1652,31 +1767,23 @@ class behavior():
         return rheotaxis
 
     def border_cue(self, weight, t):
+        try:
+            if float(weight) == 0.0:
+                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        except Exception:
+            pass
         length_numpy = self.simulation.length
         buff = 2
-        x, y = (np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y))
-        rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
-        rows = np.atleast_1d(rows).astype(np.int32, copy=False)
-        cols = np.atleast_1d(cols).astype(np.int32, copy=False)
-
         dist_ds = np.asarray(self._get_env('environment/distance_to', default=np.zeros((1, 1))), dtype=float)
         if dist_ds.ndim != 2 or dist_ds.size <= 1:
             return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        rr, cc, valid = self._window_rc(rows, cols, buff, dist_ds.shape)
-        rr0 = np.clip(rr, 0, dist_ds.shape[0] - 1)
-        cc0 = np.clip(cc, 0, dist_ds.shape[1] - 1)
-        dist3d = dist_ds[rr0, cc0]
+        transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+        rows, cols, rr, cc, valid, dx, dy, front = self._window_common(buff, dist_ds.shape, transform)
+
+        dist3d = dist_ds[rr, cc]
         dist3d = np.where(valid & np.isfinite(dist3d), dist3d, -np.inf)
 
-        agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
-        agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
-        heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
-        transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
-        dx, dy = self._window_dxdy(rr0, cc0, transform, agent_x, agent_y)
-        hx = np.cos(heading)[:, np.newaxis, np.newaxis]
-        hy = np.sin(heading)[:, np.newaxis, np.newaxis]
-        front = (dx * hx + dy * hy) > 0
         front_any = np.any(front & valid, axis=(1, 2))
         dist3d = np.where(front_any[:, np.newaxis, np.newaxis], np.where(front, dist3d, -np.inf), dist3d)
 
@@ -1690,8 +1797,22 @@ class behavior():
         sel_dy = dy[np.arange(dy.shape[0]), rr_i, cc_i]
         dist = np.sqrt(sel_dx * sel_dx + sel_dy * sel_dy)
 
-        current_distances = self.simulation.sample_environment(self.simulation.depth_rast_transform, 'distance_to')
-        self.simulation.current_distances = current_distances
+        # Current distance at agent position (avoid an extra sample_environment call).
+        H0, W0 = dist_ds.shape
+        rows0 = np.asarray(rows, dtype=np.int32)
+        cols0 = np.asarray(cols, dtype=np.int32)
+        valid0 = (rows0 >= 0) & (cols0 >= 0) & (rows0 < H0) & (cols0 < W0)
+        rr0 = np.clip(rows0, 0, H0 - 1)
+        cc0 = np.clip(cols0, 0, W0 - 1)
+        current_distances = np.full((int(self.simulation.num_agents),), np.nan, dtype=float)
+        try:
+            current_distances[valid0] = dist_ds[rr0[valid0], cc0[valid0]]
+        except Exception:
+            pass
+        try:
+            self.simulation.current_distances = current_distances
+        except Exception:
+            pass
 
         # Scale repulsion by distance to boundary so the cue remains meaningful on
         # coarser rasters (e.g., 1m cells) while preserving legacy behavior when
@@ -1722,35 +1843,25 @@ class behavior():
         return np.column_stack((repulse_x, repulse_y))
 
     def shallow_cue(self, weight):
+        try:
+            if float(weight) == 0.0:
+                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        except Exception:
+            pass
         buff = 2
-        x, y = (self.simulation.X, self.simulation.Y)
-        rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
-        rows = np.atleast_1d(rows).astype(np.int32, copy=False)
-        cols = np.atleast_1d(cols).astype(np.int32, copy=False)
-
         depth_ds = np.asarray(self._get_env('environment/depth', default=np.zeros((1, 1))), dtype=float)
         if depth_ds.ndim != 2 or depth_ds.size <= 1:
             return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        rr, cc, valid = self._window_rc(rows, cols, buff, depth_ds.shape)
-        rr0 = np.clip(rr, 0, depth_ds.shape[0] - 1)
-        cc0 = np.clip(cc, 0, depth_ds.shape[1] - 1)
-        depths = depth_ds[rr0, cc0]
-
-        agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
-        agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
-        heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
         transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
-        dx_cell, dy_cell = self._window_dxdy(rr0, cc0, transform, agent_x, agent_y)
+        _, _, rr, cc, valid, dx_cell, dy_cell, front_cell = self._window_common(buff, depth_ds.shape, transform)
+        depths = depth_ds[rr, cc]
         # for repulsion, use vector from cell->agent
         dx = -dx_cell
         dy = -dy_cell
 
-        hx = np.cos(heading)[:, np.newaxis, np.newaxis]
-        hy = np.sin(heading)[:, np.newaxis, np.newaxis]
-        front = (dx_cell * hx + dy_cell * hy) > 0
-        front_any = np.any(front & valid, axis=(1, 2))
-        front_mult = np.where(front_any[:, np.newaxis, np.newaxis], front, True).astype(np.float64)
+        front_any = np.any(front_cell & valid, axis=(1, 2))
+        front_mult = np.where(front_any[:, np.newaxis, np.newaxis], front_cell, True).astype(np.float64)
 
         min_depth = np.asarray(self.simulation.too_shallow, dtype=float).reshape((-1,))
         depth_mult = (depths < min_depth[:, np.newaxis, np.newaxis]).astype(np.float64)
@@ -1773,30 +1884,21 @@ class behavior():
         self.simulation.wave_drag = np.where(body_depths >= 3, 1, wave_drag_fun(body_depths))
 
     def wave_drag_cue(self, weight):
+        try:
+            if float(weight) == 0.0:
+                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        except Exception:
+            pass
         buff = 2
-        x, y = (self.simulation.X, self.simulation.Y)
-        rows, cols = geo_to_pixel(x, y, self.simulation.depth_rast_transform)
-        rows = np.atleast_1d(rows).astype(np.int32, copy=False)
-        cols = np.atleast_1d(cols).astype(np.int32, copy=False)
-
         depth_ds = np.asarray(self._get_env('environment/depth', default=np.zeros((1, 1))), dtype=float)
         if depth_ds.ndim != 2 or depth_ds.size <= 1:
             return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        rr, cc, valid = self._window_rc(rows, cols, buff, depth_ds.shape)
-        rr0 = np.clip(rr, 0, depth_ds.shape[0] - 1)
-        cc0 = np.clip(cc, 0, depth_ds.shape[1] - 1)
-        dep3d = depth_ds[rr0, cc0]
+        transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+        _, _, rr, cc, valid, dx, dy, front = self._window_common(buff, depth_ds.shape, transform)
+        dep3d = depth_ds[rr, cc]
         dep3d = np.where(valid & np.isfinite(dep3d) & (dep3d > -9990.0), dep3d, np.inf)
 
-        agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
-        agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
-        heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
-        transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
-        dx, dy = self._window_dxdy(rr0, cc0, transform, agent_x, agent_y)
-        hx = np.cos(heading)[:, np.newaxis, np.newaxis]
-        hy = np.sin(heading)[:, np.newaxis, np.newaxis]
-        front = (dx * hx + dy * hy) > 0
         front_any = np.any(front & valid, axis=(1, 2))
         dep3d = np.where(front_any[:, np.newaxis, np.newaxis], np.where(front, dep3d, np.inf), dep3d)
 
@@ -1823,6 +1925,11 @@ class behavior():
         return np.column_stack((attract_x, attract_y))
 
     def cohesion_cue(self, weight, consider_front_only=False):
+        try:
+            if float(weight) == 0.0:
+                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        except Exception:
+            pass
         num_agents = int(self.simulation.num_agents)
         # Prefer CSR neighbor representation when available (simulation-level)
         offsets = getattr(self.simulation, 'neighbors_offsets', None)
@@ -1926,6 +2033,12 @@ class behavior():
         return np.nan_to_num(cohesion_array)
 
     def alignment_cue(self, weight, consider_front_only=False):
+        try:
+            if float(weight) == 0.0:
+                self.simulation.school_sog = np.maximum(0.5 * (np.asarray(self.simulation.length, dtype=float) / 1000.0), 0.0)
+                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        except Exception:
+            pass
         num_agents = int(self.simulation.num_agents)
         # Prefer CSR neighbor representation when available (simulation-level)
         offsets = getattr(self.simulation, 'neighbors_offsets', None)
@@ -2095,6 +2208,11 @@ class behavior():
         return np.nan_to_num(alignment_array)
 
     def collision_cue(self, weight):
+        try:
+            if float(weight) == 0.0:
+                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        except Exception:
+            pass
         # ensure closest_agent and nearest_neighbor_distance are populated; reconstruct when missing
         try:
             closest_agent_arr = np.asarray(self.simulation.closest_agent, dtype=float).copy()
@@ -2195,6 +2313,16 @@ class behavior():
         self.simulation.time_since_eddy_escape[self.simulation.in_eddy == True] += 1
 
     def arbitrate(self, t):
+        # Enable per-step caching for window-based cues. We explicitly disable
+        # this before returning so direct cue calls (tests) don't see stale cache.
+        try:
+            self._window_cache_enabled = True
+            self._window_cache_t = float(t)
+            self._window_cache = {}
+        except Exception:
+            self._window_cache_enabled = True
+            self._window_cache_t = None
+            self._window_cache = {}
         # debug: log a concise summary of current headings at start of arbitration
         if getattr(self.simulation, 'debug_behavior', False):
             try:
@@ -2422,8 +2550,16 @@ class behavior():
             # Fast path: if we aren't recording diagnostics/state, return the new headings now.
             if not want_record:
                 try:
+                    try:
+                        self._window_cache_enabled = False
+                    except Exception:
+                        pass
                     return np.arctan2(head_vec[:, 1], head_vec[:, 0])
                 except Exception:
+                    try:
+                        self._window_cache_enabled = False
+                    except Exception:
+                        pass
                     return np.asarray(self.simulation.heading)
             # debug snapshot of cue magnitudes when debug_behavior is enabled
             if debug_behavior:
@@ -2595,6 +2731,10 @@ class behavior():
                         logging.getLogger(__name__).debug('simplified behavior debug dump failed')
                     except Exception:
                         pass
+            try:
+                self._window_cache_enabled = False
+            except Exception:
+                pass
             return np.arctan2(head_vec[:, 1], head_vec[:, 0])
         else:
             # If head_vec has unexpected shape, try to sanitize: replace NaNs and zero-length vectors
@@ -2649,8 +2789,16 @@ class behavior():
                             pass
                 except Exception:
                     pass
+                try:
+                    self._window_cache_enabled = False
+                except Exception:
+                    pass
                 return np.arctan2(safe_hv[:, 1], safe_hv[:, 0])
             except Exception:
                 # ultimate fallback: return previous heading
+                try:
+                    self._window_cache_enabled = False
+                except Exception:
+                    pass
                 return np.asarray(self.simulation.heading)
         # end of arbitrate: handled 2D and attempted safe fallback above

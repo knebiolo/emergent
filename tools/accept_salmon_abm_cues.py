@@ -592,6 +592,13 @@ def _expected_refugia(sim: simulation, x0: np.ndarray, y0: np.ndarray) -> np.nda
         out[:, 1] = dy / mag_safe
         out[~np.isfinite(out)] = 0.0
         out[mag == 0] = 0.0
+        # Optional sensing/search radius: outside radius, expected response is zero.
+        try:
+            r_m = float(getattr(sim, "refugia_search_radius_m", 0.0) or 0.0)
+        except Exception:
+            r_m = 0.0
+        if np.isfinite(r_m) and r_m > 0.0:
+            out[mag > r_m] = 0.0
         return out
     except Exception:
         return np.zeros((sim.num_agents, 2), dtype=float)

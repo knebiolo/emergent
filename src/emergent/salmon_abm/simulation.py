@@ -12,6 +12,10 @@ import h5py
 import numpy as np
 import logging
 from scipy.ndimage import distance_transform_edt
+try:
+    from scipy.spatial import cKDTree
+except Exception:  # pragma: no cover
+    cKDTree = None
 from typing import Optional
 from emergent.salmon_abm import utils, io, pid, agents, hdf5_io
 from emergent.salmon_abm import movement as movement_mod, behavior as behavior_mod, fatigue as fatigue_mod
@@ -59,6 +63,46 @@ class simulation:
         # Cache for static dataset arrays (e.g., environment rasters) to avoid
         # repeatedly reading large HDF5 datasets each timestep.
         self._dataset_cache = {}
+        # When True, skip all per-step writes to the HDF5/db store (X/Y and
+        # agent_data/*). This is useful for "watch-only" runs where you want
+        # realtime behavior without I/O overhead.
+        try:
+            self.disable_hdf_writes = bool(getattr(self, 'disable_hdf_writes', False))
+        except Exception:
+            self.disable_hdf_writes = False
+        # Back-compat alias (some callers may prefer this name)
+        try:
+            self.disable_output_writes = bool(getattr(self, 'disable_output_writes', self.disable_hdf_writes))
+        except Exception:
+            self.disable_output_writes = self.disable_hdf_writes
+
+        # Neighbor-finding configuration.
+        # - Default sensing radius is a fixed 1 meter (simple + predictable).
+        #   To use body-length scaling instead, set `neighbor_buffer_radius <= 0`
+        #   and configure `neighbor_buffer_lengths` (default: 2.0).
+        # - Neighbor graph rebuild is throttled via `neighbor_update_seconds` because
+        #   neighbors do not change meaningfully every sub-second timestep.
+        self.neighbor_update_seconds = float(getattr(self, 'neighbor_update_seconds', 2.0))
+        self.neighbor_update_interval_steps = int(getattr(self, 'neighbor_update_interval_steps', 0) or 0)
+        self.neighbor_buffer_lengths = float(getattr(self, 'neighbor_buffer_lengths', 2.0))
+        # Explicit override in meters; default is 1.0m. Set <=0 to fall back to
+        # body-length scaling via `neighbor_buffer_lengths`.
+        try:
+            self.neighbor_buffer_radius = float(getattr(self, 'neighbor_buffer_radius', 1.0))
+        except Exception:
+            self.neighbor_buffer_radius = 1.0
+        self._neighbor_last_build_step = None
+
+        # Per-timestep cache for sampled environment values (dedupe repeated calls
+        # to `sample_environment` across multiple cues).
+        self.cache_env_samples = bool(getattr(self, 'cache_env_samples', True))
+        self._env_sample_cache = {}
+        self._env_sample_cache_step = None
+        self._env_sample_cache_gen = 0
+        # Per-timestep cache for computed pixel indices from `geo_to_pixel` keyed
+        # by transform (independent of raster_name). This avoids repeating the
+        # coordinate transform when sampling multiple rasters with the same grid.
+        self._env_pixel_cache = {}
 
         # Avoid/mental-map configuration. In non-debug runs, prefer a sparse,
         # per-agent history representation to avoid per-agent HDF5 raster costs.
@@ -225,6 +269,13 @@ class simulation:
         except Exception:
             self.auto_derive_refugia = True
         self._refugia_derived = False
+        # Refugia cue sensing/search radius (meters). Default is a fixed 1m to
+        # avoid per-agent radii and keep behavior predictable. Set <=0 to
+        # disable gating (always point toward nearest refugia cell).
+        try:
+            self.refugia_search_radius_m = float(getattr(self, 'refugia_search_radius_m', 1.0))
+        except Exception:
+            self.refugia_search_radius_m = 1.0
 
         # If a start polygon was provided, sample initial agent positions inside it
         if start_polygon:
@@ -451,6 +502,84 @@ class simulation:
         except Exception:
             self.initial_fish_vel = np.zeros((self.num_agents, 2), dtype=float)
         self._fatigue = None
+
+    def _neighbor_radius_m(self) -> float:
+        """Return the neighbor buffer radius in meters.
+
+        Uses `neighbor_buffer_radius` when set and >0 (meters).
+
+        If `neighbor_buffer_radius <= 0`, computes:
+            `neighbor_buffer_lengths * median(length_m)`
+        where `length` is in mm.
+        """
+        # fixed-radius override in meters
+        try:
+            r = getattr(self, 'neighbor_buffer_radius', None)
+            if r is not None:
+                r = float(r)
+                if np.isfinite(r) and r > 0.0:
+                    return float(r)
+        except Exception:
+            pass
+
+        try:
+            bl = float(getattr(self, 'neighbor_buffer_lengths', 2.0))
+        except Exception:
+            bl = 2.0
+        if not np.isfinite(bl) or bl <= 0.0:
+            bl = 2.0
+
+        try:
+            length_mm = np.asarray(getattr(self, 'length', np.array([500.0])), dtype=float)
+            length_m = np.nanmedian(length_mm) / 1000.0
+        except Exception:
+            length_m = 0.5
+        if not np.isfinite(length_m) or length_m <= 0.0:
+            length_m = 0.5
+        return float(bl * length_m)
+
+    def _env_sample_cache_key(self, transform, raster_name: str):
+        try:
+            rn = str(raster_name)
+        except Exception:
+            rn = raster_name
+        try:
+            gen = int(getattr(self, '_env_sample_cache_gen', 0) or 0)
+        except Exception:
+            gen = 0
+
+        tr_key = None
+        if transform is not None:
+            try:
+                vals = tuple(transform)
+                if len(vals) >= 6:
+                    tr_key = tuple(float(vals[i]) for i in range(6))
+                else:
+                    tr_key = tuple(float(v) for v in vals)
+            except Exception:
+                tr_key = id(transform)
+
+        return (rn, tr_key, gen)
+
+    def _env_pixel_cache_key(self, transform):
+        try:
+            gen = int(getattr(self, '_env_sample_cache_gen', 0) or 0)
+        except Exception:
+            gen = 0
+
+        tr_key = None
+        if transform is not None:
+            try:
+                vals = tuple(transform)
+                if len(vals) >= 6:
+                    tr_key = tuple(float(vals[i]) for i in range(6))
+                else:
+                    tr_key = tuple(float(v) for v in vals)
+            except Exception:
+                tr_key = id(transform)
+
+        return (tr_key, gen)
+
     def initialize_headings_from_db(self):
         """(Re)initialize `self.heading` by sampling velocity rasters in the sim DB.
 
@@ -838,6 +967,23 @@ class simulation:
         # behavior -> fatigue -> movement -> write outputs.
         self.cumulative_time += dt
 
+        # Standardize a per-step marker used by diagnostics/caches.
+        try:
+            self.current_step = int(t)
+        except Exception:
+            self.current_step = t
+
+        # Reset per-timestep environment-sample cache: X/Y are stable until after
+        # movement updates later in this method.
+        try:
+            if getattr(self, 'cache_env_samples', True):
+                self._env_sample_cache_step = int(getattr(self, 'current_step', t))
+                self._env_sample_cache_gen = 0
+                self._env_sample_cache = {}
+                self._env_pixel_cache = {}
+        except Exception:
+            pass
+
         # keep previous positions for velocity calculations
         self.prev_X = self.X.copy()
         self.prev_Y = self.Y.copy()
@@ -867,76 +1013,198 @@ class simulation:
             except Exception:
                 pass
 
-        # --- neighbor finding: populate agents_within_buffers, closest_agent, nearest_neighbor_distance
+        # --- neighbor finding: populate CSR neighbors and/or nearest-neighbor fields
+        # Keep this work conditional so profiling / acceptance runs that isolate
+        # non-schooling cues don't pay O(N log N) neighbor costs.
         try:
-            from scipy.spatial import cKDTree
-            pts = np.column_stack((self.X, self.Y))
-            if len(pts) > 0:
-                tree = cKDTree(pts)
-                # buffer radius in meters (use a simulation attribute or default)
-                radius = getattr(self, 'neighbor_buffer_radius', max(10.0, (self.length.mean() / 100.0) * 5.0))
-                # Build a flat neighbor list + offsets (CSR) to avoid per-agent numpy
-                # array allocations. Prefer per-row neighborhood queries so we don't
-                # need to sort large edge lists each timestep.
-                n = int(pts.shape[0])
-                neighbors_lists = tree.query_ball_point(pts, r=radius)
-                lens = np.fromiter((len(lst) for lst in neighbors_lists), dtype=np.int32, count=n)
-                total = int(lens.sum())
-                neighbors_offsets = np.empty(n + 1, dtype=np.int64)
-                neighbors_offsets[0] = 0
-                neighbors_indices = np.empty(total, dtype=np.int32)
+            n_agents = int(getattr(self, 'num_agents', 0) or 0)
+        except Exception:
+            n_agents = 0
+        try:
+            debug_behavior = bool(getattr(self, 'debug_behavior', False))
+            build_buffers = bool(getattr(self, 'build_agents_within_buffers', False)) or debug_behavior
+        except Exception:
+            debug_behavior = False
+            build_buffers = False
 
-                pos = 0
-                for i, lst in enumerate(neighbors_lists):
-                    k = int(len(lst))
-                    end = pos + k
-                    if k > 0:
-                        neighbors_indices[pos:end] = lst
-                    pos = end
-                    neighbors_offsets[i + 1] = pos
-
-                self.neighbors_offsets = neighbors_offsets
-                self.neighbors_indices = neighbors_indices
-                # Count neighbors excluding the self entry (assumes each list includes self).
-                self.neighbor_counts = np.maximum(0, lens - 1).astype(np.int32, copy=False)
-
-                # Legacy compatibility: only build per-agent buffers when requested.
-                build_buffers = bool(getattr(self, 'build_agents_within_buffers', False)) or bool(getattr(self, 'debug_behavior', False))
-                if build_buffers:
-                    self.agents_within_buffers = [
-                        neighbors_indices[neighbors_offsets[i] : neighbors_offsets[i + 1]]
-                        for i in range(n)
-                    ]
-                # nearest neighbor excluding self
+        # Determine whether schooling/collision cues are active in this step.
+        # In normal runs `test_weights` is absent and we assume neighbors are needed.
+        tw = getattr(self, 'test_weights', None)
+        need_alignment = True
+        need_cohesion = True
+        need_collision = True
+        if isinstance(tw, dict) and tw:
+            def _nz(k: str) -> bool:
                 try:
-                    # SciPy cKDTree uses `workers` (not `n_jobs`) in modern versions.
-                    distances, indices = tree.query(pts, k=2, workers=1)
-                except TypeError:
-                    distances, indices = tree.query(pts, k=2)
-                # distances[:,0] == 0 (self), so take 1
-                nearest = np.where(np.isfinite(distances[:, 1]), indices[:, 1], np.nan)
-                nearest_d = np.where(np.isfinite(distances[:, 1]), distances[:, 1], np.nan)
-                self.closest_agent = nearest
-                self.nearest_neighbor_distance = nearest_d
-        except Exception:
-            # Leave neighbor defaults in place
-            pass
+                    return float(tw.get(k, 0.0)) != 0.0
+                except Exception:
+                    return False
+            need_alignment = _nz('alignment')
+            need_cohesion = _nz('cohesion')
+            need_collision = _nz('collision')
 
-        # instantiate per-timestep helpers
-        try:
+        need_neighbor_graph = build_buffers or need_alignment or need_cohesion
+        need_nearest = need_collision
+
+        if cKDTree is not None and n_agents > 0 and (need_neighbor_graph or need_nearest):
+            try:
+                # Throttle neighbor rebuilds: default every ~2 seconds.
+                # Always build on first use.
+                step_i = None
+                try:
+                    step_i = int(getattr(self, 'current_step', t))
+                except Exception:
+                    try:
+                        step_i = int(t)
+                    except Exception:
+                        step_i = None
+
+                interval_steps = int(getattr(self, 'neighbor_update_interval_steps', 0) or 0)
+                if interval_steps <= 0:
+                    try:
+                        seconds = float(getattr(self, 'neighbor_update_seconds', 2.0))
+                    except Exception:
+                        seconds = 2.0
+                    if not np.isfinite(seconds) or seconds <= 0.0:
+                        seconds = 2.0
+                    try:
+                        interval_steps = max(1, int(round(seconds / float(dt))))
+                    except Exception:
+                        interval_steps = 1
+
+                last_step = getattr(self, '_neighbor_last_build_step', None)
+                have_graph = getattr(self, 'neighbors_offsets', None) is not None and getattr(self, 'neighbors_indices', None) is not None
+                have_nearest = getattr(self, 'closest_agent', None) is not None and getattr(self, 'nearest_neighbor_distance', None) is not None
+                need_build_now = False
+                if not ((need_neighbor_graph and have_graph) or (need_nearest and have_nearest)):
+                    need_build_now = True
+                elif step_i is None or last_step is None:
+                    need_build_now = True
+                else:
+                    try:
+                        need_build_now = (int(step_i) - int(last_step)) >= int(interval_steps)
+                    except Exception:
+                        need_build_now = True
+
+                if not need_build_now:
+                    # Keep previous neighbor fields; skip rebuild work this step.
+                    raise StopIteration()
+
+                # Reuse a scratch points array to reduce per-step allocations.
+                pts = getattr(self, '_neighbor_pts_scratch', None)
+                if not isinstance(pts, np.ndarray) or pts.shape != (n_agents, 2):
+                    pts = np.empty((n_agents, 2), dtype=np.float64)
+                    self._neighbor_pts_scratch = pts
+                # Assigning into a float64 buffer performs any needed casting
+                # without allocating float64 copies of X/Y.
+                pts[:, 0] = np.asarray(self.X).reshape((-1,))
+                pts[:, 1] = np.asarray(self.Y).reshape((-1,))
+                tree = cKDTree(pts)
+
+                # Allow multi-threaded queries when available (SciPy `workers`).
+                try:
+                    workers = int(getattr(self, 'neighbor_workers', 1) or 1)
+                except Exception:
+                    workers = 1
+                if workers == 0:
+                    workers = 1
+
+                if need_neighbor_graph:
+                    # buffer radius in meters (use a simulation attribute or default)
+                    radius = self._neighbor_radius_m()
+
+                    # Prefer unsorted neighbor lists (we don't require stable ordering).
+                    try:
+                        neighbors_lists = tree.query_ball_point(pts, r=radius, return_sorted=False, workers=workers)
+                    except TypeError:
+                        try:
+                            neighbors_lists = tree.query_ball_point(pts, r=radius, workers=workers)
+                        except TypeError:
+                            neighbors_lists = tree.query_ball_point(pts, r=radius)
+
+                    lens = np.fromiter((len(lst) for lst in neighbors_lists), dtype=np.int32, count=n_agents)
+                    total = int(lens.sum())
+                    neighbors_offsets = np.empty(n_agents + 1, dtype=np.int64)
+                    neighbors_offsets[0] = 0
+                    neighbors_indices = np.empty(total, dtype=np.int32)
+
+                    pos = 0
+                    for i, lst in enumerate(neighbors_lists):
+                        k = int(len(lst))
+                        end = pos + k
+                        if k > 0:
+                            neighbors_indices[pos:end] = lst
+                        pos = end
+                        neighbors_offsets[i + 1] = pos
+                    counts = lens.astype(np.int32, copy=False)
+
+                    self.neighbors_offsets = neighbors_offsets
+                    self.neighbors_indices = neighbors_indices
+                    # Count neighbors excluding the self entry (assumes each list includes self).
+                    self.neighbor_counts = np.maximum(0, counts - 1).astype(np.int32, copy=False)
+
+                    # Legacy compatibility: only build per-agent buffers when requested.
+                    if build_buffers:
+                        self.agents_within_buffers = [
+                            neighbors_indices[neighbors_offsets[i] : neighbors_offsets[i + 1]]
+                            for i in range(n_agents)
+                        ]
+
+                if need_nearest:
+                    # nearest neighbor excluding self (used by collision cue)
+                    try:
+                        distances, indices = tree.query(pts, k=2, workers=workers)
+                    except TypeError:
+                        distances, indices = tree.query(pts, k=2)
+                    # distances[:,0] == 0 (self), so take 1
+                    nearest = np.where(np.isfinite(distances[:, 1]), indices[:, 1], np.nan)
+                    nearest_d = np.where(np.isfinite(distances[:, 1]), distances[:, 1], np.nan)
+                    self.closest_agent = nearest
+                    self.nearest_neighbor_distance = nearest_d
+
+                try:
+                    self._neighbor_last_build_step = step_i
+                except Exception:
+                    pass
+            except StopIteration:
+                # Normal control flow: neighbor update not due yet.
+                pass
+            except Exception:
+                # Leave neighbor defaults in place
+                pass
+
+        # instantiate per-timestep helpers (reuse instances to avoid per-step allocation)
+        behavior = getattr(self, '_behavior', None)
+        if behavior is None:
             behavior = behavior_mod.behavior(dt, self)
-        except Exception:
-            behavior = self._behavior
+            self._behavior = behavior
+        else:
+            try:
+                behavior.dt = dt
+            except Exception:
+                pass
 
-        try:
-            fatigue = fatigue_mod.fatigue(t, dt, self)
-        except Exception:
-            fatigue = None
+        fatigue = getattr(self, '_fatigue', None)
+        if fatigue is None:
+            try:
+                fatigue = fatigue_mod.fatigue(t, dt, self)
+                self._fatigue = fatigue
+            except Exception:
+                fatigue = None
+        else:
+            try:
+                fatigue.t = t
+                fatigue.dt = dt
+            except Exception:
+                pass
 
-        try:
-            movement = movement_mod.movement(self)
-        except Exception:
-            movement = self._movement
+        movement = getattr(self, '_movement', None)
+        if movement is None:
+            try:
+                movement = movement_mod.movement(self)
+                self._movement = movement
+            except Exception:
+                movement = None
 
         # run fatigue assessment first to update battery / swim modes
         if fatigue is not None:
@@ -997,6 +1265,15 @@ class simulation:
             self.X = self.X + d
             self.Y = self.Y + d
 
+        # X/Y changed; invalidate any cached samples from the pre-movement state.
+        try:
+            if getattr(self, 'cache_env_samples', True) and isinstance(getattr(self, '_env_sample_cache', None), dict):
+                self._env_sample_cache_gen = int(getattr(self, '_env_sample_cache_gen', 0) or 0) + 1
+                self._env_sample_cache = {}
+                self._env_pixel_cache = {}
+        except Exception:
+            pass
+
         # update fish kinematics (do not overwrite water velocity fields)
         try:
             self.fish_x_vel = np.asarray((self.X - self.prev_X) / dt, dtype=np.float32)
@@ -1011,10 +1288,12 @@ class simulation:
             self.update_avoid_memory(t)
         except Exception:
             pass
-        hdf5_io.write_dataset(self.db, 'X', self.X)
-        hdf5_io.write_dataset(self.db, 'Y', self.Y)
-        hdf5_io.write_dataset(self.db, 'prev_X', self.prev_X)
-        hdf5_io.write_dataset(self.db, 'prev_Y', self.prev_Y)
+        disable_writes = bool(getattr(self, 'disable_output_writes', False) or getattr(self, 'disable_hdf_writes', False))
+        if not disable_writes:
+            hdf5_io.write_dataset(self.db, 'X', self.X)
+            hdf5_io.write_dataset(self.db, 'Y', self.Y)
+            hdf5_io.write_dataset(self.db, 'prev_X', self.prev_X)
+            hdf5_io.write_dataset(self.db, 'prev_Y', self.prev_Y)
 
         # write per-timestep slices into time-indexed agent_data arrays
         h5 = hdf5_io.get_hdf5_obj(self)
@@ -1027,7 +1306,7 @@ class simulation:
             pass
 
         write_frequency = int(getattr(self, 'write_frequency', 1) or 0)
-        do_timeseries_write = write_frequency > 0 and (ts % write_frequency == 0)
+        do_timeseries_write = (not disable_writes) and write_frequency > 0 and (ts % write_frequency == 0)
         if do_timeseries_write:
             tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz')
             for key in tracked:
@@ -1051,7 +1330,7 @@ class simulation:
         if flush_frequency_raw is None:
             flush_frequency_raw = getattr(self, 'write_frequency', 1)
         flush_frequency = int(flush_frequency_raw or 0)
-        do_flush = flush_frequency > 0 and (ts % flush_frequency == 0)
+        do_flush = (not disable_writes) and flush_frequency > 0 and (ts % flush_frequency == 0)
         if do_flush and hasattr(self.db, 'flush'):
             try:
                 self.db.flush()
@@ -1071,15 +1350,50 @@ class simulation:
         if h5 is None or transform is None:
             return np.full(self.num_agents, np.nan)
 
+        # Per-timestep cache (dedupe repeated sampling across multiple cues).
+        try:
+            if getattr(self, 'cache_env_samples', True):
+                step_i = int(getattr(self, 'current_step', -1))
+                cache_step = getattr(self, '_env_sample_cache_step', None)
+                cache = getattr(self, '_env_sample_cache', None)
+                if cache_step is not None and int(cache_step) == step_i and isinstance(cache, dict):
+                    k = self._env_sample_cache_key(transform, raster_name)
+                    if k in cache:
+                        return cache[k]
+        except Exception:
+            pass
+
         ds_arr = self.get_cached_dataset(f'environment/{raster_name}', default=None)
         if ds_arr is None:
             return np.full(self.num_agents, np.nan)
         ds_arr = np.asarray(ds_arr)
 
+        rows = None
+        cols = None
         try:
-            rows, cols = utils.geo_to_pixel(self.X, self.Y, transform)
+            if getattr(self, 'cache_env_samples', True):
+                pcache = getattr(self, '_env_pixel_cache', None)
+                if isinstance(pcache, dict):
+                    pk = self._env_pixel_cache_key(transform)
+                    if pk in pcache:
+                        rows, cols = pcache[pk]
         except Exception:
-            return np.full(self.num_agents, np.nan)
+            rows = None
+            cols = None
+
+        if rows is None or cols is None:
+            try:
+                rows, cols = utils.geo_to_pixel(self.X, self.Y, transform)
+            except Exception:
+                return np.full(self.num_agents, np.nan)
+            try:
+                if getattr(self, 'cache_env_samples', True):
+                    pcache = getattr(self, '_env_pixel_cache', None)
+                    if isinstance(pcache, dict):
+                        pk = self._env_pixel_cache_key(transform)
+                        pcache[pk] = (rows, cols)
+            except Exception:
+                pass
 
         rows = np.asarray(rows, dtype=int)
         cols = np.asarray(cols, dtype=int)
@@ -1102,6 +1416,17 @@ class simulation:
                 logging.getLogger(__name__).debug('valid count: %s', int(np.sum(valid)))
             except Exception:
                 pass
+
+        try:
+            if getattr(self, 'cache_env_samples', True):
+                step_i = int(getattr(self, 'current_step', -1))
+                cache_step = getattr(self, '_env_sample_cache_step', None)
+                cache = getattr(self, '_env_sample_cache', None)
+                if cache_step is not None and int(cache_step) == step_i and isinstance(cache, dict):
+                    k = self._env_sample_cache_key(transform, raster_name)
+                    cache[k] = out
+        except Exception:
+            pass
         return out
 
     def get_cached_dataset(self, key: str, default=None):
