@@ -2201,7 +2201,13 @@ class behavior():
                 'collision': collision,
                 'refugia': refugia}
 
-        self._record_cue_shapes(cue_dict, t)
+        debug_behavior = bool(getattr(self.simulation, 'debug_behavior', False))
+        force_rawvecs = os.environ.get('FORCE_RAWVECS', '').lower() == 'true'
+        record_state = bool(getattr(self.simulation, 'record_behavior_state', False))
+        want_record = debug_behavior or force_rawvecs or record_state
+
+        if want_record:
+            self._record_cue_shapes(cue_dict, t)
 
         low_bat_cue_dict = {0: 'shallow', 1: 'border', 2: 'refugia'}
         try:
@@ -2210,62 +2216,70 @@ class behavior():
             # If simulation lacks helpers during lightweight probes, skip eddy detection
             pass
         tolerance = 50000
+        tol2 = float(tolerance) * float(tolerance)
         vec_sum_migratory = np.zeros_like(rheotaxis)
         vec_sum_tired = np.zeros_like(rheotaxis)
 
-        cue_magnitudes = {}
-        raw_vecs = {}
-        if getattr(self.simulation, 'debug_behavior', False) and not hasattr(self.simulation, 'last_cue_vecs'):
+        cue_magnitudes = {} if want_record else None
+        raw_vecs = {} if want_record else None
+        if debug_behavior and not hasattr(self.simulation, 'last_cue_vecs'):
             self._safe_set_sim_attr('last_cue_vecs', {})
 
         # helper: coerce cue arrays to shape (num_agents, 2)
+        n_agents = int(getattr(self.simulation, 'num_agents', 0) or 0)
+        cap = float(getattr(self.simulation, 'max_cue_magnitude', 5000.0))
+        cap2 = cap * cap
         for i in order_dict.keys():
             cue = order_dict[i]
-            vec = cue_dict[cue]
+            vec0 = cue_dict[cue]
             # coerce to (n_agents, 2) to avoid accidental broadcasting
-            vec = self._coerce_agent_vec(vec)
+            if isinstance(vec0, np.ndarray) and vec0.shape == (n_agents, 2):
+                vec = vec0
+            else:
+                vec = self._coerce_agent_vec(vec0)
+            vec = np.asarray(vec)
+
             # clip per-agent cue magnitudes to avoid single cue domination
             try:
-                cap = float(getattr(self.simulation, 'max_cue_magnitude', 5000.0))
-                norms = np.linalg.norm(vec, axis=1)
-                # avoid division by zero
-                with np.errstate(invalid='ignore', divide='ignore'):
-                    scale = np.where(norms > cap, (cap / norms), 1.0)
-                vec = vec * scale[:, np.newaxis]
-                # debug: report how many agents were clipped for this cue
-                if getattr(self.simulation, 'debug_behavior', False):
-                    try:
-                        n_clip = int(np.sum(norms > cap))
-                        if n_clip > 0:
-                            logging.getLogger(__name__).debug('DBG arbitrate: clipped %d agents for cue=%s (cap=%s)', n_clip, cue, cap)
-                    except Exception:
-                        pass
+                if cap > 0.0:
+                    vx = vec[:, 0]
+                    vy = vec[:, 1]
+                    norms2 = vx * vx + vy * vy
+                    over = norms2 > cap2
+                    if np.any(over):
+                        scale = cap / np.sqrt(norms2[over])
+                        vec[over, 0] = vx[over] * scale
+                        vec[over, 1] = vy[over] * scale
+                        if debug_behavior:
+                            try:
+                                n_clip = int(np.sum(over))
+                                if n_clip > 0:
+                                    logging.getLogger(__name__).debug('DBG arbitrate: clipped %d agents for cue=%s (cap=%s)', n_clip, cue, cap)
+                            except Exception:
+                                pass
             except Exception:
-                # if anything goes wrong, fall back to original vec
                 pass
-            # store coerced vector for debug dumps
-            raw_vecs[cue] = vec
-            # record L2 norm per agent for debugging
-            try:
-                cue_magnitudes[cue] = np.linalg.norm(vec, axis=1)
-            except Exception:
-                # scalar or different shape
+
+            # Save coerced/clipped vector for later use.
+            cue_dict[cue] = vec
+            if want_record:
+                raw_vecs[cue] = vec
                 try:
-                    cue_magnitudes[cue] = np.abs(vec)
+                    cue_magnitudes[cue] = np.sqrt(vec[:, 0] * vec[:, 0] + vec[:, 1] * vec[:, 1])
                 except Exception:
-                    cue_magnitudes[cue] = np.zeros(self.simulation.num_agents)
-            vec_sum_migratory = np.where(
-                np.linalg.norm(vec_sum_migratory, axis=-1)[:, np.newaxis] < tolerance,
-                vec_sum_migratory + vec,
-                vec_sum_migratory,
-            )
+                    cue_magnitudes[cue] = np.zeros(n_agents, dtype=float)
+
+            # Accumulate migratory sum for agents under tolerance (avoid per-cue np.where allocations).
+            active = (vec_sum_migratory[:, 0] * vec_sum_migratory[:, 0] + vec_sum_migratory[:, 1] * vec_sum_migratory[:, 1]) < tol2
+            if np.any(active):
+                vec_sum_migratory[active] += vec[active]
         # debug prints (guarded) to reveal raw_vecs and cue_magnitudes
-        if getattr(self.simulation, 'debug_behavior', False):
+        if debug_behavior and want_record:
             logging.getLogger(__name__).debug('DBG RAWVECS POST BUILD keys=%s', list(raw_vecs.keys()))
             logging.getLogger(__name__).debug('DBG CUE_MAGS POST BUILD keys=%s', list(cue_magnitudes.keys()))
 
         # debug: show raw_vecs and cue_magnitudes available at this point
-        try:
+        if debug_behavior and want_record:
             try:
                 kv = {k: (np.asarray(v).shape if hasattr(v, 'shape') else None) for k, v in raw_vecs.items()}
             except Exception:
@@ -2275,46 +2289,59 @@ class behavior():
             except Exception:
                 km = {k: None for k in cue_magnitudes.keys()}
             try:
-                if getattr(self.simulation, 'debug_behavior', False):
-                    logging.getLogger(__name__).debug('DBG raw_vecs keys/shapes=%s cue_magnitudes shapes=%s', kv, km)
+                logging.getLogger(__name__).debug('DBG raw_vecs keys/shapes=%s cue_magnitudes shapes=%s', kv, km)
             except Exception:
                 pass
-        except Exception:
-            pass
 
-        # persist raw_vecs unconditionally (best-effort) so external tools can access them
-        self._safe_set_sim_attr('last_cue_vecs', {k: np.asarray(v) for k, v in raw_vecs.items()})
+        if want_record:
+            # persist rawvecs/magnitudes for downstream diagnostics tools (best-effort)
+            self._safe_set_sim_attr('last_cue_vecs', {k: np.asarray(v) for k, v in raw_vecs.items()})
+            # Optional NPZ dump of raw per-cue vectors and magnitudes for deterministic debugging.
+            self._maybe_dump_rawvecs(t, raw_vecs, cue_magnitudes)
 
-        # Optional NPZ dump of raw per-cue vectors and magnitudes for deterministic debugging.
-        self._maybe_dump_rawvecs(t, raw_vecs, cue_magnitudes)
-
-        for i in np.arange(0, 3, 1):
-            cue = low_bat_cue_dict[i]
+        for cue in ('shallow', 'border', 'refugia'):
             vec = cue_dict[cue]
-            vec = self._coerce_agent_vec(vec)
-            vec_sum_tired = np.where(np.linalg.norm(vec_sum_tired, axis=-1)[:, np.newaxis] < tolerance,
-                                     vec_sum_tired + vec,
-                                     vec_sum_tired)
+            if isinstance(vec, np.ndarray) and vec.shape == (n_agents, 2):
+                v2 = vec
+            else:
+                v2 = self._coerce_agent_vec(vec)
+            active_t = (vec_sum_tired[:, 0] * vec_sum_tired[:, 0] + vec_sum_tired[:, 1] * vec_sum_tired[:, 1]) < tol2
+            if np.any(active_t):
+                vec_sum_tired[active_t] += np.asarray(v2)[active_t]
 
         head_vec = np.zeros_like(rheotaxis)
-        head_vec = np.where(self.simulation.swim_behav[:, np.newaxis] == 1, vec_sum_migratory, head_vec)
-        head_vec = np.where(self.simulation.swim_behav[:, np.newaxis] == 2, vec_sum_tired, head_vec)
-        head_vec = np.where(self.simulation.swim_behav[:, np.newaxis] == 3, vec_sum_tired, head_vec)
-        # ensure we use coerced (n,2) cue vectors for in-eddy override
-        border_vec = self._coerce_agent_vec(cue_dict['border'])
-        shallow_vec = self._coerce_agent_vec(cue_dict['shallow'])
-        head_vec = np.where(self.simulation.in_eddy[:, np.newaxis] == 1, border_vec + shallow_vec, head_vec)
+        swim_behav = np.asarray(self.simulation.swim_behav).reshape((-1,))
+        mig = swim_behav == 1
+        tired = (swim_behav == 2) | (swim_behav == 3)
+        if np.any(mig):
+            head_vec[mig] = vec_sum_migratory[mig]
+        if np.any(tired):
+            head_vec[tired] = vec_sum_tired[tired]
 
-        if getattr(self.simulation, 'debug_behavior', False):
+        # in-eddy override uses border+shallow (already coerced/clipped in cue_dict)
+        try:
+            in_eddy = np.asarray(self.simulation.in_eddy).reshape((-1,)) == 1
+        except Exception:
+            in_eddy = None
+        if in_eddy is not None and np.any(in_eddy):
+            head_vec[in_eddy] = cue_dict['border'][in_eddy] + cue_dict['shallow'][in_eddy]
+
+        if debug_behavior:
             logging.getLogger(__name__).debug(
                 'DBG arbitrate: head_vec.shape=%s debug_behavior=%s',
                 getattr(head_vec, 'shape', None),
-                getattr(self.simulation, 'debug_behavior', False),
+                debug_behavior,
             )
 
         if len(head_vec.shape) == 2:
+            # Fast path: if we aren't recording diagnostics/state, return the new headings now.
+            if not want_record:
+                try:
+                    return np.arctan2(head_vec[:, 1], head_vec[:, 0])
+                except Exception:
+                    return np.asarray(self.simulation.heading)
             # debug snapshot of cue magnitudes when debug_behavior is enabled
-            if getattr(self.simulation, 'debug_behavior', False):
+            if debug_behavior:
                 try:
                     import json, time
                     # show mean, max, and nonzero counts per cue
@@ -2455,7 +2482,7 @@ class behavior():
                 pass
 
             # optional behavior debugging: simplified dump
-            if getattr(self.simulation, 'debug_behavior', False):
+            if debug_behavior:
                 try:
                     outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
                     os.makedirs(outdir, exist_ok=True)
