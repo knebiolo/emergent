@@ -36,7 +36,8 @@ class simulation:
                  num_agents = 100,
                  use_gpu = False,
                  pid_tuning = False,
-                 db_path: Optional[str] = None):
+                 db_path: Optional[str] = None,
+                 output_write_mode: Optional[str] = None):
         self.model_dir = model_dir
         self.model_name = model_name
         self.crs = crs
@@ -75,6 +76,24 @@ class simulation:
             self.disable_output_writes = bool(getattr(self, 'disable_output_writes', self.disable_hdf_writes))
         except Exception:
             self.disable_output_writes = self.disable_hdf_writes
+        # Output write mode:
+        # - "full": write top-level X/Y/prev_* and time-indexed agent_data/* slices
+        # - "minimal": write only top-level X/Y (sufficient for live viewers that
+        #   poll current positions), skip agent_data/* time-series
+        # - "none": write nothing per-step (compute-only; viewer_live streaming still works)
+        try:
+            mode_in = output_write_mode if output_write_mode is not None else getattr(self, 'output_write_mode', None)
+        except Exception:
+            mode_in = output_write_mode
+        try:
+            mode = str(mode_in or 'full').strip().lower()
+        except Exception:
+            mode = 'full'
+        if bool(getattr(self, 'disable_output_writes', False) or getattr(self, 'disable_hdf_writes', False)):
+            mode = 'none'
+        if mode not in ('full', 'minimal', 'none'):
+            mode = 'full'
+        self.output_write_mode = mode
 
         # Neighbor-finding configuration.
         # - Default sensing radius is a fixed 1 meter (simple + predictable).
@@ -222,7 +241,7 @@ class simulation:
             'metadata': {'model_name': self.model_name}
         }
         try:
-            io.write_sim_initial(self.db, sim_state)
+            io.write_sim_initial(self.db, sim_state, create_timeseries=(self.output_write_mode == 'full'))
         except Exception:
             # fallback to manual creation if write_sim_initial fails
             hdf5_io.write_dataset(self.db, "agent_data/sex", np.zeros((self.num_agents,), dtype=np.int8))
@@ -314,10 +333,12 @@ class simulation:
                 self.prev_Y = ys.copy()
                 # write initial positions into HDF5 (top-level and time-indexed arrays)
                 try:
-                    hdf5_io.write_dataset(self.db, 'X', self.X)
-                    hdf5_io.write_dataset(self.db, 'Y', self.Y)
-                    hdf5_io.write_timeseries_step(self.db, 'agent_data/X', 0, self.X)
-                    hdf5_io.write_timeseries_step(self.db, 'agent_data/Y', 0, self.Y)
+                    if self.output_write_mode != 'none':
+                        hdf5_io.write_dataset(self.db, 'X', self.X)
+                        hdf5_io.write_dataset(self.db, 'Y', self.Y)
+                        if self.output_write_mode == 'full':
+                            hdf5_io.write_timeseries_step(self.db, 'agent_data/X', 0, self.X)
+                            hdf5_io.write_timeseries_step(self.db, 'agent_data/Y', 0, self.Y)
                 except Exception:
                     pass
                 # record that start polygon was used
@@ -680,14 +701,15 @@ class simulation:
 
         # Persist initial ideal_sog into the HDF5 time-indexed array (column 0)
         try:
-            h5 = hdf5_io.get_hdf5_obj(self)
-            arr = hdf5_io.read_dataset(h5, 'agent_data/ideal_sog', default=None)
-            if arr is not None:
-                try:
-                    arr[:, 0] = np.array(self.ideal_sog)
-                    hdf5_io.write_dataset(h5, 'agent_data/ideal_sog', arr)
-                except Exception:
-                    pass
+            if getattr(self, 'output_write_mode', 'full') == 'full':
+                h5 = hdf5_io.get_hdf5_obj(self)
+                arr = hdf5_io.read_dataset(h5, 'agent_data/ideal_sog', default=None)
+                if arr is not None:
+                    try:
+                        arr[:, 0] = np.array(self.ideal_sog)
+                        hdf5_io.write_dataset(h5, 'agent_data/ideal_sog', arr)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -1288,12 +1310,15 @@ class simulation:
             self.update_avoid_memory(t)
         except Exception:
             pass
-        disable_writes = bool(getattr(self, 'disable_output_writes', False) or getattr(self, 'disable_hdf_writes', False))
+        mode = str(getattr(self, 'output_write_mode', 'full') or 'full').lower()
+        disable_writes = (mode == 'none') or bool(getattr(self, 'disable_output_writes', False) or getattr(self, 'disable_hdf_writes', False))
         if not disable_writes:
+            # minimal mode: only current positions (sufficient for live viewers polling X/Y)
             hdf5_io.write_dataset(self.db, 'X', self.X)
             hdf5_io.write_dataset(self.db, 'Y', self.Y)
-            hdf5_io.write_dataset(self.db, 'prev_X', self.prev_X)
-            hdf5_io.write_dataset(self.db, 'prev_Y', self.prev_Y)
+            if mode == 'full':
+                hdf5_io.write_dataset(self.db, 'prev_X', self.prev_X)
+                hdf5_io.write_dataset(self.db, 'prev_Y', self.prev_Y)
 
         # write per-timestep slices into time-indexed agent_data arrays
         h5 = hdf5_io.get_hdf5_obj(self)
@@ -1306,7 +1331,7 @@ class simulation:
             pass
 
         write_frequency = int(getattr(self, 'write_frequency', 1) or 0)
-        do_timeseries_write = (not disable_writes) and write_frequency > 0 and (ts % write_frequency == 0)
+        do_timeseries_write = (not disable_writes) and mode == 'full' and write_frequency > 0 and (ts % write_frequency == 0)
         if do_timeseries_write:
             tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz')
             for key in tracked:
@@ -1464,6 +1489,15 @@ class simulation:
         # and optional real-time viewer. Backwards compatible: original signature still works.
         write_frequency = 1
         video_hook = None
+        # When streaming live frames over TCP, default to minimizing HDF writes
+        # because the viewer does not need per-step HDF outputs.
+        orig_output_write_mode = getattr(self, 'output_write_mode', 'full')
+        try:
+            if viewer_live and bool(getattr(self, 'viewer_live_minimize_hdf_writes', True)):
+                if str(getattr(self, 'output_write_mode', 'full')).lower() == 'full':
+                    self.output_write_mode = 'none'
+        except Exception:
+            pass
 
         # Accept a PID controller instance instead of scalar gains via model_name kw
         controller = None
@@ -1518,62 +1552,68 @@ class simulation:
                 viewer_proc = subprocess.Popen(viewer_cmd, creationflags=0)
             except Exception as e:
                 status['errors'].append(f'viewer_launch_error:{e}')
-        for i in range(n):
-            try:
-                self.timestep(i, dt, pid_controller=controller)
-                status['steps'] += 1
-                # optional video hook called after each timestep
-                if video_hook is not None:
-                    try:
-                        video_hook(self, i)
-                        status['video_frames'] += 1
-                    except Exception as e:
-                        status['errors'].append(f'video_hook_error:{e}')
-                # Live viewer: accept a client and stream the current positions frame
-                if viewer_live and live_server is not None:
-                    try:
-                        # accept a single client if not connected
-                        if client_conn is None:
-                            try:
-                                conn, addr = live_server.accept()
-                                conn.setblocking(True)
-                                client_conn = conn
-                            except BlockingIOError:
-                                conn = None
-                        if client_conn is not None:
-                            # send current frame positions as either raw float32 or numpy .npy
-                            try:
-                                import io
-                                import struct
-                                # build frame as (N,2) float32 array
-                                xs = getattr(self, 'X', None)
-                                ys = getattr(self, 'Y', None)
-                                if xs is not None and ys is not None:
-                                    frame = np.vstack((xs, ys)).T.astype(np.float32)
-                                else:
-                                    frame = np.zeros((self.num_agents, 2), dtype=np.float32)
-                                if viewer_stream_raw:
-                                    # raw protocol: 'R' + 4-byte length + payload
-                                    payload = frame.astype(np.float32).tobytes()
-                                    client_conn.sendall(b'R' + struct.pack('!I', len(payload)) + payload)
-                                else:
-                                    buf = io.BytesIO()
-                                    np.save(buf, frame)
-                                    data = buf.getvalue()
-                                    client_conn.sendall(struct.pack('!I', len(data)))
-                                    client_conn.sendall(data)
-                            except Exception:
+        try:
+            for i in range(n):
+                try:
+                    self.timestep(i, dt, pid_controller=controller)
+                    status['steps'] += 1
+                    # optional video hook called after each timestep
+                    if video_hook is not None:
+                        try:
+                            video_hook(self, i)
+                            status['video_frames'] += 1
+                        except Exception as e:
+                            status['errors'].append(f'video_hook_error:{e}')
+                    # Live viewer: accept a client and stream the current positions frame
+                    if viewer_live and live_server is not None:
+                        try:
+                            # accept a single client if not connected
+                            if client_conn is None:
                                 try:
-                                    client_conn.close()
+                                    conn, addr = live_server.accept()
+                                    conn.setblocking(True)
+                                    client_conn = conn
+                                except BlockingIOError:
+                                    conn = None
+                            if client_conn is not None:
+                                # send current frame positions as either raw float32 or numpy .npy
+                                try:
+                                    import io
+                                    import struct
+                                    # build frame as (N,2) float32 array
+                                    xs = getattr(self, 'X', None)
+                                    ys = getattr(self, 'Y', None)
+                                    if xs is not None and ys is not None:
+                                        frame = np.vstack((xs, ys)).T.astype(np.float32)
+                                    else:
+                                        frame = np.zeros((self.num_agents, 2), dtype=np.float32)
+                                    if viewer_stream_raw:
+                                        # raw protocol: 'R' + 4-byte length + payload
+                                        payload = frame.astype(np.float32).tobytes()
+                                        client_conn.sendall(b'R' + struct.pack('!I', len(payload)) + payload)
+                                    else:
+                                        buf = io.BytesIO()
+                                        np.save(buf, frame)
+                                        data = buf.getvalue()
+                                        client_conn.sendall(struct.pack('!I', len(data)))
+                                        client_conn.sendall(data)
                                 except Exception:
-                                    pass
-                                client_conn = None
-                    except Exception:
-                        pass
-            except Exception as e:
-                status['errors'].append(str(e))
-                # continue running unless unrecoverable
-                continue
+                                    try:
+                                        client_conn.close()
+                                    except Exception:
+                                        pass
+                                    client_conn = None
+                        except Exception:
+                            pass
+                except Exception as e:
+                    status['errors'].append(str(e))
+                    # continue running unless unrecoverable
+                    continue
+        finally:
+            try:
+                self.output_write_mode = orig_output_write_mode
+            except Exception:
+                pass
 
         # flush and close viewer process if requested
         if hasattr(self.db, 'flush'):

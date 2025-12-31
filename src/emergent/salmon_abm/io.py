@@ -232,7 +232,14 @@ def safe_hdf5_open(path_or_file, mode='a'):
                 pass
 
 
-def write_sim_initial(h5obj, sim_state_dict: Dict[str, Any], compress: bool = True, compression_opts=None):
+def write_sim_initial(
+    h5obj,
+    sim_state_dict: Dict[str, Any],
+    compress: bool = True,
+    compression_opts=None,
+    *,
+    create_timeseries: bool = True,
+):
     """Create standard groups/datasets used by the simulation.
 
     Parameters
@@ -258,13 +265,14 @@ def write_sim_initial(h5obj, sim_state_dict: Dict[str, Any], compress: bool = Tr
     hdf5_io.write_dataset(h5obj, 'weight', np.array(weight))
     hdf5_io.write_dataset(h5obj, 'body_depth', np.array(body_depth))
 
-    # create time-indexed agent_data arrays (na x nt)
-    empty_shape = (na, nt)
-    zero_stack = np.zeros(empty_shape, dtype=np.float32)
-    for name in ('X', 'Y', 'prev_X', 'prev_Y', 'ideal_sog', 'Hz'):
-        key = f'agent_data/{name}'
-        # write zeros array to create dataset in dict-like stores; for h5py this will create full dataset
-        hdf5_io.write_dataset(h5obj, key, zero_stack)
+    if create_timeseries:
+        # create time-indexed agent_data arrays (na x nt)
+        empty_shape = (na, nt)
+        zero_stack = np.zeros(empty_shape, dtype=np.float32)
+        for name in ('X', 'Y', 'prev_X', 'prev_Y', 'ideal_sog', 'Hz'):
+            key = f'agent_data/{name}'
+            # write zeros array to create dataset in dict-like stores; for h5py this will create full dataset
+            hdf5_io.write_dataset(h5obj, key, zero_stack)
 
     # also create legacy top-level position datasets for compatibility
     hdf5_io.write_dataset(h5obj, 'X', np.zeros((na,), dtype=np.float32))

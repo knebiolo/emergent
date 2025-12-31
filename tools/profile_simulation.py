@@ -159,7 +159,16 @@ def _discover_env_files(base_dir: str) -> list[str]:
     return out
 
 
-def profile_sim(*, n_agents: int, steps: int, dt: float, write_frequency: int, tag: str | None) -> str:
+def profile_sim(
+    *,
+    n_agents: int,
+    steps: int,
+    dt: float,
+    write_frequency: int,
+    tag: str | None,
+    output_write_mode: str | None,
+    warmup_steps: int,
+) -> str:
     """Profile a short real simulation loop (timestep calls only)."""
     base = _data_dir()
     outdir = os.path.join("outputs", "profiling")
@@ -173,6 +182,7 @@ def profile_sim(*, n_agents: int, steps: int, dt: float, write_frequency: int, t
     if not os.path.exists(start_poly):
         start_poly = None
 
+    warm = max(0, int(warmup_steps))
     sim = simmod.simulation(
         model_dir=outdir,
         model_name=f"sim_profile_{run_tag}",
@@ -182,9 +192,10 @@ def profile_sim(*, n_agents: int, steps: int, dt: float, write_frequency: int, t
         start_polygon=start_poly,
         env_files=env_files,
         longitudinal_profile=os.path.join(base, "longitudinal.shp") if os.path.exists(os.path.join(base, "longitudinal.shp")) else None,
-        num_timesteps=max(1, int(steps) + 1),
+        num_timesteps=max(1, int(steps) + warm + 1),
         num_agents=int(n_agents),
         db_path=db_path,
+        output_write_mode=output_write_mode,
     )
 
     # Prefer sparse avoid memory (avoid raster I/O).
@@ -199,11 +210,15 @@ def profile_sim(*, n_agents: int, steps: int, dt: float, write_frequency: int, t
         except Exception:
             continue
 
+    # Warm-up loop (important when Numba kernels compile on first use).
+    for i in range(warm):
+        sim.timestep(i, float(dt))
+
     # Profile timestep loop only.
     pr = cProfile.Profile()
     pr.enable()
     t0 = time.perf_counter()
-    for i in range(int(steps)):
+    for i in range(warm, warm + int(steps)):
         sim.timestep(i, float(dt))
     t1 = time.perf_counter()
     pr.disable()
@@ -213,7 +228,7 @@ def profile_sim(*, n_agents: int, steps: int, dt: float, write_frequency: int, t
     ps.print_stats(50)
     profile_text = s.getvalue()
 
-    summary = f"steps={steps}, n_agents={n_agents}, dt={dt}, write_frequency={write_frequency}, wallclock={t1-t0:.3f}s\n"
+    summary = f"steps={steps}, warmup_steps={warm}, n_agents={n_agents}, dt={dt}, write_frequency={write_frequency}, output_write_mode={output_write_mode}, wallclock={t1-t0:.3f}s\n"
     txt_name = f"sim_profile_{run_tag}.txt"
     with open(os.path.join(outdir, txt_name), "w", encoding="utf-8") as fh:
         fh.write(summary)
@@ -244,6 +259,10 @@ if __name__ == '__main__':
                         help='How many history entries to seed per agent (only used when --avoid-mode=sparse)')
     parser.add_argument('--write-frequency', type=int, default=0,
                         help='(sim mode) timestep write frequency; 0 disables per-step HDF5 writes')
+    parser.add_argument('--output-write-mode', choices=('full', 'minimal', 'none'), default=None,
+                        help='(sim mode) output write mode: full/minimal/none')
+    parser.add_argument('--warmup-steps', type=int, default=2,
+                        help='(sim mode) warmup timesteps (excluded from profile), default 2')
     parser.add_argument('--tag', type=str, default=None, help='Optional run tag to annotate output files')
     args = parser.parse_args()
 
@@ -267,5 +286,7 @@ if __name__ == '__main__':
             dt=float(args.dt),
             write_frequency=int(args.write_frequency),
             tag=args.tag,
+            output_write_mode=args.output_write_mode,
+            warmup_steps=int(args.warmup_steps),
         )
         print(f"Wrote profiling output to {out}")
