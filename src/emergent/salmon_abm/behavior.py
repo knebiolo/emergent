@@ -122,6 +122,56 @@ if _NUMBA_AVAILABLE:
         out_y = np.empty(axs.shape[0], dtype=np.float64)
         _repulsive_batched_core(axs, ays, mf, mo, rm, cm, nr, nc, aff, float(weight), float(t), out_x, out_y)
         return out_x, out_y
+
+    @njit(parallel=True, fastmath=True)
+    def _already_been_here_sparse_core_affine(
+        agent_x_f64,
+        agent_y_f64,
+        hist_r_i16,
+        hist_c_i16,
+        hist_t_f32,
+        a_f64,
+        e_f64,
+        b_f64,
+        c_f64,
+        d_f64,
+        f_f64,
+        weight_f64,
+        t_now_f64,
+        horizon_f64,
+        out_fx_f64,
+        out_fy_f64,
+    ):
+        n = agent_x_f64.shape[0]
+        K = hist_r_i16.shape[1]
+        for i in prange(n):
+            fx = 0.0
+            fy = 0.0
+            ax = agent_x_f64[i]
+            ay = agent_y_f64[i]
+            for j in range(K):
+                rr = hist_r_i16[i, j]
+                cc = hist_c_i16[i, j]
+                if rr < 0 or cc < 0:
+                    continue
+                tt = hist_t_f32[i, j]
+                if not np.isfinite(tt):
+                    continue
+                t_since = t_now_f64 - float(tt)
+                if t_since <= 10.0 or t_since >= horizon_f64:
+                    continue
+                mult = 1.0 - (t_since - 5.0) / 7195.0
+                wx = a_f64 * float(cc) + b_f64 * float(rr) + c_f64
+                wy = d_f64 * float(cc) + e_f64 * float(rr) + f_f64
+                dx = ax - wx
+                dy = ay - wy
+                dist2 = dx * dx + dy * dy
+                if dist2 == 0.0:
+                    dist2 = 1e-6
+                fx += (weight_f64 * dx / dist2) * mult
+                fy += (weight_f64 * dy / dist2) * mult
+            out_fx_f64[i] = fx
+            out_fy_f64[i] = fy
 else:
     def _repulsive_core(agent_x, agent_y, world_x, world_y, multiplier, weight):
         # fallback Python implementation operating on flattened arrays with minimal temporaries
@@ -537,6 +587,19 @@ class behavior():
                 _repulsive_core_safe(0.0, 0.0, _np.array([0.0]), _np.array([0.0]), _np.array([1.0]), 1.0)
             except Exception:
                 pass
+            try:
+                ar = _np.array([0, 1], dtype=_np.int32)
+                ac = _np.array([0, 1], dtype=_np.int32)
+                hr = _np.array([[0, -1], [1, -1]], dtype=_np.int16)
+                hc = _np.array([[1, -1], [0, -1]], dtype=_np.int16)
+                ht = _np.array([[0.0, _np.nan], [0.0, _np.nan]], dtype=_np.float32)
+                ax = _np.array([0.0, 1.0], dtype=_np.float64)
+                ay = _np.array([0.0, 1.0], dtype=_np.float64)
+                out_fx = _np.zeros(2, dtype=_np.float64)
+                out_fy = _np.zeros(2, dtype=_np.float64)
+                _already_been_here_sparse_core_affine(ax, ay, hr, hc, ht, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 20.0, 7200.0, out_fx, out_fy)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -565,12 +628,23 @@ class behavior():
         if rows_hist is None or cols_hist is None or t_hist is None:
             return None
 
-        try:
-            rows_hist = np.asarray(rows_hist)
-            cols_hist = np.asarray(cols_hist)
-            t_hist = np.asarray(t_hist, dtype=float)
-        except Exception:
-            return None
+        # Avoid needless conversions on the hot path: these are typically already
+        # numpy arrays allocated by `simulation.ensure_avoid_history()`.
+        if not isinstance(rows_hist, np.ndarray):
+            try:
+                rows_hist = np.asarray(rows_hist)
+            except Exception:
+                return None
+        if not isinstance(cols_hist, np.ndarray):
+            try:
+                cols_hist = np.asarray(cols_hist)
+            except Exception:
+                return None
+        if not isinstance(t_hist, np.ndarray):
+            try:
+                t_hist = np.asarray(t_hist)
+            except Exception:
+                return None
 
         n = int(getattr(sim, 'num_agents', 0) or 0)
         if n <= 0:
@@ -598,35 +672,99 @@ class behavior():
         chunk = max(1, chunk)
 
         t_now = float(t)
-        fx = np.zeros(n, dtype=float)
-        fy = np.zeros(n, dtype=float)
+        fx = np.zeros(n, dtype=np.float64)
+        fy = np.zeros(n, dtype=np.float64)
+
+        # Prefer the Numba kernel when available: avoids allocating (n_agents x chunk)
+        # temporaries and keeps results aligned with world coordinates.
+        if _NUMBA_AVAILABLE:
+            try:
+                ax = np.ascontiguousarray(agent_x, dtype=np.float64)
+                ay = np.ascontiguousarray(agent_y, dtype=np.float64)
+                hr = np.ascontiguousarray(rows_hist, dtype=np.int16)
+                hc = np.ascontiguousarray(cols_hist, dtype=np.int16)
+                ht = np.ascontiguousarray(t_hist, dtype=np.float32)
+                _already_been_here_sparse_core_affine(
+                    ax,
+                    ay,
+                    hr,
+                    hc,
+                    ht,
+                    float(a),
+                    float(e),
+                    float(b),
+                    float(c),
+                    float(d),
+                    float(f),
+                    float(weight),
+                    float(t_now),
+                    float(horizon),
+                    fx,
+                    fy,
+                )
+                return np.column_stack((fx, fy))
+            except Exception:
+                # Fall back to the vectorized implementation below.
+                pass
+
+        # Fast path for the common north-up mental map transform (b == d == 0):
+        # compute in pixel-index space and scale by (a,e) to get meters, which
+        # avoids per-chunk float casting of the history arrays.
+        use_pixel_space = False
+        agent_r = agent_c = None
+        try:
+            use_pixel_space = (abs(float(b)) < 1e-12) and (abs(float(d)) < 1e-12)
+        except Exception:
+            use_pixel_space = False
+        if use_pixel_space:
+            try:
+                r0, c0 = geo_to_pixel(agent_x, agent_y, getattr(sim, 'mental_map_transform', getattr(sim, 'depth_rast_transform', None)))
+                agent_r = np.asarray(r0, dtype=np.int32).reshape((-1,))
+                agent_c = np.asarray(c0, dtype=np.int32).reshape((-1,))
+                if agent_r.size != n or agent_c.size != n:
+                    use_pixel_space = False
+            except Exception:
+                use_pixel_space = False
 
         K = int(rows_hist.shape[1])
         for start in range(0, K, chunk):
             end = min(K, start + chunk)
-            rr = rows_hist[:, start:end].astype(float, copy=False)
-            cc = cols_hist[:, start:end].astype(float, copy=False)
+            rr = rows_hist[:, start:end]
+            cc = cols_hist[:, start:end]
             tt = t_hist[:, start:end]
 
-            valid = (rr >= 0) & (cc >= 0) & np.isfinite(tt)
-            if not np.any(valid):
+            valid_rc = (rr >= 0) & (cc >= 0)
+            if not np.any(valid_rc):
                 continue
 
+            # Keep invalid entries as zero multiplier so we can use fast `sum`
+            # rather than `nansum` and avoid NaN replacement overhead.
             t_since = t_now - tt
-            mult = np.where((t_since > 10.0) & (t_since < horizon), 1.0 - (t_since - 5.0) / 7195.0, 0.0)
-            mult = np.where(valid, mult, 0.0)
-            if not np.any(mult):
+            in_range = valid_rc & np.isfinite(tt) & (t_since > 10.0) & (t_since < horizon)
+            if not np.any(in_range):
                 continue
+            mult = np.zeros(tt.shape, dtype=np.float64)
+            mult[in_range] = 1.0 - (t_since[in_range] - 5.0) / 7195.0
 
-            wx = a * cc + b * rr + c
-            wy = d * cc + e * rr + f
-            dx = agent_x[:, np.newaxis] - wx
-            dy = agent_y[:, np.newaxis] - wy
+            if use_pixel_space and agent_r is not None and agent_c is not None:
+                # dx = a * (agent_col - hist_col); dy = e * (agent_row - hist_row)
+                dcol = (agent_c[:, np.newaxis] - cc)
+                drow = (agent_r[:, np.newaxis] - rr)
+                dx = float(a) * dcol
+                dy = float(e) * drow
+            else:
+                wx = a * cc + b * rr + c
+                wy = d * cc + e * rr + f
+                dx = agent_x[:, np.newaxis] - wx
+                dy = agent_y[:, np.newaxis] - wy
+
             dist2 = dx * dx + dy * dy
             dist2 = np.where(dist2 == 0, 1e-6, dist2)
 
-            fx += np.nansum((float(weight) * dx / dist2) * mult, axis=1)
-            fy += np.nansum((float(weight) * dy / dist2) * mult, axis=1)
+            dx_over_dist2 = dx / dist2
+            dy_over_dist2 = dy / dist2
+            fx += float(weight) * np.sum(dx_over_dist2 * mult, axis=1)
+            fy += float(weight) * np.sum(dy_over_dist2 * mult, axis=1)
 
         return np.column_stack((fx, fy))
 

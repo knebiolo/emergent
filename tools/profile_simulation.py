@@ -24,7 +24,7 @@ from emergent.salmon_abm import simulation as simmod
 import os
 
 
-def profile_hotspot(n_agents=1000, iters=100):
+def profile_hotspot(n_agents=1000, iters=100, *, avoid_mode: str = "dense", history_len: int = 1024, seed_k: int = 64):
     # Create a minimal mock simulation object with essentials used by behavior
     class MockSim:
         def __init__(self, n):
@@ -44,6 +44,10 @@ def profile_hotspot(n_agents=1000, iters=100):
             self.recover_stopwatch = np.zeros(n)
             self.swim_behav = np.ones(n, dtype=np.int32)
             self.ideal_sog = np.full(n, 0.5)
+            # Avoid-memory config
+            self.use_sparse_avoid_memory = (str(avoid_mode).lower() == "sparse")
+            self.avoid_memory_horizon_s = 7200.0
+            self.avoid_history_chunk = 32
             # simple in-memory HDF5-like mock: dict of arrays
             self._h5 = {
                 'memory/0': np.zeros((200, 200), dtype=float),
@@ -61,6 +65,24 @@ def profile_hotspot(n_agents=1000, iters=100):
                     self.behavior_batch_size = int(bsize)
                 except Exception:
                     pass
+            # Optional: seed sparse avoid history so behavior takes the sparse path.
+            if self.use_sparse_avoid_memory:
+                k = max(1, int(history_len))
+                self.avoid_hist_rows = np.full((n, k), -1, dtype=np.int16)
+                self.avoid_hist_cols = np.full((n, k), -1, dtype=np.int16)
+                self.avoid_hist_t = np.full((n, k), np.nan, dtype=np.float32)
+                self.avoid_hist_pos = np.zeros((n,), dtype=np.int32)
+                # seed a handful of visited points for each agent (kept small for setup speed)
+                sk = max(1, min(int(seed_k), k))
+                rr = np.random.randint(0, 200, size=(n, sk), dtype=np.int16)
+                cc = np.random.randint(0, 200, size=(n, sk), dtype=np.int16)
+                # spread timestamps so some fall within the active horizon window
+                base_t = 1000.0
+                tt = (base_t - np.random.uniform(20.0, 2000.0, size=(n, sk))).astype(np.float32)
+                self.avoid_hist_rows[:, :sk] = rr
+                self.avoid_hist_cols[:, :sk] = cc
+                self.avoid_hist_t[:, :sk] = tt
+                self.avoid_hist_pos[:] = sk % k
 
         def sample_environment(self, transform, key):
             # simple constant sample
@@ -114,12 +136,13 @@ def profile_hotspot(n_agents=1000, iters=100):
     outdir = 'outputs/profiling'
     os.makedirs(outdir, exist_ok=True)
     tag = os.environ.get('RUN_TAG')
-    fname = f'hotspot_profile_{tag}.txt' if tag else 'hotspot_profile.txt'
+    mode_tag = str(avoid_mode).lower()
+    fname = f'hotspot_profile_{mode_tag}_{tag}.txt' if tag else f'hotspot_profile_{mode_tag}.txt'
     with open(os.path.join(outdir, fname), 'w', encoding='utf-8') as fh:
         fh.write(summary)
         fh.write(profile_text)
 
-    print('Wrote profiling output to outputs/profiling/hotspot_profile.txt')
+    print(f'Wrote profiling output to outputs/profiling/{fname}')
 
 
 if __name__ == '__main__':
@@ -130,6 +153,12 @@ if __name__ == '__main__':
     parser.add_argument('--steps', type=int, default=10)
     parser.add_argument('--debug-behavior', action='store_true',
                         help='Enable debug_behavior on the mock simulation to force non-empty windows and richer batch logs')
+    parser.add_argument('--avoid-mode', choices=('dense', 'sparse'), default='sparse',
+                        help='Which avoid-memory implementation to profile')
+    parser.add_argument('--avoid-history-len', type=int, default=1024,
+                        help='Sparse history length per agent (only used when --avoid-mode=sparse)')
+    parser.add_argument('--avoid-seed-k', type=int, default=64,
+                        help='How many history entries to seed per agent (only used when --avoid-mode=sparse)')
     parser.add_argument('--tag', type=str, default=None, help='Optional run tag to annotate output files')
     args = parser.parse_args()
 
@@ -139,6 +168,12 @@ if __name__ == '__main__':
             os.environ['DEBUG_BEHAVIOR'] = '1'
         if args.tag:
             os.environ['RUN_TAG'] = args.tag
-        profile_hotspot(n_agents=args.nagents, iters=args.iters)
+        profile_hotspot(
+            n_agents=args.nagents,
+            iters=args.iters,
+            avoid_mode=str(args.avoid_mode),
+            history_len=int(args.avoid_history_len),
+            seed_k=int(args.avoid_seed_k),
+        )
     else:
         print('sim mode not implemented in this harness yet')
