@@ -1796,6 +1796,10 @@ class behavior():
         if dist_ds.ndim != 2 or dist_ds.size <= 1:
             return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
+        # Filter nodata values in distance raster
+        dist_nodata_mask = np.abs(dist_ds) > 9990
+        dist_ds = np.where(dist_nodata_mask, 0.0, dist_ds)
+
         transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
         rows, cols, rr, cc, valid, dx, dy, front = self._window_common(buff, dist_ds.shape, transform)
 
@@ -1872,6 +1876,10 @@ class behavior():
         depth_ds = np.asarray(self._get_env('environment/depth', default=np.zeros((1, 1))), dtype=float)
         if depth_ds.ndim != 2 or depth_ds.size <= 1:
             return np.zeros((self.simulation.num_agents, 2), dtype=float)
+
+        # Filter nodata values in depth raster
+        depth_nodata_mask = np.abs(depth_ds) > 9990
+        depth_ds = np.where(depth_nodata_mask, 0.0, depth_ds)
 
         transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
         _, _, rr, cc, valid, dx_cell, dy_cell, front_cell = self._window_common(buff, depth_ds.shape, transform)
@@ -2516,26 +2524,31 @@ class behavior():
                 vec = self._coerce_agent_vec(vec0)
             vec = np.asarray(vec)
 
+            # FAIL LOUD: Check for nodata/garbage values BEFORE clipping
+            if not np.all(np.isfinite(vec)):
+                bad_count = np.sum(~np.isfinite(vec))
+                raise ValueError(f"Cue '{cue}' has {bad_count} non-finite values at step {t}. This indicates environment sampling failure or nodata corruption.")
+            
+            # Check for suspiciously large values (likely nodata like -9999)
+            max_abs = np.max(np.abs(vec))
+            if max_abs > 1e6:
+                raise ValueError(f"Cue '{cue}' has suspiciously large magnitude {max_abs:.2e} at step {t}. This likely indicates nodata values (-9999) leaked through. Check environment sampling and nodata filtering.")
+
             # clip per-agent cue magnitudes to avoid single cue domination
-            try:
-                if cap > 0.0:
-                    vx = vec[:, 0]
-                    vy = vec[:, 1]
-                    norms2 = vx * vx + vy * vy
-                    over = norms2 > cap2
-                    if np.any(over):
-                        scale = cap / np.sqrt(norms2[over])
-                        vec[over, 0] = vx[over] * scale
-                        vec[over, 1] = vy[over] * scale
-                        if debug_behavior:
-                            try:
-                                n_clip = int(np.sum(over))
-                                if n_clip > 0:
-                                    logging.getLogger(__name__).debug('DBG arbitrate: clipped %d agents for cue=%s (cap=%s)', n_clip, cue, cap)
-                            except Exception:
-                                pass
-            except Exception:
-                pass
+            if cap > 0.0:
+                vx = vec[:, 0]
+                vy = vec[:, 1]
+                norms2 = vx * vx + vy * vy
+                over = norms2 > cap2
+                if np.any(over):
+                    scale = cap / np.sqrt(norms2[over])
+                    vec[over, 0] = vx[over] * scale
+                    vec[over, 1] = vy[over] * scale
+                    if debug_behavior:
+                        n_clip = int(np.sum(over))
+                        if n_clip > 0:
+                            logging.getLogger(__name__).debug('DBG arbitrate: clipped %d agents for cue=%s (cap=%s)', n_clip, cue, cap)
+
 
             # Save coerced/clipped vector for later use.
             cue_dict[cue] = vec

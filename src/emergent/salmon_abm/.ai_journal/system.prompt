@@ -54,6 +54,12 @@ docs\USER_CONFIG_OPTIONS.md
 	2. Mark ONE step `in-progress` before edits; mark it `completed` immediately after.
 	3. After edits, append a session file in `.ai_journal/session/` with: header metadata, files changed, commands run, short summary, blockers, and next steps.
 - Session note template: include a short "What I wished I was told" bullet (helpful for handoff).
+- **CRITICAL:** In every session entry, document the "Active Context" section listing:
+	- Primary file(s) being edited (with line ranges if applicable)
+	- Test scripts/datasets being used (with paths)
+	- Simulation outputs being analyzed (with timestamps/file names)
+	- Current debugging focus (e.g., "rheotaxis nodata bug in behavior.py:1775")
+	- This allows future sessions to resume exactly where work stopped
 
 # Handoff Priorities (what the next AI should read first)
 - `src/emergent/salmon_abm/sockeye.py` - this is getting deprecated, but it is where we came from.  
@@ -64,6 +70,24 @@ docs\USER_CONFIG_OPTIONS.md
 
 # Small housekeeping
 - Verbosity default: medium. If user asks for more detail, expand session file outputs to include diffs and commands.
+
+# Project Directory Structure (CRITICAL - added 2026-01-01)
+**Tools, tests, and temporary files have designated locations:**
+- **Tools/scripts**: `tools/` (e.g., run_nuyakuk_headless.py, debug utilities, benchmarks)
+- **Tests**: `src/emergent/salmon_abm/tests/` (pytest test files)
+- **Test temp directory**: `src/emergent/salmon_abm/tests/_tmp_io/` (temporary test outputs)
+- When creating diagnostic/utility scripts, place them in `tools/`
+- When creating unit/integration tests, place them in `src/emergent/salmon_abm/tests/`
+- Do NOT create test/tool files in project root
+
+**Canonical Scripts (USE THESE, NOT OLD VERSIONS):**
+- **Testing**: `tools/test_salmon_abm.py` - Small, fast, deterministic (200 agents, 50 steps, seed=42)
+  - Use for: debugging, validation, checking fixes
+  - Features: Debug modes, trace CSV, heading analysis, nodata validation
+- **Production**: `tools/run_salmon_production.py` - Large-scale, optimized (requires --nagents --nsteps)
+  - Use for: Real runs, benchmarks, performance testing
+  - Features: Async I/O backends, minimal logging, timestamped outputs
+- Do NOT use: run_salmon_headless.py, run_nuyakuk_headless.py, run_headless_*.py (old/deprecated)
 
 # git
 - The user will handle all git actions, commit, PR, push, etc. 
