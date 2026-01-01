@@ -37,7 +37,8 @@ class simulation:
                  use_gpu = False,
                  pid_tuning = False,
                  db_path: Optional[str] = None,
-                 output_write_mode: Optional[str] = None):
+                 output_write_mode: Optional[str] = None,
+                 output_write_backend: Optional[str] = None):
         self.model_dir = model_dir
         self.model_name = model_name
         self.crs = crs
@@ -94,6 +95,39 @@ class simulation:
         if mode not in ('full', 'minimal', 'none'):
             mode = 'full'
         self.output_write_mode = mode
+
+        # Output write backend:
+        # - "sync": current behavior (simulation thread writes to HDF)
+        # - "thread": enqueue per-step payloads to a dedicated writer thread
+        # - "process": writer process via mp.Queue (pickled payloads)
+        # - "shm": writer process via shared-memory ring buffer (low-copy IPC)
+        try:
+            backend_in = output_write_backend if output_write_backend is not None else getattr(self, 'output_write_backend', None)
+        except Exception:
+            backend_in = output_write_backend
+        try:
+            backend = str(backend_in or 'sync').strip().lower()
+        except Exception:
+            backend = 'sync'
+        if backend not in ('sync', 'thread', 'process', 'shm'):
+            backend = 'sync'
+        self.output_write_backend = backend
+        self._async_writer = None
+
+        # Keys to write each step when using async output backends. Kept small by
+        # default; callers can extend this list.
+        try:
+            keys = getattr(self, 'output_write_keys', None)
+        except Exception:
+            keys = None
+        if keys is None:
+            keys = ('agent_data/X', 'agent_data/Y')
+        self.output_write_keys = tuple(str(k) for k in keys)
+        self.output_write_queue_max = int(getattr(self, 'output_write_queue_max', 64) or 64)
+        self.output_write_policy = str(getattr(self, 'output_write_policy', 'block') or 'block')
+        self.output_write_every_steps = int(getattr(self, 'output_write_every_steps', 1) or 1)
+        self.output_flush_every_steps = int(getattr(self, 'output_flush_every_steps', 0) or 0)
+        self.output_write_ring_slots = int(getattr(self, 'output_write_ring_slots', 16) or 16)
 
         # Neighbor-finding configuration.
         # - Default sensing radius is a fixed 1 meter (simple + predictable).
@@ -248,6 +282,14 @@ class simulation:
             hdf5_io.write_dataset(self.db, "agent_data/length", np.zeros((self.num_agents,), dtype=np.float32))
             hdf5_io.write_dataset(self.db, "agent_data/weight", np.zeros((self.num_agents,), dtype=np.float32))
             hdf5_io.write_dataset(self.db, "agent_data/body_depth", np.zeros((self.num_agents,), dtype=np.float32))
+            # minimal placeholders for compatibility; avoid writing large (N,T) arrays here
+            try:
+                hdf5_io.ensure_vector_dataset(self.db, 'X', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0)
+                hdf5_io.ensure_vector_dataset(self.db, 'Y', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0)
+                hdf5_io.ensure_vector_dataset(self.db, 'prev_X', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0)
+                hdf5_io.ensure_vector_dataset(self.db, 'prev_Y', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0)
+            except Exception:
+                pass
 
         # populate agent attributes using the agents module
         agents.sim_sex(self)
@@ -722,14 +764,18 @@ class simulation:
         sized from the depth raster extent and a configurable coarse cell size.
         """
         h5 = hdf5_io.get_hdf5_obj(self)
-        if h5 is None:
-            return False
         if avoid_cell_size is None:
             avoid_cell_size = float(getattr(self, 'avoid_cell_size', 10.0))
         if avoid_cell_size <= 0:
             avoid_cell_size = 10.0
 
-        depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=None)
+        depth_ds = None
+        try:
+            depth_ds = self.get_cached_dataset('environment/depth', default=None)
+        except Exception:
+            depth_ds = None
+        if depth_ds is None and h5 is not None:
+            depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=None)
         if depth_ds is None:
             return False
         depth_arr = np.asarray(depth_ds)
@@ -763,6 +809,9 @@ class simulation:
         self._avoid_map_shape = (avoid_height, avoid_width)
 
         if create_datasets:
+            if h5 is None:
+                # Sparse avoid memory can operate without dense per-agent rasters.
+                return True
             # ensure memory datasets exist for each agent (create lazily if missing)
             for i in range(int(self.num_agents)):
                 key = f'memory/{i}'
@@ -907,11 +956,10 @@ class simulation:
         Non-debug default: update sparse per-agent visit history (fast, no per-agent HDF5 writes).
         Debug/explicit: also write into per-agent HDF5 rasters under `memory/<i>`.
         """
-        h5 = hdf5_io.get_hdf5_obj(self)
-        if h5 is None:
-            return False
-
         persist_dense = bool(getattr(self, 'persist_avoid_memory_hdf5', False) or getattr(self, 'debug_behavior', False))
+        h5 = hdf5_io.get_hdf5_obj(self)
+        if h5 is None and persist_dense:
+            return False
 
         # ensure transform is defined; only create dense datasets when persisting
         if getattr(self, 'mental_map_transform', None) is None:
@@ -960,9 +1008,13 @@ class simulation:
                 pos2 = pos.copy()
                 pos2[mask] = (pos2[mask] + 1) % k
                 self.avoid_hist_pos = pos2.astype(np.int32)
+            if not persist_dense:
+                return True
 
         # Optional dense HDF5 write (debug / explicit)
         if persist_dense:
+            if h5 is None:
+                return False
             # ensure datasets exist
             if getattr(self, 'mental_map_transform', None) is None:
                 return False
@@ -1311,14 +1363,13 @@ class simulation:
         except Exception:
             pass
         mode = str(getattr(self, 'output_write_mode', 'full') or 'full').lower()
-        disable_writes = (mode == 'none') or bool(getattr(self, 'disable_output_writes', False) or getattr(self, 'disable_hdf_writes', False))
-        if not disable_writes:
-            # minimal mode: only current positions (sufficient for live viewers polling X/Y)
-            hdf5_io.write_dataset(self.db, 'X', self.X)
-            hdf5_io.write_dataset(self.db, 'Y', self.Y)
-            if mode == 'full':
-                hdf5_io.write_dataset(self.db, 'prev_X', self.prev_X)
-                hdf5_io.write_dataset(self.db, 'prev_Y', self.prev_Y)
+        backend = str(getattr(self, 'output_write_backend', 'sync') or 'sync').lower()
+        disable_all_writes = bool(getattr(self, 'disable_output_writes', False) or getattr(self, 'disable_hdf_writes', False))
+        # Sync backend uses `output_write_mode` to control per-step writes.
+        disable_sync_writes = (mode == 'none') or disable_all_writes
+        # Async backends are controlled separately: `output_write_mode='none'`
+        # is used to disable sync writes while still allowing async output.
+        disable_async_writes = disable_all_writes
 
         # write per-timestep slices into time-indexed agent_data arrays
         h5 = hdf5_io.get_hdf5_obj(self)
@@ -1331,32 +1382,66 @@ class simulation:
             pass
 
         write_frequency = int(getattr(self, 'write_frequency', 1) or 0)
-        do_timeseries_write = (not disable_writes) and mode == 'full' and write_frequency > 0 and (ts % write_frequency == 0)
-        if do_timeseries_write:
-            tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz')
-            for key in tracked:
-                attr_key = key.split('/')[-1]
-                # try direct attribute, then lowercase, then capitalized
-                if hasattr(self, attr_key):
-                    val = getattr(self, attr_key)
-                elif hasattr(self, attr_key.lower()):
-                    val = getattr(self, attr_key.lower())
-                elif hasattr(self, attr_key.capitalize()):
-                    val = getattr(self, attr_key.capitalize())
-                else:
-                    logging.getLogger(__name__).debug('No matching attribute for %s; skipping', attr_key)
-                    continue
-                ok = hdf5_io.write_timeseries_step(h5, key, ts, val)
-                if not ok:
-                    logging.getLogger(__name__).debug('Dataset %s missing/unwritable; skipping timestep write', key)
+        if backend == 'sync':
+            if not disable_sync_writes:
+                # minimal mode: only current positions (sufficient for live viewers polling X/Y)
+                hdf5_io.write_dataset(self.db, 'X', self.X)
+                hdf5_io.write_dataset(self.db, 'Y', self.Y)
+                if mode == 'full':
+                    hdf5_io.write_dataset(self.db, 'prev_X', self.prev_X)
+                    hdf5_io.write_dataset(self.db, 'prev_Y', self.prev_Y)
+
+            do_timeseries_write = (not disable_sync_writes) and mode == 'full' and write_frequency > 0 and (ts % write_frequency == 0)
+            if do_timeseries_write:
+                tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz')
+                for key in tracked:
+                    attr_key = key.split('/')[-1]
+                    # try direct attribute, then lowercase, then capitalized
+                    if hasattr(self, attr_key):
+                        val = getattr(self, attr_key)
+                    elif hasattr(self, attr_key.lower()):
+                        val = getattr(self, attr_key.lower())
+                    elif hasattr(self, attr_key.capitalize()):
+                        val = getattr(self, attr_key.capitalize())
+                    else:
+                        logging.getLogger(__name__).debug('No matching attribute for %s; skipping', attr_key)
+                        continue
+                    ok = hdf5_io.write_timeseries_step(h5, key, ts, val)
+                    if not ok:
+                        logging.getLogger(__name__).debug('Dataset %s missing/unwritable; skipping timestep write', key)
+        else:
+            # Async backends: enqueue per-step payloads to a dedicated writer.
+            writer = getattr(self, '_async_writer', None)
+            if (not disable_async_writes) and writer is not None:
+                payload = {}
+                for key in getattr(self, 'output_write_keys', ()):
+                    try:
+                        k = str(key)
+                    except Exception:
+                        continue
+                    # map dataset key to simulation attribute
+                    attr = k.split('/')[-1] if '/' in k else k
+                    if attr in ('X', 'Y', 'prev_X', 'prev_Y'):
+                        val = getattr(self, attr, None)
+                    else:
+                        val = getattr(self, attr, None)
+                        if val is None:
+                            val = getattr(self, attr.lower(), None)
+                    if val is None:
+                        continue
+                    payload[k] = np.asarray(val)
+                try:
+                    writer.submit(int(ts), payload, copy=True)
+                except Exception:
+                    pass
 
         # flush when supported (best-effort)
         flush_frequency_raw = getattr(self, 'flush_frequency', None)
         if flush_frequency_raw is None:
             flush_frequency_raw = getattr(self, 'write_frequency', 1)
         flush_frequency = int(flush_frequency_raw or 0)
-        do_flush = (not disable_writes) and flush_frequency > 0 and (ts % flush_frequency == 0)
-        if do_flush and hasattr(self.db, 'flush'):
+        do_flush = (not disable_sync_writes) and flush_frequency > 0 and (ts % flush_frequency == 0)
+        if backend == 'sync' and do_flush and hasattr(self.db, 'flush'):
             try:
                 self.db.flush()
             except Exception:
@@ -1489,15 +1574,256 @@ class simulation:
         # and optional real-time viewer. Backwards compatible: original signature still works.
         write_frequency = 1
         video_hook = None
-        # When streaming live frames over TCP, default to minimizing HDF writes
-        # because the viewer does not need per-step HDF outputs.
+        # Preserve and temporarily override write settings for the duration of the run.
         orig_output_write_mode = getattr(self, 'output_write_mode', 'full')
+        orig_backend = getattr(self, 'output_write_backend', 'sync')
+        writer = None
         try:
+            # When streaming live frames over TCP, default to minimizing HDF writes
+            # because the viewer does not need per-step HDF outputs.
             if viewer_live and bool(getattr(self, 'viewer_live_minimize_hdf_writes', True)):
                 if str(getattr(self, 'output_write_mode', 'full')).lower() == 'full':
                     self.output_write_mode = 'none'
         except Exception:
             pass
+
+        # Async output backend: set up dedicated writer (Phase 2: thread backend).
+        try:
+            backend = str(getattr(self, 'output_write_backend', 'sync') or 'sync').lower()
+        except Exception:
+            backend = 'sync'
+        if backend == 'thread':
+            try:
+                from emergent.salmon_abm.async_output import AsyncWriteConfig, ThreadHdfWriter
+                # Ensure only the requested datasets exist (and are chunked for
+                # efficient column writes) before the writer starts.
+                try:
+                    for key in getattr(self, 'output_write_keys', ()):
+                        k = str(key)
+                        if k.startswith('agent_data/'):
+                            hdf5_io.ensure_timeseries_dataset(
+                                getattr(self, 'db', None),
+                                k,
+                                n_agents=int(getattr(self, 'num_agents', 0)),
+                                n_steps=int(getattr(self, 'num_timesteps', 0)),
+                                dtype=np.float32,
+                            )
+                        elif k in ('X', 'Y', 'prev_X', 'prev_Y'):
+                            hdf5_io.ensure_vector_dataset(
+                                getattr(self, 'db', None),
+                                k,
+                                n_agents=int(getattr(self, 'num_agents', 0)),
+                                dtype=np.float32,
+                                fillvalue=0.0,
+                            )
+                except Exception:
+                    pass
+                cfg = AsyncWriteConfig(
+                    h5_path=str(getattr(self, 'db_path', '')),
+                    n_agents=int(getattr(self, 'num_agents', 0)),
+                    n_steps=int(getattr(self, 'num_timesteps', 0)),
+                    mode="a",
+                    queue_max=int(getattr(self, 'output_write_queue_max', 64) or 64),
+                    policy=str(getattr(self, 'output_write_policy', 'block') or 'block'),
+                    write_every_steps=int(getattr(self, 'output_write_every_steps', 1) or 1),
+                    flush_every_steps=int(getattr(self, 'output_flush_every_steps', 0) or 0),
+                )
+                writer = ThreadHdfWriter(cfg, h5obj=getattr(self, 'db', None))
+                writer.start()
+                self._async_writer = writer
+                # Ensure sync writes are disabled while async writer is active.
+                self.output_write_mode = 'none'
+            except Exception as e:
+                status = {'steps': 0, 'errors': [f'async_writer_init_error:{e}'], 'video_frames': 0}
+                self.last_run_status = status
+                if return_status or video:
+                    return status
+                return False
+        elif backend == 'process':
+            try:
+                from emergent.salmon_abm.async_output import AsyncWriteConfig, ProcessHdfWriter
+
+                # Ensure environment datasets needed for stepping are cached in-memory
+                # before we close the HDF handle to avoid concurrent HDF access.
+                try:
+                    if getattr(self, 'auto_derive_refugia', False) and not getattr(self, '_refugia_derived', False):
+                        try:
+                            self.derive_environment_refugia()
+                        except Exception:
+                            pass
+                    for k in (
+                        'environment/depth',
+                        'environment/vel_x',
+                        'environment/vel_y',
+                        'environment/vel_mag',
+                        'environment/vel_dir',
+                        'environment/distance_to',
+                        'environment/refugia',
+                        'environment/x_coords',
+                        'environment/y_coords',
+                    ):
+                        try:
+                            _ = self.get_cached_dataset(k, default=None)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Pre-create only requested datasets for the writer.
+                try:
+                    with h5py.File(str(getattr(self, 'db_path', '')), "a") as h5:
+                        for key in getattr(self, 'output_write_keys', ()):
+                            k = str(key)
+                            if k.startswith('agent_data/'):
+                                hdf5_io.ensure_timeseries_dataset(
+                                    h5,
+                                    k,
+                                    n_agents=int(getattr(self, 'num_agents', 0)),
+                                    n_steps=int(getattr(self, 'num_timesteps', 0)),
+                                    dtype=np.float32,
+                                )
+                            elif k in ('X', 'Y', 'prev_X', 'prev_Y'):
+                                hdf5_io.ensure_vector_dataset(
+                                    h5,
+                                    k,
+                                    n_agents=int(getattr(self, 'num_agents', 0)),
+                                    dtype=np.float32,
+                                    fillvalue=0.0,
+                                )
+                        try:
+                            h5.flush()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Close sim-side HDF handle to avoid concurrent file access.
+                try:
+                    if getattr(self, 'db', None) is not None:
+                        try:
+                            self.db.close()
+                        except Exception:
+                            pass
+                    self.db = None
+                except Exception:
+                    pass
+
+                cfg = AsyncWriteConfig(
+                    h5_path=str(getattr(self, 'db_path', '')),
+                    n_agents=int(getattr(self, 'num_agents', 0)),
+                    n_steps=int(getattr(self, 'num_timesteps', 0)),
+                    mode="a",
+                    queue_max=int(getattr(self, 'output_write_queue_max', 64) or 64),
+                    policy=str(getattr(self, 'output_write_policy', 'block') or 'block'),
+                    write_every_steps=int(getattr(self, 'output_write_every_steps', 1) or 1),
+                    flush_every_steps=int(getattr(self, 'output_flush_every_steps', 0) or 0),
+                )
+                writer = ProcessHdfWriter(cfg)
+                writer.start()
+                self._async_writer = writer
+                # Ensure sync writes are disabled while async writer is active.
+                self.output_write_mode = 'none'
+            except Exception as e:
+                status = {'steps': 0, 'errors': [f'async_writer_process_init_error:{e}'], 'video_frames': 0}
+                self.last_run_status = status
+                if return_status or video:
+                    return status
+                return False
+        elif backend == 'shm':
+            try:
+                from emergent.salmon_abm.async_output import AsyncWriteConfig, ShmRingHdfWriter
+
+                # Ensure environment datasets needed for stepping are cached in-memory
+                # before we close the HDF handle to avoid concurrent file access.
+                try:
+                    if getattr(self, 'auto_derive_refugia', False) and not getattr(self, '_refugia_derived', False):
+                        try:
+                            self.derive_environment_refugia()
+                        except Exception:
+                            pass
+                    for k in (
+                        'environment/depth',
+                        'environment/vel_x',
+                        'environment/vel_y',
+                        'environment/vel_mag',
+                        'environment/vel_dir',
+                        'environment/distance_to',
+                        'environment/refugia',
+                        'environment/x_coords',
+                        'environment/y_coords',
+                    ):
+                        try:
+                            _ = self.get_cached_dataset(k, default=None)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Pre-create only requested datasets for the writer.
+                try:
+                    with h5py.File(str(getattr(self, 'db_path', '')), "a") as h5:
+                        for key in getattr(self, 'output_write_keys', ()):
+                            k = str(key)
+                            if k.startswith('agent_data/'):
+                                hdf5_io.ensure_timeseries_dataset(
+                                    h5,
+                                    k,
+                                    n_agents=int(getattr(self, 'num_agents', 0)),
+                                    n_steps=int(getattr(self, 'num_timesteps', 0)),
+                                    dtype=np.float32,
+                                )
+                            elif k in ('X', 'Y', 'prev_X', 'prev_Y'):
+                                hdf5_io.ensure_vector_dataset(
+                                    h5,
+                                    k,
+                                    n_agents=int(getattr(self, 'num_agents', 0)),
+                                    dtype=np.float32,
+                                    fillvalue=0.0,
+                                )
+                        try:
+                            h5.flush()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Close sim-side HDF handle to avoid concurrent file access.
+                try:
+                    if getattr(self, 'db', None) is not None:
+                        try:
+                            self.db.close()
+                        except Exception:
+                            pass
+                    self.db = None
+                except Exception:
+                    pass
+
+                cfg = AsyncWriteConfig(
+                    h5_path=str(getattr(self, 'db_path', '')),
+                    n_agents=int(getattr(self, 'num_agents', 0)),
+                    n_steps=int(getattr(self, 'num_timesteps', 0)),
+                    mode="a",
+                    queue_max=int(getattr(self, 'output_write_queue_max', 64) or 64),
+                    policy=str(getattr(self, 'output_write_policy', 'block') or 'block'),
+                    write_every_steps=int(getattr(self, 'output_write_every_steps', 1) or 1),
+                    flush_every_steps=int(getattr(self, 'output_flush_every_steps', 0) or 0),
+                )
+                writer = ShmRingHdfWriter(
+                    cfg,
+                    keys=tuple(getattr(self, 'output_write_keys', ())),
+                    ring_slots=int(getattr(self, 'output_write_ring_slots', 16) or 16),
+                    dtype=np.float32,
+                )
+                writer.start()
+                self._async_writer = writer
+                # Ensure sync writes are disabled while async writer is active.
+                self.output_write_mode = 'none'
+            except Exception as e:
+                status = {'steps': 0, 'errors': [f'async_writer_shm_init_error:{e}'], 'video_frames': 0}
+                self.last_run_status = status
+                if return_status or video:
+                    return status
+                return False
 
         # Accept a PID controller instance instead of scalar gains via model_name kw
         controller = None
@@ -1610,13 +1936,23 @@ class simulation:
                     # continue running unless unrecoverable
                     continue
         finally:
+            # Stop async writer first so subsequent flush/close is safe.
+            try:
+                if writer is not None:
+                    writer.close(timeout_s=float(getattr(self, 'output_write_close_timeout_s', 10.0)))
+            except Exception as e:
+                status['errors'].append(f'async_writer_close_error:{e}')
+            try:
+                self._async_writer = None
+            except Exception:
+                pass
             try:
                 self.output_write_mode = orig_output_write_mode
             except Exception:
                 pass
 
         # flush and close viewer process if requested
-        if hasattr(self.db, 'flush'):
+        if backend == 'sync' and hasattr(self.db, 'flush'):
             try:
                 self.db.flush()
             except Exception:

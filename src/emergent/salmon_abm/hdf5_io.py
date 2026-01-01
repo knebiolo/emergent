@@ -187,6 +187,129 @@ def write_timeseries_step(hdf5_obj: Any, key: str, step: int, values: Any) -> bo
         return False
 
 
+def _ensure_h5_groups_for_key(hdf5_obj: Any, key: str) -> None:
+    """Ensure any intermediate groups in a path-like key exist (h5py only)."""
+    if h5py is None or hdf5_obj is None:
+        return
+    try:
+        if not hasattr(hdf5_obj, "require_group"):
+            return
+    except Exception:
+        return
+    try:
+        parts = str(key).split("/")
+    except Exception:
+        return
+    if len(parts) <= 1:
+        return
+    grp = hdf5_obj
+    for name in parts[:-1]:
+        if not name:
+            continue
+        try:
+            grp = grp.require_group(name)
+        except Exception:
+            return
+
+
+def ensure_timeseries_dataset(
+    hdf5_obj: Any,
+    key: str,
+    *,
+    n_agents: int,
+    n_steps: int,
+    dtype: Any = np.float32,
+    chunks: tuple[int, int] | None = None,
+    fillvalue: Any = 0.0,
+    compression: Optional[str] = None,
+    compression_opts: Any = None,
+) -> bool:
+    """Ensure a 2D (agents x timesteps) dataset exists without writing full data."""
+    if hdf5_obj is None:
+        return False
+    try:
+        key = str(key)
+    except Exception:
+        pass
+    if _key_exists(hdf5_obj, key):
+        return True
+
+    na = max(0, int(n_agents))
+    nt = max(0, int(n_steps))
+    if na <= 0 or nt <= 0:
+        return False
+
+    if isinstance(hdf5_obj, dict):
+        hdf5_obj[key] = np.zeros((na, nt), dtype=dtype)
+        return True
+
+    if h5py is None:
+        return False
+
+    try:
+        _ensure_h5_groups_for_key(hdf5_obj, key)
+        if chunks is None:
+            chunks = (min(na, 1024), 1)
+        hdf5_obj.create_dataset(
+            key,
+            shape=(na, nt),
+            dtype=dtype,
+            chunks=chunks,
+            fillvalue=fillvalue,
+            compression=compression,
+            compression_opts=compression_opts,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def ensure_vector_dataset(
+    hdf5_obj: Any,
+    key: str,
+    *,
+    n_agents: int,
+    dtype: Any = np.float32,
+    fillvalue: Any = 0.0,
+    compression: Optional[str] = None,
+    compression_opts: Any = None,
+) -> bool:
+    """Ensure a 1D (agents,) dataset exists without writing full data."""
+    if hdf5_obj is None:
+        return False
+    try:
+        key = str(key)
+    except Exception:
+        pass
+    if _key_exists(hdf5_obj, key):
+        return True
+
+    na = max(0, int(n_agents))
+    if na <= 0:
+        return False
+
+    if isinstance(hdf5_obj, dict):
+        hdf5_obj[key] = np.full((na,), fillvalue, dtype=dtype)
+        return True
+
+    if h5py is None:
+        return False
+
+    try:
+        _ensure_h5_groups_for_key(hdf5_obj, key)
+        hdf5_obj.create_dataset(
+            key,
+            shape=(na,),
+            dtype=dtype,
+            fillvalue=fillvalue,
+            compression=compression,
+            compression_opts=compression_opts,
+        )
+        return True
+    except Exception:
+        return False
+
+
 def ensure_group(hdf5_obj: Any, group: str):
     """Ensure a group exists in the hdf5 file or dict-like; return the group.
 
@@ -273,30 +396,25 @@ def create_agent_timeseries(hdf5_obj: Any, sim: Any, nsteps: int):
     except Exception:
         return False
 
-    shape = (n_agents, int(nsteps))
+    nsteps_i = int(nsteps)
+    shape = (n_agents, nsteps_i)
 
-    def _ensure(key, default_arr):
-        if _key_exists(hdf5_obj, key):
-            return
-        try:
-            # write_dataset will handle dict-like or h5py objects
-            write_dataset(hdf5_obj, key, default_arr)
-        except Exception:
-            pass
-
-    # per-timestep 2D slots (num_agents x nsteps)
-    _ensure('agent_data/X', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/Y', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/prev_X', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/prev_Y', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/x_vel', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/y_vel', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/Hz', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/heading', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/swim_behav', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/is_stuck', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/thrust', np.zeros(shape, dtype=np.float32))
-    _ensure('agent_data/drag', np.zeros(shape, dtype=np.float32))
+    # per-timestep 2D slots (num_agents x nsteps) created chunked for column writes
+    for key in (
+        'agent_data/X',
+        'agent_data/Y',
+        'agent_data/prev_X',
+        'agent_data/prev_Y',
+        'agent_data/x_vel',
+        'agent_data/y_vel',
+        'agent_data/Hz',
+        'agent_data/heading',
+        'agent_data/swim_behav',
+        'agent_data/is_stuck',
+        'agent_data/thrust',
+        'agent_data/drag',
+    ):
+        ensure_timeseries_dataset(hdf5_obj, key, n_agents=n_agents, n_steps=nsteps_i, dtype=np.float32)
 
     # 1-D per-agent scalars (parity with sockeye.py)
     try:

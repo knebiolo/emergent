@@ -168,6 +168,7 @@ def profile_sim(
     tag: str | None,
     output_write_mode: str | None,
     warmup_steps: int,
+    output_write_backend: str | None,
 ) -> str:
     """Profile a short real simulation loop (timestep calls only)."""
     base = _data_dir()
@@ -196,6 +197,7 @@ def profile_sim(
         num_agents=int(n_agents),
         db_path=db_path,
         output_write_mode=output_write_mode,
+        output_write_backend=output_write_backend,
     )
 
     # Prefer sparse avoid memory (avoid raster I/O).
@@ -261,6 +263,8 @@ if __name__ == '__main__':
                         help='(sim mode) timestep write frequency; 0 disables per-step HDF5 writes')
     parser.add_argument('--output-write-mode', choices=('full', 'minimal', 'none'), default=None,
                         help='(sim mode) output write mode: full/minimal/none')
+    parser.add_argument('--output-write-backend', choices=('sync', 'thread', 'process'), default=None,
+                        help='(sim mode) output write backend: sync/thread/process')
     parser.add_argument('--warmup-steps', type=int, default=2,
                         help='(sim mode) warmup timesteps (excluded from profile), default 2')
     parser.add_argument('--tag', type=str, default=None, help='Optional run tag to annotate output files')
@@ -288,5 +292,6 @@ if __name__ == '__main__':
             tag=args.tag,
             output_write_mode=args.output_write_mode,
             warmup_steps=int(args.warmup_steps),
+            output_write_backend=args.output_write_backend,
         )
         print(f"Wrote profiling output to {out}")

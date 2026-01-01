@@ -239,6 +239,7 @@ def write_sim_initial(
     compression_opts=None,
     *,
     create_timeseries: bool = True,
+    timeseries_keys: Optional[Tuple[str, ...]] = None,
 ):
     """Create standard groups/datasets used by the simulation.
 
@@ -266,19 +267,24 @@ def write_sim_initial(
     hdf5_io.write_dataset(h5obj, 'body_depth', np.array(body_depth))
 
     if create_timeseries:
-        # create time-indexed agent_data arrays (na x nt)
-        empty_shape = (na, nt)
-        zero_stack = np.zeros(empty_shape, dtype=np.float32)
-        for name in ('X', 'Y', 'prev_X', 'prev_Y', 'ideal_sog', 'Hz'):
-            key = f'agent_data/{name}'
-            # write zeros array to create dataset in dict-like stores; for h5py this will create full dataset
-            hdf5_io.write_dataset(h5obj, key, zero_stack)
+        keys = timeseries_keys
+        if keys is None:
+            keys = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz')
+        for key in keys:
+            try:
+                k = str(key)
+            except Exception:
+                k = key  # type: ignore[assignment]
+            if not str(k).startswith('agent_data/'):
+                k = f'agent_data/{k}'
+            # Create a chunked dataset without writing a full (na,nt) zeros matrix.
+            hdf5_io.ensure_timeseries_dataset(h5obj, k, n_agents=na, n_steps=nt, dtype=np.float32)
 
     # also create legacy top-level position datasets for compatibility
-    hdf5_io.write_dataset(h5obj, 'X', np.zeros((na,), dtype=np.float32))
-    hdf5_io.write_dataset(h5obj, 'Y', np.zeros((na,), dtype=np.float32))
-    hdf5_io.write_dataset(h5obj, 'prev_X', np.zeros((na,), dtype=np.float32))
-    hdf5_io.write_dataset(h5obj, 'prev_Y', np.zeros((na,), dtype=np.float32))
+    hdf5_io.ensure_vector_dataset(h5obj, 'X', n_agents=na, dtype=np.float32, fillvalue=0.0)
+    hdf5_io.ensure_vector_dataset(h5obj, 'Y', n_agents=na, dtype=np.float32, fillvalue=0.0)
+    hdf5_io.ensure_vector_dataset(h5obj, 'prev_X', n_agents=na, dtype=np.float32, fillvalue=0.0)
+    hdf5_io.ensure_vector_dataset(h5obj, 'prev_Y', n_agents=na, dtype=np.float32, fillvalue=0.0)
 
     # environment placeholders
     hdf5_io.create_environment_placeholders(h5obj)
