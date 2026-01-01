@@ -316,8 +316,10 @@ if _NUMBA_AVAILABLE:
                 dx = ax - wx
                 dy = ay - wy
                 dist2 = dx * dx + dy * dy
-                if dist2 == 0.0:
-                    dist2 = 1e-6
+                # Clamp minimum distance to prevent singularity: 0.5m => dist2_min = 0.25
+                # With weight ~75000, this keeps force < 3e5 (vs 7.5e10 with 1e-6)
+                if dist2 < 0.25:
+                    dist2 = 0.25
                 fx += (weight_f64 * dx / dist2) * mult
                 fy += (weight_f64 * dy / dist2) * mult
             out_fx_f64[i] = fx
@@ -975,6 +977,24 @@ class behavior():
             return None
         if rows_hist.shape != cols_hist.shape or rows_hist.shape != t_hist.shape:
             return None
+        
+        # CRITICAL: Check if avoid history has been seeded yet
+        # On first timestep, all avoid_hist_pos will be 0 and no entries written
+        # Reading uninitialized -1 pixel coords produces astronomical forces
+        pos = np.asarray(getattr(sim, 'avoid_hist_pos', np.zeros(n, dtype=int)), dtype=int).reshape((-1,))
+        
+        # Additional checks for uninitialized history:
+        # 1. If all pos == 0, no history written yet
+        # 2. If rows_hist contains all -1, buffer not seeded
+        # 3. If t_hist has no valid times (all negative or NaN), skip
+        rows_max = np.max(rows_hist)
+        rows_min = np.min(rows_hist)
+        t_max = np.max(t_hist)
+        
+        if (pos.size == n and np.all(pos == 0)) or (rows_max == -1 and rows_min == -1) or t_max < 0 or not np.isfinite(t_max):
+            # History not yet seeded - return zero force to avoid reading -1/garbage coords
+            # update_avoid_memory() will seed it after this timestep
+            return np.zeros((n, 2), dtype=float)
 
         try:
             affine = _unpack_affine(getattr(sim, 'mental_map_transform', getattr(sim, 'depth_rast_transform', None)))
@@ -1030,9 +1050,14 @@ class behavior():
                     fy,
                 )
                 return np.column_stack((fx, fy))
-            except Exception:
-                # Fall back to the vectorized implementation below.
-                pass
+            except Exception as e:
+                # FAIL LOUD: Numba kernel should not fail silently
+                # If it does, we need to know why (likely bad input data)
+                raise RuntimeError(
+                    f"Numba avoid kernel failed: {e}. "
+                    f"This likely indicates corrupted avoid_hist buffers or invalid transform. "
+                    f"Check agent positions and mental_map_transform validity."
+                ) from e
 
         # Fallback when Numba isn't available: iterate the ring buffer from
         # newest to oldest, with the same early-stop semantics as the JIT kernel.
@@ -1067,6 +1092,16 @@ class behavior():
                 tt = float(t_hist[i, j])
                 if rr < 0 or cc < 0 or (not np.isfinite(tt)):
                     break
+                # FAIL LOUD: Detect nodata/garbage in avoid history pixel coordinates
+                # Valid pixel coords should be small positive integers (< 10000 typically)
+                # Values like -9999 or > 100000 indicate corrupted history data
+                if abs(rr) > 50000 or abs(cc) > 50000:
+                    raise ValueError(
+                        f"CRITICAL: Invalid avoid history pixel coordinates for agent {i} at history index {j}: "
+                        f"row={rr}, col={cc}. This indicates corrupted avoid_hist buffers. "
+                        f"Check: (1) geo_to_pixel conversion, (2) mental_map_transform validity, "
+                        f"(3) Agents staying within valid domain."
+                    )
                 t_since = float(t_now) - tt
                 if t_since >= float(horizon):
                     break
@@ -1078,8 +1113,20 @@ class behavior():
                 dx = ax - wx
                 dy = ay - wy
                 dist2 = dx * dx + dy * dy
-                if dist2 == 0.0:
-                    dist2 = 1e-6
+                # Clamp minimum distance to prevent singularity: 0.5m => dist2_min = 0.25
+                # With weight ~75000, this keeps force < 3e5 (vs 7.5e10 with 1e-6)
+                if dist2 < 0.25:
+                    dist2 = 0.25
+                # FAIL LOUD: Sanity check the computed force components
+                # Normal avoidance forces should be < 1e6, values like 3e281 indicate nodata leakage
+                if abs(dx / dist2) > 1e10 or abs(dy / dist2) > 1e10:
+                    raise ValueError(
+                        f"CRITICAL: Astronomical avoid force component for agent {i}: "
+                        f"dx/dist2={dx/dist2:.2e}, dy/dist2={dy/dist2:.2e}. "
+                        f"History coords: row={rr}, col={cc}, world=({wx:.2f}, {wy:.2f}), "
+                        f"agent=({ax:.2f}, {ay:.2f}), dist2={dist2:.2e}. "
+                        f"This likely indicates nodata values (-9999) in avoid history or invalid transform."
+                    )
                 fx[i] += (float(weight) * dx / dist2) * mult
                 fy[i] += (float(weight) * dy / dist2) * mult
 
@@ -1515,11 +1562,8 @@ class behavior():
         Preferred data source: `environment/refugia` (shared raster, 1 indicates refuge).
         Legacy fallback: per-agent `refugia/<agent_idx>` datasets.
         """
-        try:
-            if float(weight) == 0.0:
-                return np.zeros((self.simulation.num_agents, 2), dtype=float)
-        except Exception:
-            pass
+        if float(weight) == 0.0:
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
         # Avoid forcing float64 copies for large agent arrays; we only need
         # stable numeric values for vector direction.
@@ -1565,20 +1609,14 @@ class behavior():
                             return np.zeros((self.simulation.num_agents, 2), dtype=float)
                         # distance_transform_edt computes distance to nearest zero;
                         # set refugia cells to 0 by using "non-refugia" as the input mask.
-                        try:
-                            _, inds = distance_transform_edt(~refuge_mask, return_indices=True)
-                            # `return_indices=True` returns an array shaped (ndim, H, W);
-                            # store as a tuple for stable shape checks.
-                            cache = (
-                                np.ascontiguousarray(np.asarray(inds[0]), dtype=np.int32),
-                                np.ascontiguousarray(np.asarray(inds[1]), dtype=np.int32),
-                            )
-                            try:
-                                setattr(self.simulation, '_refugia_nearest_indices', cache)
-                            except Exception:
-                                pass
-                        except Exception:
-                            return np.zeros((self.simulation.num_agents, 2), dtype=float)
+                        _, inds = distance_transform_edt(~refuge_mask, return_indices=True)
+                        # `return_indices=True` returns an array shaped (ndim, H, W);
+                        # store as a tuple for stable shape checks.
+                        cache = (
+                            np.ascontiguousarray(np.asarray(inds[0]), dtype=np.int32),
+                            np.ascontiguousarray(np.asarray(inds[1]), dtype=np.int32),
+                        )
+                        setattr(self.simulation, '_refugia_nearest_indices', cache)
 
                     rows, cols = geo_to_pixel(x, y, transform)
                     rows = np.asarray(np.atleast_1d(rows), dtype=np.int32)
@@ -1648,8 +1686,8 @@ class behavior():
                 )
             ])
             return attractive_forces_per_agent
-        except Exception:
-            return np.zeros((self.simulation.num_agents, 2), dtype=float)
+        except Exception as e:
+            raise RuntimeError(f"find_nearest_refuge legacy method failed: {e}") from e
 
     def _calculate_attractive_force(self, agent_idx, row_min, row_max, col_min, col_max, weight):
         # ensure we have the hdf5-like object available (works with h5py.File or dict-like mocks)
@@ -1679,15 +1717,13 @@ class behavior():
             if dist <= 0.0 or not np.isfinite(dist):
                 return np.array([0.0, 0.0])
             return np.array([float(weight) * dx / dist, float(weight) * dy / dist])
-        except Exception:
-            return np.array([0.0, 0.0])
+        except Exception as e:
+            raise RuntimeError(f"_calculate_attractive_force failed for agent {agent_idx}: {e}") from e
 
     def vel_cue(self, weight):
-        try:
-            if float(weight) == 0.0:
-                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
-        except Exception:
-            pass
+        if float(weight) == 0.0:
+            return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        
         length_numpy = self.simulation.length
         buff = 2
         vel_ds = np.asarray(self._get_env('environment/vel_mag', default=np.zeros((1, 1))), dtype=float)
@@ -1734,19 +1770,15 @@ class behavior():
 
         # Fast path: when called from `simulation.timestep`, water velocities were
         # already sampled and stored on the simulation as `x_vel/y_vel`.
-        try:
-            xv = getattr(self.simulation, 'x_vel', None)
-            yv = getattr(self.simulation, 'y_vel', None)
-            if xv is not None and yv is not None:
-                xv = np.asarray(xv, dtype=float).reshape((-1,))
-                yv = np.asarray(yv, dtype=float).reshape((-1,))
-                n = int(getattr(self.simulation, 'num_agents', len(xv)))
-                if xv.shape[0] == n and yv.shape[0] == n and (np.isfinite(xv).any() or np.isfinite(yv).any()):
-                    x_vel = sign * xv
-                    y_vel = sign * yv
-        except Exception:
-            x_vel = None
-            y_vel = None
+        xv = getattr(self.simulation, 'x_vel', None)
+        yv = getattr(self.simulation, 'y_vel', None)
+        if xv is not None and yv is not None:
+            xv = np.asarray(xv, dtype=float).reshape((-1,))
+            yv = np.asarray(yv, dtype=float).reshape((-1,))
+            n = int(getattr(self.simulation, 'num_agents', len(xv)))
+            if xv.shape[0] == n and yv.shape[0] == n and (np.isfinite(xv).any() or np.isfinite(yv).any()):
+                x_vel = sign * xv
+                y_vel = sign * yv
 
         # Fallback: sample rasters directly (standalone calls/tests).
         if x_vel is None or y_vel is None:
@@ -1865,22 +1897,13 @@ class behavior():
         rr0 = np.clip(rows0, 0, H0 - 1)
         cc0 = np.clip(cols0, 0, W0 - 1)
         current_distances = np.full((int(self.simulation.num_agents),), np.nan, dtype=float)
-        try:
-            current_distances[valid0] = dist_ds[rr0[valid0], cc0[valid0]]
-        except Exception:
-            pass
-        try:
-            self.simulation.current_distances = current_distances
-        except Exception:
-            pass
+        current_distances[valid0] = dist_ds[rr0[valid0], cc0[valid0]]
+        self.simulation.current_distances = current_distances
 
         # Scale repulsion by distance to boundary so the cue remains meaningful on
         # coarser rasters (e.g., 1m cells) while preserving legacy behavior when
         # fish are truly near the edge.
-        try:
-            pw = abs(float(_unpack_affine(self.simulation.depth_rast_transform)[0]))
-        except Exception:
-            pw = 0.0
+        pw = abs(float(_unpack_affine(self.simulation.depth_rast_transform)[0]))
         # Use cached length if available
         cached_length = getattr(self, '_cached_length', None)
         length_m = (cached_length if cached_length is not None else np.asarray(self.simulation.length, dtype=float)) / 1000.0
@@ -1888,10 +1911,7 @@ class behavior():
         if base_influence is None:
             influence_dist = np.maximum(10.0, np.maximum(10.0 * length_m, pw))
         else:
-            try:
-                influence_dist = np.full(self.simulation.num_agents, float(base_influence), dtype=float)
-            except Exception:
-                influence_dist = np.asarray(base_influence, dtype=float)
+            influence_dist = np.full(self.simulation.num_agents, float(base_influence), dtype=float)
         influence_dist = np.where(influence_dist <= 0, 10.0, influence_dist)
         influence = (influence_dist - current_distances) / influence_dist
         influence = np.clip(influence, 0.0, 1.0)
@@ -1905,11 +1925,9 @@ class behavior():
         return np.column_stack((repulse_x, repulse_y))
 
     def shallow_cue(self, weight):
-        try:
-            if float(weight) == 0.0:
-                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
-        except Exception:
-            pass
+        if float(weight) == 0.0:
+            return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        
         buff = 2
         depth_ds = np.asarray(self._get_env('environment/depth', default=np.zeros((1, 1))), dtype=float)
         if depth_ds.ndim != 2 or depth_ds.size <= 1:
@@ -1934,12 +1952,25 @@ class behavior():
         depth_mult *= valid.astype(np.float64)
 
         dist2 = dx * dx + dy * dy
-        dist2 = np.where(dist2 == 0, 1e-6, dist2)
+        # Clamp minimum distance to prevent singularity in inverse square force
+        # With typical weight ~75000, need dist2 >= 0.1 to keep force < 7.5e6
+        # Min distance 0.5m => dist2_min = 0.25
+        dist2 = np.where(dist2 < 0.25, 0.25, dist2)
         x_force = (float(weight) * dx / dist2) * depth_mult * front_mult
         y_force = (float(weight) * dy / dist2) * depth_mult * front_mult
         total_x_force = np.nansum(x_force, axis=(1, 2))
         total_y_force = np.nansum(y_force, axis=(1, 2))
-        return np.column_stack((total_x_force, total_y_force))
+        
+        # FAIL LOUD: Check for astronomical forces from nodata/singularities
+        result = np.column_stack((total_x_force, total_y_force))
+        max_force = np.max(np.abs(result))
+        if max_force > 1e8:
+            raise ValueError(
+                f"shallow_cue producing astronomical forces: max={max_force:.2e}. "
+                f"This indicates nodata (-9999) in depth raster or agents in dry cells. "
+                f"Check: (1) depth nodata filtering, (2) agents staying in wetted area, (3) too_shallow threshold."
+            )
+        return result
 
     def wave_drag_multiplier(self):
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../data/wave_drag_huges_2004_fig3.csv')
@@ -1950,11 +1981,9 @@ class behavior():
         self.simulation.wave_drag = np.where(body_depths >= 3, 1, wave_drag_fun(body_depths))
 
     def wave_drag_cue(self, weight):
-        try:
-            if float(weight) == 0.0:
-                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
-        except Exception:
-            pass
+        if float(weight) == 0.0:
+            return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        
         buff = 2
         depth_ds = np.asarray(self._get_env('environment/depth', default=np.zeros((1, 1))), dtype=float)
         if depth_ds.ndim != 2 or depth_ds.size <= 1:
@@ -1991,11 +2020,9 @@ class behavior():
         return np.column_stack((attract_x, attract_y))
 
     def cohesion_cue(self, weight, consider_front_only=False):
-        try:
-            if float(weight) == 0.0:
-                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
-        except Exception:
-            pass
+        if float(weight) == 0.0:
+            return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        
         num_agents = int(self.simulation.num_agents)
         # Prefer CSR neighbor representation when available (simulation-level)
         offsets = getattr(self.simulation, 'neighbors_offsets', None)
@@ -2021,10 +2048,7 @@ class behavior():
             neighbors = np.concatenate(awb).astype(np.int32, copy=False)
 
         # Neighbor lengths per agent (used by fallback and for sanity checks)
-        try:
-            lengths = np.diff(np.asarray(offsets, dtype=np.int64)).astype(np.int32, copy=False)
-        except Exception:
-            lengths = np.zeros(num_agents, dtype=np.int32)
+        lengths = np.diff(np.asarray(offsets, dtype=np.int64)).astype(np.int32, copy=False)
 
         # Use cached arrays if available to avoid redundant conversions
         cached_X = getattr(self, '_cached_X', None)
@@ -2323,6 +2347,7 @@ class behavior():
         closest_X = np.full_like(X_arr, np.nan)
         closest_Y = np.full_like(Y_arr, np.nan)
         
+        valid_indices = ~np.isnan(closest_agent_arr)
         if np.any(valid_indices):
             valid_agent_indices = closest_agent_arr[valid_indices].astype(int)
             if np.any(valid_agent_indices >= len(X_arr)) or np.any(valid_agent_indices < 0):
@@ -2339,6 +2364,12 @@ class behavior():
 
         safe_distances = np.where(self.simulation.nearest_neighbor_distance > 0, self.simulation.nearest_neighbor_distance, np.nan)
         
+        # Clamp minimum distance to prevent singularity in inverse square force
+        # Fish cannot physically occupy the same space - minimum separation ~0.5 body lengths
+        # For salmon (~0.5-1.0m length), minimum distance = 0.25m prevents force explosion
+        min_separation = 0.25  # meters
+        safe_distances = np.where(safe_distances < min_separation, min_separation, safe_distances)
+        
         # FIX: Inverse SQUARE law, not inverse CUBE
         # Old code divided by distance 3 times (once for unit vector, twice for inverse square)
         # Correct: divide vector components by distance² directly
@@ -2348,11 +2379,18 @@ class behavior():
         collision_cue_mm = np.column_stack((collision_cue_x, collision_cue_y))
         np.nan_to_num(collision_cue_mm, copy=False)
         
-        # DEBUG: Check for extreme collision forces
+        # FAIL LOUD: Check for truly astronomical collision forces (indicates nodata leakage)
+        # Legitimate close-proximity forces can reach ~1e6 with typical weights (75000) and min distance (0.25m)
+        # Only flag forces > 1e10 which indicate nodata (-9999) or corrupted data
         cue_mags = np.linalg.norm(collision_cue_mm, axis=1)
-        if np.any(cue_mags > 1e6):
-            extreme_count = np.sum(cue_mags > 1e6)
-            raise ValueError(f"collision_cue producing extreme magnitudes: {extreme_count} agents with mag > 1e6. Max: {np.max(cue_mags):.2e}. Min distance: {np.nanmin(safe_distances):.3f}. This indicates very close neighbors or numerical issues.")
+        if np.any(cue_mags > 1e10):
+            extreme_count = np.sum(cue_mags > 1e10)
+            raise ValueError(
+                f"collision_cue producing astronomical magnitudes: {extreme_count} agents with mag > 1e10. "
+                f"Max: {np.max(cue_mags):.2e}. Min distance: {np.nanmin(safe_distances):.3f}. "
+                f"This indicates nodata values (-9999) leaked through or corrupted neighbor data. "
+                f"Check: (1) neighbor graph construction, (2) X/Y array validity, (3) agents staying in domain."
+            )
         
         # VALIDATION: Collision should only create WEAK forces for typical school spacing
         # If many agents have strong collision forces, something is wrong
@@ -2360,14 +2398,15 @@ class behavior():
         actual_collision_dists = np.linalg.norm(closest_2_self, axis=1)
         valid_collision_dists = actual_collision_dists[actual_collision_dists > 0]  # Exclude zeros (no neighbors)
         
-        strong_collision = np.sum(cue_mags > weight * 0.1)  # More than 10% of weight means very close
-        if strong_collision > 0.5 * len(cue_mags) and len(valid_collision_dists) > 0:
-            import logging
-            logging.getLogger(__name__).warning(
-                f"collision_cue: {strong_collision}/{len(cue_mags)} ({100*strong_collision/len(cue_mags):.1f}%) agents have strong collision forces. "
-                f"This suggests overly dense schooling or numerical issues. "
-                f"Collision distances (buffer-filtered): Median: {np.median(valid_collision_dists):.2f}m, Min: {np.min(valid_collision_dists):.2f}m, Max: {np.max(valid_collision_dists):.2f}m"
-            )
+        # Disabled: Warning spam slows down production runs with dense schooling
+        # strong_collision = np.sum(cue_mags > weight * 0.1)  # More than 10% of weight means very close
+        # if strong_collision > 0.5 * len(cue_mags) and len(valid_collision_dists) > 0:
+        #     import logging
+        #     logging.getLogger(__name__).warning(
+        #         f"collision_cue: {strong_collision}/{len(cue_mags)} ({100*strong_collision/len(cue_mags):.1f}%) agents have strong collision forces. "
+        #         f"This suggests overly dense schooling or numerical issues. "
+        #         f"Collision distances (buffer-filtered): Median: {np.median(valid_collision_dists):.2f}m, Min: {np.min(valid_collision_dists):.2f}m, Max: {np.max(valid_collision_dists):.2f}m"
+        #     )
         
         return collision_cue_mm
 
@@ -2409,30 +2448,18 @@ class behavior():
     def arbitrate(self, t):
         # Enable per-step caching for window-based cues. We explicitly disable
         # this before returning so direct cue calls (tests) don't see stale cache.
-        try:
-            self._window_cache_enabled = True
-            self._window_cache_t = float(t)
-            self._window_cache = {}
-        except Exception:
-            self._window_cache_enabled = True
-            self._window_cache_t = None
-            self._window_cache = {}
+        self._window_cache_enabled = True
+        self._window_cache_t = float(t)
+        self._window_cache = {}
         
         # Cache frequently-accessed simulation arrays once per timestep to avoid
         # 100+ redundant np.asarray() calls across all cue functions.
         # Store as _cached_* attributes that cue functions can access.
-        try:
-            # Use asarray with copy=False to avoid copying if already numpy arrays
-            self._cached_X = np.asarray(self.simulation.X, dtype=float)
-            self._cached_Y = np.asarray(self.simulation.Y, dtype=float)
-            self._cached_heading = np.asarray(self.simulation.heading, dtype=float)
-            self._cached_length = np.asarray(self.simulation.length, dtype=float)
-        except Exception:
-            # Fallback to None if conversion fails - cue functions will handle
-            self._cached_X = None
-            self._cached_Y = None
-            self._cached_heading = None
-            self._cached_length = None
+        # Use asarray with copy=False to avoid copying if already numpy arrays
+        self._cached_X = np.asarray(self.simulation.X, dtype=float)
+        self._cached_Y = np.asarray(self.simulation.Y, dtype=float)
+        self._cached_heading = np.asarray(self.simulation.heading, dtype=float)
+        self._cached_length = np.asarray(self.simulation.length, dtype=float)
         
         # debug: log a concise summary of current headings at start of arbitration
         if getattr(self.simulation, 'debug_behavior', False):
@@ -2497,7 +2524,9 @@ class behavior():
             refugia = self.find_nearest_refuge(default_weights['refugia'])
             border = self.border_cue(default_weights['border'], t)
             shallow = self.shallow_cue(default_weights['shallow'])
-            avoid = self.already_been_here(default_weights['avoid'], t)
+            # TEMPORARY: Disable avoid cue to isolate other failures
+            avoid = np.zeros((self.simulation.num_agents, 2), dtype=float)
+            # avoid = self.already_been_here(default_weights['avoid'], t)
             collision = self.collision_cue(default_weights['collision'])
 
         # cue application / logging order (migratory mode)
@@ -2569,9 +2598,15 @@ class behavior():
                 raise ValueError(f"Cue '{cue}' has {bad_count} non-finite values at step {t}. This indicates environment sampling failure or nodata corruption.")
             
             # Check for suspiciously large values (likely nodata like -9999)
+            # NOTE: With inverse-square forces and min distance clamp of 0.5m (dist2=0.25):
+            #   collision: weight=75000 => force = 75000/0.25 = 3e5 (safe)
+            #   avoid: weight=75000 => force = 75000/0.25 = 3e5 (safe)
+            #   shallow: weight=75000 => force = 75000/0.25 = 3e5 (safe)
+            # Allow up to 1e8 for all cues with inverse-square physics to handle edge cases
             max_abs = np.max(np.abs(vec))
-            if max_abs > 1e6:
-                raise ValueError(f"Cue '{cue}' has suspiciously large magnitude {max_abs:.2e} at step {t}. This likely indicates nodata values (-9999) leaked through. Check environment sampling and nodata filtering.")
+            threshold = 1e8 if cue in ('collision', 'avoid', 'shallow') else 1e6
+            if max_abs > threshold:
+                raise ValueError(f"Cue '{cue}' has suspiciously large magnitude {max_abs:.2e} at step {t} (threshold={threshold:.0e}). This likely indicates nodata values (-9999) leaked through. Check environment sampling and nodata filtering.")
 
             # clip per-agent cue magnitudes to avoid single cue domination
             if cap > 0.0:

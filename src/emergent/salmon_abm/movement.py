@@ -643,7 +643,11 @@ class movement():
         # yields (n,1) and multiplies correctly with fish_velocities (n,2).
         denom = ideal_swim_speeds[:, np.newaxis]
         ratio = np.divide(max_allowed[:, np.newaxis], denom, out=np.ones_like(denom), where=denom != 0)
-        fish_velocities[too_fast] = (ratio[too_fast] * fish_velocities[too_fast].T).T
+        
+        # Only apply speed capping if there are any too_fast agents
+        # (avoids broadcasting error when too_fast mask is empty)
+        if np.any(too_fast):
+            fish_velocities[too_fast] = (ratio[too_fast] * fish_velocities[too_fast].T).T
 
         self.simulation.max_practical_sog = fish_velocities
 
@@ -731,10 +735,7 @@ class movement():
         fish_vel_1[self.simulation.dead == 1] = 0.0
 
         # return displacement (dx, dy) over this timestep
-        try:
-            dxdy = fish_vel_1 * dt
-        except Exception:
-            dxdy = np.zeros((self.simulation.num_agents, 2), dtype=float)
+        dxdy = fish_vel_1 * dt
 
         # optional movement debug: dump per-step arrays (enqueue to diagnostics when possible)
         try:
@@ -784,8 +785,92 @@ class movement():
         dy = displacement * np.sin(self.simulation.heading)
         dxdy = np.stack((dx, dy)).T
         
+        # Check if any jump would land in nodata region (dry land)
+        if np.any(mask):
+            # Calculate landing positions
+            landing_x = self.simulation.X + dx
+            landing_y = self.simulation.Y + dy
+            
+            # Check if landing positions are valid (sample depth at landing spot)
+            depth_ds = np.asarray(self.simulation._get_env('environment/depth', default=np.zeros((1, 1))), dtype=float)
+            if depth_ds.ndim == 2 and depth_ds.size > 1:
+                transform = getattr(self.simulation, 'depth_rast_transform', None)
+                if transform is not None:
+                    # Convert landing positions to raster coordinates
+                    from affine import Affine
+                    if isinstance(transform, Affine):
+                        inv_transform = ~transform
+                        landing_cols, landing_rows = inv_transform * (landing_x[mask], landing_y[mask])
+                    else:
+                        inv_transform = ~Affine.from_gdal(*transform)
+                        landing_cols, landing_rows = inv_transform * (landing_x[mask], landing_y[mask])
+                    
+                    landing_rows = np.asarray(landing_rows, dtype=np.int32)
+                    landing_cols = np.asarray(landing_cols, dtype=np.int32)
+                    H, W = depth_ds.shape
+                    
+                    # Check for out-of-bounds or nodata landing spots
+                    valid_landing = (landing_rows >= 0) & (landing_cols >= 0) & (landing_rows < H) & (landing_cols < W)
+                    landing_rows_clipped = np.clip(landing_rows, 0, H - 1)
+                    landing_cols_clipped = np.clip(landing_cols, 0, W - 1)
+                    landing_depth = depth_ds[landing_rows_clipped, landing_cols_clipped]
+                    
+                    # Nodata in depth raster is typically |depth| > 9990
+                    nodata_landing = np.abs(landing_depth) > 9990
+                    invalid_landing = ~valid_landing | nodata_landing
+                    
+                    if np.any(invalid_landing):
+                        # Fish jumped onto DRY LAND! Mark them for flopping behavior
+                        jumping_agents = np.where(mask)[0]
+                        landed_on_dry = jumping_agents[invalid_landing]
+                        
+                        # Mark as on_land and record landing time
+                        self.simulation.on_land[landed_on_dry] = True
+                        self.simulation.time_landed[landed_on_dry] = np.where(
+                            np.isinf(self.simulation.time_landed[landed_on_dry]),
+                            t,  # First time landing
+                            self.simulation.time_landed[landed_on_dry]  # Keep original landing time
+                        )
+                        
+                        # Initialize random flop heading for newly landed fish
+                        newly_landed = landed_on_dry[np.isinf(self.simulation.time_landed[landed_on_dry])]
+                        if len(newly_landed) > 0:
+                            self.simulation.flop_heading[newly_landed] = np.random.uniform(0, 2*np.pi, len(newly_landed))
+                        
+                        print(f"WARNING: {len(landed_on_dry)} fish jumped onto DRY LAND at t={t}. They will flop around for {self.simulation.max_flop_time}s trying to find water.")
+        
         # Apply mask and update time of jump
         dxdy[~mask] = 0.0
         self.simulation.time_of_jump[mask] = t
+        
+        return dxdy
+
+    def flop(self, t, dt, mask):
+        """
+        Fish flopping on dry land - random movement trying to get back to water.
+        Fish change flop direction every ~1 second (randomly).
+        Returns displacement for flopping fish.
+        """
+        # Flop distance is small - fish thrashing around ~0.5 body lengths per second
+        flop_speed = 0.5 * self.simulation.length  # m/s
+        
+        # Change flop heading randomly (roughly every 1 second)
+        # Probability of changing direction this timestep
+        change_heading_prob = dt / 1.0  # Average 1 second between direction changes
+        should_change = np.random.random(self.simulation.num_agents) < change_heading_prob
+        change_and_flopping = should_change & mask
+        
+        if np.any(change_and_flopping):
+            self.simulation.flop_heading[change_and_flopping] = np.random.uniform(
+                0, 2*np.pi, np.sum(change_and_flopping)
+            )
+        
+        # Calculate flop displacement
+        dx = flop_speed * dt * np.cos(self.simulation.flop_heading)
+        dy = flop_speed * dt * np.sin(self.simulation.flop_heading)
+        dxdy = np.column_stack((dx, dy))
+        
+        # Only return displacement for flopping fish
+        dxdy[~mask] = 0.0
         
         return dxdy

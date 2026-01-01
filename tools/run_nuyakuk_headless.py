@@ -299,6 +299,8 @@ def run_headless(args):
         for t in range(args.nsteps):
             # expose current step so movement debug filenames are meaningful
             setattr(sim, 'current_step', int(t))
+            if t % max(1, int(args.nsteps / 20)) == 0:  # Print every 5%
+                print(f'Step {t}/{args.nsteps} (t={t*dt:.1f}s)', flush=True)
             sim.timestep(t, dt)
             # debug: report whether behavior populated last_cue_vecs for this step
             try:
@@ -327,17 +329,19 @@ def run_headless(args):
                 xvel = (sim.X - sim.prev_X) / dt
                 yvel = (sim.Y - sim.prev_Y) / dt
 
-            # write per-agent rows
-            for a in range(sim.num_agents):
-                row = [t, a, float(sim.X[a]), float(sim.Y[a]), float(xvel[a]), float(yvel[a]),
-                       float(depth_vals[a]) if np.isfinite(depth_vals[a]) else '',
-                       float(velx_vals[a]) if np.isfinite(velx_vals[a]) else '',
-                       float(vely_vals[a]) if np.isfinite(vely_vals[a]) else '',
-                       float(mag_vals[a]) if np.isfinite(mag_vals[a]) else '']
-                writer.writerow(row)
+            # write per-agent rows (only at trace_interval to improve performance)
+            trace_interval = getattr(args, 'trace_interval', 1)
+            if t % trace_interval == 0:
+                for a in range(sim.num_agents):
+                    row = [t, a, float(sim.X[a]), float(sim.Y[a]), float(xvel[a]), float(yvel[a]),
+                           float(depth_vals[a]) if np.isfinite(depth_vals[a]) else '',
+                           float(velx_vals[a]) if np.isfinite(velx_vals[a]) else '',
+                           float(vely_vals[a]) if np.isfinite(vely_vals[a]) else '',
+                           float(mag_vals[a]) if np.isfinite(mag_vals[a]) else '']
+                    writer.writerow(row)
 
-            # small flush to keep file consistent
-            fh.flush()
+                # small flush to keep file consistent
+                fh.flush()
             if (t + 1) % max(1, int(args.nsteps / 10)) == 0:
                 print(f'Progress: {t+1}/{args.nsteps}')
 
@@ -406,17 +410,20 @@ def run_headless(args):
                         except Exception:
                             pass
                     # Also write to HDF5 diagnostics writer when available (atomic per-step storage)
-                    try:
-                        dw = getattr(sim, 'diagnostics_writer', None)
-                        if dw is not None:
-                            # use step index t and include safe_payload arrays
-                            dw.write_step(t, safe_payload)
-                            try:
-                                print('Wrote per-step diagnostics to HDF5 for step', t)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                    # Skip unless at trace_interval to improve performance
+                    trace_interval = getattr(args, 'trace_interval', 1)
+                    if t % trace_interval == 0:
+                        try:
+                            dw = getattr(sim, 'diagnostics_writer', None)
+                            if dw is not None:
+                                # use step index t and include safe_payload arrays
+                                dw.write_step(t, safe_payload)
+                                try:
+                                    print('Wrote per-step diagnostics to HDF5 for step', t)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                     # Additionally write an authoritative per-step NPZ into a dedicated folder
                     try:
                         forced_dir = os.path.join(outdir, 'forced_rawvecs')
@@ -537,10 +544,10 @@ def run_headless(args):
                                     'low_speed': 1500,
                                     'wave_drag': 0,
                                     'refugia': 50000,
-                                    'border': 50000,
-                                    'shallow': 100000,
+                                    'border': 200000,  # Strong boundary protection
+                                    'shallow': 500000,  # Must DOMINATE border to prevent cove trapping
                                     'avoid': 25000,
-                                    'collision': 50000,
+                                    'collision': 5000,  # Reduced 5x - fish can school densely like real salmon
                                 }
                             # compute cues via behavior helper
                             b = sim._behavior
@@ -622,11 +629,14 @@ def run_headless(args):
                                 auth_payload['auth_head_vec'] = total
                             except Exception:
                                 pass
-                            try:
-                                dw.write_step(t, auth_payload)
-                                print('Wrote authoritative diagnostics to HDF5 for step', t)
-                            except Exception:
-                                pass
+                            # Only write at trace_interval
+                            trace_interval = getattr(args, 'trace_interval', 1)
+                            if t % trace_interval == 0:
+                                try:
+                                    dw.write_step(t, auth_payload)
+                                    print('Wrote authoritative diagnostics to HDF5 for step', t)
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
             except Exception:
@@ -709,6 +719,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--nagents', type=int, default=200)
     parser.add_argument('--nsteps', type=int, default=200)
+    parser.add_argument('--trace-interval', dest='trace_interval', type=int, default=1, help='Write trace/diagnostics every N steps (default=1, use 10-50 for speed)')
     parser.add_argument('--seed', type=int, default=None, help='Optional RNG seed for deterministic runs')
     parser.add_argument('--debug-movement', action='store_true', help='Enable movement debug dumps')
     parser.add_argument('--debug-behavior', action='store_true', help='Enable behavior debug dumps')

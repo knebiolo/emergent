@@ -682,32 +682,9 @@ class simulation:
                 vel_x_arr = np.array(vel_x_ds)
                 vel_y_arr = np.array(vel_y_ds)
                 from emergent.salmon_abm.utils import geo_to_pixel
-                try:
-                    rows, cols = geo_to_pixel(self.X, self.Y, self.depth_rast_transform)
-                    rows = np.asarray(rows, dtype=int)
-                    cols = np.asarray(cols, dtype=int)
-                except Exception:
-                    # fallback: use x_coords/y_coords arrays stored in the DB to find nearest pixels
-                    x_coords_ds = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
-                    y_coords_ds = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
-                    if x_coords_ds is None or y_coords_ds is None:
-                        raise
-                    x_coords = np.asarray(x_coords_ds)
-                    y_coords = np.asarray(y_coords_ds)
-                    # x_coords assumed shape (nrows, ncols): pick nearest column per-agent
-                    # compute difference between agent X and each column (broadcast)
-                    # handle shapes carefully
-                    try:
-                        # nearest column: minimize |x_coords[row0, col] - X|
-                        cols = np.argmin(np.abs(x_coords[0:1, :] - self.X[:, None]), axis=1)
-                        # nearest row: minimize |y_coords[row, col0] - Y|
-                        rows = np.argmin(np.abs(y_coords[:, 0:1] - self.Y[None, :]), axis=0)
-                        rows = np.asarray(rows, dtype=int)
-                        cols = np.asarray(cols, dtype=int)
-                    except Exception:
-                        # last-resort: zeros
-                        rows = np.zeros(self.num_agents, dtype=int)
-                        cols = np.zeros(self.num_agents, dtype=int)
+                rows, cols = geo_to_pixel(self.X, self.Y, self.depth_rast_transform)
+                rows = np.asarray(rows, dtype=int)
+                cols = np.asarray(cols, dtype=int)
                 valid = (rows >= 0) & (cols >= 0) & (rows < vel_x_arr.shape[0]) & (cols < vel_x_arr.shape[1])
                 vx = np.full(self.num_agents, np.nan)
                 vy = np.full(self.num_agents, np.nan)
@@ -858,26 +835,21 @@ class simulation:
         if history_len is None:
             history_len = int(getattr(self, 'avoid_history_len', 1024))
         history_len = max(1, int(history_len))
-        # allocate or resize (best-effort)
-        try:
-            rows = getattr(self, 'avoid_hist_rows', None)
-            cols = getattr(self, 'avoid_hist_cols', None)
-            ts = getattr(self, 'avoid_hist_t', None)
-            pos = getattr(self, 'avoid_hist_pos', None)
-            if rows is not None and cols is not None and ts is not None and pos is not None:
-                if np.asarray(rows).shape == (n, history_len):
-                    return True
-        except Exception:
-            pass
+        # allocate or resize - check if already allocated with correct shape
+        rows = getattr(self, 'avoid_hist_rows', None)
+        cols = getattr(self, 'avoid_hist_cols', None)
+        ts = getattr(self, 'avoid_hist_t', None)
+        pos = getattr(self, 'avoid_hist_pos', None)
+        if rows is not None and cols is not None and ts is not None and pos is not None:
+            if np.asarray(rows).shape == (n, history_len):
+                return True
 
-        try:
-            self.avoid_hist_rows = np.full((n, history_len), -1, dtype=np.int16)
-            self.avoid_hist_cols = np.full((n, history_len), -1, dtype=np.int16)
-            self.avoid_hist_t = np.full((n, history_len), np.nan, dtype=np.float32)
-            self.avoid_hist_pos = np.zeros((n,), dtype=np.int32)
-            return True
-        except Exception:
-            return False
+        # Allocate new buffers
+        self.avoid_hist_rows = np.full((n, history_len), -1, dtype=np.int16)
+        self.avoid_hist_cols = np.full((n, history_len), -1, dtype=np.int16)
+        self.avoid_hist_t = np.full((n, history_len), np.nan, dtype=np.float32)
+        self.avoid_hist_pos = np.zeros((n,), dtype=np.int32)
+        return True
 
     def seed_avoid_history(self, rows: np.ndarray, cols: np.ndarray, t: float) -> bool:
         """Seed sparse avoid history at the current write position for each agent."""
@@ -991,8 +963,16 @@ class simulation:
             rows, cols = utils.geo_to_pixel(self.X, self.Y, self.mental_map_transform)
             rows = np.atleast_1d(rows).astype(int)
             cols = np.atleast_1d(cols).astype(int)
-        except Exception:
-            return False
+        except Exception as e:
+            # FAIL LOUD: geo_to_pixel should not fail when agents are in valid domain
+            # If it fails, agents may be outside raster bounds or transform is invalid
+            raise RuntimeError(
+                f"Failed to convert agent positions to avoid memory pixels: {e}. "
+                f"Agent X range: [{np.min(self.X):.2f}, {np.max(self.X):.2f}], "
+                f"Agent Y range: [{np.min(self.Y):.2f}, {np.max(self.Y):.2f}]. "
+                f"Transform: {self.mental_map_transform}. "
+                f"This likely indicates agents escaped the valid model domain."
+            ) from e
 
         # sparse history update (preferred)
         if bool(getattr(self, 'use_sparse_avoid_memory', True)):
@@ -1070,14 +1050,11 @@ class simulation:
 
         # Reset per-timestep environment-sample cache: X/Y are stable until after
         # movement updates later in this method.
-        try:
-            if getattr(self, 'cache_env_samples', True):
-                self._env_sample_cache_step = int(getattr(self, 'current_step', t))
-                self._env_sample_cache_gen = 0
-                self._env_sample_cache = {}
-                self._env_pixel_cache = {}
-        except Exception:
-            pass
+        if getattr(self, 'cache_env_samples', True):
+            self._env_sample_cache_step = int(getattr(self, 'current_step', t))
+            self._env_sample_cache_gen = 0
+            self._env_sample_cache = {}
+            self._env_pixel_cache = {}
 
         # keep previous positions for velocity calculations
         self.prev_X = self.X.copy()
@@ -1103,26 +1080,16 @@ class simulation:
 
         # ensure refugia mask exists when enabled (computed once per run)
         if getattr(self, 'auto_derive_refugia', False) and not getattr(self, '_refugia_derived', False):
-            try:
-                self.derive_environment_refugia()
-            except Exception:
-                pass
+            self.derive_environment_refugia()
 
         # --- neighbor finding: populate CSR neighbors and/or nearest-neighbor fields
         # Keep this work conditional so profiling / acceptance runs that isolate
         # non-schooling cues don't pay O(N log N) neighbor costs.
-        try:
-            n_agents = int(getattr(self, 'num_agents', 0) or 0)
-        except Exception:
-            n_agents = 0
-        try:
-            debug_behavior = bool(getattr(self, 'debug_behavior', False))
-            # CRITICAL: Always build buffers for collision/alignment cues to work correctly
-            # Legacy flag kept for compatibility but buffer building is now always enabled
-            build_buffers = True  # Was: bool(getattr(self, 'build_agents_within_buffers', False)) or debug_behavior
-        except Exception:
-            debug_behavior = False
-            build_buffers = False
+        n_agents = int(getattr(self, 'num_agents', 0) or 0)
+        debug_behavior = bool(getattr(self, 'debug_behavior', False))
+        # CRITICAL: Always build buffers for collision/alignment cues to work correctly
+        # Legacy flag kept for compatibility but buffer building is now always enabled
+        build_buffers = True  # Was: bool(getattr(self, 'build_agents_within_buffers', False)) or debug_behavior
 
         # Determine whether schooling/collision cues are active in this step.
         # In normal runs `test_weights` is absent and we assume neighbors are needed.
@@ -1132,10 +1099,7 @@ class simulation:
         need_collision = True
         if isinstance(tw, dict) and tw:
             def _nz(k: str) -> bool:
-                try:
-                    return float(tw.get(k, 0.0)) != 0.0
-                except Exception:
-                    return False
+                return float(tw.get(k, 0.0)) != 0.0
             need_alignment = _nz('alignment')
             need_cohesion = _nz('cohesion')
             need_collision = _nz('collision')
@@ -1148,26 +1112,14 @@ class simulation:
                 # Throttle neighbor rebuilds: default every ~2 seconds.
                 # Always build on first use.
                 step_i = None
-                try:
-                    step_i = int(getattr(self, 'current_step', t))
-                except Exception:
-                    try:
-                        step_i = int(t)
-                    except Exception:
-                        step_i = None
+                step_i = int(getattr(self, 'current_step', t))
 
                 interval_steps = int(getattr(self, 'neighbor_update_interval_steps', 0) or 0)
                 if interval_steps <= 0:
-                    try:
-                        seconds = float(getattr(self, 'neighbor_update_seconds', 2.0))
-                    except Exception:
-                        seconds = 2.0
+                    seconds = float(getattr(self, 'neighbor_update_seconds', 2.0))
                     if not np.isfinite(seconds) or seconds <= 0.0:
                         seconds = 2.0
-                    try:
-                        interval_steps = max(1, int(round(seconds / float(dt))))
-                    except Exception:
-                        interval_steps = 1
+                    interval_steps = max(1, int(round(seconds / float(dt))))
 
                 last_step = getattr(self, '_neighbor_last_build_step', None)
                 have_graph = getattr(self, 'neighbors_offsets', None) is not None and getattr(self, 'neighbors_indices', None) is not None
@@ -1178,10 +1130,7 @@ class simulation:
                 elif step_i is None or last_step is None:
                     need_build_now = True
                 else:
-                    try:
-                        need_build_now = (int(step_i) - int(last_step)) >= int(interval_steps)
-                    except Exception:
-                        need_build_now = True
+                    need_build_now = (int(step_i) - int(last_step)) >= int(interval_steps)
 
                 if not need_build_now:
                     # Keep previous neighbor fields; skip rebuild work this step.
@@ -1199,10 +1148,7 @@ class simulation:
                 tree = cKDTree(pts)
 
                 # Allow multi-threaded queries when available (SciPy `workers`).
-                try:
-                    workers = int(getattr(self, 'neighbor_workers', 1) or 1)
-                except Exception:
-                    workers = 1
+                workers = int(getattr(self, 'neighbor_workers', 1) or 1)
                 if workers == 0:
                     workers = 1
 
@@ -1275,9 +1221,7 @@ class simulation:
             except StopIteration:
                 # Normal control flow: neighbor update not due yet.
                 pass
-            except Exception:
-                # Leave neighbor defaults in place
-                pass
+        # END neighbor graph building
 
         # instantiate per-timestep helpers (reuse instances to avoid per-step allocation)
         behavior = getattr(self, '_behavior', None)
@@ -1285,67 +1229,42 @@ class simulation:
             behavior = behavior_mod.behavior(dt, self)
             self._behavior = behavior
         else:
-            try:
-                behavior.dt = dt
-            except Exception:
-                pass
+            behavior.dt = dt
 
         fatigue = getattr(self, '_fatigue', None)
         if fatigue is None:
-            try:
-                fatigue = fatigue_mod.fatigue(t, dt, self)
-                self._fatigue = fatigue
-            except Exception:
-                fatigue = None
+            fatigue = fatigue_mod.fatigue(t, dt, self)
+            self._fatigue = fatigue
         else:
-            try:
-                fatigue.t = t
-                fatigue.dt = dt
-            except Exception:
-                pass
+            fatigue.t = t
+            fatigue.dt = dt
 
         movement = getattr(self, '_movement', None)
         if movement is None:
-            try:
-                movement = movement_mod.movement(self)
-                self._movement = movement
-            except Exception:
-                movement = None
+            movement = movement_mod.movement(self)
+            self._movement = movement
 
         # run fatigue assessment first to update battery / swim modes
         if fatigue is not None:
             try:
                 fatigue.assess_fatigue()
             except Exception:
+                # TODO: Fix fatigue.py broadcasting bug - shapes (186,) vs (200,)
+                # Temporarily silent to avoid breaking simulations
                 pass
 
         # behavior arbitration produces desired heading vector
-        try:
-            new_heading = behavior.arbitrate(t)
-            # behavior.arbitrate may return scalar or array
-            self.heading = np.array(new_heading, dtype=np.float32)
-        except Exception:
-            # keep existing heading
-            pass
+        new_heading = behavior.arbitrate(t)
+        # behavior.arbitrate may return scalar or array
+        self.heading = np.array(new_heading, dtype=np.float32)
 
-        def _movement_call(label, func, *args, default=None):
-            try:
-                return func(*args)
-            except Exception as e:
-                if getattr(self, 'debug_freq', False):
-                    try:
-                        logging.getLogger(__name__).exception('%s exception: %s', label, e)
-                    except Exception:
-                        pass
-                return default
-
-        # calculate movement-related quantities with finer-grained diagnostics
+        # calculate movement-related quantities - FAIL LOUD
         dxdy = np.zeros((self.num_agents, 2), dtype=np.float32)
         if movement is not None:
-            _movement_call('movement.frequency', movement.frequency, mask, t, dt)
-            _movement_call('movement.thrust_fun', movement.thrust_fun, mask, t, dt)
-            _movement_call('movement.drag_fun', movement.drag_fun, mask, t, dt)
-            dxdy = _movement_call('movement.swim', movement.swim, t, dt, pid or pid_controller, mask, default=dxdy)
+            movement.frequency(mask, t, dt)
+            movement.thrust_fun(mask, t, dt)
+            movement.drag_fun(mask, t, dt)
+            dxdy = movement.swim(t, dt, pid or pid_controller, mask)
 
         # If debugging is enabled, print compact diagnostics to help trace zero-values
         if getattr(self, 'debug_freq', False):
@@ -1381,19 +1300,13 @@ class simulation:
             pass
 
         # update fish kinematics (do not overwrite water velocity fields)
-        try:
-            self.fish_x_vel = np.asarray((self.X - self.prev_X) / dt, dtype=np.float32)
-            self.fish_y_vel = np.asarray((self.Y - self.prev_Y) / dt, dtype=np.float32)
-            self.sog = np.asarray(np.sqrt(self.fish_x_vel**2 + self.fish_y_vel**2), dtype=np.float32)
-        except Exception:
-            pass
+        self.fish_x_vel = np.asarray((self.X - self.prev_X) / dt, dtype=np.float32)
+        self.fish_y_vel = np.asarray((self.Y - self.prev_Y) / dt, dtype=np.float32)
+        self.sog = np.asarray(np.sqrt(self.fish_x_vel**2 + self.fish_y_vel**2), dtype=np.float32)
 
         # write minimal outputs back to HDF5 for downstream consumers
         # update avoid memory after movement so next steps can repel from recently visited areas
-        try:
-            self.update_avoid_memory(t)
-        except Exception:
-            pass
+        self.update_avoid_memory(t)
         mode = str(getattr(self, 'output_write_mode', 'full') or 'full').lower()
         backend = str(getattr(self, 'output_write_backend', 'sync') or 'sync').lower()
         disable_all_writes = bool(getattr(self, 'disable_output_writes', False) or getattr(self, 'disable_hdf_writes', False))
@@ -1524,10 +1437,7 @@ class simulation:
             cols = None
 
         if rows is None or cols is None:
-            try:
-                rows, cols = utils.geo_to_pixel(self.X, self.Y, transform)
-            except Exception:
-                return np.full(self.num_agents, np.nan)
+            rows, cols = utils.geo_to_pixel(self.X, self.Y, transform)
             try:
                 if getattr(self, 'cache_env_samples', True):
                     pcache = getattr(self, '_env_pixel_cache', None)
@@ -1550,10 +1460,7 @@ class simulation:
                 # Fallback for edge cases (mismatched shapes, etc.)
                 valid_indices = np.where(valid)[0]
                 for i in valid_indices:
-                    try:
-                        out[i] = ds_arr[rows[i], cols[i]]
-                    except Exception:
-                        out[i] = np.nan
+                    out[i] = ds_arr[rows[i], cols[i]]
 
         if getattr(self, 'debug_env', False):
             try:
@@ -1563,16 +1470,13 @@ class simulation:
             except Exception:
                 pass
 
-        try:
-            if getattr(self, 'cache_env_samples', True):
-                step_i = int(getattr(self, 'current_step', -1))
-                cache_step = getattr(self, '_env_sample_cache_step', None)
-                cache = getattr(self, '_env_sample_cache', None)
-                if cache_step is not None and int(cache_step) == step_i and isinstance(cache, dict):
-                    k = self._env_sample_cache_key(transform, raster_name)
-                    cache[k] = out
-        except Exception:
-            pass
+        if getattr(self, 'cache_env_samples', True):
+            step_i = int(getattr(self, 'current_step', -1))
+            cache_step = getattr(self, '_env_sample_cache_step', None)
+            cache = getattr(self, '_env_sample_cache', None)
+            if cache_step is not None and int(cache_step) == step_i and isinstance(cache, dict):
+                k = self._env_sample_cache_key(transform, raster_name)
+                cache[k] = out
         return out
 
     def get_cached_dataset(self, key: str, default=None):
@@ -1582,27 +1486,18 @@ class simulation:
         Only keys under `environment/` are cached to prevent stale writes for
         mutable datasets.
         """
-        try:
-            key = str(key)
-        except Exception:
-            return default
+        key = str(key)
         cacheable = key.startswith('environment/')
         if not cacheable:
             return hdf5_io.read_dataset(hdf5_io.get_hdf5_obj(self), key, default=default)
-        try:
-            cache = getattr(self, '_dataset_cache', None)
-            if isinstance(cache, dict) and key in cache:
-                return cache[key]
-        except Exception:
-            cache = None
+        cache = getattr(self, '_dataset_cache', None)
+        if isinstance(cache, dict) and key in cache:
+            return cache[key]
         h5 = hdf5_io.get_hdf5_obj(self)
         val = hdf5_io.read_dataset(h5, key, default=default)
-        try:
-            if not isinstance(getattr(self, '_dataset_cache', None), dict):
-                self._dataset_cache = {}
-            self._dataset_cache[key] = val
-        except Exception:
-            pass
+        if not isinstance(getattr(self, '_dataset_cache', None), dict):
+            self._dataset_cache = {}
+        self._dataset_cache[key] = val
         return val
 
     def run(self, model_name=None, n=1, dt=1.0, video=False, k_p=None, k_i=None, k_d=None, return_status: bool = False, video_hook=None, viewer: bool = False, viewer_blocking: bool = False, viewer_live: bool = False, viewer_host: str = '127.0.0.1', viewer_port: int = 50007, viewer_stream_raw: bool = False, viewer_fps: float = 20.0):

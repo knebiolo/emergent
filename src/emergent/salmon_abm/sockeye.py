@@ -576,6 +576,12 @@ class simulation():
         self.bout_dur = self.arr.zeros(num_agents)       # running bout timer 
         self.time_of_jump = self.arr.zeros(num_agents)   # time since last jump - can't happen every timestep
         
+        # initialize flopping on land parameters
+        self.on_land = np.zeros(num_agents, dtype=bool)  # fish currently on dry land
+        self.time_landed = self.arr.repeat(np.inf, num_agents)  # when fish first landed (inf = never)
+        self.flop_heading = self.arr.zeros(num_agents)   # random heading for current flop movement
+        self.max_flop_time = 5.0  # seconds - fish dies if on land longer than this
+        
         # initialize odometer
         self.kcal = self.arr.zeros(num_agents)           #kilo calorie counter
     
@@ -4061,17 +4067,72 @@ class simulation():
         movement.thrust_fun(mask=~should_jump, t = t, dt = dt)
         dxdy_swim = movement.swim(t, dt, pid_controller = pid_controller, mask=~should_jump)
         
-        # Arbitrate amongst behavioral cues
+        # Handle fish flopping on dry land
+        dxdy_flop = movement.flop(t, dt, mask=self.on_land)
+        
+        # Check if flopping fish found water or died
+        if np.any(self.on_land):
+            time_flopping = t - self.time_landed[self.on_land]
+            
+            # Fish that exceeded max flop time die
+            died_on_land = self.on_land & (time_flopping > self.max_flop_time)
+            if np.any(died_on_land):
+                print(f"MORTALITY: {np.sum(died_on_land)} fish died after flopping on dry land for {self.max_flop_time}s at t={t}")
+                self.dead[died_on_land] = 1
+                self.on_land[died_on_land] = False  # Stop flopping (they're dead)
+            
+            # Check if any flopping fish made it back to water
+            # Sample depth at new position (after flop movement)
+            test_X = self.X + dxdy_flop[:,0]
+            test_Y = self.Y + dxdy_flop[:,1]
+            depth_ds = np.asarray(self._get_env('environment/depth', default=np.zeros((1, 1))), dtype=float)
+            
+            if depth_ds.ndim == 2 and depth_ds.size > 1:
+                transform = getattr(self, 'depth_rast_transform', None)
+                if transform is not None:
+                    from affine import Affine
+                    if isinstance(transform, Affine):
+                        inv_transform = ~transform
+                        test_cols, test_rows = inv_transform * (test_X[self.on_land], test_Y[self.on_land])
+                    else:
+                        inv_transform = ~Affine.from_gdal(*transform)
+                        test_cols, test_rows = inv_transform * (test_X[self.on_land], test_Y[self.on_land])
+                    
+                    test_rows = np.asarray(test_rows, dtype=np.int32)
+                    test_cols = np.asarray(test_cols, dtype=np.int32)
+                    H, W = depth_ds.shape
+                    
+                    valid = (test_rows >= 0) & (test_cols >= 0) & (test_rows < H) & (test_cols < W)
+                    test_rows_clipped = np.clip(test_rows, 0, H - 1)
+                    test_cols_clipped = np.clip(test_cols, 0, W - 1)
+                    test_depth = depth_ds[test_rows_clipped, test_cols_clipped]
+                    
+                    # Found water if depth is finite and not nodata
+                    found_water = valid & (np.abs(test_depth) < 9990) & np.isfinite(test_depth)
+                    
+                    if np.any(found_water):
+                        # Get indices of fish that found water
+                        flopping_indices = np.where(self.on_land)[0]
+                        rescued_fish = flopping_indices[found_water]
+                        
+                        print(f"SUCCESS: {len(rescued_fish)} fish flopped back into water at t={t} after {np.mean(t - self.time_landed[rescued_fish]):.1f}s on land!")
+                        
+                        # Reset flopping state
+                        self.on_land[rescued_fish] = False
+                        self.time_landed[rescued_fish] = np.inf
+        
+        # Arbitrate amongst behavioral cues (only for fish in water)
         tolerance = 0.1  # A small tolerance level to account for floating-point arithmetic issues
         #if abs(self.cumulative_time % 1) < tolerance or abs(self.cumulative_time % 1 - 1) < tolerance:
         self.heading = behavior.arbitrate(t)
             
-        # move
+        # move - apply appropriate movement based on state
         self.prev_X = self.X.copy() #np.where(mask,self.X.copy(),self.prev_X)
         self.prev_Y = self.Y.copy() #np.where(mask,self.Y.copy(),self.prev_Y)
-            
-        self.X = self.X + dxdy_swim[:,0] + dxdy_jump[:,0]
-        self.Y = self.Y + dxdy_swim[:,1] + dxdy_jump[:,1]
+        
+        # Fish on land only move by flopping, fish in water swim/jump normally
+        self.X = self.X + np.where(self.on_land[:, np.newaxis], dxdy_flop, dxdy_swim + dxdy_jump)[:,0]
+        self.Y = self.Y + np.where(self.on_land[:, np.newaxis], dxdy_flop, dxdy_swim + dxdy_jump)[:,1]
         
         self.sog = np.where(should_jump,
                             self.ideal_sog,
@@ -4081,6 +4142,7 @@ class simulation():
             print ('fish off map - why?')
             print ('dxdy swim: %s'%(dxdy_swim))
             print ('dxdy jump: %s'%(dxdy_jump))
+            print ('dxdy flop: %s'%(dxdy_flop))
             sys.exit()
             self.dead = np.where(np.isnan(self.X),1,self.dead)
     
