@@ -1510,10 +1510,14 @@ class simulation:
         valid = (rows >= 0) & (cols >= 0) & (rows < ds_arr.shape[0]) & (cols < ds_arr.shape[1])
         out = np.full(self.num_agents, np.nan)
         if np.any(valid):
+            # Optimized: advanced indexing is much faster than looping
+            # Only fall back to loop if advanced indexing fails (extremely rare)
             try:
                 out[valid] = ds_arr[rows[valid], cols[valid]]
-            except Exception:
-                for i in np.where(valid)[0]:
+            except (IndexError, ValueError):
+                # Fallback for edge cases (mismatched shapes, etc.)
+                valid_indices = np.where(valid)[0]
+                for i in valid_indices:
                     try:
                         out[i] = ds_arr[rows[i], cols[i]]
                     except Exception:

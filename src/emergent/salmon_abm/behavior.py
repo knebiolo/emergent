@@ -712,9 +712,21 @@ class behavior():
         if cache is not None:
             agent_state = cache.get(('agent_state',))
         if agent_state is None:
-            agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
-            agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
-            heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
+            # Use cached arrays from arbitrate() if available to avoid redundant conversions
+            cached_X = getattr(self, '_cached_X', None)
+            cached_Y = getattr(self, '_cached_Y', None)
+            cached_heading = getattr(self, '_cached_heading', None)
+            
+            if cached_X is not None and cached_Y is not None and cached_heading is not None:
+                agent_x = np.nan_to_num(cached_X).reshape((-1,))
+                agent_y = np.nan_to_num(cached_Y).reshape((-1,))
+                heading = cached_heading.reshape((-1,))
+            else:
+                # Fallback for standalone calls (tests)
+                agent_x = np.nan_to_num(np.asarray(self.simulation.X, dtype=float)).reshape((-1,))
+                agent_y = np.nan_to_num(np.asarray(self.simulation.Y, dtype=float)).reshape((-1,))
+                heading = np.asarray(self.simulation.heading, dtype=float).reshape((-1,))
+            
             hx = np.cos(heading)[:, np.newaxis, np.newaxis]
             hy = np.sin(heading)[:, np.newaxis, np.newaxis]
             agent_state = (agent_x, agent_y, heading, hx, hy)
@@ -1511,8 +1523,11 @@ class behavior():
 
         # Avoid forcing float64 copies for large agent arrays; we only need
         # stable numeric values for vector direction.
-        x = np.asarray(self.simulation.X)
-        y = np.asarray(self.simulation.Y)
+        # Use cached arrays if available to avoid redundant conversions
+        cached_X = getattr(self, '_cached_X', None)
+        cached_Y = getattr(self, '_cached_Y', None)
+        x = cached_X if cached_X is not None else np.asarray(self.simulation.X)
+        y = cached_Y if cached_Y is not None else np.asarray(self.simulation.Y)
         # Prefer a shared environment refugia raster when available.
         shared_refugia = self._get_env('environment/refugia', default=None)
         if shared_refugia is not None:
@@ -1821,7 +1836,9 @@ class behavior():
             pw = abs(float(_unpack_affine(self.simulation.depth_rast_transform)[0]))
         except Exception:
             pw = 0.0
-        length_m = np.asarray(self.simulation.length, dtype=float) / 1000.0
+        # Use cached length if available
+        cached_length = getattr(self, '_cached_length', None)
+        length_m = (cached_length if cached_length is not None else np.asarray(self.simulation.length, dtype=float)) / 1000.0
         base_influence = getattr(self.simulation, 'border_influence_distance_m', None)
         if base_influence is None:
             influence_dist = np.maximum(10.0, np.maximum(10.0 * length_m, pw))
@@ -1960,8 +1977,17 @@ class behavior():
         except Exception:
             lengths = np.zeros(num_agents, dtype=np.int32)
 
-        X = np.asarray(self.simulation.X, dtype=np.float64).reshape((-1,))
-        Y = np.asarray(self.simulation.Y, dtype=np.float64).reshape((-1,))
+        # Use cached arrays if available to avoid redundant conversions
+        cached_X = getattr(self, '_cached_X', None)
+        cached_Y = getattr(self, '_cached_Y', None)
+        
+        if cached_X is not None and cached_Y is not None:
+            X = cached_X.astype(np.float64, copy=False).reshape((-1,))
+            Y = cached_Y.astype(np.float64, copy=False).reshape((-1,))
+        else:
+            X = np.asarray(self.simulation.X, dtype=np.float64).reshape((-1,))
+            Y = np.asarray(self.simulation.Y, dtype=np.float64).reshape((-1,))
+        
         x_vel = np.asarray(getattr(self.simulation, 'x_vel', np.zeros(num_agents)), dtype=np.float64).reshape((-1,))
         y_vel = np.asarray(getattr(self.simulation, 'y_vel', np.zeros(num_agents)), dtype=np.float64).reshape((-1,))
 
@@ -2127,8 +2153,17 @@ class behavior():
             self._safe_set_sim_attr('_alignment_diag', ad)
 
         # Fast path: Numba kernel over per-agent neighbor slices.
-        X = np.asarray(self.simulation.X, dtype=np.float64).reshape((-1,))
-        Y = np.asarray(self.simulation.Y, dtype=np.float64).reshape((-1,))
+        # Use cached arrays if available to avoid redundant conversions
+        cached_X = getattr(self, '_cached_X', None)
+        cached_Y = getattr(self, '_cached_Y', None)
+        
+        if cached_X is not None and cached_Y is not None:
+            X = cached_X.astype(np.float64, copy=False).reshape((-1,))
+            Y = cached_Y.astype(np.float64, copy=False).reshape((-1,))
+        else:
+            X = np.asarray(self.simulation.X, dtype=np.float64).reshape((-1,))
+            Y = np.asarray(self.simulation.Y, dtype=np.float64).reshape((-1,))
+        
         x_vel = np.asarray(getattr(self.simulation, 'x_vel', np.zeros(num_agents)), dtype=np.float64).reshape((-1,))
         y_vel = np.asarray(getattr(self.simulation, 'y_vel', np.zeros(num_agents)), dtype=np.float64).reshape((-1,))
         sog = np.asarray(getattr(self.simulation, 'sog', np.zeros(num_agents)), dtype=np.float64).reshape((-1,))
@@ -2214,6 +2249,10 @@ class behavior():
         except Exception:
             pass
         # ensure closest_agent and nearest_neighbor_distance are populated; reconstruct when missing
+        # Use cached X/Y if available
+        cached_X = getattr(self, '_cached_X', None)
+        cached_Y = getattr(self, '_cached_Y', None)
+        
         try:
             closest_agent_arr = np.asarray(self.simulation.closest_agent, dtype=float).copy()
         except Exception:
@@ -2223,22 +2262,25 @@ class behavior():
         except Exception:
             nearest_d_arr = np.full(self.simulation.num_agents, np.nan)
 
-        # reconstruct missing entries from agents_within_buffers
+        # reconstruct missing entries from agents_within_buffers (vectorized)
         try:
             awb = getattr(self.simulation, 'agents_within_buffers', None)
             if awb is not None:
-                for ag in range(self.simulation.num_agents):
-                    if np.isnan(nearest_d_arr[ag]) or np.isnan(closest_agent_arr[ag]):
-                        nbrs = awb[ag]
-                        if nbrs is None or len(nbrs) == 0:
-                            continue
-                        # compute distances to neighbors
-                        dx = self.simulation.X[nbrs] - self.simulation.X[ag]
-                        dy = self.simulation.Y[nbrs] - self.simulation.Y[ag]
-                        dists = np.sqrt(dx**2 + dy**2)
-                        idx = int(np.argmin(dists))
-                        closest_agent_arr[ag] = nbrs[idx]
-                        nearest_d_arr[ag] = float(dists[idx])
+                # Find agents with missing data
+                missing_mask = np.isnan(nearest_d_arr) | np.isnan(closest_agent_arr)
+                missing_indices = np.where(missing_mask)[0]
+                
+                for ag in missing_indices:
+                    nbrs = awb[ag]
+                    if nbrs is None or len(nbrs) == 0:
+                        continue
+                    # compute distances to neighbors
+                    dx = self.simulation.X[nbrs] - self.simulation.X[ag]
+                    dy = self.simulation.Y[nbrs] - self.simulation.Y[ag]
+                    dists = np.sqrt(dx**2 + dy**2)
+                    idx = int(np.argmin(dists))
+                    closest_agent_arr[ag] = nbrs[idx]
+                    nearest_d_arr[ag] = float(dists[idx])
         except Exception:
             pass
 
@@ -2250,11 +2292,13 @@ class behavior():
             pass
 
         valid_indices = ~np.isnan(closest_agent_arr)
-        closest_X = np.full_like(self.simulation.X, np.nan)
-        closest_Y = np.full_like(self.simulation.Y, np.nan)
+        X_arr = cached_X if cached_X is not None else self.simulation.X
+        Y_arr = cached_Y if cached_Y is not None else self.simulation.Y
+        closest_X = np.full_like(X_arr, np.nan)
+        closest_Y = np.full_like(Y_arr, np.nan)
         try:
-            closest_X[valid_indices] = self.simulation.X[closest_agent_arr[valid_indices].astype(int)]
-            closest_Y[valid_indices] = self.simulation.Y[closest_agent_arr[valid_indices].astype(int)]
+            closest_X[valid_indices] = X_arr[closest_agent_arr[valid_indices].astype(int)]
+            closest_Y[valid_indices] = Y_arr[closest_agent_arr[valid_indices].astype(int)]
         except Exception:
             # fallback: leave NaNs
             pass
@@ -2323,10 +2367,27 @@ class behavior():
             self._window_cache_enabled = True
             self._window_cache_t = None
             self._window_cache = {}
+        
+        # Cache frequently-accessed simulation arrays once per timestep to avoid
+        # 100+ redundant np.asarray() calls across all cue functions.
+        # Store as _cached_* attributes that cue functions can access.
+        try:
+            # Use asarray with copy=False to avoid copying if already numpy arrays
+            self._cached_X = np.asarray(self.simulation.X, dtype=float)
+            self._cached_Y = np.asarray(self.simulation.Y, dtype=float)
+            self._cached_heading = np.asarray(self.simulation.heading, dtype=float)
+            self._cached_length = np.asarray(self.simulation.length, dtype=float)
+        except Exception:
+            # Fallback to None if conversion fails - cue functions will handle
+            self._cached_X = None
+            self._cached_Y = None
+            self._cached_heading = None
+            self._cached_length = None
+        
         # debug: log a concise summary of current headings at start of arbitration
         if getattr(self.simulation, 'debug_behavior', False):
             try:
-                h = np.asarray(self.simulation.heading)
+                h = self._cached_heading if self._cached_heading is not None else np.asarray(self.simulation.heading)
                 # show size, mean, and a short sample (first 10 entries) instead of whole array
                 sample = list(h[:10]) if getattr(h, 'size', 0) > 0 else []
                 mean = float(np.nanmean(h)) if getattr(h, 'size', 0) > 0 else float('nan')

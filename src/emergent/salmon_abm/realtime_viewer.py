@@ -86,7 +86,12 @@ def load_positions_from_h5(path: str) -> np.ndarray:
         Y = np.array(y_ds)
         f.close()
         if X.ndim == 2 and Y.ndim == 2:
-            # assume (T, N)
+            # Check if shape is (N_agents, T_timesteps) and transpose if needed
+            if X.shape[0] < X.shape[1]:
+                # Likely (N, T) format - transpose to (T, N)
+                X = X.T
+                Y = Y.T
+            # Now stack along last dimension to get (T, N, 2)
             return np.stack((X, Y), axis=2)
         raise RuntimeError(f"Unsupported x/y shapes: {X.shape} / {Y.shape}")
 
@@ -158,6 +163,8 @@ class ReplayWidget(QOpenGLWidget):
         self.frame = 0
         self.playing = False
         self.trail = 0
+        self.fish_body_length = 8  # length of fish body in pixels
+        self.tail_segments = 3  # number of tail segments for animation
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -441,7 +448,7 @@ class ReplayWidget(QOpenGLWidget):
             except Exception:
                 pass
 
-            # draw current points (newest)
+            # draw current points (newest) as fish bodies
             for i in range(self.N):
                 x, y = pts[i]
                 if not (np.isfinite(x) and np.isfinite(y)):
@@ -450,7 +457,21 @@ class ReplayWidget(QOpenGLWidget):
                 y_adj = y + pan_y * (ymax_loc - ymin_loc)
                 sxp = tx + (x_adj - xmin_loc) * s
                 syp = ty + (ymax_loc - y_adj) * s
-                painter.drawEllipse(QRectF(sxp - r, syp - r, 2 * r, 2 * r))
+                
+                # Compute heading from velocity (difference between current and previous position)
+                heading_deg = 0.0
+                if self.frame > 0:
+                    prev_pts = self.positions[self.frame - 1]
+                    if i < prev_pts.shape[0]:
+                        prev_x, prev_y = prev_pts[i]
+                        if np.isfinite(prev_x) and np.isfinite(prev_y):
+                            dx = x - prev_x
+                            dy = y - prev_y
+                            if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+                                heading_deg = np.degrees(np.arctan2(dy, dx))
+                
+                # Draw fish body with flapping tail
+                self._draw_fish_body(painter, sxp, syp, heading_deg, r)
 
             painter.setPen(QPen(QColor(0, 0, 0)))
             # display a live frame counter when receiving live updates (T often == 1)
