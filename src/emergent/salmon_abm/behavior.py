@@ -1797,16 +1797,18 @@ class behavior():
         return rheotaxis
 
     def border_cue(self, weight, t):
-        try:
-            if float(weight) == 0.0:
-                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
-        except Exception:
-            pass
+        if float(weight) == 0.0:
+            return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        
         length_numpy = self.simulation.length
         buff = 2
         dist_ds = np.asarray(self._get_env('environment/distance_to', default=np.zeros((1, 1))), dtype=float)
         if dist_ds.ndim != 2 or dist_ds.size <= 1:
-            return np.zeros((self.simulation.num_agents, 2), dtype=float)
+            raise ValueError(
+                "border_cue: distance_to raster not available or invalid. "
+                "Border cue requires 'environment/distance_to' dataset in HDF5. "
+                "Without this, fish will swim out of domain bounds!"
+            )
 
         # FAIL LOUD: Check if agents are sampling nodata in distance raster
         # This means they've left the valid model domain
@@ -1825,17 +1827,18 @@ class behavior():
         sampled_dist = np.full(self.simulation.num_agents, np.nan, dtype=float)
         sampled_dist[valid0] = dist_ds[rr0[valid0], cc0[valid0]]
         
-        # Check for nodata values (typically -9999 or very large negative)
-        nodata_mask = np.abs(sampled_dist) > 9990
-        if np.any(nodata_mask):
-            bad_agents = np.where(nodata_mask)[0]
+        # Check for agents ON BOUNDARY (distance_to = 0 means nodata/land pixel)
+        # distance_to is 0.0 at nodata pixels, NOT -9999
+        boundary_mask = (sampled_dist <= 0.0) & np.isfinite(sampled_dist)
+        if np.any(boundary_mask):
+            bad_agents = np.where(boundary_mask)[0]
             bad_positions = [(self.simulation.X[i], self.simulation.Y[i]) for i in bad_agents[:5]]
             raise ValueError(
-                f"CRITICAL: {np.sum(nodata_mask)} agents sampling nodata in distance_to raster at timestep {t}. "
-                f"Agents have left the valid model domain! "
+                f"CRITICAL: {np.sum(boundary_mask)} agents are ON BOUNDARY/LAND (distance_to=0) at timestep {t}. "
+                f"Agents have entered nodata regions! "
                 f"First bad positions: {bad_positions}. "
-                f"This indicates collision/alignment cues are pushing fish out of bounds, "
-                f"or initial placement was outside valid domain."
+                f"This indicates border_cue repulsion is too weak, "
+                f"or collision/alignment cues are overpowering boundary avoidance."
             )
 
         dist3d = dist_ds[rr, cc]
@@ -2105,12 +2108,10 @@ class behavior():
         return np.nan_to_num(cohesion_array)
 
     def alignment_cue(self, weight, consider_front_only=False):
-        try:
-            if float(weight) == 0.0:
-                self.simulation.school_sog = np.maximum(0.5 * (np.asarray(self.simulation.length, dtype=float) / 1000.0), 0.0)
-                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
-        except Exception:
-            pass
+        if float(weight) == 0.0:
+            self.simulation.school_sog = np.maximum(0.5 * (np.asarray(self.simulation.length, dtype=float) / 1000.0), 0.0)
+            return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        
         num_agents = int(self.simulation.num_agents)
         # Prefer CSR neighbor representation when available (simulation-level)
         offsets = getattr(self.simulation, 'neighbors_offsets', None)
@@ -2141,10 +2142,7 @@ class behavior():
                 self.simulation.school_sog = np.maximum(0.5 * (np.asarray(self.simulation.length, dtype=float) / 1000.0), 0.0)
                 return np.zeros((num_agents, 2), dtype=float)
         # Neighbor lengths per agent (needed for fallback and for diagnostic sanity)
-        try:
-            lengths = np.diff(np.asarray(offsets, dtype=np.int64)).astype(np.int32, copy=False)
-        except Exception:
-            lengths = np.zeros(num_agents, dtype=np.int32)
+        lengths = np.diff(np.asarray(offsets, dtype=np.int64)).astype(np.int32, copy=False)
         # capture raw neighbor headings (may be all zeros at init)
         if getattr(self.simulation, 'debug_behavior', False):
             try:
@@ -2156,12 +2154,10 @@ class behavior():
             except Exception:
                 # non-fatal: continue without verbose logs
                 pass
-        # read raw headings; if unavailable, use empty array
-        raw_headings_neighbors = np.array([], dtype=float)
-        try:
-            raw_headings_neighbors = np.asarray(self.simulation.heading, dtype=float)[neighbor_indices]
-        except Exception:
-            raw_headings_neighbors = np.array([], dtype=float)
+        # read raw headings
+        if not hasattr(self.simulation, 'heading'):
+            raise AttributeError("alignment_cue: simulation.heading not available - cannot compute alignment")
+        raw_headings_neighbors = np.asarray(self.simulation.heading, dtype=float)[neighbor_indices]
         headings_neighbors = raw_headings_neighbors.copy()
         # If headings are all zero (common at initialization), fall back to neighbor velocity directions
         used_velocity_heading = False
@@ -2170,22 +2166,20 @@ class behavior():
         # exactly all zeros.
         if headings_neighbors.size > 0 and (not np.any(headings_neighbors)):
             # compute neighbor velocities' headings where available
-            try:
-                vx = np.asarray(self.simulation.x_vel)[neighbor_indices]
-                vy = np.asarray(self.simulation.y_vel)[neighbor_indices]
-                vel_mag = np.sqrt(vx**2 + vy**2)
-                if np.any(vel_mag > 0):
-                    headings_neighbors = np.arctan2(vy, vx)
-                    used_velocity_heading = True
-                    if getattr(self.simulation, 'debug_behavior', False):
-                        try:
-                            import logging
-                            logging.getLogger(__name__).debug('alignment_cue: used velocity fallback; sample headings_neighbors=%s', headings_neighbors[:20])
-                        except Exception:
-                            pass
-            except Exception:
-                # do not propagate; leave headings_neighbors as-is
-                pass
+            if not hasattr(self.simulation, 'x_vel') or not hasattr(self.simulation, 'y_vel'):
+                raise AttributeError("alignment_cue: velocity fields not available for heading fallback")
+            vx = np.asarray(self.simulation.x_vel)[neighbor_indices]
+            vy = np.asarray(self.simulation.y_vel)[neighbor_indices]
+            vel_mag = np.sqrt(vx**2 + vy**2)
+            if np.any(vel_mag > 0):
+                headings_neighbors = np.arctan2(vy, vx)
+                used_velocity_heading = True
+                if getattr(self.simulation, 'debug_behavior', False):
+                    try:
+                        import logging
+                        logging.getLogger(__name__).debug('alignment_cue: used velocity fallback; sample headings_neighbors=%s', headings_neighbors[:20])
+                    except Exception:
+                        pass
         # Only build heavy diagnostics when explicitly requested.
         want_diag = bool(getattr(self.simulation, 'debug_behavior', False)) or (os.environ.get('FORCE_RAWVECS', '').lower() == 'true')
         if want_diag:

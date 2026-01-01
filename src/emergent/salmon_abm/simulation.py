@@ -428,25 +428,46 @@ class simulation:
         # that read environment/* will have something to sample in unit tests
         hdf5_io.create_environment_placeholders(self.db)
 
-        # best-effort: compute `environment/distance_to` when missing and depth exists
-        try:
-            h5 = hdf5_io.get_hdf5_obj(self)
-            dist_ds = hdf5_io.read_dataset(h5, 'environment/distance_to', default=None)
-            if dist_ds is None:
-                depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=None)
-                if depth_ds is not None:
-                    depth_arr = np.asarray(depth_ds, dtype=float)
-                    if depth_arr.ndim == 2 and depth_arr.size > 1:
-                        wetted = np.isfinite(depth_arr) & (depth_arr != -9999.0)
-                        try:
-                            tr = getattr(self, 'depth_rast_transform', None)
-                            pw = float(tr[0]) if tr is not None else 1.0
-                        except Exception:
-                            pw = 1.0
-                        dist_to_bound = distance_transform_edt(wetted) * abs(pw)
-                        hdf5_io.write_dataset(h5, 'environment/distance_to', dist_to_bound.astype('float32'))
-        except Exception:
-            pass
+        # CRITICAL: Compute `environment/distance_to` when missing - required for border_cue
+        # Without this, fish will swim out of domain bounds!
+        h5 = hdf5_io.get_hdf5_obj(self)
+        dist_ds = hdf5_io.read_dataset(h5, 'environment/distance_to', default=None)
+        if dist_ds is None:
+            import logging
+            logging.getLogger(__name__).info("distance_to raster not found, computing from depth raster...")
+            depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=None)
+            if depth_ds is None:
+                raise ValueError(
+                    "Cannot create distance_to raster: environment/depth dataset not found in HDF5. "
+                    "Border cue requires distance_to to keep fish within domain bounds!"
+                )
+            depth_arr = np.asarray(depth_ds, dtype=float)
+            if depth_arr.ndim != 2 or depth_arr.size <= 1:
+                raise ValueError(
+                    f"Invalid depth raster shape: {depth_arr.shape}. "
+                    "Expected 2D array with size > 1 to compute distance_to."
+                )
+            # Wetted area = finite depth values (not nodata -9999)
+            wetted = np.isfinite(depth_arr) & (depth_arr != -9999.0)
+            if not np.any(wetted):
+                raise ValueError(
+                    "Depth raster contains no valid (wetted) cells! "
+                    "All values are nodata (-9999) or NaN. Cannot compute distance_to."
+                )
+            # Get pixel width from transform for distance scaling
+            tr = getattr(self, 'depth_rast_transform', None)
+            if tr is None:
+                raise ValueError("depth_rast_transform not available - cannot compute distance_to pixel scaling")
+            pw = float(tr[0]) if hasattr(tr, '__getitem__') else 1.0
+            
+            # Compute distance transform: distance from each cell to nearest boundary (non-wetted cell)
+            dist_to_bound = distance_transform_edt(wetted) * abs(pw)
+            hdf5_io.write_dataset(h5, 'environment/distance_to', dist_to_bound.astype('float32'))
+            logging.getLogger(__name__).info(
+                f"Created distance_to raster: {dist_to_bound.shape}, "
+                f"max distance: {np.max(dist_to_bound):.1f}m, "
+                f"{100*np.sum(wetted)/wetted.size:.1f}% wetted area"
+            )
 
         # Movement-related defaults required by movement helpers. Set early so
         # movement.frequency/drag_fun/swim can run safely even if attributes
