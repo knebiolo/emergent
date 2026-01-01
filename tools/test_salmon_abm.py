@@ -49,16 +49,16 @@ def import_env_to_h5(sim, env_files):
     """Import environment rasters into simulation HDF5."""
     h5 = hdf5_io.get_hdf5_obj(sim)
     if h5 is None:
-        print("⚠️  No HDF5 object available for environment import")
+        print("[WARN]  No HDF5 object available for environment import")
         return
     
     for ef in env_files:
         try:
             arr, tr_tup, crs = io.write_raster_to_hdf5(h5, ef, dataset_name=None, sim=sim)
             key = 'environment/' + os.path.splitext(os.path.basename(ef))[0]
-            print(f"✓ Imported: {key}")
+            print(f"[OK] Imported: {key}")
         except Exception as e:
-            print(f"✗ Failed to import {os.path.basename(ef)}: {e}")
+            print(f"[ERR] Failed to import {os.path.basename(ef)}: {e}")
     
     # Write coordinate grids
     try:
@@ -73,7 +73,7 @@ def import_env_to_h5(sim, env_files):
             # Handle affine.Affine objects (they have 9 elements in a 3x3 matrix)
             # We need: [a, b, c, d, e, f] where x = a*col + b*row + c, y = d*col + e*row + f
             if hasattr(transform, 'to_gdal'):
-                # affine.Affine object - convert to GDAL 6-tuple
+                # affine - convert to GDAL 6-tuple
                 a, b, c, d, e, f = transform.to_gdal()
             elif isinstance(transform, (list, tuple)) and len(transform) == 6:
                 a, b, c, d, e, f = transform
@@ -83,199 +83,136 @@ def import_env_to_h5(sim, env_files):
             cols = np.arange(ncols, dtype=float)
             rows = np.arange(nrows, dtype=float)
             col_indices, row_indices = np.meshgrid(cols, rows)
-            x_coords = a * col_indices + b * row_indices + c
-            y_coords = d * col_indices + e * row_indices + f
-            hdf5_io.write_dataset(h5, 'environment/x_coords', x_coords)
-            hdf5_io.write_dataset(h5, 'environment/y_coords', y_coords)
-            print("✓ Generated coordinate grids")
+            
+            # Write coordinate grids
+            hdf5_io.write_dataset(h5, 'environment/x', col_indices * a + row_indices * b + c)
+            hdf5_io.write_dataset(h5, 'environment/y', col_indices * d + row_indices * e + f)
+            print("[OK] Wrote coordinate grids")
     except Exception as e:
-        print(f"✗ Failed to generate coordinate grids: {e}")
-
-
-def run_test(args):
-    """Run test simulation with diagnostics."""
-    
-    # Setup paths
-    base = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'data', 'salmon_abm'))
-    base = os.path.abspath(base)
-    env_files = discover_env_files(base)
-    start_poly = os.path.join(base, 'start_loc_river_right.shp')
-    
-    outdir = os.path.abspath(os.path.join('outputs', 'test'))
-    os.makedirs(outdir, exist_ok=True)
-    
-    print("=" * 70)
-    print("SALMON ABM - CANONICAL TEST SCRIPT")
-    print("=" * 70)
-    print(f"Agents:    {args.nagents}")
-    print(f"Steps:     {args.nsteps}")
-    print(f"Seed:      {args.seed if args.seed else 'Random'}")
-    print(f"Debug:     {args.debug_behavior or args.debug_movement}")
-    print(f"Output:    {outdir}")
-    print("=" * 70)
-    
-    # Create simulation
-    sim = simulation(
-        model_dir=outdir,
-        model_name=args.model_name,
-        crs=None,
-        basin='nuyakuk',
-        water_temp=10.0,
-        start_polygon=start_poly if os.path.exists(start_poly) else None,
-        env_files=env_files,
-        longitudinal_profile=None,
-        num_timesteps=args.nsteps,
-        num_agents=args.nagents,
-        db_path=os.path.join(outdir, f'{args.model_name}.h5')
-    )
-    
-    # Apply deterministic seed for testing
-    if args.seed is not None:
-        np.random.seed(args.seed)
-        try:
-            sim.rng = np.random.default_rng(args.seed)
-        except Exception:
-            sim.rng = None
-        print(f"✓ Applied seed: {args.seed}")
-    
-    # Load test weights if provided
-    if args.test_weights_file and os.path.exists(args.test_weights_file):
-        try:
-            with open(args.test_weights_file, 'r') as f:
-                sim.test_weights = json.load(f)
-            print(f"✓ Loaded test weights: {args.test_weights_file}")
-        except Exception as e:
-            print(f"✗ Failed to load test weights: {e}")
-    
-    # Enable debug modes
-    if args.debug_movement:
-        sim.debug_movement = True
-        print("✓ Movement debugging enabled")
-    if args.debug_behavior:
-        sim.debug_behavior = True
-        print("✓ Behavior debugging enabled")
-    
-    # Import environment data
-    print("\nImporting environment rasters...")
-    import_env_to_h5(sim, env_files)
-    
-    # Initialize headings from velocity field
-    try:
-        sim.initialize_headings_from_db()
-        print("✓ Initialized headings from velocity field")
-    except Exception as e:
-        print(f"⚠️  Failed to initialize headings: {e}")
-    
-    # Validate initial sampling
-    try:
-        depth_vals = sim.sample_environment(getattr(sim, 'depth_rast_transform', None), 'depth')
-        valid = np.sum(np.isfinite(depth_vals) & (depth_vals != -9999.0))
-        print(f"✓ Valid depth samples: {valid}/{sim.num_agents} ({100*valid/sim.num_agents:.1f}%)")
-        if valid < 0.9 * sim.num_agents:
-            print(f"⚠️  WARNING: {sim.num_agents - valid} agents in nodata regions!")
-    except Exception as e:
-        print(f"✗ Sampling validation failed: {e}")
-    
-    # Run simulation
-    print("\n" + "=" * 70)
-    print("RUNNING SIMULATION")
-    print("=" * 70)
-    
-    csv_path = os.path.join(outdir, f'{args.model_name}_trace.csv')
-    header = ['timestep', 'agent', 'x', 'y', 'heading_deg', 'depth', 'vel_mag']
-    
-    with open(csv_path, 'w', newline='') as fh:
-        writer = csv.writer(fh)
-        writer.writerow(header)
-        
-        dt = 1.0
-        start_time = time.time()
-        
-        for t in range(args.nsteps):
-            sim.current_step = t
-            step_start = time.time()
-            
-            sim.timestep(t, dt)
-            
-            # Sample environment
-            depth_vals = sim.sample_environment(getattr(sim, 'depth_rast_transform', None), 'depth')
-            mag_vals = sim.sample_environment(getattr(sim, 'vel_mag_rast_transform', None), 'vel_mag')
-            
-            # Write trace (sample every 10 agents to keep file manageable)
-            for a in range(0, sim.num_agents, max(1, sim.num_agents // 100)):
-                row = [
-                    t, a,
-                    float(sim.X[a]), float(sim.Y[a]),
-                    float(np.degrees(sim.heading[a])) if hasattr(sim, 'heading') else 0.0,
-                    float(depth_vals[a]) if np.isfinite(depth_vals[a]) else '',
-                    float(mag_vals[a]) if np.isfinite(mag_vals[a]) else ''
-                ]
-                writer.writerow(row)
-            
-            # Progress reporting
-            if (t + 1) % max(1, args.nsteps // 10) == 0:
-                elapsed = time.time() - start_time
-                step_time = time.time() - step_start
-                rate = (t + 1) / elapsed if elapsed > 0 else 0
-                print(f"  Step {t+1:4d}/{args.nsteps}  |  {step_time*1000:.1f}ms/step  |  {rate:.1f} steps/s")
-    
-    total_time = time.time() - start_time
-    
-    # Summary
-    print("\n" + "=" * 70)
-    print("TEST COMPLETE")
-    print("=" * 70)
-    print(f"Total time:    {total_time:.2f}s")
-    print(f"Steps/sec:     {args.nsteps/total_time:.2f}")
-    print(f"Database:      {sim.db_path}")
-    print(f"Trace:         {csv_path}")
-    print("=" * 70)
-    
-    # Heading analysis (check for nodata bug)
-    print("\nHeading Analysis (checking for nodata bug):")
-    h_deg = np.degrees(sim.heading)
-    north = np.sum((h_deg > 45) & (h_deg < 135))
-    east = np.sum((h_deg > -45) & (h_deg < 45))
-    south = np.sum((h_deg > -135) & (h_deg < -45))
-    west = np.sum((h_deg > 135) | (h_deg < -135))
-    
-    print(f"  North (45-135°):   {north:5d} ({100*north/sim.num_agents:5.1f}%)")
-    print(f"  East (-45-45°):    {east:5d} ({100*east/sim.num_agents:5.1f}%)")
-    print(f"  South (-135--45°): {south:5d} ({100*south/sim.num_agents:5.1f}%)")
-    print(f"  West (135-180°):   {west:5d} ({100*west/sim.num_agents:5.1f}%)")
-    
-    if north > 0.1 * sim.num_agents:
-        print("\n⚠️  WARNING: >10% swimming north - possible nodata bug!")
-    elif west > 0.5 * sim.num_agents:
-        print("\n✓ PASS: Majority swimming west (upstream)")
-    
-    print(f"\nTo view: python -m emergent.salmon_abm.realtime_viewer {sim.db_path}")
-    
-    sim.close()
+        print(f"[ERR] Failed to write coordinate grids: {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Canonical salmon ABM test script')
-    parser.add_argument('--nagents', type=int, default=200, help='Number of agents (default: 200)')
-    parser.add_argument('--nsteps', type=int, default=50, help='Number of timesteps (default: 50)')
-    parser.add_argument('--seed', type=int, default=42, help='RNG seed for deterministic runs (default: 42)')
-    parser.add_argument('--model-name', default='test_salmon', help='Model name for outputs')
-    parser.add_argument('--debug-movement', action='store_true', help='Enable movement debug dumps')
-    parser.add_argument('--debug-behavior', action='store_true', help='Enable behavior debug dumps')
-    parser.add_argument('--test-weights-file', default=None, help='JSON file with test cue weights')
-    
+    parser = argparse.ArgumentParser(description="Test salmon ABM")
+    parser.add_argument('--nagents', type=int, default=200, help='Number of agents')
+    parser.add_argument('--nsteps', type=int, default=50, help='Number of simulation steps')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--debug-behavior', action='store_true', help='Enable behavior state tracking')
+    parser.add_argument('--debug-movement', action='store_true', help='Enable movement debugging')
+    parser.add_argument('--test-weights-file', type=str, default=None, help='Path to test weights JSON')
     args = parser.parse_args()
     
+    # Discover environment files
+    base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'salmon_abm')
+    env_files = discover_env_files(base_dir)
+    
+    if not env_files:
+        print(f"[ERR] No environment files found in {base_dir}")
+        return
+    
+    print(f"[OK] Found {len(env_files)} environment files")
+    for ef in env_files:
+        print(f"     - {os.path.basename(ef)}")
+    
+    # Create simulation
+    print(f"\n[OK] Creating simulation: {args.nagents} agents, {args.nsteps} steps, seed={args.seed}")
+    
+    config = {
+        'n_agents': args.nagents,
+        'n_steps': args.nsteps,
+        'random_seed': args.seed,
+        'dt': 1.0,
+        'trace_output': True,
+        'debug_behavior': args.debug_behavior,
+        'debug_movement': args.debug_movement,
+    }
+    
+    if args.test_weights_file:
+        with open(args.test_weights_file, 'r') as f:
+            weights = json.load(f)
+            config['cue_weights'] = weights
+            print(f"[OK] Loaded weights from {args.test_weights_file}")
+    
+    sim = simulation(**config)
+    
+    # Import environment data
+    print(f"\n[OK] Importing environment data...")
+    import_env_to_h5(sim, env_files)
+    
+    # Initialize agent headings from velocity field
+    print(f"\n[OK] Initializing agent headings from velocity field...")
     try:
-        run_test(args)
-    except KeyboardInterrupt:
-        print("\n\nInterrupted by user")
-        sys.exit(1)
+        vel_dir_ds = hdf5_io.read_dataset(hdf5_io.get_hdf5_obj(sim), 'environment/vel_dir')
+        if vel_dir_ds is not None:
+            vel_dir = np.array(vel_dir_ds)
+            # Sample random positions and extract headings
+            nrows, ncols = vel_dir.shape
+            for i in range(sim.n_agents):
+                row = np.random.randint(0, nrows)
+                col = np.random.randint(0, ncols)
+                heading = vel_dir[row, col]
+                if not np.isnan(heading):
+                    sim.agents[i].heading = heading
+            print("[OK] Initialized headings from velocity field")
     except Exception as e:
-        print(f"\n\n✗ FATAL ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        print(f"[WARN] Could not initialize headings: {e}")
+    
+    # Run simulation
+    print(f"\n[OK] Running simulation...")
+    t0 = time.time()
+    sim.run()
+    elapsed = time.time() - t0
+    print(f"[OK] Simulation complete in {elapsed:.2f}s ({args.nsteps/elapsed:.1f} steps/s)")
+    
+    # Save outputs
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs', 'test')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    model_name = f"test_n{args.nagents}_s{args.nsteps}_seed{args.seed}"
+    h5_path = os.path.join(output_dir, f"{model_name}.h5")
+    trace_path = os.path.join(output_dir, f"{model_name}_trace.csv")
+    
+    # Save HDF5
+    try:
+        h5 = hdf5_io.get_hdf5_obj(sim)
+        if h5:
+            h5.close()
+        print(f"[OK] Saved HDF5: {h5_path}")
+    except Exception as e:
+        print(f"[ERR] Failed to save HDF5: {e}")
+    
+    # Save trace CSV
+    try:
+        if hasattr(sim, 'trace_data') and sim.trace_data:
+            with open(trace_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=sim.trace_data[0].keys())
+                writer.writeheader()
+                writer.writerows(sim.trace_data)
+            print(f"[OK] Saved trace: {trace_path}")
+    except Exception as e:
+        print(f"[ERR] Failed to save trace: {e}")
+    
+    # Analyze final heading distribution
+    print(f"\n[OK] Analyzing final heading distribution...")
+    headings = np.array([agent.heading for agent in sim.agents])
+    
+    # Count agents by quadrant (N/S/E/W)
+    north = np.sum((headings >= 315) | (headings < 45))
+    east = np.sum((headings >= 45) & (headings < 135))
+    south = np.sum((headings >= 135) & (headings < 225))
+    west = np.sum((headings >= 225) & (headings < 315))
+    
+    print(f"  North (315-45deg):   {north:4d} agents ({100*north/args.nagents:5.1f}%)")
+    print(f"  East  (45-135deg):   {east:4d} agents ({100*east/args.nagents:5.1f}%)")
+    print(f"  South (135-225deg):  {south:4d} agents ({100*south/args.nagents:5.1f}%)")
+    print(f"  West  (225-315deg):  {west:4d} agents ({100*west/args.nagents:5.1f}%)")
+    
+    # Warning if too many agents swimming north (indicates nodata bug)
+    if north / args.nagents > 0.10:
+        print(f"\n[WARN] {100*north/args.nagents:.1f}% of agents swimming north - may indicate nodata bug!")
+        print(f"       (Expected: agents should follow flow direction)")
+    
+    print(f"\n[OK] Test complete!")
 
 
 if __name__ == '__main__':

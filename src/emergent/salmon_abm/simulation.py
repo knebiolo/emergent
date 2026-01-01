@@ -1096,7 +1096,9 @@ class simulation:
             n_agents = 0
         try:
             debug_behavior = bool(getattr(self, 'debug_behavior', False))
-            build_buffers = bool(getattr(self, 'build_agents_within_buffers', False)) or debug_behavior
+            # CRITICAL: Always build buffers for collision/alignment cues to work correctly
+            # Legacy flag kept for compatibility but buffer building is now always enabled
+            build_buffers = True  # Was: bool(getattr(self, 'build_agents_within_buffers', False)) or debug_behavior
         except Exception:
             debug_behavior = False
             build_buffers = False
@@ -1223,6 +1225,15 @@ class simulation:
                             neighbors_indices[neighbors_offsets[i] : neighbors_offsets[i + 1]]
                             for i in range(n_agents)
                         ]
+                        # DEBUG: Log buffer stats to verify correct radius
+                        if not hasattr(self, '_logged_buffer_stats'):
+                            import logging
+                            buffer_sizes = [len(buf) for buf in self.agents_within_buffers]
+                            logging.getLogger(__name__).info(
+                                f"Built agents_within_buffers: radius={radius:.3f}m, "
+                                f"mean neighbors={np.mean(buffer_sizes):.1f}, max={np.max(buffer_sizes)}"
+                            )
+                            self._logged_buffer_stats = True
 
                 if need_nearest:
                     # nearest neighbor excluding self (used by collision cue)

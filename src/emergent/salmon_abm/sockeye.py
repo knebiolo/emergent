@@ -1400,9 +1400,13 @@ class simulation():
             print ('dead: %s' %(self.dead))
             sys.exit()
         
-        # Radius for nearest neighbors search
-        #TODO changed from 2 to xx
-        radius = 6.
+        # Radius for nearest neighbors search: 2 body lengths or 1 meter, whichever is smaller
+        # Fish can only sense neighbors within close proximity (biological constraint)
+        # NOTE: DEPRECATED - This sockeye.py code path should not be used!
+        # Use simulation.py's neighbor calculation instead.
+        median_body_length_m = np.nanmedian(self.length) / 1000.0  # convert mm to meters
+        two_body_lengths = 2.0 * median_body_length_m
+        radius = min(two_body_lengths, 1.0)  # Cap at 1 meter max sensing range
         
         # Find agents within the specified radius for each agent
         agents_within_radius = tree.query_ball_tree(tree, r=radius)

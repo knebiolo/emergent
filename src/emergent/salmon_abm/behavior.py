@@ -1771,9 +1771,21 @@ class behavior():
         self._safe_set_sim_attr('last_sampled_vel', self._safe_asarray(v, dtype=float, default=None))
         # sanitize sampled values (handle nodata values like -9999 and zeros)
         v = np.asarray(v, dtype=float)
-        # Filter out nodata values (-9999 is a common nodata marker in rasters)
+        
+        # FAIL LOUD: Agents should NEVER sample nodata during migration
+        # If they do, they've left the valid domain and the simulation is invalid
         nodata_mask = (np.abs(v[:, 0]) > 9990) | (np.abs(v[:, 1]) > 9990)
-        v[nodata_mask] = 0.0
+        if np.any(nodata_mask):
+            bad_agents = np.where(nodata_mask)[0]
+            bad_positions = [(self.simulation.X[i], self.simulation.Y[i]) for i in bad_agents[:5]]  # Show first 5
+            raise ValueError(
+                f"CRITICAL: {np.sum(nodata_mask)} agents sampling nodata velocity (values > 9990). "
+                f"Agents have left the valid model domain! "
+                f"First bad positions: {bad_positions}. "
+                f"Check: (1) Initial placement in start polygon, (2) Boundary cues preventing exit, "
+                f"(3) Collision/avoidance cues not pushing agents out of domain."
+            )
+        
         mags = np.linalg.norm(v, axis=-1)
         # treat nodata / enormous values as zero (no rheotaxis)
         invalid = ~np.isfinite(mags) | (mags <= 0) | (mags > 1e6)
@@ -1796,12 +1808,35 @@ class behavior():
         if dist_ds.ndim != 2 or dist_ds.size <= 1:
             return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
-        # Filter nodata values in distance raster
-        dist_nodata_mask = np.abs(dist_ds) > 9990
-        dist_ds = np.where(dist_nodata_mask, 0.0, dist_ds)
-
+        # FAIL LOUD: Check if agents are sampling nodata in distance raster
+        # This means they've left the valid model domain
         transform = getattr(self.simulation, 'vel_mag_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
         rows, cols, rr, cc, valid, dx, dy, front = self._window_common(buff, dist_ds.shape, transform)
+        
+        # Check if agents are in nodata regions (outside domain)
+        rows0 = np.asarray(rows, dtype=np.int32)
+        cols0 = np.asarray(cols, dtype=np.int32)
+        H0, W0 = dist_ds.shape
+        valid0 = (rows0 >= 0) & (cols0 >= 0) & (rows0 < H0) & (cols0 < W0)
+        
+        # Sample distance at agent positions
+        rr0 = np.clip(rows0, 0, H0 - 1)
+        cc0 = np.clip(cols0, 0, W0 - 1)
+        sampled_dist = np.full(self.simulation.num_agents, np.nan, dtype=float)
+        sampled_dist[valid0] = dist_ds[rr0[valid0], cc0[valid0]]
+        
+        # Check for nodata values (typically -9999 or very large negative)
+        nodata_mask = np.abs(sampled_dist) > 9990
+        if np.any(nodata_mask):
+            bad_agents = np.where(nodata_mask)[0]
+            bad_positions = [(self.simulation.X[i], self.simulation.Y[i]) for i in bad_agents[:5]]
+            raise ValueError(
+                f"CRITICAL: {np.sum(nodata_mask)} agents sampling nodata in distance_to raster at timestep {t}. "
+                f"Agents have left the valid model domain! "
+                f"First bad positions: {bad_positions}. "
+                f"This indicates collision/alignment cues are pushing fish out of bounds, "
+                f"or initial placement was outside valid domain."
+            )
 
         dist3d = dist_ds[rr, cc]
         dist3d = np.where(valid & np.isfinite(dist3d), dist3d, -np.inf)
@@ -2254,65 +2289,52 @@ class behavior():
         return np.nan_to_num(alignment_array)
 
     def collision_cue(self, weight):
-        try:
-            if float(weight) == 0.0:
-                return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
-        except Exception:
-            pass
-        # ensure closest_agent and nearest_neighbor_distance are populated; reconstruct when missing
+        if float(weight) == 0.0:
+            return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+            
+        # CRITICAL: Collision should ONLY consider neighbors within sensing radius (agents_within_buffers)
+        # DO NOT use simulation.closest_agent which is absolute nearest regardless of distance!
+        # Fish can only sense neighbors within ~1m, not across the entire domain.
+        
         # Use cached X/Y if available
         cached_X = getattr(self, '_cached_X', None)
         cached_Y = getattr(self, '_cached_Y', None)
-        
-        try:
-            closest_agent_arr = np.asarray(self.simulation.closest_agent, dtype=float).copy()
-        except Exception:
-            closest_agent_arr = np.full(self.simulation.num_agents, np.nan)
-        try:
-            nearest_d_arr = np.asarray(self.simulation.nearest_neighbor_distance, dtype=float).copy()
-        except Exception:
-            nearest_d_arr = np.full(self.simulation.num_agents, np.nan)
-
-        # reconstruct missing entries from agents_within_buffers (vectorized)
-        try:
-            awb = getattr(self.simulation, 'agents_within_buffers', None)
-            if awb is not None:
-                # Find agents with missing data
-                missing_mask = np.isnan(nearest_d_arr) | np.isnan(closest_agent_arr)
-                missing_indices = np.where(missing_mask)[0]
-                
-                for ag in missing_indices:
-                    nbrs = awb[ag]
-                    if nbrs is None or len(nbrs) == 0:
-                        continue
-                    # compute distances to neighbors
-                    dx = self.simulation.X[nbrs] - self.simulation.X[ag]
-                    dy = self.simulation.Y[nbrs] - self.simulation.Y[ag]
-                    dists = np.sqrt(dx**2 + dy**2)
-                    idx = int(np.argmin(dists))
-                    closest_agent_arr[ag] = nbrs[idx]
-                    nearest_d_arr[ag] = float(dists[idx])
-        except Exception:
-            pass
-
-        # update simulation attributes so other code sees reconstructed values
-        try:
-            self.simulation.closest_agent = closest_agent_arr
-            self.simulation.nearest_neighbor_distance = nearest_d_arr
-        except Exception:
-            pass
-
-        valid_indices = ~np.isnan(closest_agent_arr)
         X_arr = cached_X if cached_X is not None else self.simulation.X
         Y_arr = cached_Y if cached_Y is not None else self.simulation.Y
+        
+        # Find closest neighbor from buffer-filtered neighbors only
+        awb = getattr(self.simulation, 'agents_within_buffers', None)
+        if awb is None:
+            # No neighbor data available - return zero collision forces
+            return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        
+        closest_agent_arr = np.full(self.simulation.num_agents, np.nan)
+        nearest_d_arr = np.full(self.simulation.num_agents, np.nan)
+        
+        for ag in range(self.simulation.num_agents):
+            nbrs = awb[ag]
+            if nbrs is None or len(nbrs) == 0:
+                continue
+            # Remove self from neighbor list
+            nbrs = np.array([n for n in nbrs if n != ag])
+            if len(nbrs) == 0:
+                continue
+            # compute distances to neighbors within buffer
+            dx = X_arr[nbrs] - X_arr[ag]
+            dy = Y_arr[nbrs] - Y_arr[ag]
+            dists = np.sqrt(dx**2 + dy**2)
+            idx = int(np.argmin(dists))
+            closest_agent_arr[ag] = nbrs[idx]
+            nearest_d_arr[ag] = float(dists[idx])
         closest_X = np.full_like(X_arr, np.nan)
         closest_Y = np.full_like(Y_arr, np.nan)
-        try:
-            closest_X[valid_indices] = X_arr[closest_agent_arr[valid_indices].astype(int)]
-            closest_Y[valid_indices] = Y_arr[closest_agent_arr[valid_indices].astype(int)]
-        except Exception:
-            # fallback: leave NaNs
-            pass
+        
+        if np.any(valid_indices):
+            valid_agent_indices = closest_agent_arr[valid_indices].astype(int)
+            if np.any(valid_agent_indices >= len(X_arr)) or np.any(valid_agent_indices < 0):
+                raise ValueError(f"collision_cue: Invalid closest_agent indices detected. Max index: {valid_agent_indices.max()}, array length: {len(X_arr)}")
+            closest_X[valid_indices] = X_arr[valid_agent_indices]
+            closest_Y[valid_indices] = Y_arr[valid_agent_indices]
 
         self_2_closest = np.column_stack((closest_X.flatten() - self.simulation.X.flatten(), closest_Y.flatten() - self.simulation.Y.flatten()))
         closest_2_self = np.column_stack((self.simulation.X.flatten() - closest_X.flatten(), self.simulation.Y.flatten() - closest_Y.flatten()))
@@ -2322,14 +2344,37 @@ class behavior():
         closest_2_self = np.nan_to_num(closest_2_self)
 
         safe_distances = np.where(self.simulation.nearest_neighbor_distance > 0, self.simulation.nearest_neighbor_distance, np.nan)
-        v_hat_x = np.divide(closest_2_self[:, 0], safe_distances, out=np.zeros_like(closest_2_self[:, 0]), where=safe_distances != 0)
-        v_hat_y = np.divide(closest_2_self[:, 1], safe_distances, out=np.zeros_like(closest_2_self[:, 1]), where=safe_distances != 0)
-
-        collision_cue_x = np.divide(weight * v_hat_x, safe_distances**2, out=np.zeros_like(v_hat_x), where=safe_distances != 0)
-        collision_cue_y = np.divide(weight * v_hat_y, safe_distances**2, out=np.zeros_like(v_hat_y), where=safe_distances != 0)
+        
+        # FIX: Inverse SQUARE law, not inverse CUBE
+        # Old code divided by distance 3 times (once for unit vector, twice for inverse square)
+        # Correct: divide vector components by distance² directly
+        collision_cue_x = np.divide(weight * closest_2_self[:, 0], safe_distances**2, out=np.zeros_like(closest_2_self[:, 0]), where=safe_distances != 0)
+        collision_cue_y = np.divide(weight * closest_2_self[:, 1], safe_distances**2, out=np.zeros_like(closest_2_self[:, 1]), where=safe_distances != 0)
 
         collision_cue_mm = np.column_stack((collision_cue_x, collision_cue_y))
         np.nan_to_num(collision_cue_mm, copy=False)
+        
+        # DEBUG: Check for extreme collision forces
+        cue_mags = np.linalg.norm(collision_cue_mm, axis=1)
+        if np.any(cue_mags > 1e6):
+            extreme_count = np.sum(cue_mags > 1e6)
+            raise ValueError(f"collision_cue producing extreme magnitudes: {extreme_count} agents with mag > 1e6. Max: {np.max(cue_mags):.2e}. Min distance: {np.nanmin(safe_distances):.3f}. This indicates very close neighbors or numerical issues.")
+        
+        # VALIDATION: Collision should only create WEAK forces for typical school spacing
+        # If many agents have strong collision forces, something is wrong
+        # Calculate actual collision distances (from buffer-filtered neighbors, not absolute nearest)
+        actual_collision_dists = np.linalg.norm(closest_2_self, axis=1)
+        valid_collision_dists = actual_collision_dists[actual_collision_dists > 0]  # Exclude zeros (no neighbors)
+        
+        strong_collision = np.sum(cue_mags > weight * 0.1)  # More than 10% of weight means very close
+        if strong_collision > 0.5 * len(cue_mags) and len(valid_collision_dists) > 0:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"collision_cue: {strong_collision}/{len(cue_mags)} ({100*strong_collision/len(cue_mags):.1f}%) agents have strong collision forces. "
+                f"This suggests overly dense schooling or numerical issues. "
+                f"Collision distances (buffer-filtered): Median: {np.median(valid_collision_dists):.2f}m, Min: {np.min(valid_collision_dists):.2f}m, Max: {np.max(valid_collision_dists):.2f}m"
+            )
+        
         return collision_cue_mm
 
     def is_in_eddy(self, t):
@@ -2444,7 +2489,7 @@ class behavior():
                     'border': 50000,
                     'shallow': 100000,
                     'avoid': 25000,
-                    'collision': 50000,
+                    'collision': 50000,  # Restored after fixing inverse cube→square bug
                 }
 
             # ensure rheotaxis is always computed (used downstream)
@@ -2624,6 +2669,37 @@ class behavior():
             )
 
         if len(head_vec.shape) == 2:
+            # VALIDATION: Check for biologically impossible headings (FAIL LOUD for debugging)
+            # Sample flow velocity to detect downstream swimming
+            try:
+                # Get water velocity at agent positions
+                tx = getattr(self.simulation, 'vel_x_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+                ty = getattr(self.simulation, 'vel_y_rast_transform', None) or getattr(self.simulation, 'depth_rast_transform', None)
+                water_vx = self.simulation.sample_environment(tx, 'vel_x')
+                water_vy = self.simulation.sample_environment(ty, 'vel_y')
+                
+                # Proposed fish heading vector
+                proposed_heading = np.arctan2(head_vec[:, 1], head_vec[:, 0])
+                fish_vx = np.cos(proposed_heading)
+                fish_vy = np.sin(proposed_heading)
+                
+                # Dot product: positive means swimming WITH flow (downstream), negative means AGAINST flow (upstream)
+                dot_product = fish_vx * water_vx + fish_vy * water_vy
+                
+                # Count agents swimming downstream (dot product > 0)
+                downstream_count = np.sum(dot_product > 0.1)  # Small threshold for numerical noise
+                if downstream_count > 0:
+                    # This is expected during initialization and occasional behavior - just log, don't crash
+                    if debug_behavior:
+                        logging.getLogger(__name__).warning(
+                            'VALIDATION WARNING at t=%d: %d agents (%.1f%%) have headings aligned with flow (swimming downstream). '
+                            'Max dot product: %.3f. This may indicate cue dominance issues.',
+                            t, downstream_count, 100 * downstream_count / len(dot_product), np.max(dot_product)
+                        )
+            except Exception as e:
+                if debug_behavior:
+                    logging.getLogger(__name__).debug('Heading validation failed: %s', e)
+            
             # Fast path: if we aren't recording diagnostics/state, return the new headings now.
             if not want_record:
                 try:
