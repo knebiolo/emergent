@@ -36,8 +36,19 @@ docs\USER_CONFIG_OPTIONS.md
 - Fallbacks & dependencies: assume Docker/conda environments; prefer canonical implementations (e.g., `scipy.spatial.cKDTree`) and remove fallbacks unless user permits them.
 - Safety guard: if an edit may delete or archive code that is still imported elsewhere, fail fast and ask.
 
+# Error Handling Philosophy (CRITICAL - added 2026-01-01)
+**FAIL LOUD, NOT SILENT.** This project has a user base of 1. Silent failures waste debugging time.
+- NEVER write `try: ... except Exception: pass` — it masks bugs and makes debugging impossible
+- NEVER write silent fallbacks that hide data quality issues (e.g., defaulting to zero when velocity is nodata)
+- If something fails, let it crash with a clear error message
+- Use specific exception types when catching is necessary; always log or re-raise
+- Bad pattern: `try: x = foo() except: x = default_value` (silent data corruption)
+- Good pattern: `x = foo()` or `if x is None: raise ValueError("foo() returned None at line 123")`
+- When adding validation, fail immediately with descriptive errors: `if vel < -9000: raise ValueError(f"Nodata value {vel} in velocity field at agent {i}")`
+- User prefers loud crashes during development over silent runtime bugs
+
 # Todo/Journaling Enforcement
-- There should only be 1 journal file per day, with multiple time stamped entries.  you are to write a journal entry after completing each major to do task.
+- There should only be 1 journal file per session, with multiple time stamped entries per day.  you are to write a journal entry after completing each major to do task.
 - For any multi-step task, always use the `manage_todo_list` tool:
 	1. Create concise steps (actionable, 3-7 words).
 	2. Mark ONE step `in-progress` before edits; mark it `completed` immediately after.
@@ -45,7 +56,7 @@ docs\USER_CONFIG_OPTIONS.md
 - Session note template: include a short "What I wished I was told" bullet (helpful for handoff).
 
 # Handoff Priorities (what the next AI should read first)
-- `src/emergent/salmon_abm/sockeye.py`
+- `src/emergent/salmon_abm/sockeye.py` - this is getting deprecated, but it is where we came from.  
 
 # Test & Progress Rules
 - After edits touching code, run targeted tests for changed modules; report results as a one-line summary plus failing test names if any.

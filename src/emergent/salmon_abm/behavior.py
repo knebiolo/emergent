@@ -1771,6 +1771,9 @@ class behavior():
         self._safe_set_sim_attr('last_sampled_vel', self._safe_asarray(v, dtype=float, default=None))
         # sanitize sampled values (handle nodata values like -9999 and zeros)
         v = np.asarray(v, dtype=float)
+        # Filter out nodata values (-9999 is a common nodata marker in rasters)
+        nodata_mask = (np.abs(v[:, 0]) > 9990) | (np.abs(v[:, 1]) > 9990)
+        v[nodata_mask] = 0.0
         mags = np.linalg.norm(v, axis=-1)
         # treat nodata / enormous values as zero (no rheotaxis)
         invalid = ~np.isfinite(mags) | (mags <= 0) | (mags > 1e6)

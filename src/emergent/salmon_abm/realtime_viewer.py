@@ -44,7 +44,7 @@ try:
         QVBoxLayout,
         QOpenGLWidget,
     )
-    from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject, QThread, QRectF
+    from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject, QThread, QRectF, QPointF
     from PyQt5.QtGui import QPainter, QColor, QPen, QImage
 except Exception:
     raise
@@ -70,6 +70,13 @@ def load_positions_from_h5(path: str) -> np.ndarray:
                 collect(v, name)
 
     collect(f)
+
+    # Priority check: agent_data/X and agent_data/Y (headless runner format)
+    if 'agent_data/X' in datasets and 'agent_data/Y' in datasets:
+        X = np.array(datasets['agent_data/X']).T  # Transpose (N, T) to (T, N)
+        Y = np.array(datasets['agent_data/Y']).T
+        f.close()
+        return np.stack((X, Y), axis=2)  # Shape: (T, N, 2)
 
     # Common pattern: separate x and y coordinate datasets
     x_ds = None
@@ -121,6 +128,27 @@ def load_positions_from_h5(path: str) -> np.ndarray:
     raise RuntimeError("Could not find positions in HDF5 file; available datasets: " + ",".join(datasets.keys()))
 
 
+def load_env_from_h5(path: str):
+    """Load environment depth, x_coords, y_coords from HDF5 file.
+    
+    Returns (depth_array, x_coords, y_coords) or (None, None, None) if not found.
+    """
+    if h5py is None:
+        return None, None, None
+    try:
+        f = h5py.File(path, "r")
+        if 'environment/depth' in f and 'environment/x_coords' in f and 'environment/y_coords' in f:
+            depth = np.array(f['environment/depth'])
+            x_coords = np.array(f['environment/x_coords'])
+            y_coords = np.array(f['environment/y_coords'])
+            f.close()
+            return depth, x_coords, y_coords
+        f.close()
+    except Exception:
+        pass
+    return None, None, None
+
+
 def load_positions_from_csv(path: str) -> np.ndarray:
     import csv
 
@@ -154,7 +182,7 @@ def load_positions_from_csv(path: str) -> np.ndarray:
 
 
 class ReplayWidget(QOpenGLWidget):
-    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0, point_size: Optional[float] = None, env_depth: Optional[str] = None, allow_expand_bounds: bool = False, smooth_alpha: float = 1.0, env_clip_pct: tuple = (0.0, 100.0)):
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0, point_size: Optional[float] = None, env_depth: Optional[str] = None, allow_expand_bounds: bool = False, smooth_alpha: float = 1.0, env_clip_pct: tuple = (0.0, 100.0), env_depth_array: Optional[np.ndarray] = None, env_x_coords: Optional[np.ndarray] = None, env_y_coords: Optional[np.ndarray] = None):
         super().__init__(parent)
         if positions.ndim != 3 or positions.shape[2] != 2:
             raise ValueError("positions must be (T, N, 2)")
@@ -210,7 +238,45 @@ class ReplayWidget(QOpenGLWidget):
         self._smoothed_positions = None
         # optional background image (QImage) rendered to the world extents
         self._bg_qimage = None
-        if env_depth is not None:
+        
+        # Try to load depth from arrays first, then from file
+        if env_depth_array is not None and env_x_coords is not None and env_y_coords is not None:
+            try:
+                a = np.array(env_depth_array, dtype=float)
+                # detect nodata-like values
+                nodata_mask = np.isnan(a) | (a < -1e3)
+                valid_vals = a[~nodata_mask]
+                if valid_vals.size > 0:
+                    # normalize to 0-255
+                    lo_pct, hi_pct = env_clip_pct if isinstance(env_clip_pct, (list, tuple)) else (0.0, 100.0)
+                    amin = float(np.nanpercentile(valid_vals, max(0.0, lo_pct)))
+                    amax = float(np.nanpercentile(valid_vals, min(100.0, hi_pct)))
+                    if amax <= amin:
+                        amax = amin + 1.0
+                    norm = (a - amin) / (amax - amin)
+                    norm = np.clip(norm, 0.0, 1.0)
+                    img8 = (np.nan_to_num(norm) * 255.0).astype(np.uint8)
+                    h, w = img8.shape
+                    # build RGBA
+                    rgb = np.dstack([img8, img8, img8])
+                    alpha = (~nodata_mask).astype(np.uint8) * 255
+                    rgba = np.dstack([rgb, alpha])
+                    qimg = QImage(rgba.data.tobytes(), w, h, 4 * w, QImage.Format_RGBA8888)
+                    # Compute bbox from x/y coords
+                    env_xmin = float(np.min(env_x_coords))
+                    env_xmax = float(np.max(env_x_coords))
+                    env_ymin = float(np.min(env_y_coords))
+                    env_ymax = float(np.max(env_y_coords))
+                    self._env_bbox = (env_xmin, env_xmax, env_ymin, env_ymax)
+                    self._bg_qimage = qimg.copy()
+                    # Lock view to environment bounds
+                    self.xmin, self.xmax, self.ymin, self.ymax = env_xmin, env_xmax, env_ymin, env_ymax
+                    self._live_fixed_bounds = True
+                    print(f"Loaded depth from arrays: {a.shape}, bbox={self._env_bbox}")
+            except Exception as e:
+                print(f"Failed to load depth from arrays: {e}")
+                self._bg_qimage = None
+        elif env_depth is not None:
             try:
                 from emergent.salmon_abm import io as _io
                 arr, transform, crs = _io.enviro_import(env_depth)
@@ -281,6 +347,84 @@ class ReplayWidget(QOpenGLWidget):
             self.setUpdatesEnabled(True)
         except Exception:
             pass
+        
+        # Mouse interaction state
+        self._mouse_drag_start = None
+        self._pan_x_start = 0.0
+        self._pan_y_start = 0.0
+        self.setMouseTracking(False)
+
+    def mousePressEvent(self, event):
+        """Start pan on left-click drag."""
+        if event.button() == Qt.LeftButton:
+            self._mouse_drag_start = (event.x(), event.y())
+            self._pan_x_start = self._pan_x
+            self._pan_y_start = self._pan_y
+            self.setCursor(Qt.ClosedHandCursor)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        """Pan view during drag."""
+        if self._mouse_drag_start is not None:
+            dx = event.x() - self._mouse_drag_start[0]
+            dy = event.y() - self._mouse_drag_start[1]
+            # Convert pixel movement to world fraction
+            w = self.width()
+            h = self.height()
+            if w > 0 and h > 0:
+                self._pan_x = self._pan_x_start + dx / w  # + instead of - to fix left/right reversal
+                self._pan_y = self._pan_y_start - dy / h
+                self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        """End pan drag."""
+        if event.button() == Qt.LeftButton:
+            self._mouse_drag_start = None
+            self.setCursor(Qt.ArrowCursor)
+        event.accept()
+
+    def wheelEvent(self, event):
+        """Zoom with mouse wheel."""
+        # Get wheel delta (positive = zoom in, negative = zoom out)
+        delta = event.angleDelta().y()
+        if delta != 0:
+            # Adjust zoom factor (pad) - smaller pad = more zoom in
+            zoom_factor = 0.9 if delta > 0 else 1.1  # Inverted: scroll up = zoom in = smaller pad
+            self._pad = max(0.1, min(20.0, self._pad * zoom_factor))
+            self.update()
+        event.accept()
+
+    def _draw_fish_body(self, painter, cx, cy, heading_deg, base_radius, scale):
+        """Draw a fish body as a head circle with a line extending backward.
+        
+        Args:
+            cx, cy: screen coordinates of head center
+            heading_deg: direction fish is facing in degrees
+            base_radius: radius of head circle in screen pixels
+            scale: screen pixels per world unit (for scaling the body line)
+        """
+        # Draw head circle
+        painter.drawEllipse(QRectF(cx - base_radius, cy - base_radius, 2 * base_radius, 2 * base_radius))
+        
+        # Draw body as a line extending backward from the head
+        # Line length is 2.5 meters in world coordinates, scaled to screen pixels
+        line_length_world = 2.5  # meters
+        line_length_screen = line_length_world * scale
+        
+        # Convert heading to radians (heading is direction of movement)
+        heading_rad = np.radians(heading_deg)
+        
+        # End point of line (backward from heading direction)
+        # Note: Screen Y-axis is inverted (positive Y goes down), so we negate the sin component
+        tail_x = cx - line_length_screen * np.cos(heading_rad)
+        tail_y = cy + line_length_screen * np.sin(heading_rad)  # + instead of - for inverted Y
+        
+        # Draw the line
+        pen = QPen(QColor(220, 30, 30))
+        pen.setWidthF(max(1.5, base_radius * 0.3))  # Line thickness
+        painter.setPen(pen)
+        painter.drawLine(QPointF(cx, cy), QPointF(tail_x, tail_y))
 
     def _tick(self):
         if not getattr(self, 'playing', False):
@@ -293,11 +437,13 @@ class ReplayWidget(QOpenGLWidget):
         self.update()
 
     def start(self):
+        print(f"Start called: frame={self.frame}, T={self.T}")
         if self.frame >= self.T - 1:
             self.frame = 0
         self.playing = True
         if not self.timer.isActive():
             self.timer.start()
+            print(f"Timer started with interval {self.timer.interval()}ms")
 
     def pause(self):
         self.playing = False
@@ -417,9 +563,9 @@ class ReplayWidget(QOpenGLWidget):
             brush_col = QColor(220, 30, 30)
             painter.setBrush(brush_col)
             # default radius scales with canvas; override if user provided `point_size`
-            r = max(1, int(min(w, h) * 0.002))
+            r = max(2, int(min(w, h) * 0.002))  # Head size: 0.2% of screen
             if self._point_size is not None:
-                r = max(1, int(self._point_size))
+                r = max(2, int(self._point_size))
             if getattr(self, '_debug_force_big', False):
                 r = max(r, int(min(w, h) * 0.01))
 
@@ -460,7 +606,7 @@ class ReplayWidget(QOpenGLWidget):
                 
                 # Compute heading from velocity (difference between current and previous position)
                 heading_deg = 0.0
-                if self.frame > 0:
+                if self.frame > 0 and self.frame < len(self.positions):
                     prev_pts = self.positions[self.frame - 1]
                     if i < prev_pts.shape[0]:
                         prev_x, prev_y = prev_pts[i]
@@ -470,8 +616,8 @@ class ReplayWidget(QOpenGLWidget):
                             if abs(dx) > 1e-6 or abs(dy) > 1e-6:
                                 heading_deg = np.degrees(np.arctan2(dy, dx))
                 
-                # Draw fish body with flapping tail
-                self._draw_fish_body(painter, sxp, syp, heading_deg, r)
+                # Draw fish body with line
+                self._draw_fish_body(painter, sxp, syp, heading_deg, r, s)
 
             painter.setPen(QPen(QColor(0, 0, 0)))
             # display a live frame counter when receiving live updates (T often == 1)
@@ -945,32 +1091,9 @@ class MainWindow(QMainWindow):
         hl.addWidget(btn_restart)
         hl.addWidget(lbl_speed)
         hl.addWidget(self.speed_slider)
-
-        # zoom and pan controls
-        lbl_zoom = QLabel('Zoom')
-        self.zoom_slider = QSlider(Qt.Horizontal)
-        self.zoom_slider.setRange(50, 200)
-        self.zoom_slider.setValue(int(self._pad * 100))
-        self.zoom_slider.valueChanged.connect(self._on_zoom)
-
-        lbl_panx = QLabel('Pan X')
-        self.panx_slider = QSlider(Qt.Horizontal)
-        self.panx_slider.setRange(-200, 200)
-        self.panx_slider.setValue(0)
-        self.panx_slider.valueChanged.connect(self._on_panx)
-
-        lbl_pany = QLabel('Pan Y')
-        self.pany_slider = QSlider(Qt.Horizontal)
-        self.pany_slider.setRange(-200, 200)
-        self.pany_slider.setValue(0)
-        self.pany_slider.valueChanged.connect(self._on_pany)
-
-        hl.addWidget(lbl_zoom)
-        hl.addWidget(self.zoom_slider)
-        hl.addWidget(lbl_panx)
-        hl.addWidget(self.panx_slider)
-        hl.addWidget(lbl_pany)
-        hl.addWidget(self.pany_slider)
+        hl.addStretch()
+        
+        # Mouse controls: Left-click drag to pan, scroll wheel to zoom
 
         container = QWidget()
         layout = QVBoxLayout()
@@ -1033,24 +1156,6 @@ class MainWindow(QMainWindow):
         mult = v / 100.0
         self.viewer.set_speed(mult if mult > 0 else 1.0)
 
-    def _on_zoom(self, v: int):
-        self._pad = max(0.1, v / 100.0)
-        if hasattr(self.viewer, '_pad'):
-            self.viewer._pad = self._pad
-        self.viewer.update()
-
-    def _on_panx(self, v: int):
-        self._pan_x = float(v) / 100.0
-        if hasattr(self.viewer, '_pan_x'):
-            self.viewer._pan_x = self._pan_x
-        self.viewer.update()
-
-    def _on_pany(self, v: int):
-        self._pan_y = float(v) / 100.0
-        if hasattr(self.viewer, '_pan_y'):
-            self.viewer._pan_y = self._pan_y
-        self.viewer.update()
-
 
 def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
     """Safely replace the viewer widget in the main window without collapsing layout.
@@ -1076,6 +1181,25 @@ def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
             pass
         win.viewer = new_widget
         new_widget.show()
+        
+        # Reconnect buttons to the new viewer
+        try:
+            # Find the buttons and reconnect them
+            for child in win.centralWidget().findChildren(QPushButton):
+                if child.text() == "Start":
+                    child.clicked.disconnect()
+                    child.clicked.connect(new_widget.start)
+                elif child.text() == "Pause":
+                    child.clicked.disconnect()
+                    child.clicked.connect(new_widget.pause)
+                elif child.text() == "Stop":
+                    child.clicked.disconnect()
+                    child.clicked.connect(new_widget.stop)
+                elif child.text() == "Restart":
+                    child.clicked.disconnect()
+                    child.clicked.connect(new_widget.restart)
+        except Exception as e:
+            print(f"Warning: Could not reconnect buttons: {e}")
     except Exception:
         # best-effort fallback
         try:
@@ -1652,40 +1776,68 @@ def main(argv=None):
         print("Failed to load positions:", e)
         return
 
+    # Try to load environment depth from the HDF5 file
+    env_depth_array, env_x_coords, env_y_coords = None, None, None
+    if path.endswith('.h5') or path.endswith('.hdf5'):
+        try:
+            depth, x_coords, y_coords = load_env_from_h5(path)
+            if depth is not None:
+                env_depth_array = depth
+                env_x_coords = x_coords
+                env_y_coords = y_coords
+                print(f"Loaded environment from HDF5: depth shape {depth.shape}")
+        except Exception as ex:
+            print(f"Could not load environment from HDF5: {ex}")
+
     # create window and pick renderer based on agent count
     win = MainWindow(positions, pad=args.view_pad, force_vbo=args.force_vbo, point_size=args.point_size)
-    # if depth background requested, replace viewer with one that has the background
-    try:
-        if args.env_depth is not None:
-            try:
-                env_clip_pct = None
-                if args.env_clip:
-                    try:
-                        parts = [float(p) for p in args.env_clip.split(',')]
-                        if len(parts) >= 2:
-                            env_clip_pct = (parts[0], parts[1])
-                    except Exception:
-                        env_clip_pct = None
-                rv = ReplayWidget(positions, pad=args.view_pad, point_size=args.point_size, env_depth=args.env_depth, allow_expand_bounds=args.allow_expand_bounds, smooth_alpha=args.smooth_alpha, env_clip_pct=env_clip_pct)
-                swap_viewer_in_main(win, rv)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    
+    # Determine agent count for renderer selection
     try:
         Nagents = positions.shape[1]
     except Exception:
         Nagents = 0
-    use_gl_mode = args.use_gl or (Nagents >= 1000)
-    if use_gl_mode:
+    
+    # Use ReplayWidget with fish bodies for better visualization (up to 5000 agents)
+    # For very large simulations, fallback to GLViewer
+    if Nagents < 5000:
         try:
-            glw = GLViewer(positions, pad=win._pad, force_vbo=win._force_vbo, point_size=win._point_size)
+            env_clip_pct = None
+            if args.env_clip:
+                try:
+                    parts = [float(p) for p in args.env_clip.split(',')]
+                    if len(parts) >= 2:
+                        env_clip_pct = (parts[0], parts[1])
+                except Exception:
+                    env_clip_pct = None
+            # Pass depth arrays if loaded from HDF5
+            rv = ReplayWidget(
+                positions, 
+                pad=args.view_pad, 
+                point_size=args.point_size, 
+                env_depth=args.env_depth, 
+                allow_expand_bounds=args.allow_expand_bounds, 
+                smooth_alpha=args.smooth_alpha, 
+                env_clip_pct=env_clip_pct,
+                env_depth_array=env_depth_array,
+                env_x_coords=env_x_coords,
+                env_y_coords=env_y_coords
+            )
+            swap_viewer_in_main(win, rv)
+        except Exception as ex:
+            logger.exception('Failed to create ReplayWidget')
+    else:
+        # Fallback to GLViewer for very large simulations (5000+ agents)
+        use_gl_mode = args.use_gl or (Nagents >= 5000)
+        if use_gl_mode:
             try:
-                swap_viewer_in_main(win, glw)
+                glw = GLViewer(positions, pad=win._pad, force_vbo=win._force_vbo, point_size=win._point_size)
+                try:
+                    swap_viewer_in_main(win, glw)
+                except Exception:
+                    logger.exception('Failed to swap GLViewer into MainWindow (file mode)')
             except Exception:
-                logger.exception('Failed to swap GLViewer into MainWindow (file mode)')
-        except Exception:
-            logger.exception('GLViewer init failed in file mode; using fallback')
+                logger.exception('GLViewer init failed in file mode; using fallback')
 
     win.resize(1000, 700)
     win.show()
