@@ -544,10 +544,10 @@ def run_headless(args):
                                     'low_speed': 1500,
                                     'wave_drag': 0,
                                     'refugia': 50000,
-                                    'border': 200000,  # Strong boundary protection
-                                    'shallow': 500000,  # Must DOMINATE border to prevent cove trapping
+                                    'border': 200000,  # Was working at this value
+                                    'shallow': 500000,  # Distance-based, only affects agents near shallow water
                                     'avoid': 25000,
-                                    'collision': 5000,  # Reduced 5x - fish can school densely like real salmon
+                                    'collision': 10,  # Extremely low - fish can school very tightly within 1m buffer
                                 }
                             # compute cues via behavior helper
                             b = sim._behavior

@@ -1804,6 +1804,18 @@ class behavior():
         # sanitize sampled values (handle nodata values like -9999 and zeros)
         v = np.asarray(v, dtype=float)
         
+        # DEBUG: Print flow direction for first agent to verify upstream direction
+        if hasattr(self.simulation, '_rheo_debug_printed'):
+            pass
+        else:
+            try:
+                if len(v) > 0 and np.isfinite(v[0, 0]) and np.isfinite(v[0, 1]):
+                    raw_x, raw_y = x_vel[0] / sign, y_vel[0] / sign  # Original flow before sign flip
+                    print(f"RHEO DEBUG: Raw flow=(x={raw_x:.3f}, y={raw_y:.3f}), sign={sign}, rheotaxis will be=(x={v[0,0]:.3f}, y={v[0,1]:.3f})")
+                    self.simulation._rheo_debug_printed = True
+            except Exception:
+                pass
+        
         # FAIL LOUD: Agents should NEVER sample nodata during migration
         # If they do, they've left the valid domain and the simulation is invalid
         nodata_mask = (np.abs(v[:, 0]) > 9990) | (np.abs(v[:, 1]) > 9990)
@@ -1928,7 +1940,7 @@ class behavior():
         if float(weight) == 0.0:
             return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
         
-        buff = 2
+        buff = 2  # Keep realistic 2m sensing range
         depth_ds = np.asarray(self._get_env('environment/depth', default=np.zeros((1, 1))), dtype=float)
         if depth_ds.ndim != 2 or depth_ds.size <= 1:
             return np.zeros((self.simulation.num_agents, 2), dtype=float)
@@ -1947,19 +1959,57 @@ class behavior():
         front_any = np.any(front_cell & valid, axis=(1, 2))
         front_mult = np.where(front_any[:, np.newaxis, np.newaxis], front_cell, True).astype(np.float64)
 
-        min_depth = np.asarray(self.simulation.too_shallow, dtype=float).reshape((-1,))
-        depth_mult = (depths < min_depth[:, np.newaxis, np.newaxis]).astype(np.float64)
-        depth_mult *= valid.astype(np.float64)
-
-        dist2 = dx * dx + dy * dy
-        # Clamp minimum distance to prevent singularity in inverse square force
-        # With typical weight ~75000, need dist2 >= 0.1 to keep force < 7.5e6
-        # Min distance 0.5m => dist2_min = 0.25
-        dist2 = np.where(dist2 < 0.25, 0.25, dist2)
-        x_force = (float(weight) * dx / dist2) * depth_mult * front_mult
-        y_force = (float(weight) * dy / dist2) * depth_mult * front_mult
-        total_x_force = np.nansum(x_force, axis=(1, 2))
-        total_y_force = np.nansum(y_force, axis=(1, 2))
+        # Gradient repulsion: "start feeling shallow when wave drag isn't 1.0 and it gets louder until too_shallow"
+        # Upper threshold: 5x body_depth (start feeling it earlier than wave drag, for safety margin)
+        # Lower threshold: too_shallow (minimum safe depth, ~0.5x body depth)
+        # Repulsion strength scales from 0 at upper threshold to maximum at too_shallow
+        too_shallow = np.asarray(self.simulation.too_shallow, dtype=float).reshape((-1,))
+        body_depth_m = np.asarray(self.simulation.body_depth, dtype=float).reshape((-1,)) / 100.0
+        upper_threshold = body_depth_m * 5.0  # Start repulsion at 5x body depth (more margin than wave drag)
+        
+        # Mask invalid cells and cells behind agent
+        masked_depths = np.where((valid.astype(float) * front_mult) > 0, depths, np.inf)
+        
+        # Find shallowest cell for each agent (always repel from worst direction)
+        shallowest_idx = np.argmin(masked_depths.reshape(masked_depths.shape[0], -1), axis=1)
+        row_idx = shallowest_idx // masked_depths.shape[2]
+        col_idx = shallowest_idx % masked_depths.shape[2]
+        
+        # Calculate gradient force from shallowest cell
+        n_agents = masked_depths.shape[0]
+        total_x_force = np.zeros(n_agents)
+        total_y_force = np.zeros(n_agents)
+        
+        for i in range(n_agents):
+            shallowest_depth = masked_depths[i, row_idx[i], col_idx[i]]
+            
+            # Only apply force if depth is below upper threshold (5x body depth)
+            if shallowest_depth < upper_threshold[i] and shallowest_depth < np.inf:
+                dx_min = dx[i, row_idx[i], col_idx[i]]
+                dy_min = dy[i, row_idx[i], col_idx[i]]
+                dist2 = dx_min * dx_min + dy_min * dy_min
+                dist2 = max(dist2, 0.25)  # Clamp to prevent singularity
+                
+                # Gradient scaling: 0 at upper_threshold, increasing to max at too_shallow
+                # depth_ratio = 0 when depth=upper_threshold, = 1 when depth=too_shallow, >1 when shallower
+                depth_range = upper_threshold[i] - too_shallow[i]
+                if depth_range > 0.001:  # Avoid division by zero
+                    depth_ratio = (upper_threshold[i] - shallowest_depth) / depth_range
+                    depth_ratio = max(0.0, depth_ratio)  # No upper cap - let it scale arbitrarily high when very shallow
+                else:
+                    depth_ratio = 1.0
+                
+                # Apply force scaled by gradient (louder and louder as you get shallower)
+                # Cubic ramp-up for VERY strong warning when approaching too_shallow
+                force_scale = depth_ratio ** 3
+                total_x_force[i] = float(weight) * force_scale * dx_min / dist2
+                total_y_force[i] = float(weight) * force_scale * dy_min / dist2
+        
+        # DIAGNOSTIC: Print when agents feel shallow cue
+        active = (total_x_force != 0) | (total_y_force != 0)
+        if np.any(active):
+            max_force = np.max(np.sqrt(total_x_force**2 + total_y_force**2))
+            print(f"SHALLOW: {np.sum(active)}/100 agents, max force={max_force:.0f}")
         
         # FAIL LOUD: Check for astronomical forces from nodata/singularities
         result = np.column_stack((total_x_force, total_y_force))
@@ -2310,51 +2360,23 @@ class behavior():
         if float(weight) == 0.0:
             return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
             
-        # CRITICAL: Collision should ONLY consider neighbors within sensing radius (agents_within_buffers)
-        # DO NOT use simulation.closest_agent which is absolute nearest regardless of distance!
-        # Fish can only sense neighbors within ~1m, not across the entire domain.
+        # Use pre-computed closest_agent from simulation (already considers buffer radius)
+        # This is vectorized and fast - DO NOT replace with Python loops!
         
-        # Use cached X/Y if available
-        cached_X = getattr(self, '_cached_X', None)
-        cached_Y = getattr(self, '_cached_Y', None)
-        X_arr = cached_X if cached_X is not None else self.simulation.X
-        Y_arr = cached_Y if cached_Y is not None else self.simulation.Y
+        # Filter out invalid indices (where closest_agent is nan)
+        valid_indices = ~np.isnan(self.simulation.closest_agent)
         
-        # Find closest neighbor from buffer-filtered neighbors only
-        awb = getattr(self.simulation, 'agents_within_buffers', None)
-        if awb is None:
-            # No neighbor data available - return zero collision forces
-            return np.zeros((int(self.simulation.num_agents), 2), dtype=float)
+        # Initialize arrays for closest X and Y positions
+        closest_X = np.full_like(self.simulation.X, np.nan)
+        closest_Y = np.full_like(self.simulation.Y, np.nan)
         
-        closest_agent_arr = np.full(self.simulation.num_agents, np.nan)
-        nearest_d_arr = np.full(self.simulation.num_agents, np.nan)
-        
-        for ag in range(self.simulation.num_agents):
-            nbrs = awb[ag]
-            if nbrs is None or len(nbrs) == 0:
-                continue
-            # Remove self from neighbor list
-            nbrs = np.array([n for n in nbrs if n != ag])
-            if len(nbrs) == 0:
-                continue
-            # compute distances to neighbors within buffer
-            dx = X_arr[nbrs] - X_arr[ag]
-            dy = Y_arr[nbrs] - Y_arr[ag]
-            dists = np.sqrt(dx**2 + dy**2)
-            idx = int(np.argmin(dists))
-            closest_agent_arr[ag] = nbrs[idx]
-            nearest_d_arr[ag] = float(dists[idx])
-        closest_X = np.full_like(X_arr, np.nan)
-        closest_Y = np.full_like(Y_arr, np.nan)
-        
-        valid_indices = ~np.isnan(closest_agent_arr)
+        # Extract the closest X and Y positions using the valid indices
         if np.any(valid_indices):
-            valid_agent_indices = closest_agent_arr[valid_indices].astype(int)
-            if np.any(valid_agent_indices >= len(X_arr)) or np.any(valid_agent_indices < 0):
-                raise ValueError(f"collision_cue: Invalid closest_agent indices detected. Max index: {valid_agent_indices.max()}, array length: {len(X_arr)}")
-            closest_X[valid_indices] = X_arr[valid_agent_indices]
-            closest_Y[valid_indices] = Y_arr[valid_agent_indices]
+            valid_agent_indices = self.simulation.closest_agent[valid_indices].astype(int)
+            closest_X[valid_indices] = self.simulation.X[valid_agent_indices]
+            closest_Y[valid_indices] = self.simulation.Y[valid_agent_indices]
 
+        # calculate vector pointing from neighbor to self
         self_2_closest = np.column_stack((closest_X.flatten() - self.simulation.X.flatten(), closest_Y.flatten() - self.simulation.Y.flatten()))
         closest_2_self = np.column_stack((self.simulation.X.flatten() - closest_X.flatten(), self.simulation.Y.flatten() - closest_Y.flatten()))
 
@@ -2524,7 +2546,7 @@ class behavior():
             refugia = self.find_nearest_refuge(default_weights['refugia'])
             border = self.border_cue(default_weights['border'], t)
             shallow = self.shallow_cue(default_weights['shallow'])
-            # TEMPORARY: Disable avoid cue to isolate other failures
+            # TEMPORARY: Disable avoid cue - memory initialization bug with nodata
             avoid = np.zeros((self.simulation.num_agents, 2), dtype=float)
             # avoid = self.already_been_here(default_weights['avoid'], t)
             collision = self.collision_cue(default_weights['collision'])

@@ -388,9 +388,9 @@ class simulation:
                     hdf5_io.write_dataset(self.db, 'metadata/start_polygon', os.path.basename(start_polygon))
                 except Exception:
                     pass
-            except Exception:
-                # do not fail initialization for missing or invalid polygon
-                pass
+            except Exception as e:
+                # FAIL LOUD: polygon sampling is critical for correct initialization
+                raise RuntimeError(f'Failed to sample initial positions from start polygon {start_polygon}: {e}') from e
 
         # write agent attributes into HDF5 static datasets
         hdf5_io.write_dataset(self.db, "agent_data/sex", self.sex)
@@ -1116,9 +1116,11 @@ class simulation:
 
                 interval_steps = int(getattr(self, 'neighbor_update_interval_steps', 0) or 0)
                 if interval_steps <= 0:
-                    seconds = float(getattr(self, 'neighbor_update_seconds', 2.0))
+                    # PERFORMANCE: For dense schools (5000+ agents), rebuild only every 10 seconds
+                    # to avoid O(N²) query_ball_point every timestep
+                    seconds = float(getattr(self, 'neighbor_update_seconds', 10.0))  # Was 2.0
                     if not np.isfinite(seconds) or seconds <= 0.0:
-                        seconds = 2.0
+                        seconds = 10.0
                     interval_steps = max(1, int(round(seconds / float(dt))))
 
                 last_step = getattr(self, '_neighbor_last_build_step', None)
@@ -1186,8 +1188,10 @@ class simulation:
                     # Count neighbors excluding the self entry (assumes each list includes self).
                     self.neighbor_counts = np.maximum(0, counts - 1).astype(np.int32, copy=False)
 
-                    # Legacy compatibility: only build per-agent buffers when requested.
-                    if build_buffers:
+                    # Legacy compatibility: Build agents_within_buffers ONLY when explicitly requested
+                    # Most cues (alignment/cohesion) use CSR format directly for speed
+                    # Only build the list-of-arrays when needed (e.g., debug or legacy code)
+                    if build_buffers and getattr(self, 'force_legacy_buffer_lists', False):
                         self.agents_within_buffers = [
                             neighbors_indices[neighbors_offsets[i] : neighbors_offsets[i + 1]]
                             for i in range(n_agents)
@@ -1283,12 +1287,40 @@ class simulation:
         # apply movement (support both (N,2) and (N,) displacements)
         dxdy = np.asarray(dxdy)
         if dxdy.shape == (self.num_agents, 2):
-            self.X = self.X + dxdy[:, 0]
-            self.Y = self.Y + dxdy[:, 1]
+            new_X = self.X + dxdy[:, 0]
+            new_Y = self.Y + dxdy[:, 1]
         else:
             d = dxdy.reshape((-1,))
-            self.X = self.X + d
-            self.Y = self.Y + d
+            new_X = self.X + d
+            new_Y = self.Y + d
+        
+        # HARD BOUNDARY CHECK: Prevent movement to positions too close to edge
+        # Fish can turn on a dime - enforce physical constraint at minimum safe distance
+        min_edge_distance_m = float(getattr(self, 'min_edge_distance_m', 0.01))
+        if min_edge_distance_m > 0:
+            # Sample distance_to at proposed new positions
+            dist_ds = self.get_cached_dataset('environment/distance_to', default=None)
+            if dist_ds is not None:
+                dist_ds = np.asarray(dist_ds)
+                transform = getattr(self, 'depth_rast_transform', None)
+                if transform is not None:
+                    from emergent.salmon_abm.utils import geo_to_pixel
+                    rows, cols = geo_to_pixel(new_X, new_Y, transform)
+                    H, W = dist_ds.shape
+                    valid = (rows >= 0) & (cols >= 0) & (rows < H) & (cols < W)
+                    rr = np.clip(rows, 0, H - 1)
+                    cc = np.clip(cols, 0, W - 1)
+                    dist_at_new_pos = np.full(self.num_agents, np.nan, dtype=float)
+                    dist_at_new_pos[valid] = dist_ds[rr[valid], cc[valid]]
+                    
+                    # Reject movements that would place agent too close to boundary
+                    too_close = (dist_at_new_pos < min_edge_distance_m) & np.isfinite(dist_at_new_pos)
+                    if np.any(too_close):
+                        new_X = np.where(too_close, self.X, new_X)
+                        new_Y = np.where(too_close, self.Y, new_Y)
+        
+        self.X = new_X
+        self.Y = new_Y
 
         # X/Y changed; invalidate any cached samples from the pre-movement state.
         try:

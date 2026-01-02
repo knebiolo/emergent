@@ -153,6 +153,40 @@ After each phase:
 
 ---
 
+## Phase 4: Performance Optimization (Priority 4) 🟢
+**Target:** Vectorize remaining Python loops in simulation.py for production-scale runs
+
+**Files:** `simulation.py`
+
+**Focus Areas:**
+1. **Neighbor graph construction** (lines ~1160-1195)
+   - `tree.query_ball_point()` is fast (cKDTree C implementation)
+   - **BOTTLENECK:** Lines 1176-1183 - Python loop converting neighbor lists to CSR format
+   - With 5000 agents × 5000 neighbors = 25M iterations
+   - **CURRENT FIX:** Disabled `agents_within_buffers` list comprehension (line 1191-1195)
+   - Alignment/cohesion use CSR directly, but may need Numba kernel for CSR construction
+   
+2. **Other Python loops in simulation.py** (from 2025-12-31 session notes)
+   - Line 816: Unknown loop (needs profiling)
+   - Line 1023: Unknown loop (needs profiling)
+   - Line 1516: Unknown loop (needs profiling)
+
+**Action Items:**
+- [ ] Profile simulation.py to identify remaining bottlenecks
+- [ ] Add Numba JIT kernel for CSR neighbor list flattening (lines 1176-1183)
+- [ ] Consider caching neighbor graph for multiple timesteps (already implemented with `neighbor_update_seconds`)
+- [ ] Vectorize loops at lines 816, 1023, 1516 (identify first via profiling)
+- [ ] Benchmark: Target 15k+ timesteps/second for 5000-agent runs
+
+**Expected Timeline:** 1-2 sessions
+
+**Context:** 
+- Yesterday optimized movement.py and fatigue.py with Numba (10-30x speedup)
+- simulation.py neighbor building was never optimized - still pure Python loops
+- Production runs (5000 agents, 900 steps) now bottlenecked on neighbor graph construction
+
+---
+
 ## What I Wish I Was Told
 
 - The -9999 nodata bug would have been caught in 30 seconds if `rheo_cue()` had:

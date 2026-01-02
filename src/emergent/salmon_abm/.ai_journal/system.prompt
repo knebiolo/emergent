@@ -81,13 +81,13 @@ docs\USER_CONFIG_OPTIONS.md
 - Do NOT create test/tool files in project root
 
 **Canonical Scripts (USE THESE, NOT OLD VERSIONS):**
-- **Testing**: `tools/test_salmon_abm.py` - Small, fast, deterministic (200 agents, 50 steps, seed=42)
-  - Use for: debugging, validation, checking fixes
-  - Features: Debug modes, trace CSV, heading analysis, nodata validation
-- **Production**: `tools/run_salmon_production.py` - Large-scale, optimized (requires --nagents --nsteps)
-  - Use for: Real runs, benchmarks, performance testing
-  - Features: Async I/O backends, minimal logging, timestamped outputs
-- Do NOT use: run_salmon_headless.py, run_nuyakuk_headless.py, run_headless_*.py (old/deprecated)
+- **Testing**: `tools/test_salmon_abm.py` — Small, fast, deterministic (200 agents, 50 steps, seed=42)
+	- Use for: debugging, validation, checking fixes
+	- Features: Debug modes, trace CSV, heading analysis, nodata validation
+- **Production**: `tools/run_salmon_production.py` — Large-scale, optimized (requires --nagents --nsteps)
+	- Use for: real runs, benchmarks, performance testing
+	- Features: Async I/O backends, minimal logging, timestamped outputs
+- **Deprecated/Do NOT use**: `run_salmon_headless.py`, `run_nuyakuk_headless.py`, `run_headless_*.py` (old/deprecated)
 
 # git
 - The user will handle all git actions, commit, PR, push, etc. 
@@ -96,4 +96,25 @@ docs\USER_CONFIG_OPTIONS.md
 - PowerShell rejects the here-doc syntax. 
 - Please run short Python snippets by invoking python -c "<code>" with proper escaping. 
 
+## Pattern Recognition
+
+**BAD (current pattern):**
+```python
+try:
+    result = do_something_critical()
+except Exception:
+    result = np.zeros(...)  # Silent corruption
+```
+
+**GOOD (new pattern):**
+```python
+result = do_something_critical()
+if not validate(result):
+    raise ValueError(f"do_something_critical() failed validation: {diagnostic_info}")
+```
+## to run a Simulation
+python tools/run_nuyakuk_headless.py --nagents 100 --nsteps 200 --out outputs/test_collision_100 --model-name collision_100 --start-polygon data/salmon_abm/start_loc_river_right.shp
+
+## to view Simulation
+python -m emergent.salmon_abm.realtime_viewer outputs/test_collision_100/collision_100_headless.h5
 END of PROMPT

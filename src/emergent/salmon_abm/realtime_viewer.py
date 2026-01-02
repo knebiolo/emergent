@@ -158,12 +158,12 @@ def load_positions_from_csv(path: str) -> np.ndarray:
     if not rows:
         raise RuntimeError("Empty CSV")
     cols = [c.lower() for c in rows[0].keys()]
-    has_t = any(c in ("t", "time") for c in cols)
+    has_t = any(c in ("t", "time", "timestep") for c in cols)
     has_agent = any(c in ("agent", "id") for c in cols)
     has_x = any(c in ("x", "lon", "longitude") for c in cols)
     has_y = any(c in ("y", "lat", "latitude") for c in cols)
     if has_t and has_agent and has_x and has_y:
-        times = sorted({float(r[[k for k in r.keys() if k.lower() in ("t", "time")][0]]) for r in rows})
+        times = sorted({float(r[[k for k in r.keys() if k.lower() in ("t", "time", "timestep")][0]]) for r in rows})
         agents = sorted({int(r[[k for k in r.keys() if k.lower() in ("agent", "id")][0]]) for r in rows})
         T = len(times)
         N = len(agents)
@@ -171,7 +171,7 @@ def load_positions_from_csv(path: str) -> np.ndarray:
         idx_agent = {a: i for i, a in enumerate(agents)}
         arr = np.full((T, N, 2), np.nan, dtype=float)
         for r in rows:
-            t = float(r[[k for k in r.keys() if k.lower() in ("t", "time")][0]])
+            t = float(r[[k for k in r.keys() if k.lower() in ("t", "time", "timestep")][0]])
             a = int(r[[k for k in r.keys() if k.lower() in ("agent", "id")][0]])
             x = float(r[[k for k in r.keys() if k.lower() in ("x", "lon", "longitude")][0]])
             y = float(r[[k for k in r.keys() if k.lower() in ("y", "lat", "latitude")][0]])
