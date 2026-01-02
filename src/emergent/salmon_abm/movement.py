@@ -727,6 +727,21 @@ class movement():
         self.simulation.integral = pid_controller.integral
         self.simulation.pid_adjustment = pid_adjustment
 
+        # PID DIAGNOSTICS: Track heading change rate and error/adjustment magnitudes
+        if not hasattr(self.simulation, 'prev_heading'):
+            self.simulation.prev_heading = self.simulation.heading.copy()
+            self.simulation.heading_delta = np.zeros(self.simulation.num_agents)
+        else:
+            # Compute heading change (wrapped to [-pi, pi])
+            delta = self.simulation.heading - self.simulation.prev_heading
+            delta = np.arctan2(np.sin(delta), np.cos(delta))  # wrap to [-pi, pi]
+            self.simulation.heading_delta = delta
+            self.simulation.prev_heading = self.simulation.heading.copy()
+        
+        # Store error and adjustment magnitudes for analysis
+        self.simulation.error_magnitude = np.linalg.norm(error, axis=1)
+        self.simulation.pid_adjustment_magnitude = np.linalg.norm(pid_adjustment, axis=1)
+
         # Optimized: compute fish_vel_1 then selectively disable PID for tired fish
         fish_vel_1 = fish_vel_0 + acc_ini * dt + pid_adjustment
         fish_vel_1[tired_mask] = fish_vel_0[tired_mask] + acc_ini[tired_mask] * dt

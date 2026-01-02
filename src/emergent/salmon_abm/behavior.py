@@ -2765,6 +2765,33 @@ class behavior():
                 if debug_behavior:
                     logging.getLogger(__name__).debug('Heading validation failed: %s', e)
             
+            # SELECTIVE HEADING RATE LIMITING:
+            # Allow immediate response to safety cues (shallow, boundary, collision)
+            # but smooth guidance cues (rheotaxis, alignment, etc.) to prevent vibration.
+            # Fish have limited sensing range (1-2m) so safety must be instant.
+            proposed_heading = np.arctan2(head_vec[:, 1], head_vec[:, 0])
+            
+            max_heading_change = getattr(self.simulation, 'max_heading_change_per_step', 0.175)  # ~10 deg/timestep
+            safety_threshold = getattr(self.simulation, 'safety_cue_threshold', 1000.0)  # Force magnitude
+            
+            if max_heading_change > 0:
+                # Compute safety cue magnitudes (shallow + boundary + collision)
+                safety_vec = cue_dict.get('shallow', np.zeros((n_agents, 2))) + \
+                             cue_dict.get('border', np.zeros((n_agents, 2))) + \
+                             cue_dict.get('collision', np.zeros((n_agents, 2)))
+                safety_magnitude = np.sqrt(safety_vec[:, 0]**2 + safety_vec[:, 1]**2)
+                
+                # Only rate-limit when safety cues are weak (normal migration/schooling)
+                prev_heading = np.asarray(self.simulation.heading)
+                heading_delta = proposed_heading - prev_heading
+                heading_delta = np.arctan2(np.sin(heading_delta), np.cos(heading_delta))  # Wrap to [-π, π]
+                
+                # Apply rate limit only where safety is low
+                needs_limiting = safety_magnitude < safety_threshold
+                if np.any(needs_limiting):
+                    heading_delta_clipped = np.clip(heading_delta[needs_limiting], -max_heading_change, max_heading_change)
+                    proposed_heading[needs_limiting] = prev_heading[needs_limiting] + heading_delta_clipped
+            
             # Fast path: if we aren't recording diagnostics/state, return the new headings now.
             if not want_record:
                 try:
@@ -2772,7 +2799,7 @@ class behavior():
                         self._window_cache_enabled = False
                     except Exception:
                         pass
-                    return np.arctan2(head_vec[:, 1], head_vec[:, 0])
+                    return proposed_heading
                 except Exception:
                     try:
                         self._window_cache_enabled = False
@@ -2953,7 +2980,8 @@ class behavior():
                 self._window_cache_enabled = False
             except Exception:
                 pass
-            return np.arctan2(head_vec[:, 1], head_vec[:, 0])
+            # Return the rate-limited heading computed earlier (already stored in proposed_heading)
+            return proposed_heading
         else:
             # If head_vec has unexpected shape, try to sanitize: replace NaNs and zero-length vectors
             try:

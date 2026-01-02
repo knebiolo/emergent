@@ -222,6 +222,12 @@ class simulation:
         self.swim_mode = np.ones(self.num_agents, dtype=np.int8)
         self.max_s_U = np.repeat(2.77, self.num_agents)
         self.max_p_U = np.repeat(4.43, self.num_agents)
+        
+        # PID diagnostics for vibration analysis
+        self.heading_delta = np.zeros(self.num_agents, dtype=np.float32)
+        self.error_magnitude = np.zeros(self.num_agents, dtype=np.float32)
+        self.pid_adjustment_magnitude = np.zeros(self.num_agents, dtype=np.float32)
+        
         # When agents are fatigued (swim_behav == 3), their effective sustainable
         # swim speed may be reduced. Keep this as a separate array so callers can
         # tune fatigued capacity without mutating the baseline `max_s_U`.
@@ -265,6 +271,9 @@ class simulation:
             self._created_db_file = True
 
         # create standard datasets using io helper to keep logic centralized
+        timeseries_keys = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y',
+                           'agent_data/ideal_sog', 'agent_data/Hz', 'agent_data/battery', 'agent_data/swim_behav',
+                           'agent_data/heading_delta', 'agent_data/error_magnitude', 'agent_data/pid_adjustment_magnitude')
         sim_state = {
             'num_agents': self.num_agents,
             'num_timesteps': self.num_timesteps,
@@ -275,7 +284,7 @@ class simulation:
             'metadata': {'model_name': self.model_name}
         }
         try:
-            io.write_sim_initial(self.db, sim_state, create_timeseries=(self.output_write_mode == 'full'))
+            io.write_sim_initial(self.db, sim_state, create_timeseries=(self.output_write_mode == 'full'), timeseries_keys=timeseries_keys)
         except Exception:
             # fallback to manual creation if write_sim_initial fails
             hdf5_io.write_dataset(self.db, "agent_data/sex", np.zeros((self.num_agents,), dtype=np.int8))
@@ -1198,7 +1207,6 @@ class simulation:
                         ]
                         # DEBUG: Log buffer stats to verify correct radius
                         if not hasattr(self, '_logged_buffer_stats'):
-                            import logging
                             buffer_sizes = [len(buf) for buf in self.agents_within_buffers]
                             logging.getLogger(__name__).info(
                                 f"Built agents_within_buffers: radius={radius:.3f}m, "
@@ -1365,7 +1373,7 @@ class simulation:
 
             do_timeseries_write = (not disable_sync_writes) and mode == 'full' and write_frequency > 0 and (ts % write_frequency == 0)
             if do_timeseries_write:
-                tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz', 'agent_data/battery', 'agent_data/swim_behav')
+                tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz', 'agent_data/battery', 'agent_data/swim_behav', 'agent_data/heading_delta', 'agent_data/error_magnitude', 'agent_data/pid_adjustment_magnitude')
                 for key in tracked:
                     attr_key = key.split('/')[-1]
                     # try direct attribute, then lowercase, then capitalized
