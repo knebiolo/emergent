@@ -2387,9 +2387,9 @@ class behavior():
         safe_distances = np.where(self.simulation.nearest_neighbor_distance > 0, self.simulation.nearest_neighbor_distance, np.nan)
         
         # Clamp minimum distance to prevent singularity in inverse square force
-        # Fish cannot physically occupy the same space - minimum separation ~0.5 body lengths
-        # For salmon (~0.5-1.0m length), minimum distance = 0.25m prevents force explosion
-        min_separation = 0.25  # meters
+        # Fish cannot physically occupy the same space - minimum separation for point agents
+        # User requirement: fish should be able to get as close as 5cm center-to-center (tightly packed staging mass)
+        min_separation = 0.05  # meters (5cm) - allows realistic tight schooling
         safe_distances = np.where(safe_distances < min_separation, min_separation, safe_distances)
         
         # FIX: Inverse SQUARE law, not inverse CUBE
@@ -2414,11 +2414,25 @@ class behavior():
                 f"Check: (1) neighbor graph construction, (2) X/Y array validity, (3) agents staying in domain."
             )
         
-        # VALIDATION: Collision should only create WEAK forces for typical school spacing
-        # If many agents have strong collision forces, something is wrong
+        # DIAGNOSTIC: Print actual neighbor distances to debug tight schooling
         # Calculate actual collision distances (from buffer-filtered neighbors, not absolute nearest)
         actual_collision_dists = np.linalg.norm(closest_2_self, axis=1)
         valid_collision_dists = actual_collision_dists[actual_collision_dists > 0]  # Exclude zeros (no neighbors)
+        
+        # Debug output to track distance evolution over time - CRITICAL for verifying collision direction
+        # Print distances at step 0 AND periodically to see if collision is pushing fish apart (correct)
+        # or pulling them together (bug)
+        if not hasattr(self, '_collision_steps_logged'):
+            self._collision_steps_logged = set()
+        
+        current_step = getattr(self.simulation, 'current_step', -1)
+        log_steps = {0, 50, 100, 150, 199}  # Key checkpoints
+        
+        if current_step in log_steps and current_step not in self._collision_steps_logged:
+            if len(valid_collision_dists) > 0:
+                print(f"\nCOLLISION STEP {current_step}: weight={weight:.1f}, min_sep={min_separation:.3f}m")
+                print(f"  Distance stats: min={np.min(valid_collision_dists):.3f}m, median={np.median(valid_collision_dists):.3f}m, max={np.max(valid_collision_dists):.3f}m")
+                self._collision_steps_logged.add(current_step)
         
         # Disabled: Warning spam slows down production runs with dense schooling
         # strong_collision = np.sum(cue_mags > weight * 0.1)  # More than 10% of weight means very close

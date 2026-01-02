@@ -647,7 +647,7 @@ class movement():
         # Only apply speed capping if there are any too_fast agents
         # (avoids broadcasting error when too_fast mask is empty)
         if np.any(too_fast):
-            fish_velocities[too_fast] = (ratio[too_fast] * fish_velocities[too_fast].T).T
+            fish_velocities[too_fast] = ratio[too_fast] * fish_velocities[too_fast]
 
         self.simulation.max_practical_sog = fish_velocities
 
@@ -730,7 +730,27 @@ class movement():
         # Optimized: compute fish_vel_1 then selectively disable PID for tired fish
         fish_vel_1 = fish_vel_0 + acc_ini * dt + pid_adjustment
         fish_vel_1[tired_mask] = fish_vel_0[tired_mask] + acc_ini[tired_mask] * dt
-
+        
+        # PHYSICS FIX: Fatigued fish (swim_behav==3) with insufficient thrust must fall back
+        # Check if surge produces negative acceleration in forward direction (thrust < drag)
+        fatigued_mask = (self.simulation.swim_behav == 3)
+        heading_vec = np.column_stack((np.cos(self.simulation.heading), np.sin(self.simulation.heading)))
+        
+        # Project acceleration onto heading direction
+        acc_forward = np.sum(acc_ini * heading_vec, axis=1)
+        
+        # Fatigued fish with negative forward acceleration cannot maintain position - they fall back
+        fatigued_falling_back = fatigued_mask & (acc_forward < -0.01)  # threshold to avoid numerical noise
+        
+        # For falling back fish, disable PID entirely and let physics take over
+        # They drift backward due to drag > thrust
+        if np.any(fatigued_falling_back):
+            fish_vel_1[fatigued_falling_back] = fish_vel_0[fatigued_falling_back] + acc_ini[fatigued_falling_back] * dt
+            # Store fallback state for diagnostics
+            if not hasattr(self.simulation, 'fish_falling_back'):
+                self.simulation.fish_falling_back = np.zeros(self.simulation.num_agents, dtype=bool)
+            self.simulation.fish_falling_back[:] = fatigued_falling_back
+        
         # Zero velocity for dead fish
         fish_vel_1[self.simulation.dead == 1] = 0.0
 

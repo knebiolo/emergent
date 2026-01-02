@@ -149,6 +149,27 @@ def load_env_from_h5(path: str):
     return None, None, None
 
 
+def load_battery_from_h5(path: str):
+    """Load battery state array from HDF5 file if available.
+    
+    Returns:
+        np.ndarray or None: Battery array of shape (T, N) where T=timesteps, N=agents.
+                           Values range from 0.0 (depleted) to 1.0 (full charge).
+    """
+    if h5py is None:
+        return None
+    try:
+        f = h5py.File(path, "r")
+        if 'agent_data/battery' in f:
+            battery = np.array(f['agent_data/battery']).T  # Transpose (N, T) to (T, N)
+            f.close()
+            return battery
+        f.close()
+    except Exception:
+        pass
+    return None
+
+
 def load_positions_from_csv(path: str) -> np.ndarray:
     import csv
 
@@ -182,7 +203,7 @@ def load_positions_from_csv(path: str) -> np.ndarray:
 
 
 class ReplayWidget(QOpenGLWidget):
-    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0, point_size: Optional[float] = None, env_depth: Optional[str] = None, allow_expand_bounds: bool = False, smooth_alpha: float = 1.0, env_clip_pct: tuple = (0.0, 100.0), env_depth_array: Optional[np.ndarray] = None, env_x_coords: Optional[np.ndarray] = None, env_y_coords: Optional[np.ndarray] = None):
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0, point_size: Optional[float] = None, env_depth: Optional[str] = None, allow_expand_bounds: bool = False, smooth_alpha: float = 1.0, env_clip_pct: tuple = (0.0, 100.0), env_depth_array: Optional[np.ndarray] = None, env_x_coords: Optional[np.ndarray] = None, env_y_coords: Optional[np.ndarray] = None, battery_array: Optional[np.ndarray] = None):
         super().__init__(parent)
         if positions.ndim != 3 or positions.shape[2] != 2:
             raise ValueError("positions must be (T, N, 2)")
@@ -193,6 +214,7 @@ class ReplayWidget(QOpenGLWidget):
         self.trail = 0
         self.fish_body_length = 8  # length of fish body in pixels
         self.tail_segments = 3  # number of tail segments for animation
+        self.battery_array = battery_array  # Battery data for fatigue visualization
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -404,7 +426,7 @@ class ReplayWidget(QOpenGLWidget):
             base_radius: radius of head circle in screen pixels
             scale: screen pixels per world unit (for scaling the body line)
         """
-        # Draw head circle
+        # Draw head circle (using currently set brush and pen)
         painter.drawEllipse(QRectF(cx - base_radius, cy - base_radius, 2 * base_radius, 2 * base_radius))
         
         # Draw body as a line extending backward from the head
@@ -420,11 +442,39 @@ class ReplayWidget(QOpenGLWidget):
         tail_x = cx - line_length_screen * np.cos(heading_rad)
         tail_y = cy + line_length_screen * np.sin(heading_rad)  # + instead of - for inverted Y
         
-        # Draw the line
-        pen = QPen(QColor(220, 30, 30))
-        pen.setWidthF(max(1.5, base_radius * 0.3))  # Line thickness
-        painter.setPen(pen)
+        # Draw the line (pen already set to match fish color)
+        current_pen = painter.pen()
+        current_pen.setWidthF(max(1.5, base_radius * 0.3))  # Line thickness
+        painter.setPen(current_pen)
         painter.drawLine(QPointF(cx, cy), QPointF(tail_x, tail_y))
+
+    def _get_battery_color(self, agent_idx: int) -> QColor:
+        """Get color for agent based on battery level.
+        
+        Args:
+            agent_idx: Index of the agent
+            
+        Returns:
+            QColor: Green (100% battery) to Red (0% battery)
+        """
+        if self.battery_array is None or self.frame >= len(self.battery_array) or agent_idx >= self.N:
+            # Default red color if no battery data
+            return QColor(220, 30, 30)
+        
+        try:
+            battery = float(self.battery_array[self.frame, agent_idx])
+            battery = np.clip(battery, 0.0, 1.0)
+            
+            # Interpolate from red (0%) to green (100%)
+            # Red: (220, 30, 30)
+            # Green: (30, 220, 30)
+            r = int(220 - 190 * battery)
+            g = int(30 + 190 * battery)
+            b = 30
+            
+            return QColor(r, g, b)
+        except Exception:
+            return QColor(220, 30, 30)
 
     def _tick(self):
         if not getattr(self, 'playing', False):
@@ -604,6 +654,13 @@ class ReplayWidget(QOpenGLWidget):
                 sxp = tx + (x_adj - xmin_loc) * s
                 syp = ty + (ymax_loc - y_adj) * s
                 
+                # Get color based on battery level (green=100%, red=0%)
+                fish_color = self._get_battery_color(i)
+                painter.setBrush(fish_color)
+                pen = QPen(fish_color.darker(120))
+                pen.setWidthF(1.0)
+                painter.setPen(pen)
+                
                 # Compute heading from velocity (difference between current and previous position)
                 heading_deg = 0.0
                 if self.frame > 0 and self.frame < len(self.positions):
@@ -719,7 +776,7 @@ class GLViewer(QOpenGLWidget):
     widget will raise ImportError and the caller should fall back.
     """
 
-    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, force_vbo: bool = False, point_size: Optional[float] = None):
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, force_vbo: bool = False, point_size: Optional[float] = None, env_depth_array: Optional[np.ndarray] = None, env_x_coords: Optional[np.ndarray] = None, env_y_coords: Optional[np.ndarray] = None, battery_array: Optional[np.ndarray] = None):
         super().__init__(parent)
         if positions.ndim != 3 or positions.shape[2] != 2:
             raise ValueError("positions must be (T, N, 2)")
@@ -739,6 +796,11 @@ class GLViewer(QOpenGLWidget):
         self._pan_y = 0.0
         self._force_vbo = bool(force_vbo)
         self._point_size = None if point_size is None else float(point_size)
+        self.env_depth_array = env_depth_array
+        self.env_x_coords = env_x_coords
+        self.env_y_coords = env_y_coords
+        self._env_texture = None
+        self.battery_array = battery_array  # Battery data for fatigue visualization
 
         try:
             from OpenGL import GL
@@ -813,14 +875,25 @@ class GLViewer(QOpenGLWidget):
             # Preallocate a GPU buffer (raw GL buffer) for dynamic point data
             self._vbo_capacity = max(256, int(getattr(self, 'N', 0)))
             self._vbo_capacity_bytes = int(self._vbo_capacity * 2 * np.dtype(np.float32).itemsize)
+            
+            # Also preallocate color buffer for battery visualization
+            self._color_vbo_capacity_bytes = int(self._vbo_capacity * 3 * np.dtype(np.float32).itemsize)
 
             # attempt raw GL buffer creation
             self._vbo_id = None
+            self._color_vbo_id = None
             try:
                 self._vbo_id = GL.glGenBuffers(1)
                 GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._vbo_id))
                 GL.glBufferData(GL.GL_ARRAY_BUFFER, self._vbo_capacity_bytes, None, GL.GL_DYNAMIC_DRAW)
                 GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+                
+                # Create color VBO
+                self._color_vbo_id = GL.glGenBuffers(1)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._color_vbo_id))
+                GL.glBufferData(GL.GL_ARRAY_BUFFER, self._color_vbo_capacity_bytes, None, GL.GL_DYNAMIC_DRAW)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+                
                 self._using_raw_vbo = True
             except Exception:
                 # try PyOpenGL VBO wrapper
@@ -835,15 +908,19 @@ class GLViewer(QOpenGLWidget):
             vs = b"""
             #version 120
             attribute vec2 position;
+            attribute vec3 color;
+            varying vec3 vColor;
             void main() {
                 gl_Position = gl_ModelViewProjectionMatrix * vec4(position.xy, 0.0, 1.0);
                 gl_PointSize = 3.0;
+                vColor = color;
             }
             """
             fs = b"""
             #version 120
+            varying vec3 vColor;
             void main() {
-                gl_FragColor = vec4(0.8, 0.12, 0.12, 1.0);
+                gl_FragColor = vec4(vColor, 1.0);
             }
             """
             try:
@@ -859,6 +936,46 @@ class GLViewer(QOpenGLWidget):
                 GL.glLinkProgram(self._program)
             except Exception:
                 self._program = None
+            
+            # Create texture from environment depth array if available
+            if self.env_depth_array is not None and self.env_x_coords is not None and self.env_y_coords is not None:
+                try:
+                    # Normalize depth to 0-1 range for visualization
+                    depth_array = np.array(self.env_depth_array, dtype=float)
+                    depth_min = np.nanmin(depth_array)
+                    depth_max = np.nanmax(depth_array)
+                    if depth_max > depth_min:
+                        depth_norm = (depth_array - depth_min) / (depth_max - depth_min)
+                    else:
+                        depth_norm = np.zeros_like(depth_array)
+                    
+                    # Create RGB image (blue gradient for depth)
+                    h, w = depth_norm.shape
+                    rgb_image = np.zeros((h, w, 3), dtype=np.uint8)
+                    rgb_image[:, :, 0] = (200 * (1.0 - depth_norm)).astype(np.uint8)  # R
+                    rgb_image[:, :, 1] = (220 * (1.0 - depth_norm)).astype(np.uint8)  # G
+                    rgb_image[:, :, 2] = (255 * (1.0 - depth_norm)).astype(np.uint8)  # B
+                    
+                    # Flip vertically for OpenGL texture coordinates (OpenGL origin bottom-left)
+                    rgb_image = np.flipud(rgb_image)
+                    
+                    # Store environment bounds
+                    self.env_xmin = float(np.min(self.env_x_coords))
+                    self.env_xmax = float(np.max(self.env_x_coords))
+                    self.env_ymin = float(np.min(self.env_y_coords))
+                    self.env_ymax = float(np.max(self.env_y_coords))
+                    
+                    # Create OpenGL texture
+                    self._env_texture = GL.glGenTextures(1)
+                    GL.glBindTexture(GL.GL_TEXTURE_2D, self._env_texture)
+                    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+                    GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+                    GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGB, w, h, 0, GL.GL_RGB, GL.GL_UNSIGNED_BYTE, rgb_image)
+                    GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+                except Exception as tex_ex:
+                    import logging as _lg
+                    _lg.getLogger('realtime_viewer').exception('Failed to create environment texture')
+                    self._env_texture = None
         except Exception:
             import logging as _lg
             _lg.getLogger('realtime_viewer').exception('GLViewer.initializeGL failed')
@@ -909,11 +1026,38 @@ class GLViewer(QOpenGLWidget):
                     xmaxp = self.xmax
                     yminp = self.ymin
                     ymaxp = self.ymax
-                GL.glOrtho(xminp, xmaxp, ymaxp, yminp, -1.0, 1.0)
+                GL.glOrtho(xminp, xmaxp, yminp, ymaxp, -1.0, 1.0)
                 GL.glMatrixMode(GL.GL_MODELVIEW)
                 GL.glLoadIdentity()
             except Exception:
                 pass
+            
+            # Render environment background texture if available
+            if self._env_texture is not None:
+                try:
+                    GL.glEnable(GL.GL_TEXTURE_2D)
+                    GL.glBindTexture(GL.GL_TEXTURE_2D, self._env_texture)
+                    GL.glColor3f(1.0, 1.0, 1.0)
+                    
+                    # Draw textured quad covering environment bounds
+                    env_xmin = getattr(self, 'env_xmin', self.xmin)
+                    env_xmax = getattr(self, 'env_xmax', self.xmax)
+                    env_ymin = getattr(self, 'env_ymin', self.ymin)
+                    env_ymax = getattr(self, 'env_ymax', self.ymax)
+                    
+                    GL.glBegin(GL.GL_QUADS)
+                    GL.glTexCoord2f(0.0, 0.0); GL.glVertex2f(env_xmin, env_ymin)
+                    GL.glTexCoord2f(1.0, 0.0); GL.glVertex2f(env_xmax, env_ymin)
+                    GL.glTexCoord2f(1.0, 1.0); GL.glVertex2f(env_xmax, env_ymax)
+                    GL.glTexCoord2f(0.0, 1.0); GL.glVertex2f(env_xmin, env_ymax)
+                    GL.glEnd()
+                    
+                    GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+                    GL.glDisable(GL.GL_TEXTURE_2D)
+                except Exception:
+                    import logging as _lg
+                    _lg.getLogger('realtime_viewer').exception('Failed to render environment texture')
+            
             # choose drawing path: prefer raw GL buffer when available/forced, else wrapper or immediate
             import logging as _lg
             log = _lg.getLogger('realtime_viewer')
@@ -936,6 +1080,25 @@ class GLViewer(QOpenGLWidget):
 
                 if path == 'raw-vbo':
                     import ctypes
+                    
+                    # Compute battery-based colors for all agents
+                    colors = np.zeros((npoints, 3), dtype=np.float32)
+                    if self.battery_array is not None and self.frame < self.battery_array.shape[0]:
+                        for i in range(min(npoints, self.battery_array.shape[1])):
+                            try:
+                                battery = float(self.battery_array[self.frame, i])
+                                battery = np.clip(battery, 0.0, 1.0)
+                                colors[i, 0] = (220 - 190 * battery) / 255.0  # R
+                                colors[i, 1] = (30 + 190 * battery) / 255.0   # G
+                                colors[i, 2] = 30 / 255.0                      # B
+                            except Exception:
+                                colors[i] = [0.8, 0.12, 0.12]  # fallback red
+                    else:
+                        colors[:] = [0.8, 0.12, 0.12]  # default red
+                    
+                    colors = np.ascontiguousarray(colors, dtype=np.float32)
+                    
+                    # Upload vertex data
                     GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._vbo_id))
                     size_bytes = pts2.nbytes
                     if size_bytes <= getattr(self, '_vbo_capacity_bytes', 0):
@@ -944,25 +1107,60 @@ class GLViewer(QOpenGLWidget):
                         self._vbo_capacity = npoints
                         self._vbo_capacity_bytes = pts2.nbytes
                         GL.glBufferData(GL.GL_ARRAY_BUFFER, self._vbo_capacity_bytes, pts2, GL.GL_DYNAMIC_DRAW)
+                    
+                    # Upload color data
+                    if self._color_vbo_id is not None:
+                        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._color_vbo_id))
+                        color_size_bytes = colors.nbytes
+                        if color_size_bytes <= getattr(self, '_color_vbo_capacity_bytes', 0):
+                            GL.glBufferSubData(GL.GL_ARRAY_BUFFER, 0, colors)
+                        else:
+                            self._color_vbo_capacity_bytes = colors.nbytes
+                            GL.glBufferData(GL.GL_ARRAY_BUFFER, self._color_vbo_capacity_bytes, colors, GL.GL_DYNAMIC_DRAW)
+                    
                     if getattr(self, '_program', None) is not None:
                         GL.glUseProgram(self._program)
+                        
+                        # Bind position attribute
+                        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._vbo_id))
                         loc = GL.glGetAttribLocation(self._program, b'position')
                         if loc != -1:
                             GL.glEnableVertexAttribArray(loc)
                             GL.glVertexAttribPointer(loc, 2, GL.GL_FLOAT, False, 0, ctypes.c_void_p(0))
-                            GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                        
+                        # Bind color attribute
+                        if self._color_vbo_id is not None:
+                            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._color_vbo_id))
+                            color_loc = GL.glGetAttribLocation(self._program, b'color')
+                            if color_loc != -1:
+                                GL.glEnableVertexAttribArray(color_loc)
+                                GL.glVertexAttribPointer(color_loc, 3, GL.GL_FLOAT, False, 0, ctypes.c_void_p(0))
+                        
+                        GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                        
+                        if loc != -1:
                             GL.glDisableVertexAttribArray(loc)
-                        else:
-                            GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
-                            GL.glVertexPointer(2, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
-                            GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
-                            GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                        if self._color_vbo_id is not None and color_loc != -1:
+                            GL.glDisableVertexAttribArray(color_loc)
+                        
                         GL.glUseProgram(0)
                     else:
+                        # Fallback to fixed function pipeline with color array
+                        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._vbo_id))
                         GL.glEnableClientState(GL.GL_VERTEX_ARRAY)
                         GL.glVertexPointer(2, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
+                        
+                        if self._color_vbo_id is not None:
+                            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, int(self._color_vbo_id))
+                            GL.glEnableClientState(GL.GL_COLOR_ARRAY)
+                            GL.glColorPointer(3, GL.GL_FLOAT, 0, ctypes.c_void_p(0))
+                        
                         GL.glDrawArrays(GL.GL_POINTS, 0, npoints)
+                        
                         GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
+                        if self._color_vbo_id is not None:
+                            GL.glDisableClientState(GL.GL_COLOR_ARRAY)
+                    
                     GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
 
                 elif path == 'wrapper-vbo':
@@ -976,10 +1174,23 @@ class GLViewer(QOpenGLWidget):
                     self._vbo.unbind()
 
                 else:
-                    GL.glColor3f(0.8, 0.12, 0.12)
+                    # Immediate mode rendering with battery-based colors
                     GL.glPointSize(6.0)
                     GL.glBegin(GL.GL_POINTS)
-                    for x, y in pts:
+                    for i, (x, y) in enumerate(pts):
+                        # Get battery color for this agent
+                        if self.battery_array is not None and self.frame < self.battery_array.shape[0] and i < self.battery_array.shape[1]:
+                            try:
+                                battery = float(self.battery_array[self.frame, i])
+                                battery = np.clip(battery, 0.0, 1.0)
+                                r = (220 - 190 * battery) / 255.0
+                                g = (30 + 190 * battery) / 255.0
+                                b = 30 / 255.0
+                                GL.glColor3f(r, g, b)
+                            except Exception:
+                                GL.glColor3f(0.8, 0.12, 0.12)  # fallback to red
+                        else:
+                            GL.glColor3f(0.8, 0.12, 0.12)  # default red if no battery data
                         GL.glVertex2f(float(x), float(y))
                     GL.glEnd()
                     cx = 0.5 * (self.xmin + self.xmax)
@@ -1778,6 +1989,7 @@ def main(argv=None):
 
     # Try to load environment depth from the HDF5 file
     env_depth_array, env_x_coords, env_y_coords = None, None, None
+    battery_array = None
     if path.endswith('.h5') or path.endswith('.hdf5'):
         try:
             depth, x_coords, y_coords = load_env_from_h5(path)
@@ -1786,6 +1998,16 @@ def main(argv=None):
                 env_x_coords = x_coords
                 env_y_coords = y_coords
                 print(f"Loaded environment from HDF5: depth shape {depth.shape}")
+        except Exception as ex:
+            print(f"Could not load environment from HDF5: {ex}")
+        
+        # Try to load battery data for fatigue visualization
+        try:
+            battery_array = load_battery_from_h5(path)
+            if battery_array is not None:
+                print(f"Loaded battery data from HDF5: shape {battery_array.shape}")
+        except Exception as ex:
+            print(f"Could not load battery from HDF5: {ex}")
         except Exception as ex:
             print(f"Could not load environment from HDF5: {ex}")
 
@@ -1800,7 +2022,7 @@ def main(argv=None):
     
     # Use ReplayWidget with fish bodies for better visualization (up to 5000 agents)
     # For very large simulations, fallback to GLViewer
-    if Nagents < 5000:
+    if Nagents < 5001:
         try:
             env_clip_pct = None
             if args.env_clip:
@@ -1821,17 +2043,18 @@ def main(argv=None):
                 env_clip_pct=env_clip_pct,
                 env_depth_array=env_depth_array,
                 env_x_coords=env_x_coords,
-                env_y_coords=env_y_coords
+                env_y_coords=env_y_coords,
+                battery_array=battery_array
             )
             swap_viewer_in_main(win, rv)
         except Exception as ex:
             logger.exception('Failed to create ReplayWidget')
     else:
-        # Fallback to GLViewer for very large simulations (5000+ agents)
-        use_gl_mode = args.use_gl or (Nagents >= 5000)
+        # Fallback to GLViewer for very large simulations (5001+ agents)
+        use_gl_mode = args.use_gl or (Nagents >= 5001)
         if use_gl_mode:
             try:
-                glw = GLViewer(positions, pad=win._pad, force_vbo=win._force_vbo, point_size=win._point_size)
+                glw = GLViewer(positions, pad=win._pad, force_vbo=win._force_vbo, point_size=win._point_size, env_depth_array=env_depth_array, env_x_coords=env_x_coords, env_y_coords=env_y_coords, battery_array=battery_array)
                 try:
                     swap_viewer_in_main(win, glw)
                 except Exception:

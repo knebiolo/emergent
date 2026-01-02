@@ -74,8 +74,11 @@ class fatigue():
             b_s = self.simulation.b_s
 
             # Optimized: direct indexing instead of chained np.where
-            ttf[mask_dict['prolonged']] = np.exp(a_p + swim_speeds[mask_dict['prolonged']] * b_p)
-            ttf[mask_dict['sprint']] = np.exp(a_s + swim_speeds[mask_dict['sprint']] * b_s)
+            # Must index a_p/b_p/a_s/b_s by mask as well since they are per-agent arrays
+            mask_prolonged = mask_dict['prolonged']
+            mask_sprint = mask_dict['sprint']
+            ttf[mask_prolonged] = np.exp(a_p[mask_prolonged] + swim_speeds[mask_prolonged] * b_p[mask_prolonged])
+            ttf[mask_sprint] = np.exp(a_s[mask_sprint] + swim_speeds[mask_sprint] * b_s[mask_sprint])
             return ttf
         elif method == 'Katapodis_Gervais':
             genus = 'Oncorhyncus'

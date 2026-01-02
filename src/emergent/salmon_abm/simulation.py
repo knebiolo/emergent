@@ -1250,12 +1250,7 @@ class simulation:
 
         # run fatigue assessment first to update battery / swim modes
         if fatigue is not None:
-            try:
-                fatigue.assess_fatigue()
-            except Exception:
-                # TODO: Fix fatigue.py broadcasting bug - shapes (186,) vs (200,)
-                # Temporarily silent to avoid breaking simulations
-                pass
+            fatigue.assess_fatigue()
 
         # behavior arbitration produces desired heading vector
         new_heading = behavior.arbitrate(t)
@@ -1370,7 +1365,7 @@ class simulation:
 
             do_timeseries_write = (not disable_sync_writes) and mode == 'full' and write_frequency > 0 and (ts % write_frequency == 0)
             if do_timeseries_write:
-                tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz')
+                tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz', 'agent_data/battery', 'agent_data/swim_behav')
                 for key in tracked:
                     attr_key = key.split('/')[-1]
                     # try direct attribute, then lowercase, then capitalized

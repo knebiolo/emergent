@@ -269,7 +269,7 @@ def write_sim_initial(
     if create_timeseries:
         keys = timeseries_keys
         if keys is None:
-            keys = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz')
+            keys = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz', 'agent_data/battery', 'agent_data/swim_behav')
         for key in keys:
             try:
                 k = str(key)
