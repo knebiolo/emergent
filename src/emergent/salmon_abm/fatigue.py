@@ -198,6 +198,30 @@ class fatigue():
             'sustained': bl_s <= self.simulation.max_s_U,
         }
 
+        # DIAGNOSTIC: Print swim mode distribution at t=0
+        if self.t == 0:
+            n_sustained = np.sum(mask_dict['sustained'])
+            n_prolonged = np.sum(mask_dict['prolonged'])
+            n_sprint = np.sum(mask_dict['sprint'])
+            
+            # Get fish velocities and water velocities
+            water_vel = np.column_stack((self.simulation.x_vel, self.simulation.y_vel))
+            fish_vel = np.column_stack((self.simulation.sog * np.cos(self.simulation.heading),
+                                       self.simulation.sog * np.sin(self.simulation.heading)))
+            water_speed = np.linalg.norm(water_vel, axis=-1)
+            fish_speed = np.linalg.norm(fish_vel, axis=-1)
+            
+            print(f"\nFATIGUE DEBUG t={self.t:.1f}s:")
+            print(f"  Fish SOG (m/s): min={self.simulation.sog.min():.3f}, mean={self.simulation.sog.mean():.3f}, max={self.simulation.sog.max():.3f}")
+            print(f"  Fish SOG (BL/s): min={self.simulation.sog.min()/(self.simulation.length[0]/1000):.3f}, mean={self.simulation.sog.mean()/(self.simulation.length.mean()/1000):.3f}")
+            print(f"  Water speed (m/s): min={water_speed.min():.3f}, mean={water_speed.mean():.3f}, max={water_speed.max():.3f}")
+            print(f"  Fish velocity magnitude (m/s): min={fish_speed.min():.3f}, mean={fish_speed.mean():.3f}, max={fish_speed.max():.3f}")
+            print(f"  Swim speeds vs water (m/s): min={swim_speeds.min():.3f}, mean={swim_speeds.mean():.3f}, max={swim_speeds.max():.3f}")
+            print(f"  Swim speeds (BL/s): min={bl_s.min():.3f}, mean={bl_s.mean():.3f}, max={bl_s.max():.3f}")
+            print(f"  max_s_U threshold: {self.simulation.max_s_U[0]:.3f} BL/s")
+            print(f"  Swim modes: sustained={n_sustained}, prolonged={n_prolonged}, sprint={n_sprint}")
+            print(f"  Battery before update: min={self.simulation.battery.min():.3f}, mean={self.simulation.battery.mean():.3f}")
+
         # record bout distance
         self.bout_distance()
 
@@ -212,6 +236,11 @@ class fatigue():
 
         # update battery
         self.calc_battery(per_rec, ttf, mask_dict)
+        
+        # DIAGNOSTIC: Print battery after update
+        if self.t == 0:
+            print(f"  Battery after update: min={self.simulation.battery.min():.3f}, mean={self.simulation.battery.mean():.3f}")
+            print(f"  Recovery amount: min={per_rec.min():.6f}, mean={per_rec.mean():.6f}, max={per_rec.max():.6f}")
 
         # battery masks
         battery_dict = dict()

@@ -220,8 +220,9 @@ class simulation:
         self.dist_per_bout = np.zeros(self.num_agents, dtype=np.float32)
         self.bout_dur = np.zeros(self.num_agents, dtype=np.float32)
         self.swim_mode = np.ones(self.num_agents, dtype=np.int8)
-        self.max_s_U = np.repeat(2.77, self.num_agents)
-        self.max_p_U = np.repeat(4.43, self.num_agents)
+        # Swimming speed thresholds (BL/s) - doubled from literature values to account for salmon swimming capabilities
+        self.max_s_U = np.repeat(5.54, self.num_agents)  # Sustained: was 2.77
+        self.max_p_U = np.repeat(8.86, self.num_agents)  # Prolonged: was 4.43
         
         # PID diagnostics for vibration analysis
         self.heading_delta = np.zeros(self.num_agents, dtype=np.float32)
@@ -273,7 +274,7 @@ class simulation:
         # create standard datasets using io helper to keep logic centralized
         timeseries_keys = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y',
                            'agent_data/ideal_sog', 'agent_data/Hz', 'agent_data/battery', 'agent_data/swim_behav',
-                           'agent_data/heading_delta', 'agent_data/error_magnitude', 'agent_data/pid_adjustment_magnitude')
+                           'agent_data/heading', 'agent_data/heading_delta', 'agent_data/error_magnitude', 'agent_data/pid_adjustment_magnitude')
         sim_state = {
             'num_agents': self.num_agents,
             'num_timesteps': self.num_timesteps,
@@ -1373,7 +1374,7 @@ class simulation:
 
             do_timeseries_write = (not disable_sync_writes) and mode == 'full' and write_frequency > 0 and (ts % write_frequency == 0)
             if do_timeseries_write:
-                tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz', 'agent_data/battery', 'agent_data/swim_behav', 'agent_data/heading_delta', 'agent_data/error_magnitude', 'agent_data/pid_adjustment_magnitude')
+                tracked = ('agent_data/X', 'agent_data/Y', 'agent_data/prev_X', 'agent_data/prev_Y', 'agent_data/ideal_sog', 'agent_data/Hz', 'agent_data/battery', 'agent_data/swim_behav', 'agent_data/heading', 'agent_data/heading_delta', 'agent_data/error_magnitude', 'agent_data/pid_adjustment_magnitude')
                 for key in tracked:
                     attr_key = key.split('/')[-1]
                     # try direct attribute, then lowercase, then capitalized

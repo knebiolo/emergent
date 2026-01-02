@@ -118,8 +118,8 @@ def main():
     print(f"\n[OK] Creating simulation: {args.nagents} agents, {args.nsteps} steps, seed={args.seed}")
     
     config = {
-        'n_agents': args.nagents,
-        'n_steps': args.nsteps,
+        'num_agents': args.nagents,
+        'num_timesteps': args.nsteps,
         'random_seed': args.seed,
         'dt': 1.0,
         'trace_output': True,
@@ -147,7 +147,7 @@ def main():
             vel_dir = np.array(vel_dir_ds)
             # Sample random positions and extract headings
             nrows, ncols = vel_dir.shape
-            for i in range(sim.n_agents):
+            for i in range(sim.num_agents):
                 row = np.random.randint(0, nrows)
                 col = np.random.randint(0, ncols)
                 heading = vel_dir[row, col]
