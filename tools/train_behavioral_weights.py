@@ -27,6 +27,7 @@ import time
 import json
 import csv
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
@@ -46,7 +47,7 @@ def discover_env_files(base_dir):
     return out
 
 
-def create_episode_function(
+def create_simulation_factory(
     model_dir,
     model_name,
     crs,
@@ -59,7 +60,7 @@ def create_episode_function(
     fish_length=None,
     dt=1.0
 ):
-    """Create an episode function that runs simulation with given weights.
+    """Create a factory function that returns configured simulation instances.
     
     Args:
         model_dir: Path to HECRAS model directory
@@ -75,11 +76,10 @@ def create_episode_function(
         dt: Timestep duration in seconds
         
     Returns:
-        Callable that takes BehavioralWeights and returns episode history:
-            (positions_history, headings_history, velocities_history, alive_history)
+        Callable that takes BehavioralWeights and returns a configured simulation object
     """
-    def episode_func(weights: BehavioralWeights):
-        """Run simulation episode with given behavioral weights."""
+    def factory_func(weights: BehavioralWeights):
+        """Create and configure simulation with given behavioral weights."""
         # Create simulation with minimal output writes (compute-only)
         sim = simulation(
             model_dir=model_dir,
@@ -107,38 +107,9 @@ def create_episode_function(
         sim.neighbor_buffer_radius = weights.sensory_range * (fish_length / 1000.0 if fish_length else 1.0)
         sim.neighbor_buffer_lengths = weights.sensory_range
         
-        # Allocate history arrays
-        positions_history = np.zeros((num_timesteps, num_agents, 2), dtype=np.float32)
-        headings_history = np.zeros((num_timesteps, num_agents), dtype=np.float32)
-        velocities_history = np.zeros((num_timesteps, num_agents, 2), dtype=np.float32)
-        alive_history = np.ones((num_timesteps, num_agents), dtype=bool)
-        
-        # Run simulation timesteps
-        for t in range(num_timesteps):
-            try:
-                # Execute timestep
-                sim.timestep(t, dt)
-                
-                # Record state
-                positions_history[t, :, 0] = sim.X
-                positions_history[t, :, 1] = sim.Y
-                headings_history[t] = sim.heading
-                velocities_history[t, :, 0] = sim.fish_x_vel
-                velocities_history[t, :, 1] = sim.fish_y_vel
-                alive_history[t] = (sim.dead == 0)
-                
-            except Exception as e:
-                print(f'Error at timestep {t}: {e}')
-                # Mark rest as dead
-                alive_history[t:] = False
-                break
-        
-        # Clean up simulation
-        sim.close()
-        
-        return positions_history, headings_history, velocities_history, alive_history
+        return sim
     
-    return episode_func
+    return factory_func
 
 
 def save_training_results(out_dir, best_weights, history, config):
@@ -154,7 +125,7 @@ def save_training_results(out_dir, best_weights, history, config):
     
     # Save best weights as JSON
     weights_path = os.path.join(out_dir, 'best_weights.json')
-    best_weights.save(weights_path)
+    best_weights.to_json(Path(weights_path))
     print(f'Saved best weights to {weights_path}')
     
     # Save training history as CSV

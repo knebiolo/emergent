@@ -67,12 +67,15 @@ class BehavioralWeights:
     cohesion_radius_relaxed: float = 3.0  # Body lengths
     cohesion_radius_threatened: float = 1.5  # Body lengths
     
-    def to_dict(self) -> Dict[str, float]:
+    # Drafting (energy-efficient formations)
+    drafting_enabled: bool = True  # Enable drafting benefit calculations
+    
+    def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return asdict(self)
     
     @classmethod
-    def from_dict(cls, data: Dict[str, float]) -> 'BehavioralWeights':
+    def from_dict(cls, data: Dict[str, Any]) -> 'BehavioralWeights':
         """Load from dictionary (JSON deserialization)."""
         return cls(**data)
     
