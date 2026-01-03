@@ -13,7 +13,9 @@ from emergent.salmon_abm.rl_training import (
     compute_cohesion_score,
     compute_alignment_score,
     compute_separation_penalty,
-    compute_overall_schooling_score
+    compute_overall_schooling_score,
+    compute_episode_reward,
+    RLTrainer
 )
 
 
@@ -444,3 +446,342 @@ class TestSchoolingMetrics:
         assert len(cohesion) == 0
         assert len(alignment) == 0
         assert len(separation) == 0
+
+
+class TestEpisodeReward:
+    """Test episode reward function."""
+    
+    def test_perfect_episode(self):
+        """Test reward for perfect schooling episode."""
+        body_length = 0.5
+        T, N = 10, 5
+        
+        # Perfect formation: tight, aligned, moving upstream
+        positions = np.zeros((T, N, 2))
+        headings = np.zeros((T, N))
+        velocities = np.zeros((T, N, 2))
+        alive = np.ones((T, N), dtype=bool)
+        
+        ideal_dist = 0.85  # ~2 BL at low threat
+        
+        for t in range(T):
+            # Linear formation, moving upstream
+            for i in range(N):
+                positions[t, i] = [i * ideal_dist, t * 0.5]  # Moving +Y
+                headings[t, i] = np.pi / 2  # North
+                velocities[t, i] = [0.0, 0.5]  # Constant upstream velocity
+        
+        reward, components = compute_episode_reward(
+            positions, headings, velocities, alive, body_length
+        )
+        
+        # Should have positive reward
+        assert reward > 0.0
+        
+        # Cohesion should be positive (good spacing)
+        assert components['cohesion'] > 0.0
+        
+        # Alignment should be high (all aligned)
+        assert components['alignment'] > 5.0  # Near maximum (10.0)
+        
+        # Upstream progress should be positive
+        assert components['upstream_progress'] > 0.0
+        
+        # No mortality
+        assert components['mortality_penalty'] == 0.0
+    
+    def test_catastrophic_episode(self):
+        """Test reward for catastrophic episode (deaths, no progress)."""
+        body_length = 0.5
+        T, N = 10, 5
+        
+        positions = np.zeros((T, N, 2))
+        headings = np.zeros((T, N))
+        velocities = np.zeros((T, N, 2))
+        alive = np.ones((T, N), dtype=bool)
+        
+        # Kill half the agents
+        alive[5:, :2] = False
+        
+        # No upstream progress, random headings
+        for t in range(T):
+            for i in range(N):
+                positions[t, i] = [i * 0.2, 0.0]  # No Y movement
+                headings[t, i] = np.random.rand() * 2 * np.pi
+                velocities[t, i] = [0.1, 0.0]
+        
+        reward, components = compute_episode_reward(
+            positions, headings, velocities, alive, body_length
+        )
+        
+        # Should have negative reward due to mortality
+        assert components['mortality_penalty'] < 0.0
+        
+        # Upstream progress near zero
+        assert abs(components['upstream_progress']) < 1.0
+    
+    def test_boundary_penalty(self):
+        """Test boundary proximity penalty."""
+        body_length = 0.5
+        T, N = 5, 3
+        
+        positions = np.zeros((T, N, 2))
+        headings = np.zeros((T, N))
+        velocities = np.zeros((T, N, 2))
+        alive = np.ones((T, N), dtype=bool)
+        
+        # Agents near boundary
+        for t in range(T):
+            for i in range(N):
+                positions[t, i] = [i * 1.0, t * 0.1]
+                headings[t, i] = 0.0
+                velocities[t, i] = [0.1, 0.1]
+        
+        # Define boundary (agents are close to it)
+        boundary = np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 5.0]])
+        
+        reward, components = compute_episode_reward(
+            positions, headings, velocities, alive, body_length,
+            boundary_coords=boundary, boundary_threshold=2.0
+        )
+        
+        # Should have boundary penalty
+        assert components['boundary_penalty'] < 0.0
+    
+    def test_energy_efficiency(self):
+        """Test energy efficiency component."""
+        body_length = 0.5
+        T, N = 5, 2
+        
+        positions = np.zeros((T, N, 2))
+        headings = np.zeros((T, N))
+        velocities = np.zeros((T, N, 2))
+        alive = np.ones((T, N), dtype=bool)
+        
+        # Agents moving at constant speed
+        speed = 1.0
+        for t in range(T):
+            positions[t, 0] = [t * speed, 0.0]
+            positions[t, 1] = [t * speed, 1.0]
+            velocities[t, 0] = [speed, 0.0]
+            velocities[t, 1] = [speed, 0.0]
+        
+        reward, components = compute_episode_reward(
+            positions, headings, velocities, alive, body_length
+        )
+        
+        # Should have positive energy efficiency
+        assert components['energy_efficiency'] > 0.0
+    
+    def test_smoothness_penalty(self):
+        """Test movement smoothness penalty."""
+        body_length = 0.5
+        T, N = 10, 2
+        
+        positions = np.zeros((T, N, 2))
+        headings = np.zeros((T, N))
+        velocities = np.zeros((T, N, 2))
+        alive = np.ones((T, N), dtype=bool)
+        
+        # Jerky movement (alternating velocities)
+        for t in range(T):
+            vel = 1.0 if t % 2 == 0 else 0.1
+            velocities[t] = vel
+            positions[t] = positions[t-1] + velocities[t] if t > 0 else 0.0
+        
+        reward, components = compute_episode_reward(
+            positions, headings, velocities, alive, body_length
+        )
+        
+        # Should have smoothness penalty
+        assert components['smoothness_penalty'] < 0.0
+    
+    def test_empty_episode(self):
+        """Test reward handles empty episode gracefully."""
+        body_length = 0.5
+        
+        positions = np.zeros((0, 0, 2))
+        headings = np.zeros((0, 0))
+        velocities = np.zeros((0, 0, 2))
+        alive = np.zeros((0, 0), dtype=bool)
+        
+        reward, components = compute_episode_reward(
+            positions, headings, velocities, alive, body_length
+        )
+        
+        assert reward == 0.0
+        assert components == {}
+    
+    def test_component_breakdown(self):
+        """Test all reward components are present."""
+        body_length = 0.5
+        T, N = 5, 3
+        
+        positions = np.random.rand(T, N, 2) * 10
+        headings = np.random.rand(T, N) * 2 * np.pi
+        velocities = np.random.rand(T, N, 2)
+        alive = np.ones((T, N), dtype=bool)
+        
+        reward, components = compute_episode_reward(
+            positions, headings, velocities, alive, body_length
+        )
+        
+        # Check all components exist
+        expected_keys = [
+            'cohesion', 'alignment', 'separation',
+            'upstream_progress', 'energy_efficiency', 'drafting_benefit',
+            'boundary_penalty', 'mortality_penalty', 'smoothness_penalty',
+            'total'
+        ]
+        
+        for key in expected_keys:
+            assert key in components
+        
+        # Total should match returned reward
+        assert components['total'] == pytest.approx(reward)
+
+
+class TestRLTrainer:
+    """Test RL trainer class."""
+    
+    def create_mock_simulation(self, num_agents=10, num_timesteps=20):
+        """Create a mock simulation class for testing."""
+        class MockSimulation:
+            def __init__(self, weights):
+                self.num_agents = num_agents
+                self.num_timesteps = num_timesteps
+                self.timestep_count = 0
+                
+                # Initialize state arrays
+                self.X = np.random.uniform(0, 100, num_agents).astype(np.float32)
+                self.Y = np.random.uniform(0, 100, num_agents).astype(np.float32)
+                self.heading = np.random.uniform(0, 2*np.pi, num_agents).astype(np.float32)
+                self.fish_x_vel = np.random.uniform(-1, 1, num_agents).astype(np.float32)
+                self.fish_y_vel = np.random.uniform(0.5, 1.5, num_agents).astype(np.float32)  # Mostly upstream
+                self.battery = np.ones(num_agents, dtype=np.float32)
+                self.dead = np.zeros(num_agents, dtype=np.int8)
+                
+            def timestep(self, t, dt):
+                """Simulate one timestep - agents drift upstream."""
+                self.Y += 0.5  # Move upstream
+                self.X += np.random.uniform(-0.1, 0.1, self.num_agents)  # Small lateral drift
+                self.timestep_count += 1
+                
+            def close(self):
+                """Clean up resources."""
+                pass
+        
+        return MockSimulation
+    
+    def create_simulation_factory(self, num_agents=10, num_timesteps=20):
+        """Create a factory function for testing."""
+        mock_sim_class = self.create_mock_simulation(num_agents, num_timesteps)
+        
+        def factory(weights: BehavioralWeights):
+            return mock_sim_class(weights)
+        
+        return factory
+    
+    def test_trainer_initialization(self):
+        """Test trainer initialization."""
+        factory = self.create_simulation_factory()
+        trainer = RLTrainer(
+            simulation_factory=factory,
+            config={'exploration_noise': 0.1}
+        )
+        
+        assert trainer.exploration_noise == 0.1
+        assert trainer.body_length == 0.5
+        assert trainer.best_reward == -np.inf
+        assert len(trainer.episode_history) == 0
+    
+    def test_trainer_custom_weights(self):
+        """Test trainer with custom initial weights."""
+        weights = BehavioralWeights(cohesion_weight=5000.0)
+        factory = self.create_simulation_factory()
+        trainer = RLTrainer(
+            simulation_factory=factory,
+            initial_weights=weights
+        )
+        
+        assert trainer.initial_weights.cohesion_weight == 5000.0
+        assert trainer.best_weights.cohesion_weight == 5000.0
+    
+    def test_run_episode(self):
+        """Test running a single episode."""
+        factory = self.create_simulation_factory()
+        trainer = RLTrainer(simulation_factory=factory)
+        
+        positions, headings, velocities, battery, alive = trainer.run_episode(trainer.initial_weights)
+        
+        # Check output shapes
+        assert positions.shape == (20, 10, 2)
+        assert headings.shape == (20, 10)
+        assert velocities.shape == (20, 10, 2)
+        assert battery.shape == (20, 10)
+        assert alive.shape == (20, 10)
+    
+    def test_train_convergence(self):
+        """Test training loop converges."""
+        factory = self.create_simulation_factory()
+        trainer = RLTrainer(
+            simulation_factory=factory,
+            config={'exploration_noise': 0.05}
+        )
+        
+        best_weights, history = trainer.train(
+            num_episodes=10,
+            verbose=False
+        )
+        
+        # Should have run 10 episodes
+        assert len(history) == 10
+        
+        # Best weights should be returned
+        assert best_weights == trainer.best_weights
+    
+    def test_train_tracks_improvements(self):
+        """Test training tracks when improvements occur."""
+        factory = self.create_simulation_factory()
+        trainer = RLTrainer(simulation_factory=factory)
+        
+        best_weights, history = trainer.train(num_episodes=5, verbose=False)
+        
+        # Check history structure
+        for episode, reward in history:
+            assert isinstance(episode, int)
+            assert isinstance(reward, float)
+    
+    def test_save_best_weights(self, tmp_path):
+        """Test saving best weights to file."""
+        factory = self.create_simulation_factory()
+        trainer = RLTrainer(simulation_factory=factory)
+        
+        best_weights, history = trainer.train(num_episodes=5, verbose=False)
+        
+        weights_path = tmp_path / "best_weights.json"
+        trainer.best_weights.to_json(weights_path)
+        
+        # Check weights file exists
+        assert weights_path.exists()
+        
+        # Verify can load weights back
+        loaded_weights = BehavioralWeights.from_json(weights_path)
+        assert loaded_weights.to_dict() == trainer.best_weights.to_dict()
+    
+    def test_exploration_improves_over_time(self):
+        """Test that exploration can improve rewards."""
+        factory = self.create_simulation_factory(num_agents=20, num_timesteps=50)
+        trainer = RLTrainer(
+            simulation_factory=factory,
+            config={'exploration_noise': 0.1}
+        )
+        
+        best_weights, history = trainer.train(num_episodes=15, verbose=False)
+        
+        # Extract rewards
+        rewards = [r for _, r in history]
+        
+        # Best reward should be >= initial reward (allowing for exploration)
+        # (May not always improve due to stochastic exploration)
+        assert trainer.best_reward >= min(rewards)

@@ -1,0 +1,21 @@
+{
+  "cohesion_weight": 762.2328211675845,
+  "alignment_weight": 25388.418432281785,
+  "separation_weight": 5277.574404045997,
+  "separation_radius": 0.9209749111812021,
+  "rheotaxis_weight": 22416.651877477776,
+  "border_cue_weight": 215380.8867458022,
+  "border_threshold_multiplier": 2.0906243694504894,
+  "border_max_force": 9.943823602205493,
+  "collision_weight": 1496.543416069651,
+  "collision_radius": 0.5876798894049456,
+  "low_speed_weight": 1448.7256750477131,
+  "wave_drag_weight": 0.0,
+  "refugia_weight": 53688.82222582461,
+  "shallow_weight": 511655.3165264156,
+  "avoid_weight": 24953.072671611724,
+  "sensory_range": 2.6171139853700573,
+  "threat_level": 0.33975298594009534,
+  "cohesion_radius_relaxed": 2.288332769686438,
+  "cohesion_radius_threatened": 1.6937155799066799
+}

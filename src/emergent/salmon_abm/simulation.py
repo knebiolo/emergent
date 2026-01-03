@@ -1939,6 +1939,156 @@ class simulation:
             return status
         return True
 
+    def reset_spatial_state(self):
+        """Reset all ephemeral state (positions, velocities, memory) while preserving
+        behavioral weights and environment data. Used between RL training episodes.
+        
+        Resets:
+        - Positions (X, Y, prev_X, prev_Y)
+        - Velocities (x_vel, y_vel, fish_x_vel, fish_y_vel)
+        - Headings (heading, prev_Hz, Hz)
+        - Energy (battery, recover_stopwatch, swim_behav)
+        - Memory (avoid_hist_*)
+        - Dead/alive status (dead)
+        - Other derived state (sog, ideal_sog, thrust, drag, etc.)
+        
+        Preserves:
+        - Behavioral weights (test_weights if present)
+        - Environment rasters (depth, vel_x, vel_y, etc.)
+        - Agent attributes (sex, length, weight, body_depth)
+        - Simulation geometry (bounds, crs, transforms)
+        """
+        # Reset positions to initial state (will be re-sampled if start_polygon exists)
+        self.X = np.zeros(self.num_agents, dtype=np.float32)
+        self.Y = np.zeros(self.num_agents, dtype=np.float32)
+        self.prev_X = self.X.copy()
+        self.prev_Y = self.Y.copy()
+        
+        # Reset velocities
+        self.x_vel = np.zeros(self.num_agents, dtype=np.float32)
+        self.y_vel = np.zeros(self.num_agents, dtype=np.float32)
+        self.fish_x_vel = np.zeros(self.num_agents, dtype=np.float32)
+        self.fish_y_vel = np.zeros(self.num_agents, dtype=np.float32)
+        
+        # Reset headings
+        self.heading = np.zeros(self.num_agents, dtype=np.float32)
+        self.prev_Hz = np.zeros(self.num_agents, dtype=np.float32)
+        self.Hz = np.zeros(self.num_agents, dtype=np.float32)
+        
+        # Reset energy state
+        self.battery = np.ones(self.num_agents, dtype=np.float32)
+        self.recover_stopwatch = np.zeros(self.num_agents, dtype=np.float32)
+        self.swim_behav = np.ones(self.num_agents, dtype=np.int8)
+        
+        # Reset movement state
+        self.sog = self.ideal_sog.copy()
+        self.thrust = np.zeros((self.num_agents, 2), dtype=np.float32)
+        self.drag = np.zeros((self.num_agents, 2), dtype=np.float32)
+        self.swim_mode = np.ones(self.num_agents, dtype=np.int8)
+        
+        # Reset dead/alive status
+        self.dead = np.zeros(self.num_agents, dtype=np.int8)
+        
+        # Reset memory (avoid history)
+        if self.avoid_hist_rows is not None:
+            self.avoid_hist_rows[:] = -1
+        if self.avoid_hist_cols is not None:
+            self.avoid_hist_cols[:] = -1
+        if self.avoid_hist_t is not None:
+            self.avoid_hist_t[:] = np.nan
+        if self.avoid_hist_pos is not None:
+            self.avoid_hist_pos[:] = 0
+        
+        # Reset cumulative time
+        self.cumulative_time = 0.0
+        
+        # Reset neighbor caches
+        self.agents_within_buffers = [np.array([], dtype=int) for _ in range(self.num_agents)]
+        self.nearest_neighbor_distance = np.full(self.num_agents, np.nan)
+        self.closest_agent = np.full(self.num_agents, np.nan)
+        
+        # Reset eddy state
+        self.in_eddy = np.zeros(self.num_agents, dtype=bool)
+        self.time_since_eddy_escape = np.zeros(self.num_agents, dtype=float)
+        
+        # Reset PID diagnostics
+        self.heading_delta = np.zeros(self.num_agents, dtype=np.float32)
+        self.error_magnitude = np.zeros(self.num_agents, dtype=np.float32)
+        self.pid_adjustment_magnitude = np.zeros(self.num_agents, dtype=np.float32)
+        
+        # Re-initialize headings from environment rasters
+        try:
+            self.initialize_headings_from_db()
+        except Exception:
+            # fallback: point upstream
+            self.heading = np.full(self.num_agents, np.pi/2, dtype=np.float32)
+        
+        # Re-set initial fish velocity
+        try:
+            fv_x = self.ideal_sog * np.cos(self.heading)
+            fv_y = self.ideal_sog * np.sin(self.heading)
+            self.initial_fish_vel = np.stack((fv_x, fv_y), axis=1)
+        except Exception:
+            self.initial_fish_vel = np.zeros((self.num_agents, 2), dtype=float)
+        
+        return True
+
+    def load_behavioral_weights(self, weights_path: str = None, weights_dict: dict = None):
+        """Load trained behavioral weights from JSON file or dict and apply to simulation.
+        
+        Args:
+            weights_path: Path to JSON file containing BehavioralWeights
+            weights_dict: Dictionary of weights (alternative to file path)
+        
+        Either weights_path or weights_dict must be provided.
+        
+        Updates self.test_weights dictionary to control behavioral forces during simulation.
+        The test_weights dict is used by the behavior module to modulate force magnitudes.
+        
+        Example:
+            sim.load_behavioral_weights('outputs/rl_training/best_weights.json')
+            # or
+            sim.load_behavioral_weights(weights_dict={'cohesion': 1500.0, 'alignment': 30000.0})
+        """
+        # Import here to avoid circular dependency
+        from emergent.salmon_abm.rl_training import BehavioralWeights
+        
+        if weights_path is None and weights_dict is None:
+            raise ValueError("Either weights_path or weights_dict must be provided")
+        
+        # Load weights from JSON file if path provided
+        if weights_path is not None:
+            weights = BehavioralWeights.from_json(weights_path)
+        else:
+            weights = BehavioralWeights.from_dict(weights_dict)
+        
+        # Create test_weights dictionary for simulation
+        # Map BehavioralWeights fields to test_weights keys used by behavior module
+        self.test_weights = {
+            'cohesion': weights.cohesion_weight,
+            'alignment': weights.alignment_weight,
+            'separation': weights.separation_weight,
+            'separation_radius': weights.separation_radius,
+            'rheotaxis': weights.rheotaxis_weight,
+            'border_cue': weights.border_cue_weight,
+            'border_threshold_multiplier': weights.border_threshold_multiplier,
+            'border_max_force': weights.border_max_force,
+            'collision': weights.collision_weight,
+            'collision_radius': weights.collision_radius,
+            'refugia': weights.refugia_weight,
+            'low_speed': weights.low_speed_weight,
+            'wave_drag': weights.wave_drag_weight,
+            'shallow': weights.shallow_weight,
+            'avoid': weights.avoid_weight,
+            'sensory_range': weights.sensory_range,
+            'threat_level': weights.threat_level,
+            'cohesion_radius_relaxed': weights.cohesion_radius_relaxed,
+            'cohesion_radius_threatened': weights.cohesion_radius_threatened,
+            'drafting_enabled': weights.drafting_enabled,
+        }
+        
+        return True
+
     def close(self):
         # close HDF5 and optionally remove temporary DB file if it was created internally
         beh = getattr(self, "_behavior", None)

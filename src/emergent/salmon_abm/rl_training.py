@@ -15,9 +15,10 @@ Based on:
 import json
 import numpy as np
 from dataclasses import dataclass, asdict, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Callable, Any
 from pathlib import Path
 from scipy.spatial import cKDTree
+import time
 
 
 @dataclass
@@ -379,3 +380,412 @@ def compute_overall_schooling_score(
     }
     
     return overall_mean, components
+
+
+# =============================================================================
+# Episode Reward Function
+# =============================================================================
+
+def compute_episode_reward(
+    positions_history: np.ndarray,
+    headings_history: np.ndarray,
+    velocities_history: np.ndarray,
+    alive_history: np.ndarray,
+    body_length: float,
+    threat_level: float = 0.3,
+    boundary_coords: Optional[np.ndarray] = None,
+    boundary_threshold: float = 2.0
+) -> Tuple[float, Dict[str, float]]:
+    """
+    Compute total reward for a training episode.
+    
+    Combines schooling quality, upstream progress, energy efficiency, and penalties
+    for boundary violations and mortality.
+    
+    Based on BIOLOGICAL_SCHOOLING_METRICS.md reward function (lines 179-213).
+    
+    Args:
+        positions_history: Agent positions over time, shape (T, N, 2) or (T, N, 3)
+        headings_history: Agent headings over time, shape (T, N)
+        velocities_history: Agent velocities over time, shape (T, N, 2) or (T, N, 3)
+        alive_history: Agent alive status over time, shape (T, N) boolean
+        body_length: Fish body length in meters
+        threat_level: 0.0 = relaxed, 1.0 = high threat
+        boundary_coords: Optional boundary polygon vertices, shape (M, 2)
+        boundary_threshold: Distance to boundary considered "near" (meters)
+    
+    Returns:
+        Tuple of (total_reward, components_dict):
+        - total_reward: Scalar reward for episode
+          - Perfect: 20-30 (tight formation, efficient migration)
+          - Good: 10-20 (coordinated but imperfect)
+          - Poor: 0-10 (fragmented, inefficient)
+          - Catastrophic: <0 (high mortality, collisions)
+        - components_dict: Breakdown of reward components
+    
+    Component weights (from BIOLOGICAL_SCHOOLING_METRICS.md):
+    - Cohesion: 10.0 (core schooling quality)
+    - Alignment: 5.0 (heading coordination, shifted -1:1 → 0:2)
+    - Separation: 5.0 (crowding penalty)
+    - Upstream progress: 0.5 (meters/step)
+    - Energy efficiency: 2.0 (m/kcal)
+    - Drafting benefit: 20.0 (formation quality, 0.0-0.25 range)
+    - Boundary proximity: -5.0 per agent (safety penalty)
+    - Mortality: -50.0 per death (strong survival penalty)
+    - Smoothness: -0.2 (Δaccel penalty for jerky movement)
+    """
+    T, N = positions_history.shape[0], positions_history.shape[1]
+    
+    if T == 0 or N == 0:
+        return 0.0, {}
+    
+    # =================================================================
+    # 1. Schooling Quality (averaged over time)
+    # =================================================================
+    cohesion_scores = []
+    alignment_scores = []
+    separation_penalties = []
+    
+    for t in range(T):
+        positions_t = positions_history[t]
+        headings_t = headings_history[t]
+        alive_t = alive_history[t]
+        
+        # Only compute for alive agents
+        if np.sum(alive_t) > 0:
+            pos_alive = positions_t[alive_t]
+            head_alive = headings_t[alive_t]
+            
+            cohesion = compute_cohesion_score(pos_alive, body_length, threat_level)
+            alignment = compute_alignment_score(head_alive, pos_alive, body_length)
+            separation = compute_separation_penalty(pos_alive, body_length)
+            
+            cohesion_scores.append(np.mean(cohesion))
+            alignment_scores.append(np.mean(alignment))
+            separation_penalties.append(np.mean(separation))
+    
+    mean_cohesion = np.mean(cohesion_scores) if cohesion_scores else 0.0
+    mean_alignment = np.mean(alignment_scores) if alignment_scores else 0.0
+    mean_separation = np.mean(separation_penalties) if separation_penalties else 0.0
+    
+    # =================================================================
+    # 2. Upstream Progress (net Y-displacement)
+    # =================================================================
+    # Assume upstream = +Y direction
+    initial_y = np.mean(positions_history[0, alive_history[0], 1])
+    final_y = np.mean(positions_history[-1, alive_history[-1], 1]) if np.any(alive_history[-1]) else initial_y
+    total_upstream = final_y - initial_y
+    mean_upstream_progress = total_upstream / T  # Meters per timestep
+    
+    # =================================================================
+    # 3. Energy Efficiency (distance / speed²)
+    # =================================================================
+    # Energy ∝ speed², so efficiency = distance traveled / sum(speed²)
+    total_distance = 0.0
+    total_energy = 0.0
+    
+    for t in range(1, T):
+        alive_t = alive_history[t]
+        if np.sum(alive_t) == 0:
+            continue
+        
+        # Distance traveled by alive agents
+        displacement = positions_history[t, alive_t] - positions_history[t-1, alive_t]
+        distances = np.linalg.norm(displacement, axis=1)
+        total_distance += np.sum(distances)
+        
+        # Energy (proportional to speed²)
+        speeds = np.linalg.norm(velocities_history[t, alive_t], axis=1)
+        total_energy += np.sum(speeds ** 2)
+    
+    energy_efficiency = total_distance / total_energy if total_energy > 0 else 0.0
+    
+    # =================================================================
+    # 4. Drafting Benefit (placeholder - would need formation detection)
+    # =================================================================
+    # TODO: Implement drafting detection (agents swimming in formation)
+    # For now, assume no drafting benefit
+    mean_drafting_benefit = 0.0
+    
+    # =================================================================
+    # 5. Boundary Proximity Penalty
+    # =================================================================
+    agents_near_boundary = 0
+    if boundary_coords is not None:
+        # Count timesteps where agents are near boundary
+        for t in range(T):
+            alive_t = alive_history[t]
+            if np.sum(alive_t) == 0:
+                continue
+            
+            pos_alive = positions_history[t, alive_t]
+            
+            # Simplified: check distance to any boundary point
+            # (In practice, would use point-to-polygon distance)
+            for pos in pos_alive:
+                min_dist = np.min(np.linalg.norm(boundary_coords - pos, axis=1))
+                if min_dist < boundary_threshold:
+                    agents_near_boundary += 1
+    
+    # =================================================================
+    # 6. Mortality Penalty
+    # =================================================================
+    initial_alive = np.sum(alive_history[0])
+    final_alive = np.sum(alive_history[-1])
+    dead_count = initial_alive - final_alive
+    
+    # =================================================================
+    # 7. Movement Smoothness (acceleration changes)
+    # =================================================================
+    # Compute acceleration changes (jerk)
+    accel_smoothness_penalty = 0.0
+    
+    for t in range(2, T):
+        alive_t = alive_history[t]
+        if np.sum(alive_t) == 0:
+            continue
+        
+        # Velocity changes (acceleration)
+        vel_curr = velocities_history[t, alive_t]
+        vel_prev = velocities_history[t-1, alive_t]
+        vel_prev2 = velocities_history[t-2, alive_t]
+        
+        accel_curr = vel_curr - vel_prev
+        accel_prev = vel_prev - vel_prev2
+        
+        # Jerk = change in acceleration
+        jerk = np.linalg.norm(accel_curr - accel_prev, axis=1)
+        accel_smoothness_penalty += np.mean(jerk)
+    
+    accel_smoothness_penalty /= max(1, T - 2)  # Average over timesteps
+    
+    # =================================================================
+    # Total Reward Calculation
+    # =================================================================
+    reward = (
+        mean_cohesion * 10.0 +
+        (mean_alignment + 1.0) * 5.0 +  # Shift -1:1 → 0:2, scale to 0:10
+        mean_separation * 5.0 +
+        mean_upstream_progress * 0.5 +
+        energy_efficiency * 2.0 +
+        mean_drafting_benefit * 20.0 +
+        agents_near_boundary * -5.0 +
+        dead_count * -50.0 +
+        accel_smoothness_penalty * -0.2
+    )
+    
+    components = {
+        'cohesion': mean_cohesion * 10.0,
+        'alignment': (mean_alignment + 1.0) * 5.0,
+        'separation': mean_separation * 5.0,
+        'upstream_progress': mean_upstream_progress * 0.5,
+        'energy_efficiency': energy_efficiency * 2.0,
+        'drafting_benefit': mean_drafting_benefit * 20.0,
+        'boundary_penalty': agents_near_boundary * -5.0,
+        'mortality_penalty': dead_count * -50.0,
+        'smoothness_penalty': accel_smoothness_penalty * -0.2,
+        'total': reward
+    }
+    
+    return reward, components
+
+
+# =============================================================================
+# RL Training Infrastructure
+# =============================================================================
+
+class RLTrainer:
+    """
+    Reinforcement learning trainer for behavioral weight optimization.
+    
+    Uses evolutionary strategy with Gaussian perturbations to explore weight space
+    and maximize episode rewards.
+    
+    Training workflow:
+    1. Initialize with default behavioral weights
+    2. Create simulation with current weights
+    3. Run episode, collect trajectory
+    4. Compute reward from episode history
+    5. Mutate weights for exploration
+    6. Keep best weights across all episodes
+    7. Repeat for N episodes
+    8. Save best weights to JSON
+    """
+    
+    def __init__(
+        self,
+        simulation_factory: Callable[[BehavioralWeights], Any],
+        initial_weights: Optional[BehavioralWeights] = None,
+        config: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Initialize RL trainer.
+        
+        Args:
+            simulation_factory: Function that takes BehavioralWeights and returns simulation instance
+            initial_weights: Starting behavioral weights (default: BehavioralWeights())
+            config: Training configuration dict with keys:
+                - exploration_noise: Mutation stddev (default 0.1)
+                - body_length: Fish body length in meters (default 0.5)
+                - dt: Timestep duration in seconds (default 1.0)
+                - num_timesteps: Steps per episode (optional, for factory)
+        """
+        self.simulation_factory = simulation_factory
+        self.initial_weights = initial_weights if initial_weights else BehavioralWeights()
+        
+        # Extract config
+        config = config or {}
+        self.exploration_noise = config.get('exploration_noise', 0.1)
+        self.body_length = config.get('body_length', 0.5)
+        self.dt = config.get('dt', 1.0)
+        self.num_timesteps = config.get('num_timesteps', 100)
+        
+        # Training state
+        self.best_weights = self.initial_weights
+        self.best_reward = -np.inf
+        self.episode_history = []  # List of (episode_num, reward)
+        
+    def run_episode(
+        self,
+        weights: BehavioralWeights
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Run a single simulation episode with given weights.
+        
+        Args:
+            weights: Behavioral weights to use for this episode
+        
+        Returns:
+            Tuple of (positions, headings, velocities, battery, alive) histories
+            Each is (num_timesteps, num_agents, ...) array
+        """
+        # Create simulation with weights
+        sim = self.simulation_factory(weights)
+        
+        # Get number of timesteps from simulation
+        num_timesteps = sim.num_timesteps
+        num_agents = sim.num_agents
+        
+        # Allocate arrays for trajectory history
+        positions_history = np.zeros((num_timesteps, num_agents, 2), dtype=np.float32)
+        headings_history = np.zeros((num_timesteps, num_agents), dtype=np.float32)
+        velocities_history = np.zeros((num_timesteps, num_agents, 2), dtype=np.float32)
+        battery_history = np.zeros((num_timesteps, num_agents), dtype=np.float32)
+        alive_history = np.ones((num_timesteps, num_agents), dtype=bool)
+        
+        # Run simulation timesteps
+        for t in range(num_timesteps):
+            # Run one timestep
+            sim.timestep(t, self.dt)
+            
+            # Collect state
+            positions_history[t, :, 0] = sim.X
+            positions_history[t, :, 1] = sim.Y
+            headings_history[t] = sim.heading
+            velocities_history[t, :, 0] = sim.fish_x_vel
+            velocities_history[t, :, 1] = sim.fish_y_vel
+            battery_history[t] = sim.battery
+            alive_history[t] = (sim.dead == 0)
+        
+        # Clean up simulation
+        sim.close()
+        
+        return positions_history, headings_history, velocities_history, battery_history, alive_history
+    
+    def train(
+        self,
+        num_episodes: int = 50,
+        verbose: bool = True
+    ) -> Tuple[BehavioralWeights, list]:
+        """
+        Train behavioral weights through episodic RL.
+        
+        Args:
+            num_episodes: Number of training episodes
+            verbose: Print progress
+        
+        Returns:
+            Tuple of (best_weights, history)
+            history is list of (episode, reward) tuples
+        """
+        if verbose:
+            print(f"Starting RL training: {num_episodes} episodes")
+            print(f"Exploration noise: {self.exploration_noise}")
+            print()
+        
+        current_weights = self.initial_weights
+        
+        for episode in range(num_episodes):
+            start_time = time.time()
+            
+            # Run episode with current weights
+            positions, headings, velocities, battery, alive = self.run_episode(current_weights)
+            
+            # Compute reward
+            reward, components = compute_episode_reward(
+                positions, headings, velocities, alive,
+                body_length=self.body_length,
+                threat_level=current_weights.threat_level
+            )
+            
+            elapsed = time.time() - start_time
+            
+            # Track best weights
+            if reward > self.best_reward:
+                self.best_reward = reward
+                self.best_weights = current_weights
+                improved = True
+            else:
+                improved = False
+            
+            # Store history
+            self.episode_history.append((episode, float(reward)))
+            
+            # Progress report
+            if verbose:
+                status = "✓ NEW BEST" if improved else ""
+                print(f"Episode {episode+1}/{num_episodes}: "
+                      f"reward={reward:.2f} "
+                      f"(best={self.best_reward:.2f}) "
+                      f"[{elapsed:.1f}s] {status}")
+                if episode % 10 == 0 and episode > 0:
+                    print(f"  Components: cohesion={components['cohesion']:.1f}, "
+                          f"alignment={components['alignment']:.1f}, "
+                          f"upstream={components['upstream_progress']:.1f}")
+            
+            # Mutate weights for next episode (exploration)
+            current_weights = self.best_weights.mutate(mutation_scale=self.exploration_noise)
+        
+        if verbose:
+            print()
+            print(f"Training complete!")
+            print(f"Best reward: {self.best_reward:.2f}")
+        
+        return self.best_weights, self.episode_history
+    
+    def save_best_weights(self, filepath: Path) -> None:
+        """Save best weights to JSON file."""
+        self.best_weights.to_json(filepath)
+        if hasattr(self, 'episode_history') and self.episode_history:
+            # Also save training history
+            history_path = filepath.parent / f"{filepath.stem}_history.json"
+            with open(history_path, 'w') as f:
+                json.dump(self.episode_history, f, indent=2)
+    
+    def get_training_stats(self) -> Dict[str, Any]:
+        """Get summary statistics from training."""
+        if not self.episode_history:
+            return {}
+        
+        rewards = [ep['reward'] for ep in self.episode_history]
+        
+        return {
+            'num_episodes': len(self.episode_history),
+            'best_reward': self.best_reward,
+            'mean_reward': np.mean(rewards),
+            'std_reward': np.std(rewards),
+            'min_reward': np.min(rewards),
+            'max_reward': np.max(rewards),
+            'final_reward': rewards[-1],
+            'improvement': self.best_reward - rewards[0] if len(rewards) > 0 else 0.0
+        }
