@@ -110,14 +110,21 @@ class SimulationCanvas(QWidget):
             self.replay_widget.playing = False
             self.replay_widget.timer.stop()
             self.animation_finished.emit()
+    
+    def wheelEvent(self, event):
+        """Forward wheel events to replay widget for zooming only."""
+        # Forward to replay_widget and prevent default scroll behavior
+        self.replay_widget.wheelEvent(event)
+        event.accept()
         
-    def set_positions(self, positions: np.ndarray, headings: Optional[np.ndarray] = None):
+    def set_positions(self, positions: np.ndarray, headings: Optional[np.ndarray] = None, battery: Optional[np.ndarray] = None):
         """
         Update agent positions for visualization.
         
         Args:
             positions: Array of shape (num_agents, 2) or (num_timesteps, num_agents, 2)
             headings: Optional array of headings for oriented rendering
+            battery: Optional array of battery levels for color visualization (green=full, red=depleted)
         """
         if positions is None or positions.size == 0:
             return
@@ -136,6 +143,12 @@ class SimulationCanvas(QWidget):
             if headings.ndim == 1:
                 headings = headings[np.newaxis, :]
             self.replay_widget.heading_array = headings
+        
+        # Update battery if provided (for color visualization)
+        if battery is not None:
+            if battery.ndim == 1:
+                battery = battery[np.newaxis, :]
+            self.replay_widget.battery_array = battery
         
         # Update bounds to include all positions in trajectory
         xs = positions[:, :, 0]
@@ -360,6 +373,10 @@ class ControlPanel(QWidget):
             
             self.figure = Figure(figsize=(5, 3), dpi=80)
             self.canvas = FigureCanvasQTAgg(self.figure)
+            
+            # Disable matplotlib's default scroll/pan/zoom behavior
+            self.canvas.mpl_disconnect(self.canvas.mpl_connect('scroll_event', lambda e: None))
+            
             self.ax = self.figure.add_subplot(111)
             self.ax.set_xlabel('Episode')
             self.ax.set_ylabel('Reward')
@@ -447,7 +464,7 @@ class TrainingWorker(QObject):
     
     # Signals
     episode_started = pyqtSignal(int)  # episode number
-    episode_computed = pyqtSignal(int, float, dict, object, object)  # episode, reward, components, positions, headings
+    episode_computed = pyqtSignal(int, float, dict, object, object, object)  # episode, reward, components, positions, headings, battery
     training_completed = pyqtSignal(object, list)  # best_weights, history
     error_occurred = pyqtSignal(str)  # error message
     
@@ -505,18 +522,20 @@ class TrainingWorker(QObject):
                 # Store history
                 self.trainer.episode_history.append((episode, float(reward)))
                 
-                # Clear the animation complete flag BEFORE emitting
+                # PIPELINE OPTIMIZATION: Wait for previous episode's animation to finish BEFORE emitting this one
+                # This allows next episode to compute while current animates
+                if episode > 0:  # First episode has no previous animation
+                    print(f"Episode {episode}: Waiting for previous episode's visualization to complete...")
+                    self.animation_complete.wait()
+                    print(f"Episode {episode}: Previous visualization complete")
+                
+                # Clear the animation complete flag for THIS episode
                 self.animation_complete.clear()
                 
-                # Emit episode data - UI will handle visualization
-                self.episode_computed.emit(episode, float(reward), components, positions, headings)
+                # Emit episode data - UI will handle visualization (include battery for coloring)
+                self.episode_computed.emit(episode, float(reward), components, positions, headings, battery)
                 
-                # Wait for UI to signal that animation finished before continuing
-                print(f"Episode {episode}: Waiting for visualization to complete...")
-                self.animation_complete.wait()
-                print(f"Episode {episode}: Visualization complete, continuing to next episode")
-                
-                # Mutate for next episode
+                # Mutate for next episode (compute WHILE current episode animates)
                 current_weights = self.trainer.best_weights.mutate(
                     mutation_scale=self.trainer.exploration_noise
                 )
@@ -792,7 +811,7 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.status_label.setText(f"Computing episode {episode + 1}/{total}...")
         
     def on_episode_computed(self, episode: int, reward: float, components: Dict[str, float], 
-                           positions: np.ndarray, headings: np.ndarray):
+                           positions: np.ndarray, headings: np.ndarray, battery: np.ndarray):
         """Handle episode computation complete - start visualization and wait."""
         # Store episode data for later processing after animation
         self.pending_episode_data = (episode, reward, components)
@@ -801,8 +820,8 @@ class RLTrainingViewer(QMainWindow):
         total = self.control_panel.episodes_spin.value()
         self.control_panel.status_label.setText(f"Visualizing episode {episode + 1}/{total}...")
         
-        # Start visualization - this will trigger animation_finished when done
-        self.simulation_canvas.set_positions(positions, headings)
+        # Start visualization with battery data for coloring - this will trigger animation_finished when done
+        self.simulation_canvas.set_positions(positions, headings, battery)
         
     def on_animation_finished(self):
         """Handle animation playback complete - now update UI and continue training."""

@@ -452,8 +452,8 @@ class ReplayWidget(QOpenGLWidget):
         painter.drawEllipse(QRectF(cx - base_radius, cy - base_radius, 2 * base_radius, 2 * base_radius))
         
         # Draw body as a line extending backward from the head
-        # Line length is 0.415 meters in world coordinates, scaled to screen pixels
-        line_length_world = 0.415  # meters (half of 0.83m)
+        # Line length is 0.83 meters (full fish body), head radius reduced to 0.5x for better proportions
+        line_length_world = 0.83  # meters (full body length)
         line_length_screen = line_length_world * scale
         
         # Convert heading to radians (heading is direction of movement)
@@ -652,9 +652,10 @@ class ReplayWidget(QOpenGLWidget):
             brush_col = QColor(220, 30, 30)
             painter.setBrush(brush_col)
             # default radius scales with canvas; override if user provided `point_size`
-            r = max(2, int(min(w, h) * 0.002))  # Head size: 0.2% of screen
+            # Reduced head size for better body/head proportions (was 0.002, now 0.001)
+            r = max(2, int(min(w, h) * 0.001))  # Head size: 0.1% of screen
             if self._point_size is not None:
-                r = max(2, int(self._point_size))
+                r = max(2, int(self._point_size * 0.5))  # Halve user-provided size for smaller heads
             if getattr(self, '_debug_force_big', False):
                 r = max(r, int(min(w, h) * 0.01))
 
