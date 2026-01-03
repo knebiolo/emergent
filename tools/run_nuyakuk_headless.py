@@ -249,7 +249,7 @@ def run_headless(args):
             'border': 200000,
             'shallow': 500000,
             'avoid': 25000,
-            'collision': 3000,  # Increased from 2000
+            'collision': 5000,  # Increased from 3000
         }
         print(f'Set default test weights with collision={sim.test_weights["collision"]}, cohesion={sim.test_weights["cohesion"]}')
 
@@ -311,7 +311,7 @@ def run_headless(args):
         writer.writerow(header)
 
         # run short deterministic simulation
-        dt = 0.5
+        dt = 1.0
         for t in range(args.nsteps):
             # expose current step so movement debug filenames are meaningful
             setattr(sim, 'current_step', int(t))

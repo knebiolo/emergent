@@ -15,8 +15,9 @@ Based on:
 import json
 import numpy as np
 from dataclasses import dataclass, asdict, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from pathlib import Path
+from scipy.spatial import cKDTree
 
 
 @dataclass
@@ -161,3 +162,220 @@ class BehavioralWeights:
             mutated[key] = max(0.0, value + noise)  # Clip to non-negative
         
         return BehavioralWeights.from_dict(mutated)
+
+
+# =============================================================================
+# Schooling Quality Metrics
+# =============================================================================
+
+def compute_cohesion_score(
+    positions: np.ndarray,
+    body_length: float,
+    threat_level: float = 0.3,
+    sensory_range: float = 2.0
+) -> np.ndarray:
+    """
+    Compute cohesion quality score for each agent.
+    
+    Measures proximity to ideal group spacing using local centroid of neighbors
+    within sensory range (2 BL).
+    
+    Biological basis: Fish maintain threat-responsive spacing (Magurran & Pitcher 1987).
+    - Relaxed: ~3.0 BL spacing
+    - Threatened: ~1.5 BL spacing
+    
+    Args:
+        positions: Agent positions, shape (N, 2) or (N, 3)
+        body_length: Fish body length in meters
+        threat_level: 0.0 = relaxed, 1.0 = high threat
+        sensory_range: Neighbor detection range in body lengths (default 2.0)
+    
+    Returns:
+        Cohesion scores, shape (N,). Range 0.0-1.0.
+        - 1.0 = Perfect spacing at ideal distance
+        - 0.5 = Moderate deviation (±0.5 BL)
+        - 0.0 = Large deviation (>2 BL from ideal)
+    """
+    N = len(positions)
+    if N == 0:
+        return np.array([])
+    
+    # Build KD-tree for efficient neighbor search
+    tree = cKDTree(positions)
+    search_radius = sensory_range * body_length
+    
+    # Ideal distance adjusted by threat level
+    # Relaxed: 2.0 BL, Threatened: 1.0 BL (linear interpolation)
+    ideal_dist = body_length * (2.0 - threat_level)
+    
+    cohesion_scores = np.zeros(N)
+    
+    for i in range(N):
+        # Find neighbors within sensory range
+        neighbor_indices = tree.query_ball_point(positions[i], r=search_radius)
+        neighbor_indices = [idx for idx in neighbor_indices if idx != i]
+        
+        if len(neighbor_indices) == 0:
+            cohesion_scores[i] = 0.0  # Isolated agent
+            continue
+        
+        # Compute local centroid
+        neighbor_positions = positions[neighbor_indices]
+        centroid = np.mean(neighbor_positions, axis=0)
+        
+        # Distance to centroid
+        dist_to_centroid = np.linalg.norm(positions[i] - centroid)
+        
+        # Gaussian reward centered at ideal distance
+        # σ = 0.5 BL (controls width of reward peak)
+        sigma = 0.5 * body_length
+        cohesion_scores[i] = np.exp(-0.5 * ((dist_to_centroid - ideal_dist) / sigma)**2)
+    
+    return cohesion_scores
+
+
+def compute_alignment_score(
+    headings: np.ndarray,
+    positions: np.ndarray,
+    body_length: float,
+    sensory_range: float = 2.0
+) -> np.ndarray:
+    """
+    Compute heading alignment score for each agent.
+    
+    Measures directional coordination with neighbors using circular mean.
+    
+    Args:
+        headings: Agent headings in radians, shape (N,)
+        positions: Agent positions, shape (N, 2) or (N, 3)
+        body_length: Fish body length in meters
+        sensory_range: Neighbor detection range in body lengths (default 2.0)
+    
+    Returns:
+        Alignment scores, shape (N,). Range -1.0 to 1.0.
+        - 1.0 = Perfect alignment (same direction as neighbors)
+        - 0.0 = Perpendicular (90° difference)
+        - -1.0 = Opposite direction (180° difference)
+    """
+    N = len(positions)
+    if N == 0:
+        return np.array([])
+    
+    # Build KD-tree for neighbor search
+    tree = cKDTree(positions)
+    search_radius = sensory_range * body_length
+    
+    alignment_scores = np.zeros(N)
+    
+    for i in range(N):
+        # Find neighbors within sensory range
+        neighbor_indices = tree.query_ball_point(positions[i], r=search_radius)
+        neighbor_indices = [idx for idx in neighbor_indices if idx != i]
+        
+        if len(neighbor_indices) == 0:
+            alignment_scores[i] = 0.0  # Isolated agent
+            continue
+        
+        # Circular mean of neighbor headings
+        neighbor_headings = headings[neighbor_indices]
+        mean_heading = np.arctan2(
+            np.mean(np.sin(neighbor_headings)),
+            np.mean(np.cos(neighbor_headings))
+        )
+        
+        # Angular difference to my heading
+        heading_diff = headings[i] - mean_heading
+        
+        # Cosine similarity (wraps correctly for angles)
+        alignment_scores[i] = np.cos(heading_diff)
+    
+    return alignment_scores
+
+
+def compute_separation_penalty(
+    positions: np.ndarray,
+    body_length: float
+) -> np.ndarray:
+    """
+    Compute separation penalty for agents too close together.
+    
+    Penalizes crowding when agents are closer than 1.0 BL.
+    
+    Args:
+        positions: Agent positions, shape (N, 2) or (N, 3)
+        body_length: Fish body length in meters
+    
+    Returns:
+        Separation penalties, shape (N,). Range -1.0 to 0.0.
+        - 0.0 = No crowding (>1 BL clearance)
+        - -0.5 = Moderate crowding (0.5 BL apart)
+        - -1.0 = Severe crowding (touching)
+    """
+    N = len(positions)
+    if N == 0:
+        return np.array([])
+    
+    # Build KD-tree
+    tree = cKDTree(positions)
+    
+    # Query 2 nearest neighbors (self + closest other)
+    distances, _ = tree.query(positions, k=2)
+    
+    # distances[:, 1] is distance to nearest neighbor (not self)
+    nearest_neighbor_dist = distances[:, 1]
+    
+    # Penalty if closer than 1.0 BL
+    crowding_threshold = 1.0 * body_length
+    penalties = np.where(
+        nearest_neighbor_dist < crowding_threshold,
+        -(crowding_threshold - nearest_neighbor_dist) / body_length,  # Linear penalty
+        0.0
+    )
+    
+    return penalties
+
+
+def compute_overall_schooling_score(
+    positions: np.ndarray,
+    headings: np.ndarray,
+    body_length: float,
+    threat_level: float = 0.3,
+    sensory_range: float = 2.0
+) -> Tuple[float, Dict[str, float]]:
+    """
+    Compute overall schooling quality combining cohesion, alignment, separation.
+    
+    Args:
+        positions: Agent positions, shape (N, 2) or (N, 3)
+        headings: Agent headings in radians, shape (N,)
+        body_length: Fish body length in meters
+        threat_level: 0.0 = relaxed, 1.0 = high threat
+        sensory_range: Neighbor detection range in body lengths (default 2.0)
+    
+    Returns:
+        Tuple of (overall_score, component_dict):
+        - overall_score: Mean across all agents. Range -1 to 2.
+          - Excellent: ~2.0 (perfect cohesion + alignment, no crowding)
+          - Good: 1.0-1.5
+          - Poor: <0.5
+          - Dysfunctional: <0.0
+        - component_dict: Individual metric means for debugging
+    """
+    cohesion = compute_cohesion_score(positions, body_length, threat_level, sensory_range)
+    alignment = compute_alignment_score(headings, positions, body_length, sensory_range)
+    separation = compute_separation_penalty(positions, body_length)
+    
+    # Overall score per agent
+    per_agent_scores = cohesion + alignment + separation
+    
+    # Mean across population
+    overall_mean = np.mean(per_agent_scores)
+    
+    components = {
+        'cohesion': np.mean(cohesion),
+        'alignment': np.mean(alignment),
+        'separation': np.mean(separation),
+        'overall': overall_mean
+    }
+    
+    return overall_mean, components

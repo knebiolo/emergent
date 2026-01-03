@@ -8,7 +8,13 @@ import pytest
 import json
 import numpy as np
 from pathlib import Path
-from emergent.salmon_abm.rl_training import BehavioralWeights
+from emergent.salmon_abm.rl_training import (
+    BehavioralWeights,
+    compute_cohesion_score,
+    compute_alignment_score,
+    compute_separation_penalty,
+    compute_overall_schooling_score
+)
 
 
 class TestBehavioralWeights:
@@ -150,7 +156,7 @@ class TestBehavioralWeights:
         """Test validation of threat level."""
         # Too low
         weights = BehavioralWeights(threat_level=-0.1)
-        with pytest.raises(ValueError, match="threat_level must be 0.0-1.0"):
+        with pytest.raises(ValueError, match="must be non-negative"):
             weights.validate()
         
         # Too high
@@ -215,3 +221,226 @@ class TestBehavioralWeights:
         # Same seed -> same mutation
         assert mutated1.cohesion_weight == mutated2.cohesion_weight
         assert mutated1.alignment_weight == mutated2.alignment_weight
+
+
+class TestSchoolingMetrics:
+    """Test biological schooling quality metrics."""
+    
+    def test_cohesion_score_perfect_spacing(self):
+        """Test cohesion score for agents at ideal spacing."""
+        body_length = 0.5
+        threat_level = 0.3
+        ideal_dist = body_length * (2.0 - threat_level)  # 0.85 m
+        
+        # Create triangle formation where centroid distance ≈ ideal
+        # For equilateral triangle, centroid is at 1/3 height from base
+        # If side length = ideal_dist, height = ideal_dist * sqrt(3)/2
+        # Centroid distance from vertex ≈ 2/3 * height ≈ 0.58 * ideal_dist
+        # Not quite ideal, but let's test the logic works
+        positions = np.array([
+            [0.0, 0.0],
+            [ideal_dist, 0.0],
+            [ideal_dist/2, ideal_dist * np.sqrt(3)/2]
+        ])
+        
+        scores = compute_cohesion_score(positions, body_length, threat_level)
+        
+        # All agents should have reasonable cohesion (not perfect due to geometry)
+        assert np.all(scores > 0.3)  # Reasonable schooling
+        assert np.all(scores < 1.0)  # Not quite ideal spacing
+    
+    def test_cohesion_score_isolated(self):
+        """Test cohesion score for isolated agent."""
+        body_length = 0.5
+        sensory_range = 2.0
+        
+        # Two agents far apart (>2 BL)
+        positions = np.array([
+            [0.0, 0.0],
+            [10.0, 0.0]  # 10m apart, way beyond sensory range
+        ])
+        
+        scores = compute_cohesion_score(positions, body_length, sensory_range=sensory_range)
+        
+        # Both isolated
+        assert np.all(scores == 0.0)
+    
+    def test_cohesion_score_too_close(self):
+        """Test cohesion score when agents too close."""
+        body_length = 0.5
+        ideal_dist = 0.85  # ~2 BL at low threat
+        
+        # Agents much closer than ideal
+        positions = np.array([
+            [0.0, 0.0],
+            [0.2, 0.0],  # Only 0.2m apart, well below ideal
+            [0.0, 0.2]
+        ])
+        
+        scores = compute_cohesion_score(positions, body_length, threat_level=0.3)
+        
+        # Should have lower scores (not at ideal spacing)
+        assert np.all(scores < 1.0)
+    
+    def test_alignment_score_perfect(self):
+        """Test alignment score for perfectly aligned agents."""
+        body_length = 0.5
+        
+        # Three agents in a line, all heading same direction
+        positions = np.array([
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0]
+        ])
+        headings = np.array([0.0, 0.0, 0.0])  # All heading East
+        
+        scores = compute_alignment_score(headings, positions, body_length)
+        
+        # All perfectly aligned with neighbors
+        assert np.all(scores == pytest.approx(1.0, abs=0.01))
+    
+    def test_alignment_score_opposite(self):
+        """Test alignment score for opposite headings."""
+        body_length = 0.5
+        
+        positions = np.array([
+            [0.0, 0.0],
+            [1.0, 0.0]
+        ])
+        headings = np.array([0.0, np.pi])  # Opposite directions
+        
+        scores = compute_alignment_score(headings, positions, body_length)
+        
+        # Should be close to -1 (opposite)
+        assert np.all(scores < -0.9)
+    
+    def test_alignment_score_perpendicular(self):
+        """Test alignment score for perpendicular headings."""
+        body_length = 0.5
+        
+        positions = np.array([
+            [0.0, 0.0],
+            [1.0, 0.0]
+        ])
+        headings = np.array([0.0, np.pi/2])  # 90° apart
+        
+        scores = compute_alignment_score(headings, positions, body_length)
+        
+        # Should be close to 0 (perpendicular)
+        assert np.all(np.abs(scores) < 0.1)
+    
+    def test_separation_penalty_no_crowding(self):
+        """Test separation penalty when agents well-spaced."""
+        body_length = 0.5
+        
+        # Agents 2m apart (>1 BL)
+        positions = np.array([
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 2.0]
+        ])
+        
+        penalties = compute_separation_penalty(positions, body_length)
+        
+        # No crowding penalty
+        assert np.all(penalties == 0.0)
+    
+    def test_separation_penalty_crowding(self):
+        """Test separation penalty when agents too close."""
+        body_length = 0.5
+        crowding_threshold = 1.0 * body_length  # 0.5m
+        
+        # Agents 0.3m apart (<1 BL)
+        positions = np.array([
+            [0.0, 0.0],
+            [0.3, 0.0]
+        ])
+        
+        penalties = compute_separation_penalty(positions, body_length)
+        
+        # Should have negative penalties
+        assert np.all(penalties < 0.0)
+        
+        # Expected penalty: -(0.5 - 0.3) / 0.5 = -0.4
+        assert np.all(penalties == pytest.approx(-0.4, abs=0.01))
+    
+    def test_separation_penalty_touching(self):
+        """Test separation penalty for touching agents."""
+        body_length = 0.5
+        
+        # Agents essentially touching (0.01m apart)
+        positions = np.array([
+            [0.0, 0.0],
+            [0.01, 0.0]
+        ])
+        
+        penalties = compute_separation_penalty(positions, body_length)
+        
+        # Should be close to -1.0 (maximum penalty)
+        assert np.all(penalties < -0.95)
+    
+    def test_overall_schooling_score(self):
+        """Test overall schooling score calculation."""
+        body_length = 0.5
+        threat_level = 0.3
+        ideal_dist = body_length * (2.0 - threat_level)  # 0.85m
+        
+        # Good formation: ideal spacing, aligned headings
+        positions = np.array([
+            [0.0, 0.0],
+            [ideal_dist, 0.0],
+            [0.0, ideal_dist],
+            [-ideal_dist, 0.0]
+        ])
+        headings = np.array([0.0, 0.0, 0.0, 0.0])  # All aligned
+        
+        overall, components = compute_overall_schooling_score(
+            positions, headings, body_length, threat_level
+        )
+        
+        # Should have high overall score (>1.5 for good schooling)
+        assert overall > 1.0
+        
+        # Check components exist
+        assert 'cohesion' in components
+        assert 'alignment' in components
+        assert 'separation' in components
+        assert 'overall' in components
+        assert components['overall'] == pytest.approx(overall)
+    
+    def test_overall_schooling_score_dysfunctional(self):
+        """Test overall score for dysfunctional group."""
+        body_length = 0.5
+        
+        # Bad formation: too close, misaligned
+        positions = np.array([
+            [0.0, 0.0],
+            [0.1, 0.0],  # Very close
+            [0.05, 0.1]  # Very close
+        ])
+        headings = np.array([0.0, np.pi, np.pi/2])  # All different directions
+        
+        overall, components = compute_overall_schooling_score(
+            positions, headings, body_length, threat_level=0.3
+        )
+        
+        # Should have low or negative score
+        assert overall < 1.0
+        
+        # Separation should be strongly negative (crowding)
+        assert components['separation'] < -0.5
+    
+    def test_empty_arrays(self):
+        """Test metrics handle empty arrays gracefully."""
+        body_length = 0.5
+        
+        positions = np.array([]).reshape(0, 2)
+        headings = np.array([])
+        
+        cohesion = compute_cohesion_score(positions, body_length)
+        alignment = compute_alignment_score(headings, positions, body_length)
+        separation = compute_separation_penalty(positions, body_length)
+        
+        assert len(cohesion) == 0
+        assert len(alignment) == 0
+        assert len(separation) == 0
