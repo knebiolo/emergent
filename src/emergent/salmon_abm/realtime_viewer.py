@@ -553,7 +553,9 @@ class ReplayWidget(QOpenGLWidget):
                 pass
             w = self.width()
             h = self.height()
-            painter.fillRect(0, 0, w, h, QColor(255, 255, 255))
+            
+            # Fill background (dark grey for better contrast)
+            painter.fillRect(0, 0, w, h, QColor(30, 30, 30))
 
             # draw light grid to show canvas area
             pen = QPen(QColor(230, 230, 230))
@@ -637,9 +639,9 @@ class ReplayWidget(QOpenGLWidget):
 
             pts = self.positions[self.frame]
             if self.N == 0 or pts.size == 0:
-                painter.setPen(QPen(QColor(80, 80, 80)))
+                painter.setPen(QPen(QColor(200, 200, 200)))
                 painter.drawText(int(w / 2) - 80, int(h / 2), 'Waiting for frames...')
-                painter.setPen(QPen(QColor(0, 0, 0)))
+                painter.setPen(QPen(QColor(180, 180, 180)))
                 painter.drawText(6, 28, f'DEBUG: frame={self.frame} N={self.N}')
                 painter.end()
                 return
@@ -744,13 +746,13 @@ class ReplayWidget(QOpenGLWidget):
                 painter.drawText(6, 14, f"Frame: {self.frame+1}/{self.T}  Agents: {self.N}")
             
             # Display projected coordinate bounds (real world coordinates)
-            painter.setPen(QPen(QColor(60, 60, 60)))
+            painter.setPen(QPen(QColor(200, 200, 200)))
             painter.drawText(6, h - 6, f'X: {xmin_loc:.1f}m')
             painter.drawText(w - 120, h - 6, f'X: {xmax_loc:.1f}m')
             painter.drawText(6, 42, f'Y: {ymax_loc:.1f}m')
             painter.drawText(6, h - 20, f'Y: {ymin_loc:.1f}m')
             
-            painter.setPen(QPen(QColor(0, 0, 0)))
+            painter.setPen(QPen(QColor(150, 150, 150)))
             painter.drawText(6, 28, f'DEBUG: frame={self.frame} N={self.N} xmin={xmin_loc:.2f} xmax={xmax_loc:.2f} ymin={ymin_loc:.2f} ymax={ymax_loc:.2f}')
             painter.end()
         except Exception:
@@ -979,7 +981,7 @@ class GLViewer(QOpenGLWidget):
             return
         GL = self._GL
         try:
-            GL.glClearColor(0.9, 0.95, 1.0, 1.0)  # Light blue background
+            GL.glClearColor(0.12, 0.12, 0.12, 1.0)  # Dark grey background
             GL.glEnable(GL.GL_PROGRAM_POINT_SIZE)  # Allow shader to control point size
             import ctypes
             # Preallocate a GPU buffer (raw GL buffer) for dynamic point data

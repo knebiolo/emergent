@@ -258,6 +258,7 @@ class ControlPanel(QWidget):
     start_training = pyqtSignal()
     pause_training = pyqtSignal()
     stop_training = pyqtSignal()
+    randomize_weights = pyqtSignal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -298,6 +299,7 @@ class ControlPanel(QWidget):
         self.episodes_spin = QSpinBox()
         self.episodes_spin.setRange(1, 1000)
         self.episodes_spin.setValue(50)
+        self.episodes_spin.setToolTip("Number of training episodes to run. Each episode tests one set of behavioral weights.")
         params_layout.addWidget(self.episodes_spin, 0, 1)
         
         # Timesteps per episode
@@ -305,6 +307,7 @@ class ControlPanel(QWidget):
         self.timesteps_spin = QSpinBox()
         self.timesteps_spin.setRange(10, 1000)
         self.timesteps_spin.setValue(100)
+        self.timesteps_spin.setToolTip("Number of simulation timesteps per episode (at 1 second per timestep). Longer episodes allow more behavior to emerge.")
         params_layout.addWidget(self.timesteps_spin, 1, 1)
         
         # Number of agents
@@ -312,6 +315,7 @@ class ControlPanel(QWidget):
         self.agents_spin = QSpinBox()
         self.agents_spin.setRange(10, 1000)
         self.agents_spin.setValue(200)
+        self.agents_spin.setToolTip("Number of fish agents in the simulation. More agents = more realistic schooling but slower computation.")
         params_layout.addWidget(self.agents_spin, 2, 1)
         
         # Exploration noise
@@ -320,10 +324,17 @@ class ControlPanel(QWidget):
         self.noise_spin.setRange(0.01, 1.0)
         self.noise_spin.setSingleStep(0.01)
         self.noise_spin.setValue(0.1)
+        self.noise_spin.setToolTip("Mutation scale for exploring new behavioral weights (0.1 = 10% random variation). Higher values = more exploration, lower = more exploitation of good weights.")
         params_layout.addWidget(self.noise_spin, 3, 1)
         
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
+        
+        # Randomize button
+        self.btn_randomize = QPushButton("🎲 Randomize Weights")
+        self.btn_randomize.clicked.connect(self.randomize_weights.emit)
+        self.btn_randomize.setToolTip("Generate new random initial weights (50% variation from defaults). Only works before training starts.")
+        layout.addWidget(self.btn_randomize)
         
         # Progress
         progress_group = QGroupBox("Progress")
@@ -425,6 +436,8 @@ class ControlPanel(QWidget):
         self.timesteps_spin.setEnabled(enabled)
         self.agents_spin.setEnabled(enabled)
         self.noise_spin.setEnabled(enabled)
+        self.btn_randomize.setEnabled(enabled)
+        self.btn_randomize.setEnabled(enabled)
 
 
 class TrainingWorker(QObject):
@@ -574,6 +587,8 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.start_training.connect(self.on_start_training)
         self.control_panel.pause_training.connect(self.on_pause_training)
         self.control_panel.stop_training.connect(self.on_stop_training)
+        self.control_panel.randomize_weights.connect(self.on_randomize_weights)
+        self.control_panel.randomize_weights.connect(self.on_randomize_weights)
         
         # Connect animation finished signal
         self.simulation_canvas.animation_finished.connect(self.on_animation_finished)
@@ -731,6 +746,22 @@ class RLTrainingViewer(QMainWindow):
             self.control_panel.append_log(str(e))
             self.control_panel.append_log(traceback.format_exc())
             self.control_panel.status_label.setText("Error")
+    
+    def on_randomize_weights(self):
+        """Regenerate random initial weights."""
+        if self.training_thread is not None and self.training_thread.isRunning():
+            self.control_panel.append_log("Cannot randomize during training")
+            return
+        
+        # Generate new randomized weights
+        from emergent.salmon_abm.rl_training import BehavioralWeights
+        base_weights = BehavioralWeights()
+        new_weights = base_weights.randomize(scale=0.5)
+        
+        # Update display
+        self.weights_panel.update_weights(new_weights)
+        self.control_panel.append_log("🎲 Randomized initial weights (50% variation)")
+        self.control_panel.status_label.setText("Ready with new random weights")
         
     def on_pause_training(self):
         """Pause/resume training."""
