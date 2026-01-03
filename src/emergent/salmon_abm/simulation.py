@@ -357,6 +357,10 @@ class simulation:
                 if gdf is None or len(gdf) == 0:
                     raise RuntimeError('start polygon shapefile empty')
                 geom = gdf.unary_union if len(gdf) > 1 else gdf.geometry.iloc[0]
+                
+                # Store geometry for later resampling in reset_spatial_state()
+                self._start_geom = geom
+                
                 minx, miny, maxx, maxy = geom.bounds
                 rng = getattr(self, 'rng', None)
                 if rng is None:
@@ -1958,9 +1962,39 @@ class simulation:
         - Agent attributes (sex, length, weight, body_depth)
         - Simulation geometry (bounds, crs, transforms)
         """
-        # Reset positions to initial state (will be re-sampled if start_polygon exists)
-        self.X = np.zeros(self.num_agents, dtype=np.float32)
-        self.Y = np.zeros(self.num_agents, dtype=np.float32)
+        # Re-sample positions from start polygon if available
+        if hasattr(self, '_start_geom') and self._start_geom is not None:
+            from shapely.geometry import Point
+            geom = self._start_geom
+            minx, miny, maxx, maxy = geom.bounds
+            rng = getattr(self, 'rng', None)
+            if rng is None:
+                rng = np.random.default_rng()
+            pts = []
+            attempts = 0
+            # draw random points within bbox and test containment
+            while len(pts) < self.num_agents and attempts < max(5000, self.num_agents * 100):
+                x = float(rng.uniform(minx, maxx))
+                y = float(rng.uniform(miny, maxy))
+                if geom.contains(Point(x, y)):
+                    pts.append((x, y))
+                attempts += 1
+            # fallback: use representative point / centroid if sampling failed
+            if len(pts) < self.num_agents:
+                rep = geom.representative_point()
+                rx, ry = float(rep.x), float(rep.y)
+                while len(pts) < self.num_agents:
+                    pts.append((rx, ry))
+            xs = np.array([p[0] for p in pts], dtype=np.float64)
+            ys = np.array([p[1] for p in pts], dtype=np.float64)
+            self.X = xs
+            self.Y = ys
+        else:
+            # No start polygon - reset to zeros (original behavior)
+            self.X = np.zeros(self.num_agents, dtype=np.float32)
+            self.Y = np.zeros(self.num_agents, dtype=np.float32)
+        
+        # Reset positions to initial state
         self.prev_X = self.X.copy()
         self.prev_Y = self.Y.copy()
         

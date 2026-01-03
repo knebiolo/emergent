@@ -141,6 +141,37 @@ class BehavioralWeights:
                 f"cohesion_radius_threatened ({self.cohesion_radius_threatened})"
             )
     
+    def randomize(self, scale: float = 0.5, rng: Optional[np.random.Generator] = None) -> 'BehavioralWeights':
+        """
+        Create randomized copy for initial exploration.
+        
+        Uses larger perturbations than mutate() for initial diversity.
+        
+        Args:
+            scale: Randomization scale (default 0.5 = 50% variation)
+            rng: Random number generator (default: creates new one)
+        
+        Returns:
+            New BehavioralWeights instance with randomized values.
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+        
+        data = self.to_dict()
+        randomized = {}
+        
+        for key, value in data.items():
+            if isinstance(value, bool):
+                randomized[key] = value
+            elif isinstance(value, (int, float)):
+                # Apply larger random perturbation for initial exploration
+                perturbation = rng.normal(0, abs(value) * scale)
+                randomized[key] = max(0.0, value + perturbation)
+            else:
+                randomized[key] = value
+        
+        return BehavioralWeights.from_dict(randomized)
+    
     def mutate(self, mutation_scale: float = 0.1, rng: Optional[np.random.Generator] = None) -> 'BehavioralWeights':
         """
         Create mutated copy for RL exploration.
@@ -665,6 +696,9 @@ class RLTrainer:
         # Create simulation with weights
         sim = self.simulation_factory(weights)
         
+        # Reset spatial state to get new random starting positions for this episode
+        sim.reset_spatial_state()
+        
         # Get number of timesteps from simulation
         num_timesteps = sim.num_timesteps
         num_agents = sim.num_agents
@@ -676,7 +710,7 @@ class RLTrainer:
         battery_history = np.zeros((num_timesteps, num_agents), dtype=np.float32)
         alive_history = np.ones((num_timesteps, num_agents), dtype=bool)
         
-        # Run simulation timesteps
+        # Run simulation timesteps (always start from t=0 for each episode)
         for t in range(num_timesteps):
             # Run one timestep
             sim.timestep(t, self.dt)

@@ -20,6 +20,7 @@ from __future__ import annotations
 import sys
 import os
 import time
+import threading
 import argparse
 from typing import Optional, Dict, List, Tuple
 from pathlib import Path
@@ -56,75 +57,101 @@ except ImportError as e:
 try:
     from emergent.salmon_abm.rl_training import BehavioralWeights, RLTrainer
     from emergent.salmon_abm.simulation import simulation
+    from emergent.salmon_abm.realtime_viewer import ReplayWidget
 except ImportError as e:
     raise ImportError(f"Could not import RL training components: {e}")
 
 
-class SimulationCanvas(QOpenGLWidget):
+class SimulationCanvas(QWidget):
     """
-    Center panel: Real-time simulation visualization.
+    Center panel: Real-time simulation visualization using ReplayWidget.
     
-    Displays agent positions during training episodes.
+    Wrapper around ReplayWidget that handles live position updates during training.
     """
     
-    def __init__(self, parent=None):
+    # Signal emitted when animation completes
+    animation_finished = pyqtSignal()
+    
+    def __init__(self, parent=None, model_dir: Optional[str] = None):
         super().__init__(parent)
-        self.positions = None  # Shape: (num_agents, 2)
-        self.bounds = None  # (min_x, max_x, min_y, max_y)
-        self.point_size = 3.0
-        self.colors = QColor(50, 150, 255)  # Blue fish
         
-    def set_positions(self, positions: np.ndarray, bounds: Optional[Tuple[float, float, float, float]] = None):
-        """Update agent positions for next frame."""
-        self.positions = positions
-        if bounds is not None:
-            self.bounds = bounds
-        elif positions is not None and len(positions) > 0:
-            # Auto-compute bounds with padding
-            min_x, min_y = np.min(positions, axis=0)
-            max_x, max_y = np.max(positions, axis=0)
-            pad_x = (max_x - min_x) * 0.1
-            pad_y = (max_y - min_y) * 0.1
-            self.bounds = (min_x - pad_x, max_x + pad_x, min_y - pad_y, max_y + pad_y)
-        self.update()
+        # Initialize with dummy positions (1 timestep, 1 agent)
+        dummy_positions = np.zeros((1, 1, 2), dtype=np.float32)
         
-    def paintEvent(self, event):
-        """Draw agent positions."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        # Try to load depth raster for background
+        env_depth = None
+        if model_dir and os.path.exists(model_dir):
+            depth_path = os.path.join(model_dir, 'depth.tif')
+            if os.path.exists(depth_path):
+                env_depth = depth_path
         
-        # Clear background
-        painter.fillRect(self.rect(), QColor(240, 240, 240))
+        # Create ReplayWidget with environment background
+        self.replay_widget = ReplayWidget(
+            positions=dummy_positions,
+            parent=self,
+            env_depth=env_depth,
+            pad=1.15,
+            point_size=4.0
+        )
         
-        if self.positions is None or len(self.positions) == 0:
-            # Draw "No Data" message
-            painter.setPen(Qt.black)
-            painter.setFont(QFont("Arial", 16))
-            painter.drawText(self.rect(), Qt.AlignCenter, "Waiting for simulation data...")
+        # Connect to replay widget's timer to detect when animation finishes
+        self.replay_widget.timer.timeout.connect(self._check_animation_complete)
+        
+        # Layout
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.replay_widget)
+        self.setLayout(layout)
+        
+    def _check_animation_complete(self):
+        """Check if animation reached the end and emit signal."""
+        if self.replay_widget.playing and self.replay_widget.frame >= self.replay_widget.T - 1:
+            # Animation reached the end
+            self.replay_widget.playing = False
+            self.replay_widget.timer.stop()
+            self.animation_finished.emit()
+        
+    def set_positions(self, positions: np.ndarray, headings: Optional[np.ndarray] = None):
+        """
+        Update agent positions for visualization.
+        
+        Args:
+            positions: Array of shape (num_agents, 2) or (num_timesteps, num_agents, 2)
+            headings: Optional array of headings for oriented rendering
+        """
+        if positions is None or positions.size == 0:
             return
+            
+        # Ensure positions are 3D (T, N, 2)
+        if positions.ndim == 2:
+            # Single timestep: (N, 2) -> (1, N, 2)
+            positions = positions[np.newaxis, :, :]
         
-        # Get viewport dimensions
-        w, h = self.width(), self.height()
+        # Update ReplayWidget with full trajectory
+        self.replay_widget.positions = positions
+        self.replay_widget.T, self.replay_widget.N, _ = positions.shape
         
-        # Get bounds
-        if self.bounds is None:
-            return
-        min_x, max_x, min_y, max_y = self.bounds
+        # Update headings if provided
+        if headings is not None:
+            if headings.ndim == 1:
+                headings = headings[np.newaxis, :]
+            self.replay_widget.heading_array = headings
         
-        # Transform positions to screen coordinates
-        def to_screen(x, y):
-            sx = (x - min_x) / (max_x - min_x) * w
-            sy = h - (y - min_y) / (max_y - min_y) * h  # Flip Y
-            return sx, sy
+        # Update bounds to include all positions in trajectory
+        xs = positions[:, :, 0]
+        ys = positions[:, :, 1]
+        valid = np.isfinite(xs) & np.isfinite(ys)
+        if np.any(valid):
+            self.replay_widget.xmin = float(np.nanmin(xs[valid]))
+            self.replay_widget.xmax = float(np.nanmax(xs[valid]))
+            self.replay_widget.ymin = float(np.nanmin(ys[valid]))
+            self.replay_widget.ymax = float(np.nanmax(ys[valid]))
         
-        # Draw agents
-        painter.setPen(QPen(self.colors, self.point_size))
-        painter.setBrush(self.colors)
-        
-        for pos in self.positions:
-            sx, sy = to_screen(pos[0], pos[1])
-            painter.drawEllipse(int(sx - self.point_size/2), int(sy - self.point_size/2), 
-                               int(self.point_size), int(self.point_size))
+        # Start from first frame and auto-play the trajectory
+        self.replay_widget.frame = 0
+        self.replay_widget.playing = True
+        self.replay_widget.start()  # Start animation
+        self.replay_widget.update()
 
 
 class WeightsPanel(QWidget):
@@ -312,29 +339,77 @@ class ControlPanel(QWidget):
         progress_group.setLayout(progress_layout)
         layout.addWidget(progress_group)
         
-        # Log output
-        log_group = QGroupBox("Training Log")
-        log_layout = QVBoxLayout()
+        # Training progress plot
+        plot_group = QGroupBox("Training Progress")
+        plot_layout = QVBoxLayout()
         
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(200)
-        self.log_text.setFont(QFont("Courier New", 8))
-        log_layout.addWidget(self.log_text)
+        try:
+            from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+            from matplotlib.figure import Figure
+            
+            self.figure = Figure(figsize=(5, 3), dpi=80)
+            self.canvas = FigureCanvasQTAgg(self.figure)
+            self.ax = self.figure.add_subplot(111)
+            self.ax.set_xlabel('Episode')
+            self.ax.set_ylabel('Reward')
+            self.ax.set_title('RL Training Progress')
+            self.ax.grid(True, alpha=0.3)
+            self.figure.tight_layout()
+            
+            plot_layout.addWidget(self.canvas)
+            self.has_plot = True
+        except ImportError:
+            # Fallback to text log if matplotlib not available
+            self.log_text = QTextEdit()
+            self.log_text.setReadOnly(True)
+            self.log_text.setMaximumHeight(200)
+            self.log_text.setFont(QFont("Courier New", 8))
+            plot_layout.addWidget(self.log_text)
+            self.has_plot = False
         
-        log_group.setLayout(log_layout)
-        layout.addWidget(log_group)
+        plot_group.setLayout(plot_layout)
+        layout.addWidget(plot_group)
+        
+        # Training history for plotting
+        self.episode_history = []
+        self.reward_history = []
         
         layout.addStretch()
         self.setLayout(layout)
         
     def append_log(self, message: str):
-        """Append message to training log."""
-        self.log_text.append(message)
-        # Auto-scroll to bottom
-        self.log_text.verticalScrollBar().setValue(
-            self.log_text.verticalScrollBar().maximum()
-        )
+        """Append message to training log (if using text log fallback)."""
+        if not self.has_plot:
+            self.log_text.append(message)
+            # Auto-scroll to bottom
+            self.log_text.verticalScrollBar().setValue(
+                self.log_text.verticalScrollBar().maximum()
+            )
+    
+    def update_plot(self, episode: int, reward: float):
+        """Update training progress plot."""
+        if not self.has_plot:
+            return
+        
+        self.episode_history.append(episode)
+        self.reward_history.append(reward)
+        
+        self.ax.clear()
+        self.ax.plot(self.episode_history, self.reward_history, 'b-', linewidth=2, label='Episode Reward')
+        
+        # Mark best reward
+        if len(self.reward_history) > 0:
+            best_idx = np.argmax(self.reward_history)
+            self.ax.plot(self.episode_history[best_idx], self.reward_history[best_idx], 
+                        'r*', markersize=12, label='Best')
+        
+        self.ax.set_xlabel('Episode')
+        self.ax.set_ylabel('Reward')
+        self.ax.set_title('RL Training Progress')
+        self.ax.legend()
+        self.ax.grid(True, alpha=0.3)
+        self.figure.tight_layout()
+        self.canvas.draw()
         
     def set_progress(self, current: int, total: int):
         """Update progress bar."""
@@ -343,6 +418,13 @@ class ControlPanel(QWidget):
             self.progress_bar.setValue(percent)
         else:
             self.progress_bar.setValue(0)
+    
+    def set_parameters_enabled(self, enabled: bool):
+        """Enable or disable parameter spinboxes."""
+        self.episodes_spin.setEnabled(enabled)
+        self.timesteps_spin.setEnabled(enabled)
+        self.agents_spin.setEnabled(enabled)
+        self.noise_spin.setEnabled(enabled)
 
 
 class TrainingWorker(QObject):
@@ -352,18 +434,22 @@ class TrainingWorker(QObject):
     
     # Signals
     episode_started = pyqtSignal(int)  # episode number
-    episode_completed = pyqtSignal(int, float, dict)  # episode, reward, components
-    positions_updated = pyqtSignal(object)  # positions array
+    episode_computed = pyqtSignal(int, float, dict, object, object)  # episode, reward, components, positions, headings
     training_completed = pyqtSignal(object, list)  # best_weights, history
     error_occurred = pyqtSignal(str)  # error message
     
-    def __init__(self, trainer: RLTrainer, num_episodes: int):
+    def __init__(self, trainer, num_episodes: int):
         super().__init__()
         self.trainer = trainer
         self.num_episodes = num_episodes
-        self.is_paused = False
         self.is_stopped = False
+        self.is_paused = False
         
+        # Synchronization: wait for animation to complete
+        self.animation_complete = threading.Event()
+        self.animation_complete.set()  # Initially ready
+    
+
     def run(self):
         """Execute training loop with UI updates."""
         try:
@@ -383,12 +469,12 @@ class TrainingWorker(QObject):
                 
                 self.episode_started.emit(episode)
                 
-                # Run episode
+                # Run episode - this executes ALL timesteps before returning
                 positions, headings, velocities, battery, alive = self.trainer.run_episode(current_weights)
                 
-                # Emit final positions for visualization
-                final_positions = positions[-1, :, :]  # Last timestep, all agents
-                self.positions_updated.emit(final_positions)
+                # Log completion with actual timestep count
+                actual_timesteps = positions.shape[0]
+                print(f"Episode {episode}: Completed {actual_timesteps} timesteps")
                 
                 # Compute reward
                 from emergent.salmon_abm.rl_training import compute_episode_reward
@@ -406,8 +492,16 @@ class TrainingWorker(QObject):
                 # Store history
                 self.trainer.episode_history.append((episode, float(reward)))
                 
-                # Emit progress
-                self.episode_completed.emit(episode, float(reward), components)
+                # Clear the animation complete flag BEFORE emitting
+                self.animation_complete.clear()
+                
+                # Emit episode data - UI will handle visualization
+                self.episode_computed.emit(episode, float(reward), components, positions, headings)
+                
+                # Wait for UI to signal that animation finished before continuing
+                print(f"Episode {episode}: Waiting for visualization to complete...")
+                self.animation_complete.wait()
+                print(f"Episode {episode}: Visualization complete, continuing to next episode")
                 
                 # Mutate for next episode
                 current_weights = self.trainer.best_weights.mutate(
@@ -464,19 +558,25 @@ class RLTrainingViewer(QMainWindow):
         self.training_worker = None
         self.initial_reward = None
         
+        # Episode synchronization
+        self.pending_episode_data = None  # Stores (episode, reward, components) waiting for animation
+        
         self.init_ui()
         
     def init_ui(self):
         """Initialize UI components."""
         # Create panels
         self.weights_panel = WeightsPanel()
-        self.simulation_canvas = SimulationCanvas()
+        self.simulation_canvas = SimulationCanvas(model_dir=self.model_dir)
         self.control_panel = ControlPanel()
         
         # Connect control signals
         self.control_panel.start_training.connect(self.on_start_training)
         self.control_panel.pause_training.connect(self.on_pause_training)
         self.control_panel.stop_training.connect(self.on_stop_training)
+        
+        # Connect animation finished signal
+        self.simulation_canvas.animation_finished.connect(self.on_animation_finished)
         
         # Create splitter for three panels
         splitter = QSplitter(Qt.Horizontal)
@@ -584,8 +684,9 @@ class RLTrainingViewer(QMainWindow):
             # Create simulation factory
             simulation_factory = self.create_simulation_factory(num_agents, num_timesteps)
             
-            # Create RL trainer
-            initial_weights = BehavioralWeights()
+            # Create RL trainer with randomized initial weights for chaotic start
+            base_weights = BehavioralWeights()
+            initial_weights = base_weights.randomize(scale=0.5)  # 50% randomization for diversity
             config = {
                 'exploration_noise': exploration_noise,
                 'body_length': 0.3,  # 300mm fish
@@ -603,6 +704,9 @@ class RLTrainingViewer(QMainWindow):
             # Display initial weights
             self.weights_panel.update_weights(initial_weights)
             
+            # Disable parameter controls during training
+            self.control_panel.set_parameters_enabled(False)
+            
             # Create worker thread
             self.training_worker = TrainingWorker(self.trainer, num_episodes)
             self.training_thread = QThread()
@@ -611,8 +715,7 @@ class RLTrainingViewer(QMainWindow):
             # Connect signals
             self.training_thread.started.connect(self.training_worker.run)
             self.training_worker.episode_started.connect(self.on_episode_started)
-            self.training_worker.episode_completed.connect(self.on_episode_completed)
-            self.training_worker.positions_updated.connect(self.on_positions_updated)
+            self.training_worker.episode_computed.connect(self.on_episode_computed)
             self.training_worker.training_completed.connect(self.on_training_completed)
             self.training_worker.error_occurred.connect(self.on_error_occurred)
             self.training_worker.training_completed.connect(self.training_thread.quit)
@@ -648,14 +751,36 @@ class RLTrainingViewer(QMainWindow):
             self.control_panel.append_log("Stopping training...")
             self.control_panel.status_label.setText("Stopping...")
             
+            # Re-enable parameter controls
+            self.control_panel.set_parameters_enabled(True)
+            
     def on_episode_started(self, episode: int):
         """Handle episode start."""
         total = self.control_panel.episodes_spin.value()
         self.control_panel.set_progress(episode, total)
-        self.control_panel.status_label.setText(f"Running episode {episode + 1}/{total}")
+        self.control_panel.status_label.setText(f"Computing episode {episode + 1}/{total}...")
         
-    def on_episode_completed(self, episode: int, reward: float, components: Dict[str, float]):
-        """Handle episode completion."""
+    def on_episode_computed(self, episode: int, reward: float, components: Dict[str, float], 
+                           positions: np.ndarray, headings: np.ndarray):
+        """Handle episode computation complete - start visualization and wait."""
+        # Store episode data for later processing after animation
+        self.pending_episode_data = (episode, reward, components)
+        
+        # Update status
+        total = self.control_panel.episodes_spin.value()
+        self.control_panel.status_label.setText(f"Visualizing episode {episode + 1}/{total}...")
+        
+        # Start visualization - this will trigger animation_finished when done
+        self.simulation_canvas.set_positions(positions, headings)
+        
+    def on_animation_finished(self):
+        """Handle animation playback complete - now update UI and continue training."""
+        if self.pending_episode_data is None:
+            return
+            
+        episode, reward, components = self.pending_episode_data
+        self.pending_episode_data = None
+        
         total = self.control_panel.episodes_spin.value()
         
         # Update diagnostics
@@ -670,19 +795,26 @@ class RLTrainingViewer(QMainWindow):
         if self.trainer and self.trainer.best_weights:
             self.weights_panel.update_weights(self.trainer.best_weights)
         
-        # Log progress
-        is_best = "✓ BEST" if reward >= best_reward else ""
-        self.control_panel.append_log(f"Episode {episode + 1}/{total}: reward={reward:.2f} {is_best}")
+        # Update plot
+        self.control_panel.update_plot(episode + 1, reward)
         
-    def on_positions_updated(self, positions: np.ndarray):
-        """Update simulation canvas with new positions."""
-        self.simulation_canvas.set_positions(positions)
+        # Log progress (minimal)
+        is_best = "✓ BEST" if reward >= best_reward else ""
+        self.control_panel.append_log(f"Ep {episode + 1}/{total}: {reward:.2f} {is_best}")
+        
+        # Update status
+        self.control_panel.status_label.setText(f"Episode {episode + 1}/{total} complete")
+        
+        # Signal worker that animation is complete and it can proceed to next episode
+        if self.training_worker:
+            self.training_worker.animation_complete.set()
         
     def on_training_completed(self, best_weights: BehavioralWeights, history: List[Tuple[int, float]]):
         """Handle training completion."""
         self.control_panel.append_log("=" * 40)
         self.control_panel.append_log("Training completed!")
-        self.control_panel.append_log(f"Best reward: {self.trainer.best_reward:.2f}")
+        if self.trainer:
+            self.control_panel.append_log(f"Best reward: {self.trainer.best_reward:.2f}")
         
         initial = history[0][1]
         final = history[-1][1]
@@ -694,12 +826,18 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.status_label.setText("Training complete")
         self.control_panel.set_progress(100, 100)
         
+        # Re-enable parameter controls
+        self.control_panel.set_parameters_enabled(True)
+        
     def on_error_occurred(self, error_msg: str):
         """Handle training error."""
         self.control_panel.append_log("=" * 40)
         self.control_panel.append_log("ERROR:")
         self.control_panel.append_log(error_msg)
         self.control_panel.status_label.setText("Error occurred")
+        
+        # Re-enable parameter controls
+        self.control_panel.set_parameters_enabled(True)
 
 
 def main():
