@@ -241,15 +241,15 @@ def run_headless(args):
         # Testing collision sweet spot with HIGH DENSITY (1000 agents) for realistic staging
         sim.test_weights = {
             'rheotaxis': 25000,
-            'alignment': 20500,
-            'cohesion': 11000,  # Restored - need cohesion for schooling
+            'alignment': 25000,  # Increased from 20500 for stronger directional coordination
+            'cohesion': 1000,  # Equal to collision - further reduced from 1100
             'low_speed': 1500,
             'wave_drag': 0,
             'refugia': 50000,
             'border': 200000,
             'shallow': 500000,
             'avoid': 25000,
-            'collision': 1000,  # Sweet spot from 100-agent test
+            'collision': 2000,  # Increased from 1000
         }
         print(f'Set default test weights with collision={sim.test_weights["collision"]}, cohesion={sim.test_weights["cohesion"]}')
 

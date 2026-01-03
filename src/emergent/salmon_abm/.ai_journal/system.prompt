@@ -117,4 +117,39 @@ python tools/run_nuyakuk_headless.py --nagents 100 --nsteps 200 --out outputs/te
 
 ## to view Simulation
 python -m emergent.salmon_abm.realtime_viewer outputs/test_collision_100/collision_100_headless.h5
+
+## Behavioral Weights (CRITICAL)
+**Behavioral weights are set in TWO locations - the script overrides the code:**
+1. **Source code defaults**: `src/emergent/salmon_abm/behavior.py` (lines ~2539-2549) - These are IGNORED by run_nuyakuk_headless.py
+2. **Script overrides**: `tools/run_nuyakuk_headless.py` (lines ~242-252) - `sim.test_weights` dict OVERRIDES behavior.py defaults
+
+**To change behavioral weights for simulations, you MUST edit `tools/run_nuyakuk_headless.py`, NOT behavior.py!**
+
+Current weights in run_nuyakuk_headless.py (lines 242-252):
+```python
+sim.test_weights = {
+    'rheotaxis': 25000,
+    'alignment': 20500,
+    'cohesion': 11000,  # <-- Edit this value, not behavior.py
+    'low_speed': 1500,
+    'wave_drag': 0,
+    'refugia': 50000,
+    'border': 200000,
+    'shallow': 500000,
+    'avoid': 25000,
+    'collision': 1000,  # <-- Edit this value, not behavior.py
+}
+```
+
+Alternative: Use `--test-weights-file weights.json` to load custom weights from JSON file.
+
+Create a journal entry (.ai_journal/session/) when:
+- A major feature/fix is complete and validated
+- Switching to a different problem/area
+- After ~10-15 message exchanges
+- Before ending a work session
+- When requested
+
+This preserves context across conversation limits.
+
 END of PROMPT

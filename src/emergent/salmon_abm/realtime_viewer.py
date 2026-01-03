@@ -452,8 +452,8 @@ class ReplayWidget(QOpenGLWidget):
         painter.drawEllipse(QRectF(cx - base_radius, cy - base_radius, 2 * base_radius, 2 * base_radius))
         
         # Draw body as a line extending backward from the head
-        # Line length is 2.5 meters in world coordinates, scaled to screen pixels
-        line_length_world = 2.5  # meters
+        # Line length is 0.415 meters in world coordinates, scaled to screen pixels
+        line_length_world = 0.415  # meters (half of 0.83m)
         line_length_screen = line_length_world * scale
         
         # Convert heading to radians (heading is direction of movement)
@@ -572,14 +572,29 @@ class ReplayWidget(QOpenGLWidget):
                 dy = 1.0
 
             pad_factor = float(getattr(self, '_pad', 1.15))
+            
+            # Maintain 1:1 aspect ratio (1 meter X = 1 meter Y on screen)
+            # Start with larger data extent
+            max_extent = max(dx, dy) * pad_factor
             cx = self.xmin + dx * 0.5
             cy = self.ymin + dy * 0.5
-            dx = dx * pad_factor
-            dy = dy * pad_factor
+            
+            # Adjust world extents to match window aspect ratio
+            # This ensures 1 meter takes the same pixel count in both directions
+            window_aspect = w / h if h > 0 else 1.0
+            if window_aspect > 1.0:
+                # Window is wider than tall - expand X extent
+                dx = max_extent * window_aspect
+                dy = max_extent
+            else:
+                # Window is taller than wide - expand Y extent
+                dx = max_extent
+                dy = max_extent / window_aspect
+            
             xmin_loc = cx - dx * 0.5
             ymin_loc = cy - dy * 0.5
-            xmax_loc = xmin_loc + dx
-            ymax_loc = ymin_loc + dy
+            xmax_loc = cx + dx * 0.5
+            ymax_loc = cy + dy * 0.5
 
             sx = w / dx
             sy = h / dy
@@ -727,6 +742,14 @@ class ReplayWidget(QOpenGLWidget):
                     painter.drawText(6, 14, f"Frame: {self.frame+1}/{self.T}  Agents: {self.N}")
             except Exception:
                 painter.drawText(6, 14, f"Frame: {self.frame+1}/{self.T}  Agents: {self.N}")
+            
+            # Display projected coordinate bounds (real world coordinates)
+            painter.setPen(QPen(QColor(60, 60, 60)))
+            painter.drawText(6, h - 6, f'X: {xmin_loc:.1f}m')
+            painter.drawText(w - 120, h - 6, f'X: {xmax_loc:.1f}m')
+            painter.drawText(6, 42, f'Y: {ymax_loc:.1f}m')
+            painter.drawText(6, h - 20, f'Y: {ymin_loc:.1f}m')
+            
             painter.setPen(QPen(QColor(0, 0, 0)))
             painter.drawText(6, 28, f'DEBUG: frame={self.frame} N={self.N} xmin={xmin_loc:.2f} xmax={xmax_loc:.2f} ymin={ymin_loc:.2f} ymax={ymax_loc:.2f}')
             painter.end()
@@ -940,6 +963,8 @@ class GLViewer(QOpenGLWidget):
     def wheelEvent(self, event):
         """Zoom with mouse wheel."""
         try:
+            # Clear any active drag to prevent scroll from affecting pan
+            self._mouse_drag_start = None
             delta = event.angleDelta().y()
             if delta != 0:
                 zoom_factor = 0.9 if delta > 0 else 1.1
@@ -1098,17 +1123,34 @@ class GLViewer(QOpenGLWidget):
                     pad = float(getattr(self, '_pad', 1.15))
                     pan_x = float(getattr(self, '_pan_x', 0.0))
                     pan_y = float(getattr(self, '_pan_y', 0.0))
+                    
+                    # Maintain 1:1 aspect ratio (1 meter X = 1 meter Y on screen)
+                    max_extent = max(dx, dy) * pad
                     cx = self.xmin + dx * 0.5
                     cy = self.ymin + dy * 0.5
-                    dx *= pad
-                    dy *= pad
-                    # apply pan offsets as fraction of (padded) world extents
-                    cx += pan_x * dx
-                    cy += pan_y * dy
-                    xminp = cx - dx * 0.5
-                    xmaxp = xminp + dx
-                    yminp = cy - dy * 0.5
-                    ymaxp = yminp + dy
+                    
+                    # Adjust world extents to match window aspect ratio
+                    w_viewport = float(self.width())
+                    h_viewport = float(self.height())
+                    window_aspect = w_viewport / h_viewport if h_viewport > 0 else 1.0
+                    
+                    if window_aspect > 1.0:
+                        # Window is wider than tall - expand X extent
+                        world_dx = max_extent * window_aspect
+                        world_dy = max_extent
+                    else:
+                        # Window is taller than wide - expand Y extent
+                        world_dx = max_extent
+                        world_dy = max_extent / window_aspect
+                    
+                    # Apply pan offsets as fraction of world extents
+                    cx += pan_x * world_dx
+                    cy += pan_y * world_dy
+                    
+                    xminp = cx - world_dx * 0.5
+                    xmaxp = cx + world_dx * 0.5
+                    yminp = cy - world_dy * 0.5
+                    ymaxp = cy + world_dy * 0.5
                 except Exception:
                     xminp = self.xmin
                     xmaxp = self.xmax
@@ -1181,7 +1223,7 @@ class GLViewer(QOpenGLWidget):
                     line_vertices = np.zeros((npoints * 2, 2), dtype=np.float32)  # 2 vertices per fish
                     line_colors = np.zeros((npoints * 2, 3), dtype=np.float32)    # Color for each vertex
                     
-                    line_length = 2.5  # meters (body length)
+                    line_length = 0.415  # meters (half of 0.83m)
                     
                     for i in range(npoints):
                         x, y = pts2[i]

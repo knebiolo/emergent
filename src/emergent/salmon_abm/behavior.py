@@ -2539,7 +2539,7 @@ class behavior():
                 default_weights = {
                     'rheotaxis': 25000,
                     'alignment': 20500,
-                    'cohesion': 3000,  # Reduced from 11000 to prevent excessive clumping
+                    'cohesion': 55000,  # Set higher than collision to maintain tight schools
                     'low_speed': 1500,
                     'wave_drag': 0,
                     'refugia': 50000,
