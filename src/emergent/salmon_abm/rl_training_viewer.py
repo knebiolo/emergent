@@ -605,13 +605,13 @@ class TrainingWorker(QObject):
                 self.episode_started.emit(episode)
                 
                 # Run episode - this executes ALL timesteps before returning
-                positions, headings, velocities, battery, alive = self.trainer.run_episode(current_weights)
+                positions, headings, velocities, battery, alive, velocity_field = self.trainer.run_episode(current_weights)
                 
                 # Log completion with actual timestep count
                 actual_timesteps = positions.shape[0]
                 print(f"Episode {episode}: Completed {actual_timesteps} timesteps")
                 
-                # Compute reward (use cached longitudinal profile)
+                # Compute reward (use flow vector integration for upstream progress)
                 from emergent.salmon_abm.rl_training import compute_episode_reward
                 # Pass current weights to reward function for constraint checking
                 reward, components = compute_episode_reward(
@@ -620,7 +620,8 @@ class TrainingWorker(QObject):
                     threat_level=current_weights.threat_level,
                     behavioral_weights=current_weights.to_dict(),
                     battery_history=battery,
-                    longitudinal_profile=self.longitudinal_profile
+                    longitudinal_profile=self.longitudinal_profile,
+                    velocity_field_history=velocity_field  # Flow integration for braided channels
                 )
                 
                 # Track best

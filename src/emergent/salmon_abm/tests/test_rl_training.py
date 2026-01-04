@@ -451,6 +451,17 @@ class TestSchoolingMetrics:
 class TestEpisodeReward:
     """Test episode reward function."""
     
+    def _create_velocity_field(self, T, N, flow_y=-2.0):
+        """Helper to create dummy velocity field for tests.
+        
+        Default: flow_y=-2.0 means water flows downstream (-Y direction).
+        Upstream direction is then +Y (opposite of flow).
+        """
+        velocity_field = np.zeros((T, N, 2), dtype=np.float32)
+        velocity_field[:, :, 0] = 0.0  # No x flow
+        velocity_field[:, :, 1] = flow_y  # y flow (negative = downstream)
+        return velocity_field
+    
     def test_perfect_episode(self):
         """Test reward for perfect schooling episode."""
         body_length = 0.5
@@ -471,8 +482,11 @@ class TestEpisodeReward:
                 headings[t, i] = np.pi / 2  # North
                 velocities[t, i] = [0.0, 0.5]  # Constant upstream velocity
         
+        velocity_field = self._create_velocity_field(T, N)
+        
         reward, components = compute_episode_reward(
-            positions, headings, velocities, alive, body_length
+            positions, headings, velocities, alive, body_length,
+            velocity_field_history=velocity_field
         )
         
         # Should have positive reward
@@ -510,8 +524,11 @@ class TestEpisodeReward:
                 headings[t, i] = np.random.rand() * 2 * np.pi
                 velocities[t, i] = [0.1, 0.0]
         
+        velocity_field = self._create_velocity_field(T, N)
+        
         reward, components = compute_episode_reward(
-            positions, headings, velocities, alive, body_length
+            positions, headings, velocities, alive, body_length,
+            velocity_field_history=velocity_field
         )
         
         # Should have negative reward due to mortality
@@ -540,9 +557,12 @@ class TestEpisodeReward:
         # Define boundary (agents are close to it)
         boundary = np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 5.0]])
         
+        velocity_field = self._create_velocity_field(T, N)
+        
         reward, components = compute_episode_reward(
             positions, headings, velocities, alive, body_length,
-            boundary_coords=boundary, boundary_threshold=2.0
+            boundary_coords=boundary, boundary_threshold=2.0,
+            velocity_field_history=velocity_field
         )
         
         # Should have boundary penalty
@@ -566,8 +586,11 @@ class TestEpisodeReward:
             velocities[t, 0] = [speed, 0.0]
             velocities[t, 1] = [speed, 0.0]
         
+        velocity_field = self._create_velocity_field(T, N)
+        
         reward, components = compute_episode_reward(
-            positions, headings, velocities, alive, body_length
+            positions, headings, velocities, alive, body_length,
+            velocity_field_history=velocity_field
         )
         
         # Should have positive energy efficiency
@@ -589,8 +612,11 @@ class TestEpisodeReward:
             velocities[t] = vel
             positions[t] = positions[t-1] + velocities[t] if t > 0 else 0.0
         
+        velocity_field = self._create_velocity_field(T, N)
+        
         reward, components = compute_episode_reward(
-            positions, headings, velocities, alive, body_length
+            positions, headings, velocities, alive, body_length,
+            velocity_field_history=velocity_field
         )
         
         # Should have smoothness penalty
@@ -604,9 +630,11 @@ class TestEpisodeReward:
         headings = np.zeros((0, 0))
         velocities = np.zeros((0, 0, 2))
         alive = np.zeros((0, 0), dtype=bool)
+        velocity_field = np.zeros((0, 0, 2), dtype=np.float32)
         
         reward, components = compute_episode_reward(
-            positions, headings, velocities, alive, body_length
+            positions, headings, velocities, alive, body_length,
+            velocity_field_history=velocity_field
         )
         
         assert reward == 0.0
@@ -621,9 +649,11 @@ class TestEpisodeReward:
         headings = np.random.rand(T, N) * 2 * np.pi
         velocities = np.random.rand(T, N, 2)
         alive = np.ones((T, N), dtype=bool)
+        velocity_field = self._create_velocity_field(T, N)
         
         reward, components = compute_episode_reward(
-            positions, headings, velocities, alive, body_length
+            positions, headings, velocities, alive, body_length,
+            velocity_field_history=velocity_field
         )
         
         # Check all components exist
@@ -661,11 +691,24 @@ class TestRLTrainer:
                 self.battery = np.ones(num_agents, dtype=np.float32)
                 self.dead = np.zeros(num_agents, dtype=np.int8)
                 
+                # Water velocity at agent positions (for flow integration)
+                self.x_vel = np.zeros(num_agents, dtype=np.float32)
+                self.y_vel = np.ones(num_agents, dtype=np.float32) * 2.0  # 2 m/s upstream flow
+            
+            def reset_spatial_state(self):
+                """Reset positions for new episode."""
+                self.X = np.random.uniform(0, 100, num_agents).astype(np.float32)
+                self.Y = np.random.uniform(0, 100, num_agents).astype(np.float32)
+                
             def timestep(self, t, dt):
                 """Simulate one timestep - agents drift upstream."""
                 self.Y += 0.5  # Move upstream
                 self.X += np.random.uniform(-0.1, 0.1, self.num_agents)  # Small lateral drift
                 self.timestep_count += 1
+                
+                # Water velocity constant
+                self.x_vel = np.zeros(self.num_agents, dtype=np.float32)
+                self.y_vel = np.ones(self.num_agents, dtype=np.float32) * 2.0
                 
             def close(self):
                 """Clean up resources."""
@@ -712,12 +755,13 @@ class TestRLTrainer:
         factory = self.create_simulation_factory()
         trainer = RLTrainer(simulation_factory=factory)
         
-        positions, headings, velocities, battery, alive = trainer.run_episode(trainer.initial_weights)
+        positions, headings, velocities, battery, alive, velocity_field = trainer.run_episode(trainer.initial_weights)
         
         # Check output shapes
         assert positions.shape == (20, 10, 2)
         assert headings.shape == (20, 10)
         assert velocities.shape == (20, 10, 2)
+        assert velocity_field.shape == (20, 10, 2)
         assert battery.shape == (20, 10)
         assert alive.shape == (20, 10)
     

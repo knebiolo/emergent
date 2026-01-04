@@ -17,5 +17,20 @@
   "sensory_range": 2.0,
   "threat_level": 0.35,
   "cohesion_radius_relaxed": 3.0,
-  "cohesion_radius_threatened": 1.5
+  "cohesion_radius_threatened": 1.5,
+  "drafting_enabled": true,
+  "jump_velocity_ratio_threshold": 0.1,
+  "jump_battery_threshold": 0.25,
+  "jump_angle_min_deg": 45.0,
+  "jump_angle_max_deg": 60.0,
+  "order_0": 0,
+  "order_1": 1,
+  "order_2": 2,
+  "order_3": 3,
+  "order_4": 4,
+  "order_5": 5,
+  "order_6": 6,
+  "order_7": 7,
+  "order_8": 8,
+  "order_9": 9
 }
