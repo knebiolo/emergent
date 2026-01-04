@@ -226,14 +226,15 @@ class BehavioralWeights:
         
         return BehavioralWeights.from_dict(randomized)
     
-    def mutate(self, mutation_scale: float = 0.1, rng: Optional[np.random.Generator] = None) -> 'BehavioralWeights':
+    def mutate(self, mutation_scale: float = 0.1, order_mutation_prob: float = 0.2, rng: Optional[np.random.Generator] = None) -> 'BehavioralWeights':
         """
         Create mutated copy for RL exploration.
         
-        Applies Gaussian perturbation to all weights for training exploration.
+        Applies Gaussian perturbation to weights and occasionally swaps cue application order.
         
         Args:
             mutation_scale: Standard deviation as fraction of current value (default 0.1 = 10%)
+            order_mutation_prob: Probability of mutating cue order (default 0.2 = 20% chance)
             rng: Random number generator (default: creates new one)
         
         Returns:
@@ -245,10 +246,32 @@ class BehavioralWeights:
         data = self.to_dict()
         mutated = {}
         
+        # Extract current order as array
+        current_order = np.array([
+            data.get('order_0', 0), data.get('order_1', 1), data.get('order_2', 2),
+            data.get('order_3', 3), data.get('order_4', 4), data.get('order_5', 5),
+            data.get('order_6', 6), data.get('order_7', 7), data.get('order_8', 8),
+            data.get('order_9', 9)
+        ], dtype=int)
+        
+        # Mutate order with some probability (swap-based mutation)
+        if rng.random() < order_mutation_prob:
+            # Strategy: swap 2-3 random positions to explore order changes
+            num_swaps = rng.integers(1, 4)  # 1-3 swaps
+            for _ in range(num_swaps):
+                i, j = rng.choice(10, size=2, replace=False)
+                current_order[i], current_order[j] = current_order[j], current_order[i]
+        
+        # Store mutated order
+        for idx in range(10):
+            mutated[f'order_{idx}'] = int(current_order[idx])
+        
+        # Mutate all other fields (weights, thresholds, etc.)
         for key, value in data.items():
-            # Gaussian perturbation: N(value, mutation_scale * value)
-            noise = rng.normal(0, mutation_scale * abs(value))
-            mutated[key] = max(0.0, value + noise)  # Clip to non-negative
+            if not key.startswith('order_'):
+                # Gaussian perturbation: N(value, mutation_scale * value)
+                noise = rng.normal(0, mutation_scale * abs(value))
+                mutated[key] = max(0.0, value + noise)  # Clip to non-negative
         
         return BehavioralWeights.from_dict(mutated)
 

@@ -694,10 +694,21 @@ class ReplayWidget(QOpenGLWidget):
                 sxp = tx + (x_adj - xmin_loc) * s
                 syp = ty + (ymax_loc - y_adj) * s
                 
-                # Get color based on battery level (green=100%, red=0%)
-                fish_color = self._get_battery_color(i)
+                # Check if fish is dead (if alive_array available)
+                is_dead = False
+                if hasattr(self, 'alive_array') and self.alive_array is not None:
+                    if self.frame < len(self.alive_array) and i < self.alive_array.shape[1]:
+                        is_dead = not self.alive_array[self.frame, i]
+                
+                # Dead fish are white, alive fish colored by battery level
+                if is_dead:
+                    fish_color = QColor(255, 255, 255)  # White for dead
+                    pen = QPen(QColor(200, 200, 200))  # Light grey outline
+                else:
+                    fish_color = self._get_battery_color(i)  # Battery gradient
+                    pen = QPen(fish_color.darker(120))
+                
                 painter.setBrush(fish_color)
-                pen = QPen(fish_color.darker(120))
                 pen.setWidthF(1.0)
                 painter.setPen(pen)
                 

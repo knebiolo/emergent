@@ -118,7 +118,7 @@ class SimulationCanvas(QWidget):
         self.replay_widget.wheelEvent(event)
         event.accept()
         
-    def set_positions(self, positions: np.ndarray, headings: Optional[np.ndarray] = None, battery: Optional[np.ndarray] = None):
+    def set_positions(self, positions: np.ndarray, headings: Optional[np.ndarray] = None, battery: Optional[np.ndarray] = None, alive: Optional[np.ndarray] = None):
         """
         Update agent positions for visualization.
         
@@ -126,6 +126,7 @@ class SimulationCanvas(QWidget):
             positions: Array of shape (num_agents, 2) or (num_timesteps, num_agents, 2)
             headings: Optional array of headings for oriented rendering
             battery: Optional array of battery levels for color visualization (green=full, red=depleted)
+            alive: Optional boolean array indicating which agents are alive (for dead fish coloring)
         """
         if positions is None or positions.size == 0:
             return
@@ -150,6 +151,12 @@ class SimulationCanvas(QWidget):
             if battery.ndim == 1:
                 battery = battery[np.newaxis, :]
             self.replay_widget.battery_array = battery
+        
+        # Update alive status if provided (for dead fish coloring)
+        if alive is not None:
+            if alive.ndim == 1:
+                alive = alive[np.newaxis, :]
+            self.replay_widget.alive_array = alive
         
         # Update bounds to include all positions in trajectory
         xs = positions[:, :, 0]
@@ -537,7 +544,7 @@ class TrainingWorker(QObject):
     
     # Signals
     episode_started = pyqtSignal(int)  # episode number
-    episode_computed = pyqtSignal(int, float, dict, object, object, object)  # episode, reward, components, positions, headings, battery
+    episode_computed = pyqtSignal(int, float, dict, object, object, object, object)  # episode, reward, components, positions, headings, battery, alive
     training_completed = pyqtSignal(object, list)  # best_weights, history
     error_occurred = pyqtSignal(str)  # error message
     
@@ -634,8 +641,8 @@ class TrainingWorker(QObject):
                 # Clear the animation complete flag for THIS episode
                 self.animation_complete.clear()
                 
-                # Emit episode data - UI will handle visualization (include battery for coloring)
-                self.episode_computed.emit(episode, float(reward), components, positions, headings, battery)
+                # Emit episode data - UI will handle visualization (include battery and alive for coloring)
+                self.episode_computed.emit(episode, float(reward), components, positions, headings, battery, alive)
                 
                 # Mutate for next episode (compute WHILE current episode animates)
                 current_weights = self.trainer.best_weights.mutate(
@@ -800,6 +807,12 @@ class RLTrainingViewer(QMainWindow):
             sim.neighbor_buffer_radius = weights.sensory_range * fish_length_m
             sim.neighbor_buffer_lengths = weights.sensory_range
             
+            # RANDOMIZE initial conditions for RL exploration
+            # Random headings [0, 2π] instead of upstream direction
+            sim.heading = np.random.uniform(0, 2*np.pi, sim.num_agents).astype(np.float32)
+            # Random initial SOG [0.1, 1.5] m/s instead of ideal_sog
+            sim.sog = np.random.uniform(0.1, 1.5, sim.num_agents).astype(np.float32)
+            
             return sim
         
         return factory_func
@@ -936,18 +949,18 @@ class RLTrainingViewer(QMainWindow):
         new_weights.order_8 = int(old_order[8])
         new_weights.order_9 = int(old_order[9])
         
-        self.current_weights = new_weights  # Store as current
+        self.current_weights = new_weights  # Store as current for training
         
         # Update display
         self.weights_panel.update_weights(new_weights)
         
-        # Update order display (default order, not randomized)
+        # Update order display (need default_order dict)
         default_order = {
-            0: 'shallow', 1: 'border', 2: 'avoid', 3: 'collision',
-            4: 'alignment', 5: 'cohesion', 6: 'low_speed', 7: 'refugia',
-            8: 'rheotaxis', 9: 'wave_drag',
+            0: 'shallow', 1: 'border', 2: 'avoid', 3: 'collision', 4: 'alignment',
+            5: 'cohesion', 6: 'low_speed', 7: 'refugia', 8: 'rheotaxis', 9: 'wave_drag'
         }
         self.weights_panel.update_order(default_order, new_weights)
+        
         self.control_panel.append_log("🎲 Randomized initial weights (100% variation)")
         self.control_panel.status_label.setText("Ready with new random weights")
     
@@ -1048,7 +1061,7 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.status_label.setText(f"Computing episode {episode + 1}/{total}...")
         
     def on_episode_computed(self, episode: int, reward: float, components: Dict[str, float], 
-                           positions: np.ndarray, headings: np.ndarray, battery: np.ndarray):
+                           positions: np.ndarray, headings: np.ndarray, battery: np.ndarray, alive: np.ndarray):
         """Handle episode computation complete - start visualization and wait."""
         # Store episode data for later processing after animation
         self.pending_episode_data = (episode, reward, components)
@@ -1057,8 +1070,8 @@ class RLTrainingViewer(QMainWindow):
         total = self.control_panel.episodes_spin.value()
         self.control_panel.status_label.setText(f"Visualizing episode {episode + 1}/{total}...")
         
-        # Start visualization with battery data for coloring - this will trigger animation_finished when done
-        self.simulation_canvas.set_positions(positions, headings, battery)
+        # Start visualization with battery and alive data for coloring - this will trigger animation_finished when done
+        self.simulation_canvas.set_positions(positions, headings, battery, alive)
         
     def on_animation_finished(self):
         """Handle animation playback complete - now update UI and continue training."""
