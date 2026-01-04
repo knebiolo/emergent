@@ -240,10 +240,18 @@ class simulation:
         except Exception:
             base = np.repeat(2.77, self.num_agents).astype(np.float32)
         self.max_s_U_fatigued = (base * self.fatigued_max_s_U_multiplier).astype(np.float32)
-        self.a_p = np.repeat(0.0, self.num_agents)
-        self.b_p = np.repeat(-1.0, self.num_agents)
-        self.a_s = np.repeat(0.0, self.num_agents)
-        self.b_s = np.repeat(-1.0, self.num_agents)
+        
+        # Castro-Santos (2005) fatigue coefficients for adult sockeye salmon (Oncorhynchus nerka)
+        # Time-to-fatigue equation: ttf (seconds) = exp(a + b * U) where U is swim speed in BL/s
+        # Prolonged swimming (max_s_U < U <= max_p_U): ttf = exp(5.29 - 0.36*U_bl/s)
+        # Sprint swimming (U > max_p_U): ttf = exp(2.78 - 0.51*U_bl/s)
+        # Reference: Castro-Santos, T. (2005). Optimal swim speeds for traversing velocity barriers.
+        #            Journal of Experimental Biology, 208, 421-432. Table 1.
+        self.a_p = np.repeat(5.29, self.num_agents)  # Prolonged intercept
+        self.b_p = np.repeat(-0.36, self.num_agents)  # Prolonged slope
+        self.a_s = np.repeat(2.78, self.num_agents)  # Sprint intercept
+        self.b_s = np.repeat(-0.51, self.num_agents)  # Sprint slope
+        
         # derived speeds are initialized after agents.sim_length() populates `self.length`
         self.opt_sog = np.zeros(self.num_agents, dtype=np.float32)
         self.school_sog = np.zeros(self.num_agents, dtype=np.float32)

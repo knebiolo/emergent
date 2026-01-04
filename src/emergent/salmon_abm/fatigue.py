@@ -138,7 +138,7 @@ class fatigue():
 
         mask_non_sustained = ~mask_sustained
         ttf0 = ttf[mask_non_sustained] * battery[mask_non_sustained]
-        ttf1 = ttf0 - (self.dt * 0.001)
+        ttf1 = ttf0 - self.dt  # FIX: Use actual timestep, not 0.001 (0.1%/sec was too lenient)
 
         ratio = np.divide(
             ttf1,
