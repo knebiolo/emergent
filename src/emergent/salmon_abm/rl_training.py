@@ -70,6 +70,15 @@ class BehavioralWeights:
     # Drafting (energy-efficient formations)
     drafting_enabled: bool = True  # Enable drafting benefit calculations
     
+    # Jump/leap behavior (for fish in high-velocity regions)
+    jump_velocity_ratio_threshold: float = 0.10  # Jump when SOG/water_velocity < 10%
+    jump_battery_threshold: float = 0.25  # Minimum battery level to jump (25%)
+    jump_angle_min_deg: float = 45.0  # Minimum jump angle in degrees
+    jump_angle_max_deg: float = 60.0  # Maximum jump angle in degrees
+    
+    # Behavioral randomization (for RL exploration chaos 🎪)
+    randomize_cue_order: bool = False  # Randomize cue application order each timestep
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return asdict(self)
@@ -114,6 +123,13 @@ class BehavioralWeights:
             'border': self.border_cue_weight,
             'shallow': self.shallow_weight,
             'avoid': self.avoid_weight,
+            # Jump/leap parameters
+            'jump_velocity_ratio_threshold': self.jump_velocity_ratio_threshold,
+            'jump_battery_threshold': self.jump_battery_threshold,
+            'jump_angle_min_deg': self.jump_angle_min_deg,
+            'jump_angle_max_deg': self.jump_angle_max_deg,
+            # Behavioral chaos
+            'randomize_cue_order': float(self.randomize_cue_order),  # Convert bool to float for consistency
         }
     
     def validate(self) -> None:
@@ -139,6 +155,25 @@ class BehavioralWeights:
             raise ValueError(
                 f"cohesion_radius_relaxed ({self.cohesion_radius_relaxed}) must be >= "
                 f"cohesion_radius_threatened ({self.cohesion_radius_threatened})"
+            )
+        
+        # Jump parameter validation
+        if self.jump_velocity_ratio_threshold < 0.0 or self.jump_velocity_ratio_threshold > 1.0:
+            raise ValueError(f"jump_velocity_ratio_threshold must be 0.0-1.0, got {self.jump_velocity_ratio_threshold}")
+        
+        if self.jump_battery_threshold < 0.0 or self.jump_battery_threshold > 1.0:
+            raise ValueError(f"jump_battery_threshold must be 0.0-1.0, got {self.jump_battery_threshold}")
+        
+        if self.jump_angle_min_deg < 0.0 or self.jump_angle_min_deg > 90.0:
+            raise ValueError(f"jump_angle_min_deg must be 0-90 degrees, got {self.jump_angle_min_deg}")
+        
+        if self.jump_angle_max_deg < 0.0 or self.jump_angle_max_deg > 90.0:
+            raise ValueError(f"jump_angle_max_deg must be 0-90 degrees, got {self.jump_angle_max_deg}")
+        
+        if self.jump_angle_min_deg > self.jump_angle_max_deg:
+            raise ValueError(
+                f"jump_angle_min_deg ({self.jump_angle_min_deg}) must be <= "
+                f"jump_angle_max_deg ({self.jump_angle_max_deg})"
             )
     
     def randomize(self, scale: float = 0.5, rng: Optional[np.random.Generator] = None) -> 'BehavioralWeights':
@@ -849,11 +884,18 @@ class RLTrainer:
             # Run episode with current weights
             positions, headings, velocities, battery, alive = self.run_episode(current_weights)
             
+            # Get simulation instance to access longitudinal_profile
+            sim = self.simulation_factory(current_weights)
+            longitudinal_profile = getattr(sim, 'longitudinal', None)
+            sim.close()
+            
             # Compute reward
             reward, components = compute_episode_reward(
                 positions, headings, velocities, alive,
                 body_length=self.body_length,
-                threat_level=current_weights.threat_level
+                threat_level=current_weights.threat_level,
+                battery_history=battery,
+                longitudinal_profile=longitudinal_profile
             )
             
             elapsed = time.time() - start_time

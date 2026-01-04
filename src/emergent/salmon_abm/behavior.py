@@ -2586,6 +2586,16 @@ class behavior():
             8: 'rheotaxis',
             9: 'wave_drag',
         }
+        
+        # CHAOS MODE: Randomize cue application order for RL exploration
+        # If randomize_cue_order is enabled in test_weights, shuffle the order each timestep
+        tw = getattr(self.simulation, 'test_weights', None)
+        if isinstance(tw, dict) and float(tw.get('randomize_cue_order', 0.0)) > 0.5:
+            # Shuffle the cue names while preserving dict structure
+            cue_names = list(order_dict.values())
+            import random
+            random.shuffle(cue_names)
+            order_dict = {i: name for i, name in enumerate(cue_names)}
 
         cue_dict = {'rheotaxis': rheotaxis,
                 'shallow': shallow,

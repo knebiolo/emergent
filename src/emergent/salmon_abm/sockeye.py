@@ -1011,8 +1011,20 @@ class simulation():
         src.close()
 
     def longitudinal_import(self, shapefile):
+        """Load longitudinal profile shapefile for river distance calculations."""
+        if shapefile is None:
+            raise ValueError(
+                "longitudinal_profile shapefile is required for RL training.\n"
+                "The reward function needs this to compute upstream progress accurately.\n"
+                "Please provide --longitudinal-profile path/to/longitudinal.shp"
+            )
+        if not os.path.exists(shapefile):
+            raise FileNotFoundError(f"Longitudinal profile shapefile not found: {shapefile}")
+        
         # Load the shapefile with the longitudinal line
         line_gdf = gpd.read_file(shapefile)
+        if len(line_gdf) == 0:
+            raise ValueError(f"Longitudinal profile shapefile is empty: {shapefile}")
         self.longitudinal = line_gdf.geometry[0]  # Assuming there's only one line feature
         
     def compute_linear_positions(self, line):

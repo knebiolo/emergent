@@ -272,6 +272,7 @@ class ControlPanel(QWidget):
     pause_training = pyqtSignal()
     stop_training = pyqtSignal()
     randomize_weights = pyqtSignal()
+    reset_training = pyqtSignal()  # NEW: Reset to initial state
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -346,8 +347,14 @@ class ControlPanel(QWidget):
         # Randomize button
         self.btn_randomize = QPushButton("🎲 Randomize Weights")
         self.btn_randomize.clicked.connect(self.randomize_weights.emit)
-        self.btn_randomize.setToolTip("Generate new random initial weights (50% variation from defaults). Only works before training starts.")
+        self.btn_randomize.setToolTip("Generate new random initial weights (100% variation from defaults). Only works before training starts.")
         layout.addWidget(self.btn_randomize)
+        
+        # Reset button
+        self.btn_reset = QPushButton("🔄 Reset Training")
+        self.btn_reset.clicked.connect(self.reset_training.emit)
+        self.btn_reset.setToolTip("Reset to initial state (clears training history, keeps current weights). Start fresh without restarting the app.")
+        layout.addWidget(self.btn_reset)
         
         # Progress
         progress_group = QGroupBox("Progress")
@@ -374,8 +381,15 @@ class ControlPanel(QWidget):
             self.figure = Figure(figsize=(5, 3), dpi=80)
             self.canvas = FigureCanvasQTAgg(self.figure)
             
-            # Disable matplotlib's default scroll/pan/zoom behavior
-            self.canvas.mpl_disconnect(self.canvas.mpl_connect('scroll_event', lambda e: None))
+            # Disable matplotlib's default scroll/pan/zoom navigation toolbar behavior
+            # We need to disconnect the NavigationToolbar2QT scroll handler
+            try:
+                # Disconnect all scroll_event callbacks to prevent pan/zoom interference
+                callbacks = self.canvas.callbacks.callbacks.get('scroll_event', {})
+                for cid in list(callbacks.keys()):
+                    self.canvas.mpl_disconnect(cid)
+            except Exception:
+                pass  # If no callbacks exist, that's fine
             
             self.ax = self.figure.add_subplot(111)
             self.ax.set_xlabel('Episode')
@@ -478,6 +492,31 @@ class TrainingWorker(QObject):
         # Synchronization: wait for animation to complete
         self.animation_complete = threading.Event()
         self.animation_complete.set()  # Initially ready
+        
+        # Cache longitudinal profile (create sim once to get it)
+        print("Caching longitudinal profile from simulation...", flush=True)
+        self.longitudinal_profile = None
+        try:
+            sim = self.trainer.simulation_factory(self.trainer.initial_weights)
+            self.longitudinal_profile = getattr(sim, 'longitudinal', None)
+            print(f"Simulation created, checking longitudinal attribute...", flush=True)
+            if self.longitudinal_profile is not None:
+                print(f"Longitudinal profile cached: {type(self.longitudinal_profile)}", flush=True)
+            else:
+                print(f"WARNING: sim.longitudinal is None", flush=True)
+            sim.close()
+        except Exception as e:
+            import traceback
+            error_msg = f"ERROR caching longitudinal profile: {e}\n{traceback.format_exc()}"
+            print(error_msg, flush=True)
+            raise RuntimeError(f"Failed to cache longitudinal profile: {e}") from e
+        
+        if self.longitudinal_profile is None:
+            raise ValueError(
+                "Longitudinal profile not loaded from simulation.\n"
+                "Check that longitudinal_profile path is correct and shapefile loads properly.\n"
+                "Simulation may have failed to import the shapefile."
+            )
     
 
     def run(self):
@@ -506,14 +545,16 @@ class TrainingWorker(QObject):
                 actual_timesteps = positions.shape[0]
                 print(f"Episode {episode}: Completed {actual_timesteps} timesteps")
                 
-                # Compute reward
+                # Compute reward (use cached longitudinal profile)
                 from emergent.salmon_abm.rl_training import compute_episode_reward
                 # Pass current weights to reward function for constraint checking
                 reward, components = compute_episode_reward(
                     positions, headings, velocities, alive,
                     body_length=self.trainer.body_length,
                     threat_level=current_weights.threat_level,
-                    behavioral_weights=current_weights.to_dict()
+                    behavioral_weights=current_weights.to_dict(),
+                    battery_history=battery,
+                    longitudinal_profile=self.longitudinal_profile
                 )
                 
                 # Track best
@@ -595,7 +636,15 @@ class RLTrainingViewer(QMainWindow):
         # Episode synchronization
         self.pending_episode_data = None  # Stores (episode, reward, components) waiting for animation
         
-        self.init_ui()
+        print(f"RLTrainingViewer init: calling init_ui()...", flush=True)
+        try:
+            self.init_ui()
+            print(f"RLTrainingViewer init: init_ui() complete", flush=True)
+        except Exception as e:
+            import traceback
+            print(f"ERROR in init_ui: {e}", flush=True)
+            traceback.print_exc()
+            raise
         
     def init_ui(self):
         """Initialize UI components."""
@@ -609,7 +658,7 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.pause_training.connect(self.on_pause_training)
         self.control_panel.stop_training.connect(self.on_stop_training)
         self.control_panel.randomize_weights.connect(self.on_randomize_weights)
-        self.control_panel.randomize_weights.connect(self.on_randomize_weights)
+        self.control_panel.reset_training.connect(self.on_reset_training)
         
         # Connect animation finished signal
         self.simulation_canvas.animation_finished.connect(self.on_animation_finished)
@@ -648,6 +697,15 @@ class RLTrainingViewer(QMainWindow):
         
         self.control_panel.append_log(f"Found {len(env_files)} environment files")
         
+        # Look for longitudinal profile shapefile (REQUIRED for reward function)
+        longitudinal_path = os.path.join(self.model_dir, 'longitudinal.shp')
+        if not os.path.exists(longitudinal_path):
+            raise FileNotFoundError(
+                f"Longitudinal profile shapefile required but not found: {longitudinal_path}\n"
+                f"The reward function requires this to compute upstream progress accurately."
+            )
+        self.control_panel.append_log(f"Found longitudinal profile: {longitudinal_path}")
+        
         def factory_func(weights: BehavioralWeights):
             """Create and configure simulation with given behavioral weights."""
             # Create simulation with minimal output writes (compute-only)
@@ -659,7 +717,7 @@ class RLTrainingViewer(QMainWindow):
                 water_temp=self.water_temp,
                 start_polygon=self.start_polygon,
                 env_files=env_files,
-                longitudinal_profile=None,
+                longitudinal_profile=longitudinal_path,
                 fish_length=None,  # Random fish lengths
                 num_timesteps=num_timesteps,
                 num_agents=num_agents,
@@ -722,7 +780,7 @@ class RLTrainingViewer(QMainWindow):
             
             # Create RL trainer with randomized initial weights for chaotic start
             base_weights = BehavioralWeights()
-            initial_weights = base_weights.randomize(scale=0.5)  # 50% randomization for diversity
+            initial_weights = base_weights.randomize(scale=1.0)  # 100% randomization for maximum diversity
             config = {
                 'exploration_noise': exploration_noise,
                 'body_length': 0.3,  # 300mm fish
@@ -777,12 +835,48 @@ class RLTrainingViewer(QMainWindow):
         # Generate new randomized weights
         from emergent.salmon_abm.rl_training import BehavioralWeights
         base_weights = BehavioralWeights()
-        new_weights = base_weights.randomize(scale=0.5)
+        new_weights = base_weights.randomize(scale=1.0)  # 100% randomization
         
         # Update display
         self.weights_panel.update_weights(new_weights)
-        self.control_panel.append_log("🎲 Randomized initial weights (50% variation)")
+        self.control_panel.append_log("🎲 Randomized initial weights (100% variation)")
         self.control_panel.status_label.setText("Ready with new random weights")
+    
+    def on_reset_training(self):
+        """Reset training to initial state (clear history but keep weights)."""
+        if self.training_thread is not None and self.training_thread.isRunning():
+            self.control_panel.append_log("Cannot reset during training - stop first")
+            return
+        
+        # Clear trainer and history
+        self.trainer = None
+        self.training_thread = None
+        self.training_worker = None
+        self.initial_reward = None
+        self.pending_episode_data = None
+        
+        # Reset progress display
+        self.control_panel.progress_bar.setValue(0)
+        self.control_panel.status_label.setText("Ready (reset)")
+        
+        # Clear plot if it exists
+        if hasattr(self.control_panel, 'has_plot') and self.control_panel.has_plot:
+            try:
+                self.control_panel.ax.clear()
+                self.control_panel.ax.set_xlabel('Episode')
+                self.control_panel.ax.set_ylabel('Reward')
+                self.control_panel.ax.set_title('RL Training Progress')
+                self.control_panel.ax.grid(True, alpha=0.3)
+                self.control_panel.canvas.draw()
+            except Exception:
+                pass
+        
+        # Re-enable parameter controls
+        self.control_panel.set_parameters_enabled(True)
+        
+        self.control_panel.append_log("=" * 50)
+        self.control_panel.append_log("🔄 Training reset - ready to start fresh")
+        self.control_panel.append_log("Current weights preserved - press Randomize for new weights")
         
     def on_pause_training(self):
         """Pause/resume training."""
@@ -913,40 +1007,56 @@ class RLTrainingViewer(QMainWindow):
 
 def main():
     """Run RL training visualizer."""
-    parser = argparse.ArgumentParser(description="RL Training Visualizer for Behavioral Weights")
-    parser.add_argument('--model-dir', type=str, required=False, default=None,
-                       help='Path to model directory with environment files (depth.tif, vel_x.tif, etc.)')
-    parser.add_argument('--start-polygon', type=str, required=False, default=None,
-                       help='Path to starting polygon shapefile')
-    parser.add_argument('--model-name', type=str, default='salmon_abm',
-                       help='Model name (default: salmon_abm)')
-    parser.add_argument('--basin', type=str, default='nuyakuk',
-                       help='Basin name (default: nuyakuk)')
-    
-    args = parser.parse_args()
-    
-    app = QApplication(sys.argv)
-    viewer = RLTrainingViewer(
-        model_dir=args.model_dir,
-        start_polygon=args.start_polygon,
-        model_name=args.model_name,
-        basin=args.basin
-    )
-    viewer.show()
-    
-    # Show startup message if not configured
-    if not args.model_dir or not args.start_polygon:
-        viewer.control_panel.append_log("=" * 50)
-        viewer.control_panel.append_log("Welcome to RL Training Visualizer!")
-        viewer.control_panel.append_log("")
-        viewer.control_panel.append_log("Please restart with configuration:")
-        viewer.control_panel.append_log("  python -m emergent.salmon_abm.rl_training_viewer \\")
-        viewer.control_panel.append_log("    --model-dir data/salmon_abm \\")
-        viewer.control_panel.append_log("    --start-polygon data/salmon_abm/start_loc_river_right.shp")
-        viewer.control_panel.append_log("")
-        viewer.control_panel.append_log("Or configure paths before starting training.")
-    
-    sys.exit(app.exec_())
+    print("RL Viewer starting...", flush=True)
+    try:
+        print("Parsing arguments...", flush=True)
+        parser = argparse.ArgumentParser(description="RL Training Visualizer for Behavioral Weights")
+        parser.add_argument('--model-dir', type=str, required=False, default=None,
+                           help='Path to model directory with environment files (depth.tif, vel_x.tif, etc.)')
+        parser.add_argument('--start-polygon', type=str, required=False, default=None,
+                           help='Path to starting polygon shapefile')
+        parser.add_argument('--model-name', type=str, default='salmon_abm',
+                           help='Model name (default: salmon_abm)')
+        parser.add_argument('--basin', type=str, default='nuyakuk',
+                           help='Basin name (default: nuyakuk)')
+        
+        args = parser.parse_args()
+        print(f"Args parsed: model_dir={args.model_dir}, start_polygon={args.start_polygon}", flush=True)
+        
+        print("Creating QApplication...", flush=True)
+        app = QApplication(sys.argv)
+        print("Creating RLTrainingViewer...", flush=True)
+        viewer = RLTrainingViewer(
+            model_dir=args.model_dir,
+            start_polygon=args.start_polygon,
+            model_name=args.model_name,
+            basin=args.basin
+        )
+        print("Showing viewer...", flush=True)
+        viewer.show()
+        viewer.raise_()  # Bring to front
+        viewer.activateWindow()  # Activate window
+        
+        # Show startup message if not configured
+        if not args.model_dir or not args.start_polygon:
+            viewer.control_panel.append_log("=" * 50)
+            viewer.control_panel.append_log("Welcome to RL Training Visualizer!")
+            viewer.control_panel.append_log("")
+            viewer.control_panel.append_log("Please restart with configuration:")
+            viewer.control_panel.append_log("  python -m emergent.salmon_abm.rl_training_viewer \\")
+            viewer.control_panel.append_log("    --model-dir data/salmon_abm \\")
+            viewer.control_panel.append_log("    --start-polygon data/salmon_abm/start_loc_river_right.shp")
+            viewer.control_panel.append_log("")
+            viewer.control_panel.append_log("Or configure paths before starting training.")
+            viewer.control_panel.append_log("=" * 50)
+        
+        print("Starting event loop...", flush=True)
+        sys.exit(app.exec_())
+    except Exception as e:
+        import traceback
+        print(f"FATAL ERROR: {e}", file=sys.stderr, flush=True)
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == '__main__':

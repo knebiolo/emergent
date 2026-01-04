@@ -255,6 +255,13 @@ class simulation:
         self.in_eddy = np.zeros(self.num_agents, dtype=bool)
         self.time_since_eddy_escape = np.zeros(self.num_agents, dtype=float)
         self.max_eddy_escape_seconds = 1000
+        
+        # Jump/leap behavior state (for high-velocity regions)
+        self.time_of_jump = np.full(self.num_agents, -np.inf, dtype=float)  # Last jump time (start at -inf so can jump immediately)
+        self.on_land = np.zeros(self.num_agents, dtype=bool)  # Fish that jumped onto dry land
+        self.time_landed = np.full(self.num_agents, np.inf, dtype=float)  # When fish landed on dry land
+        self.flop_heading = np.zeros(self.num_agents, dtype=float)  # Random heading while flopping
+        self.max_flop_time = 10.0  # Max seconds fish can flop before dying
 
         # create or open HDF5 database for simulation outputs (minimal structure)
         self._created_db_file = False
@@ -482,6 +489,25 @@ class simulation:
                 f"max distance: {np.max(dist_to_bound):.1f}m, "
                 f"{100*np.sum(wetted)/wetted.size:.1f}% wetted area"
             )
+
+        # CRITICAL: Load longitudinal profile shapefile for RL reward computation
+        # The reward function requires this to compute upstream progress accurately
+        self.longitudinal = None
+        if longitudinal_profile is not None:
+            try:
+                import geopandas as gpd
+                logging.getLogger(__name__).info(f"Loading longitudinal profile from {longitudinal_profile}")
+                line_gdf = gpd.read_file(longitudinal_profile)
+                if line_gdf is None or len(line_gdf) == 0:
+                    raise ValueError(f"Longitudinal profile shapefile is empty: {longitudinal_profile}")
+                self.longitudinal = line_gdf.geometry[0]  # Assuming there's only one line feature
+                logging.getLogger(__name__).info(f"Longitudinal profile loaded: {type(self.longitudinal)}")
+            except Exception as e:
+                # FAIL LOUD: RL training requires longitudinal profile
+                raise RuntimeError(
+                    f"Failed to load longitudinal profile from {longitudinal_profile}: {e}\n"
+                    "This is required for RL training reward computation."
+                ) from e
 
         # Movement-related defaults required by movement helpers. Set early so
         # movement.frequency/drag_fun/swim can run safely even if attributes
@@ -1270,13 +1296,79 @@ class simulation:
         # behavior.arbitrate may return scalar or array
         self.heading = np.array(new_heading, dtype=np.float32)
 
-        # calculate movement-related quantities - FAIL LOUD
+        # Jump/swim decision logic (ported from sockeye.py)
+        # Check if fish should jump based on progress ratio, battery, and cooldown
+        should_jump = np.zeros(self.num_agents, dtype=bool)
+        if movement is not None and g is not None:
+            # Get jump thresholds from test_weights (if available) or use defaults
+            tw = getattr(self, 'test_weights', None)
+            jump_vel_ratio_threshold = 0.10  # Default: jump when making < 10% progress
+            jump_battery_threshold = 0.25  # Default: need 25% battery to jump
+            jump_cooldown_sec = 60.0  # Default: 60 second cooldown between jumps
+            
+            if isinstance(tw, dict):
+                jump_vel_ratio_threshold = float(tw.get('jump_velocity_ratio_threshold', 0.10))
+                jump_battery_threshold = float(tw.get('jump_battery_threshold', 0.25))
+                jump_cooldown_sec = float(tw.get('jump_cooldown_seconds', 60.0))
+            
+            # Calculate progress ratio: fish velocity relative to water velocity
+            water_speed = np.sqrt(self.x_vel**2 + self.y_vel**2)
+            fish_sog = getattr(self, 'sog', np.zeros(self.num_agents))
+            
+            # Avoid division by zero
+            sog_to_water_vel_ratio = np.where(
+                water_speed > 0.01,
+                fish_sog / water_speed,
+                1.0  # If water is still, fish can swim fine (no need to jump)
+            )
+            
+            # Time since last jump
+            time_since_jump = t - self.time_of_jump
+            
+            # Jump conditions: poor progress, sufficient battery, cooldown expired, alive
+            should_jump = (
+                (sog_to_water_vel_ratio <= jump_vel_ratio_threshold) &
+                (time_since_jump > jump_cooldown_sec) &
+                (self.battery >= jump_battery_threshold) &
+                (self.dead == 0) &
+                (~self.on_land)  # Don't try to jump while flopping on land
+            )
+        
+        # Calculate movement-related quantities - FAIL LOUD
         dxdy = np.zeros((self.num_agents, 2), dtype=np.float32)
+        dxdy_flop = np.zeros((self.num_agents, 2), dtype=np.float32)
+        
         if movement is not None:
-            movement.frequency(mask, t, dt)
-            movement.thrust_fun(mask, t, dt)
-            movement.drag_fun(mask, t, dt)
-            dxdy = movement.swim(t, dt, pid or pid_controller, mask)
+            # Fish on dry land: flop around trying to find water
+            if np.any(self.on_land):
+                dxdy_flop = movement.flop(t, dt, mask=self.on_land)
+                
+                # Check if flopping fish exceeded max flop time (they die)
+                time_flopping = t - self.time_landed[self.on_land]
+                died_on_land = self.on_land & (time_flopping > self.max_flop_time)
+                if np.any(died_on_land):
+                    if getattr(self, 'verbose', False):
+                        print(f"MORTALITY: {np.sum(died_on_land)} fish died after flopping on dry land for {self.max_flop_time}s at t={t}")
+                    self.dead[died_on_land] = 1
+                    self.on_land[died_on_land] = False  # Stop flopping (they're dead)
+            
+            # Fish that should jump: use jump physics
+            if np.any(should_jump):
+                g_val = g if g is not None else 9.81  # Default gravity
+                dxdy_jump = movement.jump(t, g_val, mask=should_jump)
+                dxdy[should_jump] = dxdy_jump[should_jump]
+            
+            # Fish that should swim normally: use thrust/drag/PID
+            swim_mask = mask & (~should_jump) & (~self.on_land)
+            if np.any(swim_mask):
+                movement.frequency(swim_mask, t, dt)
+                movement.thrust_fun(swim_mask, t, dt)
+                movement.drag_fun(swim_mask, t, dt)
+                dxdy_swim = movement.swim(t, dt, pid or pid_controller, swim_mask)
+                dxdy[swim_mask] = dxdy_swim[swim_mask]
+            
+            # Add flopping displacement
+            dxdy[self.on_land] = dxdy_flop[self.on_land]
 
         # If debugging is enabled, print compact diagnostics to help trace zero-values
         if getattr(self, 'debug_freq', False):
