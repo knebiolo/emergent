@@ -185,6 +185,48 @@ class fatigue():
             # keep lightweight debug behavior similar to original
             pass
 
+    def deduct_jump_energy(self, jumping_mask):
+        """
+        Deduct battery energy for fish that are jumping.
+        
+        Jumping requires explosive acceleration to sprint speed, consuming
+        significant energy reserves. Fish must accelerate to 2-3× sustained
+        swim speed for effective jumps.
+        
+        Args:
+            jumping_mask: Boolean array indicating which fish are jumping this timestep
+        
+        Energy cost rationale:
+        - Jumps require acceleration to ucrit (critical swimming speed)
+        - Ballistic flight through air has no energy cost (gravity does the work)
+        - Landing/recovery has minor cost (absorbed in next timestep's fatigue)
+        - Total cost ~25% battery per jump attempt (success or failure)
+        
+        Biological basis:
+        - Salmonids can typically make 5-10 jump attempts before exhaustion
+        - Jump frequency decreases with repeated attempts (fatigue accumulation)
+        - Energy cost independent of jump success (effort is pre-launch)
+        """
+        jump_energy_cost = 0.25  # 25% battery depletion per jump
+        
+        if np.any(jumping_mask):
+            # Deduct energy from jumping fish
+            self.simulation.battery[jumping_mask] -= jump_energy_cost
+            
+            # Clip to valid range [0, 1]
+            self.simulation.battery = np.clip(self.simulation.battery, 0.0, 1.0)
+            
+            # Optional: Track jump count for debugging/analysis
+            if hasattr(self.simulation, 'jump_count'):
+                self.simulation.jump_count[jumping_mask] += 1
+            
+            # Verbose logging if enabled
+            if getattr(self.simulation, 'verbose', False):
+                n_jumping = np.sum(jumping_mask)
+                mean_battery_after = np.mean(self.simulation.battery[jumping_mask])
+                print(f"JUMP ENERGY: {n_jumping} fish jumped at t={self.t:.1f}s, "
+                      f"battery after jump: mean={mean_battery_after:.2f}")
+
     def assess_fatigue(self):
         swim_speeds = self.swim_speeds()
         bl_s = self.bl_s(swim_speeds)

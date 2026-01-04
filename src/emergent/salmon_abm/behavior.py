@@ -2574,22 +2574,38 @@ class behavior():
             collision = self.collision_cue(default_weights['collision'])
 
         # cue application / logging order (migratory mode)
-        order_dict = {
-            0: 'shallow',
-            1: 'border',
-            2: 'avoid',
-            3: 'collision',
-            4: 'alignment',
-            5: 'cohesion',
-            6: 'low_speed',
-            7: 'refugia',
-            8: 'rheotaxis',
-            9: 'wave_drag',
-        }
+        # Use RL-trained order parameters if available, otherwise use default order
+        tw = getattr(self.simulation, 'test_weights', None)
+        
+        # Default cue name mapping (index -> cue name)
+        default_cue_names = ['shallow', 'border', 'avoid', 'collision', 'alignment', 
+                             'cohesion', 'low_speed', 'refugia', 'rheotaxis', 'wave_drag']
+        
+        # Build order_dict from RL-trained parameters or use defaults
+        if isinstance(tw, dict) and any(f'order_{i}' in tw for i in range(10)):
+            # Use RL-trained order parameters
+            order_dict = {}
+            for i in range(10):
+                cue_idx = int(tw.get(f'order_{i}', i))
+                cue_idx = max(0, min(9, cue_idx))  # Clamp to valid range [0, 9]
+                order_dict[i] = default_cue_names[cue_idx]
+        else:
+            # Use default hardcoded order
+            order_dict = {
+                0: 'shallow',
+                1: 'border',
+                2: 'avoid',
+                3: 'collision',
+                4: 'alignment',
+                5: 'cohesion',
+                6: 'low_speed',
+                7: 'refugia',
+                8: 'rheotaxis',
+                9: 'wave_drag',
+            }
         
         # CHAOS MODE: Randomize cue application order for RL exploration
         # If randomize_cue_order is enabled in test_weights, shuffle the order each timestep
-        tw = getattr(self.simulation, 'test_weights', None)
         if isinstance(tw, dict) and float(tw.get('randomize_cue_order', 0.0)) > 0.5:
             # Shuffle the cue names while preserving dict structure
             cue_names = list(order_dict.values())

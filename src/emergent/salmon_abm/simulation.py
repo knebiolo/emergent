@@ -255,10 +255,16 @@ class simulation:
         
         # Jump/leap behavior state (for high-velocity regions)
         self.time_of_jump = np.full(self.num_agents, -np.inf, dtype=float)  # Last jump time (start at -inf so can jump immediately)
+        self.jump_count = np.zeros(self.num_agents, dtype=int)  # Track total jumps per fish (for analysis/debugging)
         self.on_land = np.zeros(self.num_agents, dtype=bool)  # Fish that jumped onto dry land
         self.time_landed = np.full(self.num_agents, np.inf, dtype=float)  # When fish landed on dry land
         self.flop_heading = np.zeros(self.num_agents, dtype=float)  # Random heading while flopping
         self.max_flop_time = 10.0  # Max seconds fish can flop before dying
+        
+        # Shallow water mortality state
+        self.in_shallow_water = np.zeros(self.num_agents, dtype=bool)  # Fish currently in shallow water
+        self.shallow_water_timesteps = np.zeros(self.num_agents, dtype=int)  # Timesteps in shallow water
+        self.max_shallow_timesteps = 60  # Max timesteps in shallow water before dying
 
         # create or open HDF5 database for simulation outputs (minimal structure)
         self._created_db_file = False
@@ -1349,11 +1355,35 @@ class simulation:
                     self.dead[died_on_land] = 1
                     self.on_land[died_on_land] = False  # Stop flopping (they're dead)
             
+            # Check for shallow water mortality (fish in water too shallow for too long)
+            # Get depth at current positions
+            current_depth = np.asarray(self.depth, dtype=float)
+            too_shallow_threshold = np.asarray(getattr(self, 'too_shallow', 0.0), dtype=float)
+            
+            # Identify fish in shallow water (depth < too_shallow threshold)
+            currently_shallow = (current_depth < too_shallow_threshold) & (self.dead == 0) & (~self.on_land)
+            
+            # Update shallow water timestep counter
+            self.shallow_water_timesteps[currently_shallow] += 1
+            self.shallow_water_timesteps[~currently_shallow] = 0  # Reset counter when not in shallow water
+            
+            # Check for mortality due to prolonged shallow water exposure
+            died_shallow = (self.shallow_water_timesteps > self.max_shallow_timesteps) & (self.dead == 0)
+            if np.any(died_shallow):
+                if getattr(self, 'verbose', False):
+                    print(f"MORTALITY: {np.sum(died_shallow)} fish died after {self.max_shallow_timesteps} timesteps in shallow water at t={t}")
+                self.dead[died_shallow] = 1
+                self.shallow_water_timesteps[died_shallow] = 0  # Reset counter
+            
             # Fish that should jump: use jump physics
             if np.any(should_jump):
                 g_val = g if g is not None else 9.81  # Default gravity
                 dxdy_jump = movement.jump(t, g_val, mask=should_jump)
                 dxdy[should_jump] = dxdy_jump[should_jump]
+                
+                # Deduct jump energy cost (25% battery per jump)
+                if fatigue is not None:
+                    fatigue.deduct_jump_energy(should_jump)
             
             # Fish that should swim normally: use thrust/drag/PID
             swim_mask = mask & (~should_jump) & (~self.on_land)

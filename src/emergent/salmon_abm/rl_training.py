@@ -40,17 +40,13 @@ class BehavioralWeights:
     cohesion_weight: float = 1000.0
     alignment_weight: float = 25000.0
     separation_weight: float = 5000.0
-    separation_radius: float = 1.0  # Body lengths
     
     # Environmental responses
     rheotaxis_weight: float = 25000.0
     border_cue_weight: float = 200000.0
-    border_threshold_multiplier: float = 2.0
-    border_max_force: float = 10.0
     
     # Collision avoidance
     collision_weight: float = 2000.0
-    collision_radius: float = 0.5  # Body lengths
     
     # Additional behavioral weights
     low_speed_weight: float = 1500.0
@@ -66,9 +62,6 @@ class BehavioralWeights:
     # Dynamic cohesion parameters (threat-responsive)
     cohesion_radius_relaxed: float = 3.0  # Body lengths
     cohesion_radius_threatened: float = 1.5  # Body lengths
-    
-    # Drafting (energy-efficient formations)
-    drafting_enabled: bool = True  # Enable drafting benefit calculations
     
     # Jump/leap behavior (for fish in high-velocity regions)
     jump_velocity_ratio_threshold: float = 0.10  # Jump when SOG/water_velocity < 10%
@@ -123,9 +116,11 @@ class BehavioralWeights:
         tools/run_nuyakuk_headless.py and simulation.py.
         """
         return {
+            # Behavioral cue weights
             'rheotaxis': self.rheotaxis_weight,
             'alignment': self.alignment_weight,
             'cohesion': self.cohesion_weight,
+            'separation': self.separation_weight,
             'collision': self.collision_weight,
             'low_speed': self.low_speed_weight,
             'wave_drag': self.wave_drag_weight,
@@ -133,11 +128,19 @@ class BehavioralWeights:
             'border': self.border_cue_weight,
             'shallow': self.shallow_weight,
             'avoid': self.avoid_weight,
+            
+            # Threat-responsive schooling parameters (ACTUALLY IMPLEMENTED)
+            'sensory_range': self.sensory_range,
+            'threat_level': self.threat_level,
+            'cohesion_radius_relaxed': self.cohesion_radius_relaxed,
+            'cohesion_radius_threatened': self.cohesion_radius_threatened,
+            
             # Jump/leap parameters
             'jump_velocity_ratio_threshold': self.jump_velocity_ratio_threshold,
             'jump_battery_threshold': self.jump_battery_threshold,
             'jump_angle_min_deg': self.jump_angle_min_deg,
             'jump_angle_max_deg': self.jump_angle_max_deg,
+            
             # Cue application order
             'order_0': self.order_0,
             'order_1': self.order_1,
@@ -777,6 +780,10 @@ def compute_episode_reward(
             behavioral_weights.get('refugia', 0.0),
             collision_w,
             behavioral_weights.get('shallow', 0.0),
+            behavioral_weights.get('low_speed', 0.0),
+            behavioral_weights.get('wave_drag', 0.0),
+            behavioral_weights.get('border', 0.0),
+            behavioral_weights.get('avoid', 0.0),
         ]
         # Normalize to prevent scale bias
         total = sum(all_weights)
@@ -789,9 +796,9 @@ def compute_episode_reward(
     
     reward = (
         mean_cohesion * 10.0 +
-        (mean_alignment + 1.0) * 5.0 +  # Shift -1:1 → 0:2, scale to 0:10
+        (mean_alignment + 1.0) * 10.0 +  # INCREASED: Alignment critical for coordinated schooling (shift -1:1 → 0:2, scale to 0:20)
         mean_separation * 5.0 +
-        mean_upstream_progress * 5.0 +  # INCREASED from 0.5 to 5.0 - must make progress!
+        mean_upstream_progress * 15.0 +  # CRITICAL: Migration is primary goal - must make upstream progress!
         energy_efficiency * 2.0 +
         mean_drafting_benefit * 20.0 +
         agents_near_boundary * -5.0 +
@@ -804,9 +811,9 @@ def compute_episode_reward(
     
     components = {
         'cohesion': mean_cohesion * 10.0,
-        'alignment': (mean_alignment + 1.0) * 5.0,
+        'alignment': (mean_alignment + 1.0) * 10.0,
         'separation': mean_separation * 5.0,
-        'upstream_progress': mean_upstream_progress * 5.0,
+        'upstream_progress': mean_upstream_progress * 15.0,
         'energy_efficiency': energy_efficiency * 2.0,
         'drafting_benefit': mean_drafting_benefit * 20.0,
         'boundary_penalty': agents_near_boundary * -5.0,
