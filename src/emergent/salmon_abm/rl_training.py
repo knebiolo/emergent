@@ -508,7 +508,8 @@ def compute_episode_reward(
     boundary_threshold: float = 2.0,
     behavioral_weights: Optional[Dict[str, float]] = None,
     battery_history: Optional[np.ndarray] = None,
-    longitudinal_profile: Optional[Any] = None
+    longitudinal_profile: Optional[Any] = None,
+    velocity_field_history: Optional[np.ndarray] = None
 ) -> Tuple[float, Dict[str, float]]:
     """
     Compute total reward for a training episode.
@@ -583,29 +584,57 @@ def compute_episode_reward(
     mean_separation = np.mean(separation_penalties) if separation_penalties else 0.0
     
     # =================================================================
-    # 2. Upstream Progress (MUST use longitudinal profile for accurate river distance)
+    # 2. Upstream Progress (Flow Vector Integration)
     # =================================================================
-    if longitudinal_profile is None:
-        raise ValueError("longitudinal_profile is required for computing upstream progress - cannot use Y-displacement fallback")
+    # Use flow vector integration: measures distance swum AGAINST current
+    # Works for braided channels, pools, and any river geometry
+    # Formula: upstream_progress = sum(displacement · upstream_unit_vector)
+    # where upstream_unit_vector = -velocity / |velocity|
     
-    # Use longitudinal distance along river channel
-    # longitudinal_profile is a shapely geometry (LineString) from the shapefile
-    from shapely.geometry import Point
+    if velocity_field_history is None:
+        raise ValueError(
+            "velocity_field_history is required for computing upstream progress. "
+            "Flow vector integration replaces longitudinal profile projection to handle "
+            "braided channels and complex geometry. Pass sampled velocity at agent positions."
+        )
     
-    initial_pos = np.mean(positions_history[0, alive_history[0]], axis=0)
-    final_pos = np.mean(positions_history[-1, alive_history[-1]], axis=0) if np.any(alive_history[-1]) else initial_pos
+    # Compute upstream progress via flow integration
+    total_upstream_progress = 0.0
     
-    # Convert to shapely Points and project onto longitudinal line
-    initial_point = Point(initial_pos[0], initial_pos[1])
-    final_point = Point(final_pos[0], final_pos[1])
+    for t in range(1, T):
+        alive_t = alive_history[t]
+        if np.sum(alive_t) == 0:
+            continue
+        
+        # Get alive agents at this timestep
+        positions_t = positions_history[t, alive_t]
+        positions_prev = positions_history[t-1, alive_t]
+        velocities_t = velocity_field_history[t, alive_t]  # Sampled water velocity
+        
+        # Displacement of each agent
+        displacement = positions_t - positions_prev  # Shape: (n_alive, 2)
+        
+        # Water velocity magnitude at each agent
+        vel_mag = np.linalg.norm(velocities_t, axis=1)  # Shape: (n_alive,)
+        
+        # Upstream unit vector = -velocity / |velocity|
+        # Only compute where velocity is significant (>0.01 m/s)
+        valid = vel_mag > 0.01
+        
+        if np.any(valid):
+            upstream_unit = np.zeros_like(velocities_t)
+            upstream_unit[valid] = -velocities_t[valid] / vel_mag[valid, np.newaxis]
+            
+            # Project displacement onto upstream direction (dot product)
+            # progress > 0 = moved against current (upstream)
+            # progress < 0 = moved with current (downstream/drift)
+            # progress = 0 = moved perpendicular to flow
+            progress_per_agent = np.sum(displacement * upstream_unit, axis=1)
+            
+            # Mean progress across alive agents this timestep
+            total_upstream_progress += np.mean(progress_per_agent[valid])
     
-    # Get distance along the river centerline using shapely's project method
-    initial_river_dist = longitudinal_profile.project(initial_point)
-    final_river_dist = longitudinal_profile.project(final_point)
-    
-    total_upstream = final_river_dist - initial_river_dist
-    
-    mean_upstream_progress = total_upstream / T  # Meters per timestep
+    mean_upstream_progress = total_upstream_progress / T if T > 0 else 0.0
     
     # =================================================================
     # 3. Energy Efficiency (distance / speed²)
@@ -850,7 +879,7 @@ class RLTrainer:
     def run_episode(
         self,
         weights: BehavioralWeights
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Run a single simulation episode with given weights.
         
@@ -858,7 +887,7 @@ class RLTrainer:
             weights: Behavioral weights to use for this episode
         
         Returns:
-            Tuple of (positions, headings, velocities, battery, alive) histories
+            Tuple of (positions, headings, velocities, battery, alive, velocity_field) histories
             Each is (num_timesteps, num_agents, ...) array
         """
         # Create simulation with weights
@@ -877,6 +906,7 @@ class RLTrainer:
         velocities_history = np.zeros((num_timesteps, num_agents, 2), dtype=np.float32)
         battery_history = np.zeros((num_timesteps, num_agents), dtype=np.float32)
         alive_history = np.ones((num_timesteps, num_agents), dtype=bool)
+        velocity_field_history = np.zeros((num_timesteps, num_agents, 2), dtype=np.float32)
         
         # Run simulation timesteps (always start from t=0 for each episode)
         for t in range(num_timesteps):
@@ -891,11 +921,15 @@ class RLTrainer:
             velocities_history[t, :, 1] = sim.fish_y_vel
             battery_history[t] = sim.battery
             alive_history[t] = (sim.dead == 0)
+            
+            # Collect water velocity field at agent positions (for flow integration)
+            velocity_field_history[t, :, 0] = sim.x_vel
+            velocity_field_history[t, :, 1] = sim.y_vel
         
         # Clean up simulation
         sim.close()
         
-        return positions_history, headings_history, velocities_history, battery_history, alive_history
+        return positions_history, headings_history, velocities_history, battery_history, alive_history, velocity_field_history
     
     def train(
         self,
@@ -924,20 +958,15 @@ class RLTrainer:
             start_time = time.time()
             
             # Run episode with current weights
-            positions, headings, velocities, battery, alive = self.run_episode(current_weights)
+            positions, headings, velocities, battery, alive, velocity_field = self.run_episode(current_weights)
             
-            # Get simulation instance to access longitudinal_profile
-            sim = self.simulation_factory(current_weights)
-            longitudinal_profile = getattr(sim, 'longitudinal', None)
-            sim.close()
-            
-            # Compute reward
+            # Compute reward using flow vector integration for upstream progress
             reward, components = compute_episode_reward(
                 positions, headings, velocities, alive,
                 body_length=self.body_length,
                 threat_level=current_weights.threat_level,
                 battery_history=battery,
-                longitudinal_profile=longitudinal_profile
+                velocity_field_history=velocity_field
             )
             
             elapsed = time.time() - start_time
