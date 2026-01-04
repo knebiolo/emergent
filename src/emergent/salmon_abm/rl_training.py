@@ -428,7 +428,10 @@ def compute_episode_reward(
     body_length: float,
     threat_level: float = 0.3,
     boundary_coords: Optional[np.ndarray] = None,
-    boundary_threshold: float = 2.0
+    boundary_threshold: float = 2.0,
+    behavioral_weights: Optional[Dict[str, float]] = None,
+    battery_history: Optional[np.ndarray] = None,
+    longitudinal_profile: Optional[Any] = None
 ) -> Tuple[float, Dict[str, float]]:
     """
     Compute total reward for a training episode.
@@ -503,12 +506,28 @@ def compute_episode_reward(
     mean_separation = np.mean(separation_penalties) if separation_penalties else 0.0
     
     # =================================================================
-    # 2. Upstream Progress (net Y-displacement)
+    # 2. Upstream Progress (MUST use longitudinal profile for accurate river distance)
     # =================================================================
-    # Assume upstream = +Y direction
-    initial_y = np.mean(positions_history[0, alive_history[0], 1])
-    final_y = np.mean(positions_history[-1, alive_history[-1], 1]) if np.any(alive_history[-1]) else initial_y
-    total_upstream = final_y - initial_y
+    if longitudinal_profile is None:
+        raise ValueError("longitudinal_profile is required for computing upstream progress - cannot use Y-displacement fallback")
+    
+    # Use longitudinal distance along river channel
+    # longitudinal_profile is a shapely geometry (LineString) from the shapefile
+    from shapely.geometry import Point
+    
+    initial_pos = np.mean(positions_history[0, alive_history[0]], axis=0)
+    final_pos = np.mean(positions_history[-1, alive_history[-1]], axis=0) if np.any(alive_history[-1]) else initial_pos
+    
+    # Convert to shapely Points and project onto longitudinal line
+    initial_point = Point(initial_pos[0], initial_pos[1])
+    final_point = Point(final_pos[0], final_pos[1])
+    
+    # Get distance along the river centerline using shapely's project method
+    initial_river_dist = longitudinal_profile.project(initial_point)
+    final_river_dist = longitudinal_profile.project(final_point)
+    
+    total_upstream = final_river_dist - initial_river_dist
+    
     mean_upstream_progress = total_upstream / T  # Meters per timestep
     
     # =================================================================
@@ -594,30 +613,102 @@ def compute_episode_reward(
     accel_smoothness_penalty /= max(1, T - 2)  # Average over timesteps
     
     # =================================================================
+    # 8. Fatigue Penalty (CRITICAL for preventing exhaustion)
+    # =================================================================
+    # Heavily penalize low battery states to incentivize energy management
+    fatigue_penalty = 0.0
+    if battery_history is not None:
+        # Battery is 0.0 (depleted) to 1.0 (full)
+        # Penalize time spent below threshold
+        low_battery_threshold = 0.3  # Below 30% is critical
+        for t in range(T):
+            alive_t = alive_history[t]
+            if np.sum(alive_t) == 0:
+                continue
+            
+            battery_t = battery_history[t, alive_t]
+            # Count agent-timesteps below threshold
+            low_battery_count = np.sum(battery_t < low_battery_threshold)
+            fatigue_penalty += low_battery_count
+            
+            # Extra penalty for completely depleted (battery = 0)
+            depleted_count = np.sum(battery_t <= 0.01)
+            fatigue_penalty += depleted_count * 2.0  # Double penalty for full depletion
+        
+        # Average over timesteps
+        fatigue_penalty /= T
+    
+    # =================================================================
     # Total Reward Calculation
     # =================================================================
+    
+    # CRITICAL: Penalize zero/near-zero schooling weights to prevent degenerate solutions
+    # where fish ignore each other and just follow rheotaxis in a line
+    weight_diversity_bonus = 0.0
+    min_schooling_weight_penalty = 0.0
+    
+    if behavioral_weights is not None:
+        # Extract schooling-critical weights
+        cohesion_w = behavioral_weights.get('cohesion', 0.0)
+        alignment_w = behavioral_weights.get('alignment', 0.0)
+        collision_w = behavioral_weights.get('collision', 0.0)
+        
+        # HARSH penalty if ANY schooling weight drops below threshold
+        # Fish MUST school - it's a biological imperative!
+        min_threshold = 1000.0  # Minimum acceptable weight
+        if cohesion_w < min_threshold:
+            min_schooling_weight_penalty -= 50.0  # Major penalty
+        if alignment_w < min_threshold:
+            min_schooling_weight_penalty -= 50.0
+        if collision_w < min_threshold:
+            min_schooling_weight_penalty -= 50.0
+        
+        # Bonus for weight diversity (prevents converging to single-cue solutions)
+        all_weights = [
+            behavioral_weights.get('rheotaxis', 0.0),
+            cohesion_w,
+            alignment_w,
+            behavioral_weights.get('refugia', 0.0),
+            collision_w,
+            behavioral_weights.get('shallow', 0.0),
+        ]
+        # Normalize to prevent scale bias
+        total = sum(all_weights)
+        if total > 0:
+            normalized = [w / total for w in all_weights]
+            # Entropy bonus: high entropy = diverse weights (good)
+            # Low entropy = single dominant weight (bad)
+            entropy = -sum(p * np.log(p + 1e-10) for p in normalized if p > 0)
+            weight_diversity_bonus = entropy * 5.0  # Scale to ~5-10 range
+    
     reward = (
         mean_cohesion * 10.0 +
         (mean_alignment + 1.0) * 5.0 +  # Shift -1:1 → 0:2, scale to 0:10
         mean_separation * 5.0 +
-        mean_upstream_progress * 0.5 +
+        mean_upstream_progress * 5.0 +  # INCREASED from 0.5 to 5.0 - must make progress!
         energy_efficiency * 2.0 +
         mean_drafting_benefit * 20.0 +
         agents_near_boundary * -5.0 +
         dead_count * -50.0 +
-        accel_smoothness_penalty * -0.2
+        accel_smoothness_penalty * -0.2 +
+        fatigue_penalty * -10.0 +  # CRITICAL: Heavily penalize low battery states
+        min_schooling_weight_penalty +  # CRITICAL: Prevent zero schooling weights
+        weight_diversity_bonus  # Encourage balanced weight distribution
     )
     
     components = {
         'cohesion': mean_cohesion * 10.0,
         'alignment': (mean_alignment + 1.0) * 5.0,
         'separation': mean_separation * 5.0,
-        'upstream_progress': mean_upstream_progress * 0.5,
+        'upstream_progress': mean_upstream_progress * 5.0,
         'energy_efficiency': energy_efficiency * 2.0,
         'drafting_benefit': mean_drafting_benefit * 20.0,
         'boundary_penalty': agents_near_boundary * -5.0,
         'mortality_penalty': dead_count * -50.0,
         'smoothness_penalty': accel_smoothness_penalty * -0.2,
+        'fatigue_penalty': fatigue_penalty * -10.0,
+        'min_schooling_penalty': min_schooling_weight_penalty,
+        'weight_diversity_bonus': weight_diversity_bonus,
         'total': reward
     }
     

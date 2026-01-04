@@ -508,10 +508,12 @@ class TrainingWorker(QObject):
                 
                 # Compute reward
                 from emergent.salmon_abm.rl_training import compute_episode_reward
+                # Pass current weights to reward function for constraint checking
                 reward, components = compute_episode_reward(
                     positions, headings, velocities, alive,
                     body_length=self.trainer.body_length,
-                    threat_level=current_weights.threat_level
+                    threat_level=current_weights.threat_level,
+                    behavioral_weights=current_weights.to_dict()
                 )
                 
                 # Track best
@@ -829,6 +831,25 @@ class RLTrainingViewer(QMainWindow):
             return
             
         episode, reward, components = self.pending_episode_data
+        
+        # Diagnostic logging: Track weight evolution and warn about collapse
+        if hasattr(self.trainer, 'best_weights'):
+            weights_dict = self.trainer.best_weights.to_dict()
+            cohesion_w = weights_dict.get('cohesion', 0)
+            alignment_w = weights_dict.get('alignment', 0)
+            rheotaxis_w = weights_dict.get('rheotaxis', 0)
+            collision_w = weights_dict.get('collision', 0)
+            refugia_w = weights_dict.get('refugia', 0)
+            
+            weight_summary = f"Rheo:{rheotaxis_w:.0f} Coh:{cohesion_w:.0f} Align:{alignment_w:.0f} Coll:{collision_w:.0f} Ref:{refugia_w:.0f}"
+            
+            # CRITICAL WARNING if schooling weights drop too low
+            if cohesion_w < 1000 or alignment_w < 1000 or collision_w < 1000:
+                self.control_panel.append_log(
+                    f"⚠️  WARNING Ep{episode+1}: Schooling collapse! {weight_summary}"
+                )
+        else:
+            weight_summary = "(weights unavailable)"
         self.pending_episode_data = None
         
         total = self.control_panel.episodes_spin.value()
@@ -850,7 +871,7 @@ class RLTrainingViewer(QMainWindow):
         
         # Log progress (minimal)
         is_best = "✓ BEST" if reward >= best_reward else ""
-        self.control_panel.append_log(f"Ep {episode + 1}/{total}: {reward:.2f} {is_best}")
+        self.control_panel.append_log(f"Ep {episode + 1}/{total}: {reward:.2f} {is_best} | {weight_summary}")
         
         # Update status
         self.control_panel.status_label.setText(f"Episode {episode + 1}/{total} complete")

@@ -1660,9 +1660,17 @@ class behavior():
                     out_y *= w
                     out[~np.isfinite(out)] = 0.0
                     return out
-            except Exception:
-                # fall through to legacy method
-                pass
+            except Exception as e:
+                # FAIL LOUD: refugia calculation should not fail silently
+                import logging
+                logging.getLogger(__name__).error(
+                    f"Refugia calculation failed: {e}. "
+                    f"shared_refugia shape: {getattr(shared_refugia, 'shape', None)}, "
+                    f"transform: {transform}, "
+                    f"num_agents: {self.simulation.num_agents}, "
+                    f"refuge_mask sum: {np.sum(refuge_mask) if 'refuge_mask' in locals() else 'N/A'}"
+                )
+                raise RuntimeError(f"find_nearest_refuge failed: {e}") from e
 
         # Legacy per-agent refugia maps.
         try:
@@ -2708,6 +2716,31 @@ class behavior():
             active_t = (vec_sum_tired[:, 0] * vec_sum_tired[:, 0] + vec_sum_tired[:, 1] * vec_sum_tired[:, 1]) < tol2
             if np.any(active_t):
                 vec_sum_tired[active_t] += np.asarray(v2)[active_t]
+
+        # CRITICAL VALIDATION: Check if behavioral forces have completely failed
+        # This catches cases where all weights are near-zero (bad RL mutation) or 
+        # environmental sampling has failed (returning all NaN/zeros)
+        vec_sum_mig_magnitudes = np.sqrt(vec_sum_migratory[:, 0]**2 + vec_sum_migratory[:, 1]**2)
+        vec_sum_tired_magnitudes = np.sqrt(vec_sum_tired[:, 0]**2 + vec_sum_tired[:, 1]**2)
+        
+        # Check if ALL agents have near-zero behavioral forces
+        all_forces_zero_mig = np.all(vec_sum_mig_magnitudes < 1.0)  # < 1N is effectively zero
+        all_forces_zero_tired = np.all(vec_sum_tired_magnitudes < 1.0)
+        
+        if all_forces_zero_mig and all_forces_zero_tired:
+            # FAIL LOUD: This indicates a catastrophic configuration problem
+            tw = getattr(self.simulation, 'test_weights', None)
+            weights_info = f"test_weights={tw}" if tw else "using default weights"
+            raise ValueError(
+                f"CRITICAL at t={t}: ALL agents have near-zero behavioral forces! "
+                f"Max migratory force={np.max(vec_sum_mig_magnitudes):.3e}, "
+                f"Max tired force={np.max(vec_sum_tired_magnitudes):.3e}. "
+                f"{weights_info}. "
+                f"This will cause fish to swim in straight lines (maintaining initial heading). "
+                f"Likely causes: (1) All weights set to zero/near-zero (bad RL mutation), "
+                f"(2) Environmental data sampling failure (all cues returning zeros), "
+                f"(3) Missing/corrupt environment rasters."
+            )
 
         head_vec = np.zeros_like(rheotaxis)
         swim_behav = np.asarray(self.simulation.swim_behav).reshape((-1,))
