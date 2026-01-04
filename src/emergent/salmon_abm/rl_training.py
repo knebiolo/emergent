@@ -223,7 +223,9 @@ class BehavioralWeights:
             elif isinstance(value, (int, float)):
                 # Apply larger random perturbation for initial exploration
                 perturbation = rng.normal(0, abs(value) * scale)
-                randomized[key] = max(0.0, value + perturbation)
+                new_value = value + perturbation
+                # Ensure non-zero: clip to minimum 10.0 for weights (visible changes)
+                randomized[key] = max(10.0, new_value) if new_value >= 0 else 10.0
             else:
                 randomized[key] = value
         
@@ -274,7 +276,9 @@ class BehavioralWeights:
             if not key.startswith('order_'):
                 # Gaussian perturbation: N(value, mutation_scale * value)
                 noise = rng.normal(0, mutation_scale * abs(value))
-                mutated[key] = max(0.0, value + noise)  # Clip to non-negative
+                new_value = value + noise
+                # Ensure non-zero: clip to minimum 10.0 for weights (visible changes)
+                mutated[key] = max(10.0, new_value) if new_value >= 0 else 10.0
         
         return BehavioralWeights.from_dict(mutated)
 
@@ -748,6 +752,51 @@ def compute_episode_reward(
         fatigue_penalty /= T
     
     # =================================================================
+    # 8. Rheotaxis Alignment (Swimming into Flow)
+    # =================================================================
+    # Penalize fish swimming off-heading from upstream direction
+    # Fish should orient against flow (rheotaxis), not just move north
+    # Formula: misalignment = 1 - cos(heading - upstream_angle)
+    # Range: 0 (perfect alignment) to 2 (swimming downstream)
+    
+    rheotaxis_alignment_penalty = 0.0
+    
+    if velocity_field_history is not None:
+        for t in range(T):
+            alive_t = alive_history[t]
+            if np.sum(alive_t) == 0:
+                continue
+            
+            headings_t = headings_history[t, alive_t]
+            velocities_t = velocity_field_history[t, alive_t]
+            
+            # Compute water velocity magnitude
+            vel_mag = np.linalg.norm(velocities_t, axis=1)
+            
+            # Only penalize where flow is significant (>0.1 m/s)
+            # In still water, fish can swim any direction
+            significant_flow = vel_mag > 0.1
+            
+            if np.any(significant_flow):
+                # Compute upstream angle (opposite of flow)
+                flow_angle = np.arctan2(velocities_t[:, 1], velocities_t[:, 0])
+                upstream_angle = flow_angle + np.pi  # Opposite direction
+                
+                # Compute heading misalignment
+                # cos(angle_diff) = 1 when aligned, -1 when opposite
+                angle_diff = headings_t - upstream_angle
+                alignment = np.cos(angle_diff)
+                
+                # Misalignment penalty: 0 when aligned, 1 when perpendicular, 2 when opposite
+                misalignment = 1.0 - alignment
+                
+                # Sum misalignment for agents in significant flow
+                rheotaxis_alignment_penalty += np.mean(misalignment[significant_flow])
+        
+        # Average over timesteps
+        rheotaxis_alignment_penalty /= T
+    
+    # =================================================================
     # Total Reward Calculation
     # =================================================================
     
@@ -798,13 +847,14 @@ def compute_episode_reward(
         mean_cohesion * 10.0 +
         (mean_alignment + 1.0) * 10.0 +  # INCREASED: Alignment critical for coordinated schooling (shift -1:1 → 0:2, scale to 0:20)
         mean_separation * 5.0 +
-        mean_upstream_progress * 15.0 +  # CRITICAL: Migration is primary goal - must make upstream progress!
+        mean_upstream_progress * 30.0 +  # CRITICAL: Migration is PRIMARY goal - doubled weight!
         energy_efficiency * 2.0 +
         mean_drafting_benefit * 20.0 +
         agents_near_boundary * -5.0 +
         dead_count * -50.0 +
         accel_smoothness_penalty * -0.2 +
         fatigue_penalty * -10.0 +  # CRITICAL: Heavily penalize low battery states
+        rheotaxis_alignment_penalty * -10.0 +  # CRITICAL: Fish must orient into flow, not just swim north!
         min_schooling_weight_penalty +  # CRITICAL: Prevent zero schooling weights
         weight_diversity_bonus  # Encourage balanced weight distribution
     )
@@ -813,13 +863,14 @@ def compute_episode_reward(
         'cohesion': mean_cohesion * 10.0,
         'alignment': (mean_alignment + 1.0) * 10.0,
         'separation': mean_separation * 5.0,
-        'upstream_progress': mean_upstream_progress * 15.0,
+        'upstream_progress': mean_upstream_progress * 30.0,
         'energy_efficiency': energy_efficiency * 2.0,
         'drafting_benefit': mean_drafting_benefit * 20.0,
         'boundary_penalty': agents_near_boundary * -5.0,
         'mortality_penalty': dead_count * -50.0,
         'smoothness_penalty': accel_smoothness_penalty * -0.2,
         'fatigue_penalty': fatigue_penalty * -10.0,
+        'rheotaxis_alignment': rheotaxis_alignment_penalty * -10.0,
         'min_schooling_penalty': min_schooling_weight_penalty,
         'weight_diversity_bonus': weight_diversity_bonus,
         'total': reward

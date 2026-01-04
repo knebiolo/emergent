@@ -544,7 +544,7 @@ class TrainingWorker(QObject):
     
     # Signals
     episode_started = pyqtSignal(int)  # episode number
-    episode_computed = pyqtSignal(int, float, dict, object, object, object, object)  # episode, reward, components, positions, headings, battery, alive
+    episode_computed = pyqtSignal(int, float, dict, object, object, object, object, object)  # episode, reward, components, positions, headings, battery, alive, weights
     training_completed = pyqtSignal(object, list)  # best_weights, history
     error_occurred = pyqtSignal(str)  # error message
     
@@ -643,7 +643,7 @@ class TrainingWorker(QObject):
                 self.animation_complete.clear()
                 
                 # Emit episode data - UI will handle visualization (include battery and alive for coloring)
-                self.episode_computed.emit(episode, float(reward), components, positions, headings, battery, alive)
+                self.episode_computed.emit(episode, float(reward), components, positions, headings, battery, alive, current_weights)
                 
                 # Mutate for next episode (compute WHILE current episode animates)
                 current_weights = self.trainer.best_weights.mutate(
@@ -1062,10 +1062,10 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.status_label.setText(f"Computing episode {episode + 1}/{total}...")
         
     def on_episode_computed(self, episode: int, reward: float, components: Dict[str, float], 
-                           positions: np.ndarray, headings: np.ndarray, battery: np.ndarray, alive: np.ndarray):
+                           positions: np.ndarray, headings: np.ndarray, battery: np.ndarray, alive: np.ndarray, weights):
         """Handle episode computation complete - start visualization and wait."""
-        # Store episode data for later processing after animation
-        self.pending_episode_data = (episode, reward, components)
+        # Store episode data for later processing after animation (include current episode weights)
+        self.pending_episode_data = (episode, reward, components, weights)
         
         # Update status
         total = self.control_panel.episodes_spin.value()
@@ -1079,7 +1079,7 @@ class RLTrainingViewer(QMainWindow):
         if self.pending_episode_data is None:
             return
             
-        episode, reward, components = self.pending_episode_data
+        episode, reward, components, current_weights = self.pending_episode_data
         
         # Diagnostic logging: Track weight evolution and warn about collapse
         if hasattr(self.trainer, 'best_weights'):
@@ -1111,9 +1111,12 @@ class RLTrainingViewer(QMainWindow):
         self.weights_panel.update_diagnostics(episode + 1, total, reward, best_reward, self.initial_reward)
         self.weights_panel.update_components(components)
         
-        # Update weights display
-        if self.trainer and self.trainer.best_weights:
-            self.weights_panel.update_weights(self.trainer.best_weights)
+        # Update weights display with CURRENT episode's weights (not just best)
+        if current_weights:
+            self.weights_panel.update_weights(current_weights)
+            # Also update order display
+            default_order = {i: ['shallow', 'border', 'avoid', 'collision', 'refugia', 'rheotaxis', 'low_speed', 'wave_drag', 'cohesion', 'alignment'][i] for i in range(10)}
+            self.weights_panel.update_order(default_order, current_weights)
         
         # Update plot
         self.control_panel.update_plot(episode + 1, reward)
