@@ -76,8 +76,18 @@ class BehavioralWeights:
     jump_angle_min_deg: float = 45.0  # Minimum jump angle in degrees
     jump_angle_max_deg: float = 60.0  # Maximum jump angle in degrees
     
-    # Behavioral randomization (for RL exploration chaos 🎪)
-    randomize_cue_order: bool = False  # Randomize cue application order each timestep
+    # Cue application order (indices 0-9 map to cue names)
+    # Default order: shallow, border, avoid, collision, alignment, cohesion, low_speed, refugia, rheotaxis, wave_drag
+    order_0: int = 0  # First cue to apply
+    order_1: int = 1
+    order_2: int = 2
+    order_3: int = 3
+    order_4: int = 4
+    order_5: int = 5
+    order_6: int = 6
+    order_7: int = 7
+    order_8: int = 8
+    order_9: int = 9  # Last cue to apply
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -128,8 +138,17 @@ class BehavioralWeights:
             'jump_battery_threshold': self.jump_battery_threshold,
             'jump_angle_min_deg': self.jump_angle_min_deg,
             'jump_angle_max_deg': self.jump_angle_max_deg,
-            # Behavioral chaos
-            'randomize_cue_order': float(self.randomize_cue_order),  # Convert bool to float for consistency
+            # Cue application order
+            'order_0': self.order_0,
+            'order_1': self.order_1,
+            'order_2': self.order_2,
+            'order_3': self.order_3,
+            'order_4': self.order_4,
+            'order_5': self.order_5,
+            'order_6': self.order_6,
+            'order_7': self.order_7,
+            'order_8': self.order_8,
+            'order_9': self.order_9,
         }
     
     def validate(self) -> None:

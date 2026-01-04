@@ -220,9 +220,9 @@ class simulation:
         self.dist_per_bout = np.zeros(self.num_agents, dtype=np.float32)
         self.bout_dur = np.zeros(self.num_agents, dtype=np.float32)
         self.swim_mode = np.ones(self.num_agents, dtype=np.int8)
-        # Swimming speed thresholds (BL/s) - doubled from literature values to account for salmon swimming capabilities
-        self.max_s_U = np.repeat(5.54, self.num_agents)  # Sustained: was 2.77
-        self.max_p_U = np.repeat(8.86, self.num_agents)  # Prolonged: was 4.43
+        # Swimming speed thresholds (BL/s) - Brett (1964/1967) adult sockeye salmon
+        self.max_s_U = np.repeat(2.5, self.num_agents)  # Sustained → prolonged transition
+        self.max_p_U = np.repeat(4.7, self.num_agents)  # Prolonged → sprint transition
         
         # PID diagnostics for vibration analysis
         self.heading_delta = np.zeros(self.num_agents, dtype=np.float32)
@@ -240,17 +240,6 @@ class simulation:
         except Exception:
             base = np.repeat(2.77, self.num_agents).astype(np.float32)
         self.max_s_U_fatigued = (base * self.fatigued_max_s_U_multiplier).astype(np.float32)
-        
-        # Castro-Santos (2005) fatigue coefficients for adult sockeye salmon (Oncorhynchus nerka)
-        # Time-to-fatigue equation: ttf (seconds) = exp(a + b * U) where U is swim speed in BL/s
-        # Prolonged swimming (max_s_U < U <= max_p_U): ttf = exp(5.29 - 0.36*U_bl/s)
-        # Sprint swimming (U > max_p_U): ttf = exp(2.78 - 0.51*U_bl/s)
-        # Reference: Castro-Santos, T. (2005). Optimal swim speeds for traversing velocity barriers.
-        #            Journal of Experimental Biology, 208, 421-432. Table 1.
-        self.a_p = np.repeat(5.29, self.num_agents)  # Prolonged intercept
-        self.b_p = np.repeat(-0.36, self.num_agents)  # Prolonged slope
-        self.a_s = np.repeat(2.78, self.num_agents)  # Sprint intercept
-        self.b_s = np.repeat(-0.51, self.num_agents)  # Sprint slope
         
         # derived speeds are initialized after agents.sim_length() populates `self.length`
         self.opt_sog = np.zeros(self.num_agents, dtype=np.float32)

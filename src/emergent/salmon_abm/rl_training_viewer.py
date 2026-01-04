@@ -47,6 +47,7 @@ try:
         QProgressBar,
         QLineEdit,
         QFileDialog,
+        QCheckBox,
     )
     from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject, QThread
     from PyQt5.QtGui import QPainter, QColor, QPen, QFont
@@ -191,6 +192,13 @@ class WeightsPanel(QWidget):
         self.weights_group.setLayout(self.weights_layout)
         layout.addWidget(self.weights_group)
         
+        # Arbitration Order display
+        self.order_group = QGroupBox("Cue Application Order")
+        self.order_layout = QVBoxLayout()
+        self.order_labels = {}
+        self.order_group.setLayout(self.order_layout)
+        layout.addWidget(self.order_group)
+        
         # Diagnostics
         self.diagnostics_group = QGroupBox("Training Diagnostics")
         diag_layout = QVBoxLayout()
@@ -229,7 +237,13 @@ class WeightsPanel(QWidget):
         # Add new weight labels
         weights_dict = weights.to_dict()
         for name, value in sorted(weights_dict.items()):
-            if isinstance(value, (int, float)):
+            # Skip order fields - they're shown in the Cue Application Order panel
+            if name.startswith('order_'):
+                continue
+            
+            if isinstance(value, int):
+                label = QLabel(f"{name}: {value}")
+            elif isinstance(value, float):
                 label = QLabel(f"{name}: {value:.1f}")
             else:
                 label = QLabel(f"{name}: {value}")
@@ -260,6 +274,45 @@ class WeightsPanel(QWidget):
             label.setFont(QFont("Courier New", 9))
             self.components_layout.addWidget(label)
             self.component_labels[name] = label
+    
+    def update_order(self, order_dict: Dict[int, str], weights: Optional['BehavioralWeights'] = None):
+        """Update displayed arbitration order with optional remapping.
+        
+        Args:
+            order_dict: Default mapping of position -> cue_name
+            weights: Optional BehavioralWeights with order_0-9 fields showing new positions
+        """
+        # Clear existing labels
+        for label in self.order_labels.values():
+            self.order_layout.removeWidget(label)
+            label.deleteLater()
+        self.order_labels.clear()
+        
+        # Get remapping if weights provided
+        if weights is not None:
+            # Extract order remapping from weights
+            new_positions = [
+                weights.order_0, weights.order_1, weights.order_2, weights.order_3, weights.order_4,
+                weights.order_5, weights.order_6, weights.order_7, weights.order_8, weights.order_9
+            ]
+        else:
+            new_positions = None
+        
+        # Add order labels
+        for position, cue_name in sorted(order_dict.items()):
+            if new_positions is not None:
+                new_pos = new_positions[position]
+                if new_pos != position:
+                    label_text = f"{position}: {cue_name} → {new_pos}"
+                else:
+                    label_text = f"{position}: {cue_name}"
+            else:
+                label_text = f"{position}: {cue_name}"
+            
+            label = QLabel(label_text)
+            label.setFont(QFont("Courier New", 9))
+            self.order_layout.addWidget(label)
+            self.order_labels[position] = label
 
 
 class ControlPanel(QWidget):
@@ -272,6 +325,7 @@ class ControlPanel(QWidget):
     pause_training = pyqtSignal()
     stop_training = pyqtSignal()
     randomize_weights = pyqtSignal()
+    randomize_order = pyqtSignal()
     reset_training = pyqtSignal()  # NEW: Reset to initial state
     
     def __init__(self, parent=None):
@@ -344,11 +398,16 @@ class ControlPanel(QWidget):
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
         
-        # Randomize button
+        # Randomize buttons
         self.btn_randomize = QPushButton("🎲 Randomize Weights")
         self.btn_randomize.clicked.connect(self.randomize_weights.emit)
         self.btn_randomize.setToolTip("Generate new random initial weights (100% variation from defaults). Only works before training starts.")
         layout.addWidget(self.btn_randomize)
+        
+        self.btn_randomize_order = QPushButton("🎪 Randomize Cue Order")
+        self.btn_randomize_order.clicked.connect(self.randomize_order.emit)
+        self.btn_randomize_order.setToolTip("Shuffle behavioral cue application order. Order stays fixed throughout all episodes. Only works before training starts.")
+        layout.addWidget(self.btn_randomize_order)
         
         # Reset button
         self.btn_reset = QPushButton("🔄 Reset Training")
@@ -633,6 +692,10 @@ class RLTrainingViewer(QMainWindow):
         self.training_worker = None
         self.initial_reward = None
         
+        # Current behavioral weights (modified by randomize buttons)
+        from emergent.salmon_abm.rl_training import BehavioralWeights
+        self.current_weights = BehavioralWeights()
+        
         # Episode synchronization
         self.pending_episode_data = None  # Stores (episode, reward, components) waiting for animation
         
@@ -658,6 +721,7 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.pause_training.connect(self.on_pause_training)
         self.control_panel.stop_training.connect(self.on_stop_training)
         self.control_panel.randomize_weights.connect(self.on_randomize_weights)
+        self.control_panel.randomize_order.connect(self.on_randomize_order)
         self.control_panel.reset_training.connect(self.on_reset_training)
         
         # Connect animation finished signal
@@ -778,9 +842,8 @@ class RLTrainingViewer(QMainWindow):
             # Create simulation factory
             simulation_factory = self.create_simulation_factory(num_agents, num_timesteps)
             
-            # Create RL trainer with randomized initial weights for chaotic start
-            base_weights = BehavioralWeights()
-            initial_weights = base_weights.randomize(scale=1.0)  # 100% randomization for maximum diversity
+            # Use current_weights (which may have been randomized/modified)
+            initial_weights = self.current_weights
             config = {
                 'exploration_noise': exploration_noise,
                 'body_length': 0.3,  # 300mm fish
@@ -797,6 +860,21 @@ class RLTrainingViewer(QMainWindow):
             
             # Display initial weights
             self.weights_panel.update_weights(initial_weights)
+            
+            # Display default arbitration order (from behavior.py)
+            default_order = {
+                0: 'shallow',
+                1: 'border',
+                2: 'avoid',
+                3: 'collision',
+                4: 'alignment',
+                5: 'cohesion',
+                6: 'low_speed',
+                7: 'refugia',
+                8: 'rheotaxis',
+                9: 'wave_drag',
+            }
+            self.weights_panel.update_order(default_order, initial_weights)
             
             # Disable parameter controls during training
             self.control_panel.set_parameters_enabled(False)
@@ -832,15 +910,78 @@ class RLTrainingViewer(QMainWindow):
             self.control_panel.append_log("Cannot randomize during training")
             return
         
+        # Preserve current order before randomizing
+        old_order = [
+            self.current_weights.order_0, self.current_weights.order_1,
+            self.current_weights.order_2, self.current_weights.order_3,
+            self.current_weights.order_4, self.current_weights.order_5,
+            self.current_weights.order_6, self.current_weights.order_7,
+            self.current_weights.order_8, self.current_weights.order_9
+        ]
+        
         # Generate new randomized weights
         from emergent.salmon_abm.rl_training import BehavioralWeights
         base_weights = BehavioralWeights()
         new_weights = base_weights.randomize(scale=1.0)  # 100% randomization
         
+        # Restore order (as integers)
+        new_weights.order_0 = int(old_order[0])
+        new_weights.order_1 = int(old_order[1])
+        new_weights.order_2 = int(old_order[2])
+        new_weights.order_3 = int(old_order[3])
+        new_weights.order_4 = int(old_order[4])
+        new_weights.order_5 = int(old_order[5])
+        new_weights.order_6 = int(old_order[6])
+        new_weights.order_7 = int(old_order[7])
+        new_weights.order_8 = int(old_order[8])
+        new_weights.order_9 = int(old_order[9])
+        
+        self.current_weights = new_weights  # Store as current
+        
         # Update display
         self.weights_panel.update_weights(new_weights)
+        
+        # Update order display (default order, not randomized)
+        default_order = {
+            0: 'shallow', 1: 'border', 2: 'avoid', 3: 'collision',
+            4: 'alignment', 5: 'cohesion', 6: 'low_speed', 7: 'refugia',
+            8: 'rheotaxis', 9: 'wave_drag',
+        }
+        self.weights_panel.update_order(default_order, new_weights)
         self.control_panel.append_log("🎲 Randomized initial weights (100% variation)")
         self.control_panel.status_label.setText("Ready with new random weights")
+    
+    def on_randomize_order(self):
+        """Shuffle cue application order."""
+        if self.training_thread is not None and self.training_thread.isRunning():
+            self.control_panel.append_log("Cannot randomize order during training")
+            return
+        
+        # Random permutation of [0,1,2,3,4,5,6,7,8,9]
+        new_order = np.random.permutation(10)
+        
+        # Update current_weights with shuffled order (as integers)
+        self.current_weights.order_0 = int(new_order[0])
+        self.current_weights.order_1 = int(new_order[1])
+        self.current_weights.order_2 = int(new_order[2])
+        self.current_weights.order_3 = int(new_order[3])
+        self.current_weights.order_4 = int(new_order[4])
+        self.current_weights.order_5 = int(new_order[5])
+        self.current_weights.order_6 = int(new_order[6])
+        self.current_weights.order_7 = int(new_order[7])
+        self.current_weights.order_8 = int(new_order[8])
+        self.current_weights.order_9 = int(new_order[9])
+        
+        # Default cue names for display
+        default_order = {
+            0: 'shallow', 1: 'border', 2: 'avoid', 3: 'collision', 4: 'alignment',
+            5: 'cohesion', 6: 'low_speed', 7: 'refugia', 8: 'rheotaxis', 9: 'wave_drag'
+        }
+        
+        # Update display with remapping
+        self.weights_panel.update_order(default_order, self.current_weights)
+        self.control_panel.append_log(f"🎪 Randomized cue order: {new_order}")
+        self.control_panel.status_label.setText("Ready with shuffled cue order")
     
     def on_reset_training(self):
         """Reset training to initial state (clear history but keep weights)."""

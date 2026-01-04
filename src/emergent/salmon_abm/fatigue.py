@@ -65,7 +65,7 @@ class fatigue():
         self.simulation.dist_per_bout += dist_travelled if dist_travelled.ndim == 1 else dist_travelled.reshape((-1,))
         self.simulation.bout_dur += self.dt
 
-    def time_to_fatigue(self, swim_speeds, mask_dict, method='CastroSantos'):
+    def time_to_fatigue(self, swim_speeds, mask_dict, method='Katapodis_Gervais'):
         ttf = np.full_like(swim_speeds, np.nan)
         if method == 'CastroSantos':
             a_p = self.simulation.a_p
@@ -81,13 +81,10 @@ class fatigue():
             ttf[mask_sprint] = np.exp(a_s[mask_sprint] + swim_speeds[mask_sprint] * b_s[mask_sprint])
             return ttf
         elif method == 'Katapodis_Gervais':
-            genus = 'Oncorhyncus'
-            regression_params = {'Oncorhyncus': {'K': 3.5825, 'b': -0.2621}}
-            if genus in regression_params:
-                k = 6.3234
-                b = regression_params[genus]['b']
-            else:
-                raise ValueError('Species not found')
+            # Katopodis & Gervais (2016) Figure B-089: adult sockeye salmon
+            # Equation: U = K * t^b  =>  ttf = (U/K)^(1/b)
+            k = 6.368   # Critical velocity parameter
+            b = -0.088  # Exponent (negative = fatigue increases with speed)
             ttf = np.zeros(self.simulation.num_agents)
             ttf[~mask_dict['sustained']] = (swim_speeds[~mask_dict['sustained']] / k) ** (1 / b)
             return ttf
