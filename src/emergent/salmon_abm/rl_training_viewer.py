@@ -275,14 +275,18 @@ class WeightsPanel(QWidget):
         
     def update_weights(self, weights: BehavioralWeights):
         """Update displayed weights."""
-        # Clear existing labels
+        print(f"[UPDATE_WEIGHTS DEBUG] Called with weights, shallow_weight={weights.shallow_weight}, cohesion_weight={weights.cohesion_weight}", flush=True)
+        
+        # Clear existing labels - use delete() instead of deleteLater() for immediate removal
         for label in self.weight_labels.values():
             self.weights_layout.removeWidget(label)
+            label.setParent(None)  # Immediately remove from parent
             label.deleteLater()
         self.weight_labels.clear()
         
         # Add new weight labels
         weights_dict = weights.to_dict()
+        print(f"[UPDATE_WEIGHTS DEBUG] weights_dict has {len(weights_dict)} items", flush=True)
         for name, value in sorted(weights_dict.items()):
             # Skip order fields - they're shown in the Cue Application Order panel
             if name.startswith('order_'):
@@ -297,6 +301,7 @@ class WeightsPanel(QWidget):
             label.setFont(QFont("Courier New", 9))
             self.weights_layout.addWidget(label)
             self.weight_labels[name] = label
+            print(f"[UPDATE_WEIGHTS DEBUG] Added label: {name}={value}", flush=True)
             
     def update_diagnostics(self, episode: int, total_episodes: int, reward: float, 
                           best_reward: float, initial_reward: float):
@@ -474,16 +479,18 @@ class ControlPanel(QWidget):
         self.noise_spin.setToolTip("Mutation scale for exploring new behavioral weights (0.1 = 10% random variation). Higher values = more exploration, lower = more exploitation of good weights.")
         params_layout.addWidget(self.noise_spin, 3, 1)
         
+        # Storage interval (memory optimization)
+        params_layout.addWidget(QLabel("Store every Nth:"), 4, 0)
+        self.storage_interval_spin = QSpinBox()
+        self.storage_interval_spin.setRange(1, 100)
+        self.storage_interval_spin.setValue(10)
+        self.storage_interval_spin.setToolTip("Store trajectory data for replay every N episodes (plus first 5 and best). 1=all episodes, 10=every 10th. Saves memory for long training runs.")
+        params_layout.addWidget(self.storage_interval_spin, 4, 1)
+        
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
         
-        # Randomize buttons
-        self.btn_randomize = QPushButton("🎲 Randomize Weights")
-        self.btn_randomize.clicked.connect(self.randomize_weights.emit)
-        self.btn_randomize.setToolTip("Generate new random initial weights (100% variation from defaults). Only works before training starts.")
-        layout.addWidget(self.btn_randomize)
-        
-        # Blanket value controls
+        # Blanket value controls (above randomize for better flow)
         blanket_layout = QHBoxLayout()
         self.blanket_value_input = QLineEdit("10.0")
         self.blanket_value_input.setMaximumWidth(60)
@@ -491,13 +498,19 @@ class ControlPanel(QWidget):
         blanket_layout.addWidget(QLabel("Blanket value:"))
         blanket_layout.addWidget(self.blanket_value_input)
         
-        self.btn_set_blanket = QPushButton("📏 Set All Weights")
+        self.btn_set_blanket = QPushButton("📋 Set All Weights")
         self.btn_set_blanket.clicked.connect(self.set_blanket_value.emit)
         self.btn_set_blanket.setToolTip("Set all behavioral weights to the specified blanket value. Only works before training starts.")
         blanket_layout.addWidget(self.btn_set_blanket)
         blanket_layout.addStretch()
         
         layout.addLayout(blanket_layout)
+        
+        # Randomize buttons
+        self.btn_randomize = QPushButton("🎲 Randomize Weights")
+        self.btn_randomize.clicked.connect(self.randomize_weights.emit)
+        self.btn_randomize.setToolTip("Generate new random initial weights (100% variation from defaults). Only works before training starts.")
+        layout.addWidget(self.btn_randomize)
         
         self.btn_randomize_order = QPushButton("🎪 Randomize Cue Order")
         self.btn_randomize_order.clicked.connect(self.randomize_order.emit)
@@ -797,6 +810,8 @@ class RLTrainingViewer(QMainWindow):
         
         # Completed episodes storage (for replay)
         self.completed_episodes = []  # List of (episode, reward, components, positions, headings, battery, alive, weights)
+        self.best_episode_data = None  # Always keep best episode: (episode, reward, components, positions, headings, battery, alive, weights)
+        self.best_reward = float('-inf')  # Track best reward seen
         
         # Current behavioral weights (modified by randomize buttons)
         from emergent.salmon_abm.rl_training import BehavioralWeights
@@ -847,6 +862,9 @@ class RLTrainingViewer(QMainWindow):
         splitter.setSizes([280, 700, 420])
         
         self.setCentralWidget(splitter)
+        
+        # Display initial weights
+        self.weights_panel.update_weights(self.current_weights)
         
     def create_simulation_factory(self, num_agents: int, num_timesteps: int):
         """
@@ -1034,56 +1052,34 @@ class RLTrainingViewer(QMainWindow):
             self.control_panel.append_log("ERROR: Invalid blanket value (must be a number)")
             return
         
-        # Preserve current order before setting blanket values
-        old_order = [
-            self.current_weights.order_0, self.current_weights.order_1,
-            self.current_weights.order_2, self.current_weights.order_3,
-            self.current_weights.order_4, self.current_weights.order_5,
-            self.current_weights.order_6, self.current_weights.order_7,
-            self.current_weights.order_8, self.current_weights.order_9
-        ]
+        # Directly modify current weights - don't create new instance
+        # (creating new BehavioralWeights() resets to defaults)
+        self.current_weights.shallow_weight = blanket_value
+        self.current_weights.border_cue_weight = blanket_value
+        self.current_weights.avoid_weight = blanket_value
+        self.current_weights.collision_weight = blanket_value
+        self.current_weights.alignment_weight = blanket_value
+        self.current_weights.cohesion_weight = blanket_value
+        self.current_weights.low_speed_weight = blanket_value
+        self.current_weights.refugia_weight = blanket_value
+        self.current_weights.rheotaxis_weight = blanket_value
+        self.current_weights.wave_drag_weight = blanket_value
         
-        # Create new weights with all values set to blanket_value
-        from emergent.salmon_abm.rl_training import BehavioralWeights
-        new_weights = BehavioralWeights()
-        
-        # Set all behavioral weights to blanket value
-        new_weights.w_shallow = blanket_value
-        new_weights.w_border = blanket_value
-        new_weights.w_avoid = blanket_value
-        new_weights.w_collision = blanket_value
-        new_weights.w_alignment = blanket_value
-        new_weights.w_cohesion = blanket_value
-        new_weights.w_low_speed = blanket_value
-        new_weights.w_refugia = blanket_value
-        new_weights.w_rheotaxis = blanket_value
-        new_weights.w_wave_drag = blanket_value
-        
-        # Restore order (as integers)
-        new_weights.order_0 = int(old_order[0])
-        new_weights.order_1 = int(old_order[1])
-        new_weights.order_2 = int(old_order[2])
-        new_weights.order_3 = int(old_order[3])
-        new_weights.order_4 = int(old_order[4])
-        new_weights.order_5 = int(old_order[5])
-        new_weights.order_6 = int(old_order[6])
-        new_weights.order_7 = int(old_order[7])
-        new_weights.order_8 = int(old_order[8])
-        new_weights.order_9 = int(old_order[9])
-        
-        self.current_weights = new_weights  # Store as current for training
+        # Debug: confirm values were set
+        print(f"[BLANKET VALUE DEBUG] Set all weights to {blanket_value}", flush=True)
+        print(f"[BLANKET VALUE DEBUG] shallow_weight={self.current_weights.shallow_weight}, cohesion_weight={self.current_weights.cohesion_weight}", flush=True)
         
         # Update display
-        self.weights_panel.update_weights(new_weights)
+        self.weights_panel.update_weights(self.current_weights)
         
-        # Update order display (need default_order dict)
+        # Update order display
         default_order = {
             0: 'shallow', 1: 'border', 2: 'avoid', 3: 'collision', 4: 'alignment',
             5: 'cohesion', 6: 'low_speed', 7: 'refugia', 8: 'rheotaxis', 9: 'wave_drag'
         }
-        self.weights_panel.update_order(default_order, new_weights)
+        self.weights_panel.update_order(default_order, self.current_weights)
         
-        self.control_panel.append_log(f"📏 Set all weights to blanket value: {blanket_value}")
+        self.control_panel.append_log(f"📋 Set all weights to blanket value: {blanket_value}")
         self.control_panel.status_label.setText(f"Ready with uniform weights ({blanket_value})")
     
     def on_randomize_weights(self):
