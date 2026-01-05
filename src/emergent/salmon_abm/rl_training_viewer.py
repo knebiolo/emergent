@@ -80,12 +80,44 @@ class SimulationCanvas(QWidget):
         # Initialize with dummy positions (1 timestep, 1 agent)
         dummy_positions = np.zeros((1, 1, 2), dtype=np.float32)
         
-        # Try to load depth raster for background
+        # Try to load depth and velocity rasters for background
         env_depth = None
+        self.vel_x_data = None
+        self.vel_y_data = None
+        self.vel_transform = None
+        self.vel_bbox = None
+        
         if model_dir and os.path.exists(model_dir):
             depth_path = os.path.join(model_dir, 'depth.tif')
             if os.path.exists(depth_path):
                 env_depth = depth_path
+            
+            # Load velocity field for arrow rendering
+            vel_x_path = os.path.join(model_dir, 'vel_x.tif')
+            vel_y_path = os.path.join(model_dir, 'vel_y.tif')
+            if os.path.exists(vel_x_path) and os.path.exists(vel_y_path):
+                try:
+                    from emergent.salmon_abm import io as _io
+                    vel_x_arr, vel_x_transform, _ = _io.enviro_import(vel_x_path)
+                    vel_y_arr, vel_y_transform, _ = _io.enviro_import(vel_y_path)
+                    
+                    self.vel_x_data = np.array(vel_x_arr, dtype=float)
+                    self.vel_y_data = np.array(vel_y_arr, dtype=float)
+                    self.vel_transform = vel_x_transform
+                    
+                    # Compute velocity raster bbox
+                    h, w = self.vel_x_data.shape
+                    try:
+                        a_t, b_t, c_t, d_t, e_t, f_t = vel_x_transform
+                    except:
+                        t = vel_x_transform
+                        a_t, b_t, c_t, d_t, e_t, f_t = (t.a, t.b, t.c, t.d, t.e, t.f)
+                    
+                    xs = [a_t * c + b_t * r + c_t for c in [0, w] for r in [0, h]]
+                    ys = [d_t * c + e_t * r + f_t for c in [0, w] for r in [0, h]]
+                    self.vel_bbox = (min(xs), max(xs), min(ys), max(ys))
+                except Exception as e:
+                    print(f"Warning: Could not load velocity fields: {e}")
         
         # Create ReplayWidget with environment background
         self.replay_widget = ReplayWidget(
@@ -95,6 +127,13 @@ class SimulationCanvas(QWidget):
             pad=1.15,
             point_size=4.0
         )
+        
+        # Pass velocity data to replay widget for arrow rendering
+        if self.vel_x_data is not None:
+            self.replay_widget._vel_x_data = self.vel_x_data
+            self.replay_widget._vel_y_data = self.vel_y_data
+            self.replay_widget._vel_bbox = self.vel_bbox
+            self.replay_widget._vel_transform = self.vel_transform
         
         # Connect to replay widget's timer to detect when animation finishes
         self.replay_widget.timer.timeout.connect(self._check_animation_complete)
@@ -333,6 +372,7 @@ class ControlPanel(QWidget):
     pause_training = pyqtSignal()
     stop_training = pyqtSignal()
     randomize_weights = pyqtSignal()
+    set_blanket_value = pyqtSignal()  # NEW: Set all weights to uniform value
     randomize_order = pyqtSignal()
     reset_training = pyqtSignal()  # NEW: Reset to initial state
     episode_selected = pyqtSignal(int)  # NEW: User selected episode to replay
@@ -442,6 +482,22 @@ class ControlPanel(QWidget):
         self.btn_randomize.clicked.connect(self.randomize_weights.emit)
         self.btn_randomize.setToolTip("Generate new random initial weights (100% variation from defaults). Only works before training starts.")
         layout.addWidget(self.btn_randomize)
+        
+        # Blanket value controls
+        blanket_layout = QHBoxLayout()
+        self.blanket_value_input = QLineEdit("10.0")
+        self.blanket_value_input.setMaximumWidth(60)
+        self.blanket_value_input.setToolTip("Value to set for all behavioral weights")
+        blanket_layout.addWidget(QLabel("Blanket value:"))
+        blanket_layout.addWidget(self.blanket_value_input)
+        
+        self.btn_set_blanket = QPushButton("📏 Set All Weights")
+        self.btn_set_blanket.clicked.connect(self.set_blanket_value.emit)
+        self.btn_set_blanket.setToolTip("Set all behavioral weights to the specified blanket value. Only works before training starts.")
+        blanket_layout.addWidget(self.btn_set_blanket)
+        blanket_layout.addStretch()
+        
+        layout.addLayout(blanket_layout)
         
         self.btn_randomize_order = QPushButton("🎪 Randomize Cue Order")
         self.btn_randomize_order.clicked.connect(self.randomize_order.emit)
@@ -771,6 +827,7 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.pause_training.connect(self.on_pause_training)
         self.control_panel.stop_training.connect(self.on_stop_training)
         self.control_panel.randomize_weights.connect(self.on_randomize_weights)
+        self.control_panel.set_blanket_value.connect(self.on_set_blanket_value)
         self.control_panel.randomize_order.connect(self.on_randomize_order)
         self.control_panel.reset_training.connect(self.on_reset_training)
         self.control_panel.episode_selected.connect(self.on_episode_selected)
@@ -850,7 +907,7 @@ class RLTrainingViewer(QMainWindow):
             
             # Enable neighbor sensing for schooling cues
             fish_length_m = 0.3  # Approximate 300mm fish
-            sensory_range = 2.0  # Fixed biological constant (body lengths)
+            sensory_range = 5.0  # Fixed biological constant (5 BL = 1.5m)
             sim.neighbor_buffer_radius = sensory_range * fish_length_m
             sim.neighbor_buffer_lengths = sensory_range
             
@@ -963,6 +1020,71 @@ class RLTrainingViewer(QMainWindow):
             self.control_panel.append_log(str(e))
             self.control_panel.append_log(traceback.format_exc())
             self.control_panel.status_label.setText("Error")
+    
+    def on_set_blanket_value(self):
+        """Set all behavioral weights to a uniform blanket value."""
+        if self.training_thread is not None and self.training_thread.isRunning():
+            self.control_panel.append_log("Cannot set blanket value during training")
+            return
+        
+        # Get blanket value from input field
+        try:
+            blanket_value = float(self.control_panel.blanket_value_input.text())
+        except ValueError:
+            self.control_panel.append_log("ERROR: Invalid blanket value (must be a number)")
+            return
+        
+        # Preserve current order before setting blanket values
+        old_order = [
+            self.current_weights.order_0, self.current_weights.order_1,
+            self.current_weights.order_2, self.current_weights.order_3,
+            self.current_weights.order_4, self.current_weights.order_5,
+            self.current_weights.order_6, self.current_weights.order_7,
+            self.current_weights.order_8, self.current_weights.order_9
+        ]
+        
+        # Create new weights with all values set to blanket_value
+        from emergent.salmon_abm.rl_training import BehavioralWeights
+        new_weights = BehavioralWeights()
+        
+        # Set all behavioral weights to blanket value
+        new_weights.w_shallow = blanket_value
+        new_weights.w_border = blanket_value
+        new_weights.w_avoid = blanket_value
+        new_weights.w_collision = blanket_value
+        new_weights.w_alignment = blanket_value
+        new_weights.w_cohesion = blanket_value
+        new_weights.w_low_speed = blanket_value
+        new_weights.w_refugia = blanket_value
+        new_weights.w_rheotaxis = blanket_value
+        new_weights.w_wave_drag = blanket_value
+        
+        # Restore order (as integers)
+        new_weights.order_0 = int(old_order[0])
+        new_weights.order_1 = int(old_order[1])
+        new_weights.order_2 = int(old_order[2])
+        new_weights.order_3 = int(old_order[3])
+        new_weights.order_4 = int(old_order[4])
+        new_weights.order_5 = int(old_order[5])
+        new_weights.order_6 = int(old_order[6])
+        new_weights.order_7 = int(old_order[7])
+        new_weights.order_8 = int(old_order[8])
+        new_weights.order_9 = int(old_order[9])
+        
+        self.current_weights = new_weights  # Store as current for training
+        
+        # Update display
+        self.weights_panel.update_weights(new_weights)
+        
+        # Update order display (need default_order dict)
+        default_order = {
+            0: 'shallow', 1: 'border', 2: 'avoid', 3: 'collision', 4: 'alignment',
+            5: 'cohesion', 6: 'low_speed', 7: 'refugia', 8: 'rheotaxis', 9: 'wave_drag'
+        }
+        self.weights_panel.update_order(default_order, new_weights)
+        
+        self.control_panel.append_log(f"📏 Set all weights to blanket value: {blanket_value}")
+        self.control_panel.status_label.setText(f"Ready with uniform weights ({blanket_value})")
     
     def on_randomize_weights(self):
         """Regenerate random initial weights."""
@@ -1207,8 +1329,14 @@ class RLTrainingViewer(QMainWindow):
         # Store in completed_episodes list
         if hasattr(self, '_current_episode_data'):
             self.completed_episodes.append(self._current_episode_data)
+            # Add to dropdown navigation
             self.control_panel.add_episode_to_list(episode)
             delattr(self, '_current_episode_data')
+        else:
+            # Safety: if _current_episode_data missing, still try to add to list
+            # (shouldn't happen, but prevents episode 0 from being lost)
+            self.control_panel.append_log(f"Warning: Episode {episode} missing episode data, adding anyway")
+            self.control_panel.add_episode_to_list(episode)
         
         # Clear pending data
         self.pending_episode_data = None

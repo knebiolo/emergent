@@ -341,11 +341,12 @@ class ReplayWidget(QOpenGLWidget):
                 norm = np.clip(norm, 0.0, 1.0)
                 img8 = (np.nan_to_num(norm) * 255.0).astype(np.uint8)
                 h, w = img8.shape
-                # build RGBA with transparent nodata pixels
+                # Grayscale depth raster: black (shallow) to white (deep)
                 rgb = np.dstack([img8, img8, img8])
                 alpha = (~nodata_mask).astype(np.uint8) * 255
                 rgba = np.dstack([rgb, alpha])
                 qimg = QImage(rgba.data.tobytes(), w, h, 4 * w, QImage.Format_RGBA8888)
+                print(f"[DEPTH RASTER] Blue colormap applied: {w}×{h} pixels, valid_range=[{amin:.2f}, {amax:.2f}]")
                 # Compute raster world bbox from affine transform (a,b,c,d,e,f) mapping col,row -> x,y
                 try:
                     a_t, b_t, c_t, d_t, e_t, f_t = transform
@@ -406,6 +407,46 @@ class ReplayWidget(QOpenGLWidget):
             self._pan_y_start = self._pan_y
             self.setCursor(Qt.ClosedHandCursor)
         event.accept()
+    
+    def set_positions(self, positions: np.ndarray, headings: Optional[np.ndarray] = None, 
+                     battery: Optional[np.ndarray] = None, alive: Optional[np.ndarray] = None):
+        """
+        Load new trajectory data and start animation.
+        
+        Args:
+            positions: (T, N, 2) array of agent positions
+            headings: (T, N) array of agent headings in radians (optional)
+            battery: (T, N) array of battery levels 0-1 (optional)
+            alive: (T, N) boolean array of alive status (optional)
+        """
+        if positions.ndim != 3 or positions.shape[2] != 2:
+            raise ValueError("positions must be (T, N, 2)")
+        
+        # Stop any existing animation
+        if self.timer.isActive():
+            self.timer.stop()
+        self.playing = False
+        
+        self.positions = positions
+        self.T, self.N, _ = positions.shape
+        self.heading_array = headings
+        self.battery_array = battery
+        self.frame = 0
+        
+        # DON'T recompute bounds - keep original environment bounds
+        # This prevents zooming issues when agents cluster or die
+        # Original bounds were set from all positions in __init__
+        
+        # Reset view to default
+        self._pad = 1.15
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        
+        # Start playback automatically
+        self.playing = True
+        self.timer.start()
+        self.update()
+        print(f"set_positions: Loaded T={self.T}, N={self.N}, starting playback", flush=True)
 
     def mouseMoveEvent(self, event):
         """Pan view during drag."""
@@ -428,6 +469,21 @@ class ReplayWidget(QOpenGLWidget):
             self.setCursor(Qt.ArrowCursor)
         event.accept()
 
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts."""
+        if event.key() == Qt.Key_R:
+            # Reset view to default
+            self._pad = 1.15
+            self._pan_x = 0.0
+            self._pan_y = 0.0
+            self._mouse_drag_start = None
+            self._pan_x_start = 0.0
+            self._pan_y_start = 0.0
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+            print("View reset to default (R key)", flush=True)
+        event.accept()
+
     def wheelEvent(self, event):
         """Zoom with mouse wheel."""
         # Get wheel delta (positive = zoom in, negative = zoom out)
@@ -435,7 +491,12 @@ class ReplayWidget(QOpenGLWidget):
         if delta != 0:
             # Adjust zoom factor (pad) - smaller pad = more zoom in
             zoom_factor = 0.9 if delta > 0 else 1.1  # Inverted: scroll up = zoom in = smaller pad
-            self._pad = max(0.1, min(20.0, self._pad * zoom_factor))
+            self._pad = max(0.01, min(20.0, self._pad * zoom_factor))  # Allow 10x closer zoom
+            # Clear ALL pan state to prevent corruption
+            self._mouse_drag_start = None
+            self._pan_x_start = self._pan_x
+            self._pan_y_start = self._pan_y
+            self.setCursor(Qt.ArrowCursor)
             self.update()
         event.accept()
 
@@ -636,6 +697,96 @@ class ReplayWidget(QOpenGLWidget):
                         painter.drawImage(dest, self._bg_qimage)
                 except Exception:
                     pass
+            
+            # Velocity field arrows disabled (too slow for real-time rendering)
+            # TODO: Re-enable with GPU acceleration or coarser sampling
+            if False and hasattr(self, '_vel_x_data') and hasattr(self, '_vel_y_data') and self._vel_x_data is not None:
+                try:
+                    vel_x = self._vel_x_data
+                    vel_y = self._vel_y_data
+                    vel_bbox = getattr(self, '_vel_bbox', None)
+                    vel_transform = getattr(self, '_vel_transform', None)
+                    
+                    if vel_bbox is not None and vel_transform is not None:
+                        # Adaptive sampling: fewer arrows when zoomed out, more when zoomed in
+                        # Compute pixel size of one raster cell
+                        try:
+                            a_t, b_t, c_t, d_t, e_t, f_t = vel_transform
+                        except:
+                            t = vel_transform
+                            a_t, b_t, c_t, d_t, e_t, f_t = (t.a, t.b, t.c, t.d, t.e, t.f)
+                        
+                        cell_width_m = abs(a_t)  # Meters per pixel
+                        cell_height_m = abs(e_t)
+                        
+                        # Compute how many pixels one raster cell takes on screen
+                        pixels_per_cell = cell_width_m * s
+                        
+                        # Sample every N cells based on zoom (target ~30-50 pixel spacing)
+                        target_spacing_px = 40
+                        sample_step = max(1, int(target_spacing_px / max(1, pixels_per_cell)))
+                        
+                        h_vel, w_vel = vel_x.shape
+                        
+                        # Helper function to convert world coords to canvas
+                        def world_to_canvas_vel(wx, wy):
+                            x_adj = wx + pan_x * (xmax_loc - xmin_loc)
+                            y_adj = wy + pan_y * (ymax_loc - ymin_loc)
+                            sxp = tx + (x_adj - xmin_loc) * s
+                            syp = ty + (ymax_loc - y_adj) * s
+                            return sxp, syp
+                        
+                        # Draw white arrows
+                        arrow_pen = QPen(QColor(255, 255, 255, 180))  # Semi-transparent white
+                        arrow_pen.setWidthF(1.0)
+                        painter.setPen(arrow_pen)
+                        
+                        for row in range(0, h_vel, sample_step):
+                            for col in range(0, w_vel, sample_step):
+                                vx = vel_x[row, col]
+                                vy = vel_y[row, col]
+                                
+                                # Skip nodata/invalid (nodata = -9999)
+                                if not (np.isfinite(vx) and np.isfinite(vy)) or abs(vx) > 9000 or abs(vy) > 9000 or (abs(vx) + abs(vy) < 0.01):
+                                    continue
+                                
+                                # Compute world coords of this raster cell center
+                                wx = a_t * (col + 0.5) + b_t * (row + 0.5) + c_t
+                                wy = d_t * (col + 0.5) + e_t * (row + 0.5) + f_t
+                                
+                                # Convert to canvas coords
+                                cx, cy = world_to_canvas_vel(wx, wy)
+                                
+                                # Arrow length in pixels (scale by velocity magnitude)
+                                vel_mag = np.sqrt(vx**2 + vy**2)
+                                arrow_length = min(30, vel_mag * s * 5)  # Scale arrows
+                                
+                                # Arrow endpoint
+                                arrow_dx = (vx / vel_mag) * arrow_length if vel_mag > 0 else 0
+                                arrow_dy = -(vy / vel_mag) * arrow_length if vel_mag > 0 else 0  # Negative because canvas Y is inverted
+                                
+                                ex = cx + arrow_dx
+                                ey = cy + arrow_dy
+                                
+                                # Draw arrow line
+                                painter.drawLine(QPointF(cx, cy), QPointF(ex, ey))
+                                
+                                # Draw arrowhead (small triangle)
+                                if arrow_length > 5:
+                                    angle = np.arctan2(arrow_dy, arrow_dx)
+                                    head_size = 4
+                                    angle1 = angle + 2.8  # ~160 degrees
+                                    angle2 = angle - 2.8
+                                    
+                                    h1x = ex + head_size * np.cos(angle1)
+                                    h1y = ey + head_size * np.sin(angle1)
+                                    h2x = ex + head_size * np.cos(angle2)
+                                    h2y = ey + head_size * np.sin(angle2)
+                                    
+                                    painter.drawLine(QPointF(ex, ey), QPointF(h1x, h1y))
+                                    painter.drawLine(QPointF(ex, ey), QPointF(h2x, h2y))
+                except Exception as e:
+                    pass  # Silently skip if velocity rendering fails
 
             pts = self.positions[self.frame]
             if self.N == 0 or pts.size == 0:
@@ -982,7 +1133,7 @@ class GLViewer(QOpenGLWidget):
             delta = event.angleDelta().y()
             if delta != 0:
                 zoom_factor = 0.9 if delta > 0 else 1.1
-                self._pad = max(0.1, min(20.0, self._pad * zoom_factor))
+                self._pad = max(0.01, min(20.0, self._pad * zoom_factor))  # Allow 10x closer zoom
                 self.update()
             event.accept()
         except Exception:

@@ -15,6 +15,7 @@ Maintenance preferences (defaults):
 - Elevation policy: Flag items as `long_term` when they remain open for more than 7 days or are tagged as `roadmap` or `design` by the author.
 
 When asked to "write journal entry now", create a `session` file with a timestamped filename and include: header metadata (author, timestamp, tags), files changed, short summary, commands run, blockers, and next steps.
+Please put session reports here: src\emergent\salmon_abm\.ai_journal\session
 
 Also, please read the following documents:
 INFRASTRUCTURE_SUMMARY.md
@@ -60,6 +61,7 @@ docs\USER_CONFIG_OPTIONS.md
 	- Simulation outputs being analyzed (with timestamps/file names)
 	- Current debugging focus (e.g., "rheotaxis nodata bug in behavior.py:1775")
 	- This allows future sessions to resume exactly where work stopped
+- save sessions here: C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\data\salmon_abm
 
 # Handoff Priorities (what the next AI should read first)
 - `src/emergent/salmon_abm/sockeye.py` - this is getting deprecated, but it is where we came from.  

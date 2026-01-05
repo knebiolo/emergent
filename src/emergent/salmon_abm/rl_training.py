@@ -54,8 +54,8 @@ class BehavioralWeights:
     shallow_weight: float = 500000.0
     avoid_weight: float = 25000.0
     
-    # Threat parameters
-    threat_level: float = 0.3  # 0.0 = relaxed, 1.0 = high threat
+    # Threat parameters (FIXED - not trainable)
+    threat_level: float = 1.0  # Fixed at 1.0 (high threat - tight schooling)
     
     # Dynamic cohesion parameters (threat-responsive)
     cohesion_radius_relaxed: float = 3.0  # Body lengths
@@ -211,8 +211,14 @@ class BehavioralWeights:
         data = self.to_dict()
         randomized = {}
         
+        # Fixed parameters (not trainable)
+        fixed_params = {'threat_level'}
+        
         for key, value in data.items():
-            if isinstance(value, bool):
+            if key in fixed_params:
+                # Keep fixed parameters unchanged
+                randomized[key] = value
+            elif isinstance(value, bool):
                 randomized[key] = value
             elif isinstance(value, (int, float)):
                 # Apply larger random perturbation for initial exploration
@@ -265,9 +271,15 @@ class BehavioralWeights:
         for idx in range(10):
             mutated[f'order_{idx}'] = int(current_order[idx])
         
+        # Fixed parameters (not trainable)
+        fixed_params = {'threat_level'}
+        
         # Mutate all other fields (weights, thresholds, etc.)
         for key, value in data.items():
-            if not key.startswith('order_'):
+            if key in fixed_params:
+                # Keep fixed parameters unchanged
+                mutated[key] = value
+            elif not key.startswith('order_'):
                 # Gaussian perturbation: N(value, mutation_scale * value)
                 noise = rng.normal(0, mutation_scale * abs(value))
                 new_value = value + noise
@@ -285,13 +297,13 @@ def compute_cohesion_score(
     positions: np.ndarray,
     body_length: float,
     threat_level: float = 0.3,
-    sensory_range: float = 2.0
+    sensory_range: float = 5.0
 ) -> np.ndarray:
     """
     Compute cohesion quality score for each agent.
     
     Measures proximity to ideal group spacing using local centroid of neighbors
-    within sensory range (2 BL).
+    within sensory range (5 BL = 1.5m).
     
     Biological basis: Fish maintain threat-responsive spacing (Magurran & Pitcher 1987).
     - Relaxed: ~3.0 BL spacing
@@ -301,7 +313,7 @@ def compute_cohesion_score(
         positions: Agent positions, shape (N, 2) or (N, 3)
         body_length: Fish body length in meters
         threat_level: 0.0 = relaxed, 1.0 = high threat
-        sensory_range: Neighbor detection range in body lengths (default 2.0)
+        sensory_range: Neighbor detection range in body lengths (default 5.0)
     
     Returns:
         Cohesion scores, shape (N,). Range 0.0-1.0.
@@ -323,10 +335,19 @@ def compute_cohesion_score(
     
     cohesion_scores = np.zeros(N)
     
+    # DEBUG: Track statistics for diagnostics (very low sampling rate)
+    debug_sample = N > 0 and np.random.random() < 0.0001  # 0.01% sampling
+    neighbor_counts = []
+    distances = []
+    scores = []
+    
     for i in range(N):
         # Find neighbors within sensory range
         neighbor_indices = tree.query_ball_point(positions[i], r=search_radius)
         neighbor_indices = [idx for idx in neighbor_indices if idx != i]
+        
+        if debug_sample:
+            neighbor_counts.append(len(neighbor_indices))
         
         if len(neighbor_indices) == 0:
             cohesion_scores[i] = 0.0  # Isolated agent
@@ -340,9 +361,19 @@ def compute_cohesion_score(
         dist_to_centroid = np.linalg.norm(positions[i] - centroid)
         
         # Gaussian reward centered at ideal distance
-        # σ = 0.5 BL (controls width of reward peak)
-        sigma = 0.5 * body_length
+        # σ = 1.0 BL (controls width of reward peak)
+        # Wider sigma allows more tolerance for spacing variation
+        sigma = 1.0 * body_length
         cohesion_scores[i] = np.exp(-0.5 * ((dist_to_centroid - ideal_dist) / sigma)**2)
+        
+        if debug_sample:
+            distances.append(dist_to_centroid)
+            scores.append(cohesion_scores[i])
+    
+    if debug_sample and neighbor_counts:
+        print(f"[COHESION DEBUG] N={N}, neighbors={np.mean(neighbor_counts):.1f}±{np.std(neighbor_counts):.1f}, "
+              f"dist={np.mean(distances):.2f}±{np.std(distances):.2f}m (ideal={ideal_dist:.2f}m), "
+              f"score={np.mean(scores):.3f}±{np.std(scores):.3f}, sum={np.sum(cohesion_scores):.1f}")
     
     return cohesion_scores
 
@@ -351,7 +382,7 @@ def compute_alignment_score(
     headings: np.ndarray,
     positions: np.ndarray,
     body_length: float,
-    sensory_range: float = 2.0
+    sensory_range: float = 5.0
 ) -> np.ndarray:
     """
     Compute heading alignment score for each agent.
@@ -362,7 +393,7 @@ def compute_alignment_score(
         headings: Agent headings in radians, shape (N,)
         positions: Agent positions, shape (N, 2) or (N, 3)
         body_length: Fish body length in meters
-        sensory_range: Neighbor detection range in body lengths (default 2.0)
+        sensory_range: Neighbor detection range in body lengths (default 5.0)
     
     Returns:
         Alignment scores, shape (N,). Range -1.0 to 1.0.
@@ -576,13 +607,22 @@ def compute_episode_reward(
             alignment = compute_alignment_score(head_alive, pos_alive, body_length)
             separation = compute_separation_penalty(pos_alive, body_length)
             
-            cohesion_scores.append(np.median(cohesion))
-            alignment_scores.append(np.median(alignment))
-            separation_penalties.append(np.median(separation))
+            # Sum across agents (we want total school performance, not per-agent)
+            cohesion_scores.append(np.sum(cohesion))
+            alignment_scores.append(np.sum(alignment))
+            separation_penalties.append(np.sum(separation))
     
-    median_cohesion = np.median(cohesion_scores) if cohesion_scores else 0.0
-    median_alignment = np.median(alignment_scores) if alignment_scores else 0.0
-    median_separation = np.median(separation_penalties) if separation_penalties else 0.0
+    # Total sum across all agent-timesteps
+    sum_cohesion = np.sum(cohesion_scores) if cohesion_scores else 0.0
+    sum_alignment = np.sum(alignment_scores) if alignment_scores else 0.0
+    sum_separation = np.sum(separation_penalties) if separation_penalties else 0.0
+    
+    # DEBUG: Print schooling metrics summary (rare samples only)
+    if np.random.random() < 0.001:  # 0.1% sampling rate
+        print(f"[SCHOOLING METRICS] T={T}, N={N}, "
+              f"cohesion_sum={sum_cohesion:.1f} (×0.01={sum_cohesion*0.01:.2f}), "
+              f"alignment_sum={sum_alignment:.1f} (×0.01={sum_alignment*0.01:.2f}), "
+              f"separation_sum={sum_separation:.1f}")
     
     # =================================================================
     # 2. Upstream Progress (Flow Vector Integration)
@@ -632,10 +672,12 @@ def compute_episode_reward(
             # progress = 0 = moved perpendicular to flow
             progress_per_agent = np.sum(displacement * upstream_unit, axis=1)
             
-            # Median progress across alive agents this timestep (robust to outliers)
-            total_upstream_progress += np.median(progress_per_agent[valid])
+            # Sum total progress across all agents this timestep
+            total_upstream_progress += np.sum(progress_per_agent[valid])
     
-    median_upstream_progress = total_upstream_progress / T if T > 0 else 0.0
+    # Total upstream distance summed across all agents over entire episode (meters)
+    # This gives proper magnitude: 100 fish × 100 timesteps × 0.05m = 500m total
+    sum_upstream_progress = total_upstream_progress
     
     # =================================================================
     # 3. Energy Efficiency (distance / speed²)
@@ -715,9 +757,9 @@ def compute_episode_reward(
         
         # Jerk = change in acceleration
         jerk = np.linalg.norm(accel_curr - accel_prev, axis=1)
-        accel_smoothness_penalty += np.median(jerk)
+        accel_smoothness_penalty += np.sum(jerk)
     
-    accel_smoothness_penalty /= max(1, T - 2)  # Average over timesteps
+    # Total jerk summed across all agents and timesteps
     
     # =================================================================
     # 8. Fatigue Penalty (CRITICAL for preventing exhaustion)
@@ -742,8 +784,7 @@ def compute_episode_reward(
             depleted_count = np.sum(battery_t <= 0.01)
             fatigue_penalty += depleted_count * 2.0  # Double penalty for full depletion
         
-        # Average over timesteps
-        fatigue_penalty /= T
+        # Total fatigue penalty summed across all agent-timesteps
     
     # =================================================================
     # 8. Rheotaxis Alignment (Swimming into Flow)
@@ -771,8 +812,7 @@ def compute_episode_reward(
             stagnant_mask = displacement < 0.1  # Less than 10cm movement
             stagnation_penalty += np.sum(stagnant_mask)
     
-    # Normalize by total agent-timesteps
-    stagnation_penalty /= (T * N)
+    # Total stagnation count summed across all agent-timesteps
     
     # =================================================================
     # Penalize fish swimming off-heading from upstream direction
@@ -811,11 +851,10 @@ def compute_episode_reward(
                 # Misalignment penalty: 0 when aligned, 1 when perpendicular, 2 when opposite
                 misalignment = 1.0 - alignment
                 
-                # Median misalignment for agents in significant flow (robust to outliers)
-                rheotaxis_alignment_penalty += np.median(misalignment[significant_flow])
+                # Sum misalignment for all agents in significant flow
+                rheotaxis_alignment_penalty += np.sum(misalignment[significant_flow])
         
-        # Average over timesteps
-        rheotaxis_alignment_penalty /= T
+        # Total rheotaxis misalignment summed across all agents and timesteps
     
     # =================================================================
     # Total Reward Calculation
@@ -865,35 +904,35 @@ def compute_episode_reward(
             weight_diversity_bonus = entropy * 5.0  # Scale to ~5-10 range
     
     reward = (
-        median_cohesion * 10.0 +
-        (median_alignment + 1.0) * 10.0 +  # INCREASED: Alignment critical for coordinated schooling (shift -1:1 → 0:2, scale to 0:20)
-        median_separation * 5.0 +
-        median_upstream_progress * 30.0 +  # CRITICAL: Migration is PRIMARY goal - doubled weight!
+        sum_cohesion * 0.01 +  # Scale: sum across agents×timesteps
+        sum_alignment * 0.01 +
+        sum_separation * 0.005 +
+        sum_upstream_progress * 1.0 +  # Total meters upstream (can be negative)
         energy_efficiency * 2.0 +
         mean_drafting_benefit * 20.0 +
-        agents_near_boundary * -5.0 +
-        dead_count * -50.0 +
-        accel_smoothness_penalty * -0.2 +
-        fatigue_penalty * -10.0 +  # CRITICAL: Heavily penalize low battery states
-        stagnation_penalty * -20.0 +  # CRITICAL: Penalize stationary fish (vibrating lattices)
-        rheotaxis_alignment_penalty * -10.0 +  # CRITICAL: Fish must orient into flow, not just swim north!
+        agents_near_boundary * 0.0 +  # DISABLED: boundary_coords never passed
+        dead_count * -50.0 +  # Count of deaths
+        accel_smoothness_penalty * -0.001 +  # Sum of jerk
+        fatigue_penalty * -0.1 +  # Count of low-battery agent-timesteps
+        stagnation_penalty * -0.2 +  # Count of stagnant agent-timesteps
+        rheotaxis_alignment_penalty * -0.1 +  # Sum of misalignment
         min_schooling_weight_penalty +  # CRITICAL: Prevent zero schooling weights
         weight_diversity_bonus  # Encourage balanced weight distribution
     )
     
     components = {
-        'cohesion': median_cohesion * 10.0,
-        'alignment': (median_alignment + 1.0) * 10.0,
-        'separation': median_separation * 5.0,
-        'upstream_progress': median_upstream_progress * 30.0,
+        'cohesion': sum_cohesion * 0.01,
+        'alignment': sum_alignment * 0.01,
+        'separation': sum_separation * 0.005,
+        'upstream_progress': sum_upstream_progress * 1.0,
         'energy_efficiency': energy_efficiency * 2.0,
         'drafting_benefit': mean_drafting_benefit * 20.0,
-        'boundary_penalty': agents_near_boundary * -5.0,
+        'boundary_penalty': agents_near_boundary * -0.05,
         'mortality_penalty': dead_count * -50.0,
-        'smoothness_penalty': accel_smoothness_penalty * -0.2,
-        'fatigue_penalty': fatigue_penalty * -10.0,
-        'stagnation_penalty': stagnation_penalty * -20.0,
-        'rheotaxis_alignment': rheotaxis_alignment_penalty * -10.0,
+        'smoothness_penalty': accel_smoothness_penalty * -0.001,
+        'fatigue_penalty': fatigue_penalty * -0.1,
+        'stagnation_penalty': stagnation_penalty * -0.2,
+        'rheotaxis_alignment': rheotaxis_alignment_penalty * -0.1,
         'min_schooling_penalty': min_schooling_weight_penalty,
         'weight_diversity_bonus': weight_diversity_bonus,
         'total': reward

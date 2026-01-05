@@ -2228,7 +2228,7 @@ class simulation:
             'wave_drag': weights.wave_drag_weight,
             'shallow': weights.shallow_weight,
             'avoid': weights.avoid_weight,
-            'sensory_range': 2.0,  # Fixed biological constant (meters)
+            'sensory_range': 5.0,  # Fixed biological constant (1.5 meters = 5 BL)
             'threat_level': weights.threat_level,
             'cohesion_radius_relaxed': weights.cohesion_radius_relaxed,
             'cohesion_radius_threatened': weights.cohesion_radius_threatened,

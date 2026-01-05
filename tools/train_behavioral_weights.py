@@ -104,7 +104,7 @@ def create_simulation_factory(
         sim.load_behavioral_weights(weights_dict=weights.to_dict())
         
         # Enable neighbor sensing for schooling cues
-        sensory_range = 2.0  # Fixed biological constant (body lengths)
+        sensory_range = 5.0  # Fixed biological constant (5 BL = 1.5m)
         sim.neighbor_buffer_radius = sensory_range * (fish_length / 1000.0 if fish_length else 1.0)
         sim.neighbor_buffer_lengths = sensory_range
         
