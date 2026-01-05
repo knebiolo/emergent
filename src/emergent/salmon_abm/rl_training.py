@@ -576,13 +576,13 @@ def compute_episode_reward(
             alignment = compute_alignment_score(head_alive, pos_alive, body_length)
             separation = compute_separation_penalty(pos_alive, body_length)
             
-            cohesion_scores.append(np.mean(cohesion))
-            alignment_scores.append(np.mean(alignment))
-            separation_penalties.append(np.mean(separation))
+            cohesion_scores.append(np.median(cohesion))
+            alignment_scores.append(np.median(alignment))
+            separation_penalties.append(np.median(separation))
     
-    mean_cohesion = np.mean(cohesion_scores) if cohesion_scores else 0.0
-    mean_alignment = np.mean(alignment_scores) if alignment_scores else 0.0
-    mean_separation = np.mean(separation_penalties) if separation_penalties else 0.0
+    median_cohesion = np.median(cohesion_scores) if cohesion_scores else 0.0
+    median_alignment = np.median(alignment_scores) if alignment_scores else 0.0
+    median_separation = np.median(separation_penalties) if separation_penalties else 0.0
     
     # =================================================================
     # 2. Upstream Progress (Flow Vector Integration)
@@ -632,10 +632,10 @@ def compute_episode_reward(
             # progress = 0 = moved perpendicular to flow
             progress_per_agent = np.sum(displacement * upstream_unit, axis=1)
             
-            # Mean progress across alive agents this timestep
-            total_upstream_progress += np.mean(progress_per_agent[valid])
+            # Median progress across alive agents this timestep (robust to outliers)
+            total_upstream_progress += np.median(progress_per_agent[valid])
     
-    mean_upstream_progress = total_upstream_progress / T if T > 0 else 0.0
+    median_upstream_progress = total_upstream_progress / T if T > 0 else 0.0
     
     # =================================================================
     # 3. Energy Efficiency (distance / speed²)
@@ -715,7 +715,7 @@ def compute_episode_reward(
         
         # Jerk = change in acceleration
         jerk = np.linalg.norm(accel_curr - accel_prev, axis=1)
-        accel_smoothness_penalty += np.mean(jerk)
+        accel_smoothness_penalty += np.median(jerk)
     
     accel_smoothness_penalty /= max(1, T - 2)  # Average over timesteps
     
@@ -747,6 +747,33 @@ def compute_episode_reward(
     
     # =================================================================
     # 8. Rheotaxis Alignment (Swimming into Flow)
+    # =================================================================
+    # Penalize stationary fish (vibrating in place / no movement)
+    # Fish should actively swim, not form static lattices
+    # Compute average displacement per timestep
+    
+    stagnation_penalty = 0.0
+    
+    for t in range(1, T):
+        alive_t = alive_history[t]
+        alive_prev = alive_history[t-1]
+        alive_both = alive_t & alive_prev
+        
+        if np.sum(alive_both) > 0:
+            positions_t = positions_history[t, alive_both]
+            positions_prev = positions_history[t-1, alive_both]
+            
+            # Compute displacement magnitude
+            displacement = np.linalg.norm(positions_t - positions_prev, axis=1)
+            
+            # Penalize very small displacements (< 0.1 m per timestep)
+            # Fish should move at least ~0.1-0.5 m/s minimum
+            stagnant_mask = displacement < 0.1  # Less than 10cm movement
+            stagnation_penalty += np.sum(stagnant_mask)
+    
+    # Normalize by total agent-timesteps
+    stagnation_penalty /= (T * N)
+    
     # =================================================================
     # Penalize fish swimming off-heading from upstream direction
     # Fish should orient against flow (rheotaxis), not just move north
@@ -784,8 +811,8 @@ def compute_episode_reward(
                 # Misalignment penalty: 0 when aligned, 1 when perpendicular, 2 when opposite
                 misalignment = 1.0 - alignment
                 
-                # Sum misalignment for agents in significant flow
-                rheotaxis_alignment_penalty += np.mean(misalignment[significant_flow])
+                # Median misalignment for agents in significant flow (robust to outliers)
+                rheotaxis_alignment_penalty += np.median(misalignment[significant_flow])
         
         # Average over timesteps
         rheotaxis_alignment_penalty /= T
@@ -838,32 +865,34 @@ def compute_episode_reward(
             weight_diversity_bonus = entropy * 5.0  # Scale to ~5-10 range
     
     reward = (
-        mean_cohesion * 10.0 +
-        (mean_alignment + 1.0) * 10.0 +  # INCREASED: Alignment critical for coordinated schooling (shift -1:1 → 0:2, scale to 0:20)
-        mean_separation * 5.0 +
-        mean_upstream_progress * 30.0 +  # CRITICAL: Migration is PRIMARY goal - doubled weight!
+        median_cohesion * 10.0 +
+        (median_alignment + 1.0) * 10.0 +  # INCREASED: Alignment critical for coordinated schooling (shift -1:1 → 0:2, scale to 0:20)
+        median_separation * 5.0 +
+        median_upstream_progress * 30.0 +  # CRITICAL: Migration is PRIMARY goal - doubled weight!
         energy_efficiency * 2.0 +
         mean_drafting_benefit * 20.0 +
         agents_near_boundary * -5.0 +
         dead_count * -50.0 +
         accel_smoothness_penalty * -0.2 +
         fatigue_penalty * -10.0 +  # CRITICAL: Heavily penalize low battery states
+        stagnation_penalty * -20.0 +  # CRITICAL: Penalize stationary fish (vibrating lattices)
         rheotaxis_alignment_penalty * -10.0 +  # CRITICAL: Fish must orient into flow, not just swim north!
         min_schooling_weight_penalty +  # CRITICAL: Prevent zero schooling weights
         weight_diversity_bonus  # Encourage balanced weight distribution
     )
     
     components = {
-        'cohesion': mean_cohesion * 10.0,
-        'alignment': (mean_alignment + 1.0) * 10.0,
-        'separation': mean_separation * 5.0,
-        'upstream_progress': mean_upstream_progress * 30.0,
+        'cohesion': median_cohesion * 10.0,
+        'alignment': (median_alignment + 1.0) * 10.0,
+        'separation': median_separation * 5.0,
+        'upstream_progress': median_upstream_progress * 30.0,
         'energy_efficiency': energy_efficiency * 2.0,
         'drafting_benefit': mean_drafting_benefit * 20.0,
         'boundary_penalty': agents_near_boundary * -5.0,
         'mortality_penalty': dead_count * -50.0,
         'smoothness_penalty': accel_smoothness_penalty * -0.2,
         'fatigue_penalty': fatigue_penalty * -10.0,
+        'stagnation_penalty': stagnation_penalty * -20.0,
         'rheotaxis_alignment': rheotaxis_alignment_penalty * -10.0,
         'min_schooling_penalty': min_schooling_weight_penalty,
         'weight_diversity_bonus': weight_diversity_bonus,
@@ -1046,8 +1075,36 @@ class RLTrainer:
                           f"alignment={components['alignment']:.1f}, "
                           f"upstream={components['upstream_progress']:.1f}")
             
-            # Mutate weights for next episode (exploration)
-            current_weights = self.best_weights.mutate(mutation_scale=self.exploration_noise)
+            # Adaptive mutation strategy for next episode
+            # Key insight: WORSE solutions should explore MORE aggressively
+            # BETTER solutions should refine more carefully
+            
+            if improved:
+                # New best found - small refinement mutation from this new best
+                current_weights = current_weights.mutate(mutation_scale=self.exploration_noise * 0.5)
+            else:
+                # Didn't improve - need to explore more aggressively
+                # Compute performance gap to decide mutation strength
+                if self.best_reward > -1e6:  # Valid best exists
+                    performance_ratio = reward / self.best_reward if self.best_reward > 0 else 0.0
+                    
+                    # If we're far from best (performance_ratio < 0.5), mutate A LOT
+                    # If we're close to best (performance_ratio > 0.8), mutate moderately
+                    if performance_ratio < 0.5:
+                        # Very poor performance - large exploration from best
+                        mutation_scale = self.exploration_noise * 3.0
+                    elif performance_ratio < 0.8:
+                        # Moderate performance - normal exploration
+                        mutation_scale = self.exploration_noise * 1.5
+                    else:
+                        # Close to best - small refinement
+                        mutation_scale = self.exploration_noise
+                    
+                    # Mutate from best with adaptive scale
+                    current_weights = self.best_weights.mutate(mutation_scale=mutation_scale)
+                else:
+                    # First episode or no valid best yet
+                    current_weights = current_weights.mutate(mutation_scale=self.exploration_noise)
         
         if verbose:
             print()

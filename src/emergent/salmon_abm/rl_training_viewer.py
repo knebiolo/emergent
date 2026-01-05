@@ -850,8 +850,9 @@ class RLTrainingViewer(QMainWindow):
             
             # Enable neighbor sensing for schooling cues
             fish_length_m = 0.3  # Approximate 300mm fish
-            sim.neighbor_buffer_radius = weights.sensory_range * fish_length_m
-            sim.neighbor_buffer_lengths = weights.sensory_range
+            sensory_range = 2.0  # Fixed biological constant (body lengths)
+            sim.neighbor_buffer_radius = sensory_range * fish_length_m
+            sim.neighbor_buffer_lengths = sensory_range
             
             # RANDOMIZE initial conditions for RL exploration
             # Random headings [0, 2π] instead of upstream direction
