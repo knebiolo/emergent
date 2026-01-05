@@ -274,8 +274,8 @@ class BehavioralWeights:
         for idx in range(10):
             mutated[f'order_{idx}'] = int(current_order[idx])
         
-        # Fixed parameters (not trainable)
-        fixed_params = {'threat_level'}
+        # Fixed parameters (not trainable) - user-configured thresholds
+        fixed_params = {'threat_level', 'arbitration_tolerance'}
         
         # Mutate all other fields (weights, thresholds, etc.)
         for key, value in data.items():
@@ -907,10 +907,10 @@ def compute_episode_reward(
             weight_diversity_bonus = entropy * 5.0  # Scale to ~5-10 range
     
     reward = (
-        sum_cohesion * 0.01 +  # Scale: sum across agents×timesteps
-        sum_alignment * 0.01 +
-        sum_separation * 0.005 +
-        sum_upstream_progress * 1.0 +  # Total meters upstream (can be negative)
+        sum_cohesion * 0.001 +  # Reduced 10× - tight clustering less valuable
+        sum_alignment * 0.01 +  # Maintain - coordinated swimming important
+        sum_separation * 0.005 +  # Back to original - let collisions emerge naturally
+        sum_upstream_progress * 10.0 +  # Increased 10× - PRIMARY OBJECTIVE
         energy_efficiency * 2.0 +
         mean_drafting_benefit * 20.0 +
         agents_near_boundary * 0.0 +  # DISABLED: boundary_coords never passed
@@ -918,16 +918,16 @@ def compute_episode_reward(
         accel_smoothness_penalty * -0.001 +  # Sum of jerk
         fatigue_penalty * -0.1 +  # Count of low-battery agent-timesteps
         stagnation_penalty * -0.2 +  # Count of stagnant agent-timesteps
-        rheotaxis_alignment_penalty * -0.1 +  # Sum of misalignment
+        rheotaxis_alignment_penalty * -1.0 +  # Increased 10× - must face upstream
         min_schooling_weight_penalty +  # CRITICAL: Prevent zero schooling weights
         weight_diversity_bonus  # Encourage balanced weight distribution
     )
     
     components = {
-        'cohesion': sum_cohesion * 0.01,
+        'cohesion': sum_cohesion * 0.001,
         'alignment': sum_alignment * 0.01,
         'separation': sum_separation * 0.005,
-        'upstream_progress': sum_upstream_progress * 1.0,
+        'upstream_progress': sum_upstream_progress * 10.0,
         'energy_efficiency': energy_efficiency * 2.0,
         'drafting_benefit': mean_drafting_benefit * 20.0,
         'boundary_penalty': agents_near_boundary * -0.05,
@@ -935,7 +935,7 @@ def compute_episode_reward(
         'smoothness_penalty': accel_smoothness_penalty * -0.001,
         'fatigue_penalty': fatigue_penalty * -0.1,
         'stagnation_penalty': stagnation_penalty * -0.2,
-        'rheotaxis_alignment': rheotaxis_alignment_penalty * -0.1,
+        'rheotaxis_alignment': rheotaxis_alignment_penalty * -1.0,
         'min_schooling_penalty': min_schooling_weight_penalty,
         'weight_diversity_bonus': weight_diversity_bonus,
         'total': reward

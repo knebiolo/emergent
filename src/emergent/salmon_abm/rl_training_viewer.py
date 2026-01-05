@@ -1119,15 +1119,15 @@ class RLTrainingViewer(QMainWindow):
         print(f"[BLANKET VALUE DEBUG] Set all weights to {blanket_value}", flush=True)
         print(f"[BLANKET VALUE DEBUG] shallow_weight={self.current_weights.shallow_weight}, cohesion_weight={self.current_weights.cohesion_weight}", flush=True)
         
-        # Update display
-        self.weights_panel.update_weights(self.current_weights)
-        
-        # Update order display
-        default_order = {
-            0: 'shallow', 1: 'border', 2: 'avoid', 3: 'collision', 4: 'alignment',
-            5: 'cohesion', 6: 'low_speed', 7: 'refugia', 8: 'rheotaxis', 9: 'wave_drag'
-        }
-        self.weights_panel.update_order(default_order, self.current_weights)
+        # Update spinbox values directly (don't rebuild UI)
+        weight_keys = [
+            'shallow_weight', 'border_cue_weight', 'avoid_weight', 'collision_weight',
+            'alignment_weight', 'cohesion_weight', 'low_speed_weight', 'refugia_weight',
+            'rheotaxis_weight', 'wave_drag_weight'
+        ]
+        for key in weight_keys:
+            if key in self.weights_panel.weight_spinboxes:
+                self.weights_panel.weight_spinboxes[key].setValue(blanket_value)
         
         self.control_panel.append_log(f"📋 Set all weights to blanket value: {blanket_value}")
         self.control_panel.status_label.setText(f"Ready with uniform weights ({blanket_value})")
