@@ -48,6 +48,7 @@ try:
         QLineEdit,
         QFileDialog,
         QCheckBox,
+        QComboBox,
     )
     from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QObject, QThread
     from PyQt5.QtGui import QPainter, QColor, QPen, QFont
@@ -334,6 +335,9 @@ class ControlPanel(QWidget):
     randomize_weights = pyqtSignal()
     randomize_order = pyqtSignal()
     reset_training = pyqtSignal()  # NEW: Reset to initial state
+    episode_selected = pyqtSignal(int)  # NEW: User selected episode to replay
+    next_episode = pyqtSignal()  # NEW: Show next episode
+    prev_episode = pyqtSignal()  # NEW: Show previous episode
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -364,6 +368,34 @@ class ControlPanel(QWidget):
         btn_layout.addWidget(self.btn_stop)
         btn_group.setLayout(btn_layout)
         layout.addWidget(btn_group)
+        
+        # Episode navigation
+        nav_group = QGroupBox("Episode Navigation")
+        nav_layout = QVBoxLayout()
+        
+        # Dropdown + buttons row
+        nav_controls = QHBoxLayout()
+        
+        self.btn_prev_episode = QPushButton("◀")
+        self.btn_prev_episode.setMaximumWidth(40)
+        self.btn_prev_episode.setToolTip("Show previous episode")
+        self.btn_prev_episode.clicked.connect(self.prev_episode.emit)
+        nav_controls.addWidget(self.btn_prev_episode)
+        
+        self.episode_combo = QComboBox()
+        self.episode_combo.setToolTip("Select episode to replay")
+        self.episode_combo.currentIndexChanged.connect(self._on_episode_combo_changed)
+        nav_controls.addWidget(self.episode_combo)
+        
+        self.btn_next_episode = QPushButton("▶")
+        self.btn_next_episode.setMaximumWidth(40)
+        self.btn_next_episode.setToolTip("Show next episode")
+        self.btn_next_episode.clicked.connect(self.next_episode.emit)
+        nav_controls.addWidget(self.btn_next_episode)
+        
+        nav_layout.addLayout(nav_controls)
+        nav_group.setLayout(nav_layout)
+        layout.addWidget(nav_group)
         
         # Training parameters
         params_group = QGroupBox("Training Parameters")
@@ -484,7 +516,18 @@ class ControlPanel(QWidget):
         
         layout.addStretch()
         self.setLayout(layout)
-        
+    
+    def _on_episode_combo_changed(self, index):
+        """Handle episode selection from dropdown."""
+        if index >= 0:
+            self.episode_selected.emit(index)
+    
+    def add_episode_to_list(self, episode_num: int):
+        """Add completed episode to navigation dropdown."""
+        self.episode_combo.addItem(f"Episode {episode_num + 1}")
+        # Auto-select newest episode
+        self.episode_combo.setCurrentIndex(self.episode_combo.count() - 1)
+    
     def append_log(self, message: str):
         """Append message to training log (if using text log fallback)."""
         if not self.has_plot:
@@ -632,20 +675,11 @@ class TrainingWorker(QObject):
                 # Store history
                 self.trainer.episode_history.append((episode, float(reward)))
                 
-                # PIPELINE OPTIMIZATION: Wait for previous episode's animation to finish BEFORE emitting this one
-                # This allows next episode to compute while current animates
-                if episode > 0:  # First episode has no previous animation
-                    print(f"Episode {episode}: Waiting for previous episode's visualization to complete...")
-                    self.animation_complete.wait()
-                    print(f"Episode {episode}: Previous visualization complete")
-                
-                # Clear the animation complete flag for THIS episode
-                self.animation_complete.clear()
-                
-                # Emit episode data - UI will handle visualization (include battery and alive for coloring)
+                # Emit episode data immediately - viewer will queue if busy
+                # NO WAITING - next episode computes while current animates!
                 self.episode_computed.emit(episode, float(reward), components, positions, headings, battery, alive, current_weights)
                 
-                # Mutate for next episode (compute WHILE current episode animates)
+                # Mutate for next episode (compute in parallel with visualization)
                 current_weights = self.trainer.best_weights.mutate(
                     mutation_scale=self.trainer.exploration_noise
                 )
@@ -700,6 +734,14 @@ class RLTrainingViewer(QMainWindow):
         self.training_worker = None
         self.initial_reward = None
         
+        # Episode visualization queue (for parallel computation)
+        from collections import deque
+        self.episode_queue = deque()  # Queue of (episode, reward, components, positions, headings, battery, alive, weights)
+        self.is_animating = False  # Track if viewer is currently animating
+        
+        # Completed episodes storage (for replay)
+        self.completed_episodes = []  # List of (episode, reward, components, positions, headings, battery, alive, weights)
+        
         # Current behavioral weights (modified by randomize buttons)
         from emergent.salmon_abm.rl_training import BehavioralWeights
         self.current_weights = BehavioralWeights()
@@ -731,6 +773,9 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.randomize_weights.connect(self.on_randomize_weights)
         self.control_panel.randomize_order.connect(self.on_randomize_order)
         self.control_panel.reset_training.connect(self.on_reset_training)
+        self.control_panel.episode_selected.connect(self.on_episode_selected)
+        self.control_panel.next_episode.connect(self.on_next_episode)
+        self.control_panel.prev_episode.connect(self.on_prev_episode)
         
         # Connect animation finished signal
         self.simulation_canvas.animation_finished.connect(self.on_animation_finished)
@@ -1063,20 +1108,48 @@ class RLTrainingViewer(QMainWindow):
         
     def on_episode_computed(self, episode: int, reward: float, components: Dict[str, float], 
                            positions: np.ndarray, headings: np.ndarray, battery: np.ndarray, alive: np.ndarray, weights):
-        """Handle episode computation complete - start visualization and wait."""
-        # Store episode data for later processing after animation (include current episode weights)
+        """Handle episode computation complete - queue for visualization."""
+        # Add episode to queue
+        self.episode_queue.append((episode, reward, components, positions, headings, battery, alive, weights))
+        
+        # Update status
+        total = self.control_panel.episodes_spin.value()
+        queue_len = len(self.episode_queue)
+        self.control_panel.status_label.setText(f"Computed episode {episode + 1}/{total} (queue: {queue_len})")
+        
+        # If not currently animating, start processing queue
+        if not self.is_animating:
+            self.process_next_queued_episode()
+    
+    def process_next_queued_episode(self):
+        """Process next episode from queue."""
+        if len(self.episode_queue) == 0:
+            return
+        
+        # Mark as animating
+        self.is_animating = True
+        
+        # Get next episode from queue
+        episode, reward, components, positions, headings, battery, alive, weights = self.episode_queue.popleft()
+        
+        # Store full episode data for later saving to completed_episodes
+        self._current_episode_data = (episode, reward, components, positions.copy(), headings.copy(), battery.copy(), alive.copy(), weights)
+        
+        # Store for processing after animation
         self.pending_episode_data = (episode, reward, components, weights)
         
         # Update status
         total = self.control_panel.episodes_spin.value()
-        self.control_panel.status_label.setText(f"Visualizing episode {episode + 1}/{total}...")
+        queue_len = len(self.episode_queue)
+        self.control_panel.status_label.setText(f"Visualizing episode {episode + 1}/{total} (queue: {queue_len})")
         
-        # Start visualization with battery and alive data for coloring - this will trigger animation_finished when done
+        # Start visualization - this will trigger animation_finished when done
         self.simulation_canvas.set_positions(positions, headings, battery, alive)
         
     def on_animation_finished(self):
-        """Handle animation playback complete - now update UI and continue training."""
+        """Handle animation playback complete - update UI and process next queued episode."""
         if self.pending_episode_data is None:
+            self.is_animating = False
             return
             
         episode, reward, components, current_weights = self.pending_episode_data
@@ -1128,9 +1201,23 @@ class RLTrainingViewer(QMainWindow):
         # Update status
         self.control_panel.status_label.setText(f"Episode {episode + 1}/{total} complete")
         
-        # Signal worker that animation is complete and it can proceed to next episode
-        if self.training_worker:
-            self.training_worker.animation_complete.set()
+        # Store completed episode for replay (get original data from process_next_queued_episode)
+        # We need to retrieve the positions/headings/battery/alive that were used
+        # Store in completed_episodes list
+        if hasattr(self, '_current_episode_data'):
+            self.completed_episodes.append(self._current_episode_data)
+            self.control_panel.add_episode_to_list(episode)
+            delattr(self, '_current_episode_data')
+        
+        # Clear pending data
+        self.pending_episode_data = None
+        
+        # Mark animation as complete
+        self.is_animating = False
+        
+        # Process next episode from queue if available
+        if len(self.episode_queue) > 0:
+            self.process_next_queued_episode()
         
     def on_training_completed(self, best_weights: BehavioralWeights, history: List[Tuple[int, float]]):
         """Handle training completion."""
@@ -1161,6 +1248,42 @@ class RLTrainingViewer(QMainWindow):
         
         # Re-enable parameter controls
         self.control_panel.set_parameters_enabled(True)
+    
+    def on_episode_selected(self, index: int):
+        """Replay selected episode from dropdown."""
+        if index < 0 or index >= len(self.completed_episodes):
+            return
+        
+        episode, reward, components, positions, headings, battery, alive, weights = self.completed_episodes[index]
+        
+        # Update weights and diagnostics
+        total = self.control_panel.episodes_spin.value()
+        best_reward = self.trainer.best_reward if self.trainer else reward
+        initial_reward = self.initial_reward if self.initial_reward else reward
+        
+        self.weights_panel.update_diagnostics(episode + 1, total, reward, best_reward, initial_reward)
+        self.weights_panel.update_components(components)
+        self.weights_panel.update_weights(weights)
+        
+        default_order = {i: ['shallow', 'border', 'avoid', 'collision', 'refugia', 'rheotaxis', 'low_speed', 'wave_drag', 'cohesion', 'alignment'][i] for i in range(10)}
+        self.weights_panel.update_order(default_order, weights)
+        
+        # Replay visualization
+        self.simulation_canvas.set_positions(positions, headings, battery, alive)
+        
+        self.control_panel.status_label.setText(f"Replaying episode {episode + 1}")
+    
+    def on_next_episode(self):
+        """Show next episode in list."""
+        current_index = self.control_panel.episode_combo.currentIndex()
+        if current_index < len(self.completed_episodes) - 1:
+            self.control_panel.episode_combo.setCurrentIndex(current_index + 1)
+    
+    def on_prev_episode(self):
+        """Show previous episode in list."""
+        current_index = self.control_panel.episode_combo.currentIndex()
+        if current_index > 0:
+            self.control_panel.episode_combo.setCurrentIndex(current_index - 1)
 
 
 def main():

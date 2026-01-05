@@ -2220,7 +2220,6 @@ class simulation:
         self.test_weights = {
             'cohesion': weights.cohesion_weight,
             'alignment': weights.alignment_weight,
-            'separation': weights.separation_weight,
             'rheotaxis': weights.rheotaxis_weight,
             'border_cue': weights.border_cue_weight,
             'collision': weights.collision_weight,
@@ -2229,7 +2228,7 @@ class simulation:
             'wave_drag': weights.wave_drag_weight,
             'shallow': weights.shallow_weight,
             'avoid': weights.avoid_weight,
-            'sensory_range': weights.sensory_range,
+            'sensory_range': 2.0,  # Fixed biological constant (meters)
             'threat_level': weights.threat_level,
             'cohesion_radius_relaxed': weights.cohesion_radius_relaxed,
             'cohesion_radius_threatened': weights.cohesion_radius_threatened,

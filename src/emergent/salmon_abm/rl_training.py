@@ -39,7 +39,6 @@ class BehavioralWeights:
     # Schooling dynamics
     cohesion_weight: float = 1000.0
     alignment_weight: float = 25000.0
-    separation_weight: float = 5000.0
     
     # Environmental responses
     rheotaxis_weight: float = 25000.0
@@ -55,8 +54,7 @@ class BehavioralWeights:
     shallow_weight: float = 500000.0
     avoid_weight: float = 25000.0
     
-    # Sensory and threat parameters
-    sensory_range: float = 2.0  # Body lengths (biological constant)
+    # Threat parameters
     threat_level: float = 0.3  # 0.0 = relaxed, 1.0 = high threat
     
     # Dynamic cohesion parameters (threat-responsive)
@@ -130,7 +128,6 @@ class BehavioralWeights:
             'avoid': self.avoid_weight,
             
             # Threat-responsive schooling parameters (ACTUALLY IMPLEMENTED)
-            'sensory_range': self.sensory_range,
             'threat_level': self.threat_level,
             'cohesion_radius_relaxed': self.cohesion_radius_relaxed,
             'cohesion_radius_threatened': self.cohesion_radius_threatened,
@@ -167,9 +164,6 @@ class BehavioralWeights:
                 raise ValueError(f"{field_name} must be non-negative, got {value}")
         
         # Check specific constraints
-        if self.sensory_range < 0.5 or self.sensory_range > 5.0:
-            raise ValueError(f"sensory_range should be 0.5-5.0 BL (biological), got {self.sensory_range}")
-        
         if self.threat_level < 0.0 or self.threat_level > 1.0:
             raise ValueError(f"threat_level must be 0.0-1.0, got {self.threat_level}")
         

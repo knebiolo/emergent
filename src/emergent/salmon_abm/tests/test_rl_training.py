@@ -59,7 +59,7 @@ class TestBehavioralWeights:
         data = {
             'cohesion_weight': 2000.0,
             'alignment_weight': 28000.0,
-            'separation_weight': 6000.0,
+
             'rheotaxis_weight': 30000.0,
             'border_cue_weight': 250000.0,
             'collision_weight': 2500.0,
@@ -68,7 +68,6 @@ class TestBehavioralWeights:
             'refugia_weight': 60000.0,
             'shallow_weight': 600000.0,
             'avoid_weight': 30000.0,
-            'sensory_range': 2.5,
             'threat_level': 0.4,
             'cohesion_radius_relaxed': 3.2,
             'cohesion_radius_threatened': 1.6,
