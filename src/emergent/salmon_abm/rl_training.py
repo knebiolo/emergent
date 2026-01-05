@@ -54,6 +54,9 @@ class BehavioralWeights:
     shallow_weight: float = 500000.0
     avoid_weight: float = 25000.0
     
+    # Arbitration parameters
+    arbitration_tolerance: float = 50000.0  # Tolerance for cue accumulation (how many 'f4cks' a fish has)
+    
     # Threat parameters (FIXED - not trainable)
     threat_level: float = 1.0  # Fixed at 1.0 (high threat - tight schooling)
     

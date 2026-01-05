@@ -232,10 +232,10 @@ class WeightsPanel(QWidget):
         title.setFont(QFont("Arial", 14, QFont.Bold))
         layout.addWidget(title)
         
-        # Weights display (will be populated dynamically)
-        self.weights_group = QGroupBox("Current Weights")
+        # Weights display (editable spin boxes)
+        self.weights_group = QGroupBox("Current Weights (Editable)")
         self.weights_layout = QVBoxLayout()
-        self.weight_labels = {}
+        self.weight_spinboxes = {}  # Changed from weight_labels to weight_spinboxes
         self.weights_group.setLayout(self.weights_layout)
         layout.addWidget(self.weights_group)
         
@@ -274,35 +274,84 @@ class WeightsPanel(QWidget):
         self.setLayout(layout)
         
     def update_weights(self, weights: BehavioralWeights):
-        """Update displayed weights."""
+        """Update displayed weights with editable spin boxes."""
         print(f"[UPDATE_WEIGHTS DEBUG] Called with weights, shallow_weight={weights.shallow_weight}, cohesion_weight={weights.cohesion_weight}", flush=True)
         
-        # Clear existing labels - use delete() instead of deleteLater() for immediate removal
-        for label in self.weight_labels.values():
-            self.weights_layout.removeWidget(label)
-            label.setParent(None)  # Immediately remove from parent
-            label.deleteLater()
-        self.weight_labels.clear()
+        # Clear ALL existing widgets and layouts properly
+        # First, delete all child widgets and layouts
+        while self.weights_layout.count():
+            item = self.weights_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                # Clear nested layout
+                while item.layout().count():
+                    child = item.layout().takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+                item.layout().deleteLater()
         
-        # Add new weight labels
+        self.weight_spinboxes.clear()
+        
+        # Add new weight spin boxes
         weights_dict = weights.to_dict()
         print(f"[UPDATE_WEIGHTS DEBUG] weights_dict has {len(weights_dict)} items", flush=True)
-        for name, value in sorted(weights_dict.items()):
-            # Skip order fields - they're shown in the Cue Application Order panel
-            if name.startswith('order_'):
+        
+        # Weight attributes to display (skip order fields and non-weight params)
+        weight_keys = [
+            'shallow_weight', 'border_cue_weight', 'avoid_weight', 'collision_weight',
+            'alignment_weight', 'cohesion_weight', 'low_speed_weight', 'refugia_weight',
+            'rheotaxis_weight', 'wave_drag_weight', 'arbitration_tolerance'
+        ]
+        
+        for name in weight_keys:
+            if name not in weights_dict:
                 continue
+                
+            value = weights_dict[name]
             
-            if isinstance(value, int):
-                label = QLabel(f"{name}: {value}")
-            elif isinstance(value, float):
-                label = QLabel(f"{name}: {value:.1f}")
-            else:
-                label = QLabel(f"{name}: {value}")
-            label.setFont(QFont("Courier New", 9))
-            self.weights_layout.addWidget(label)
-            self.weight_labels[name] = label
-            print(f"[UPDATE_WEIGHTS DEBUG] Added label: {name}={value}", flush=True)
+            # Create horizontal layout for label + spinbox
+            row_layout = QHBoxLayout()
             
+            # Label
+            label_text = name.replace('_weight', '').replace('_', ' ').title()
+            label = QLabel(f"{label_text}:")
+            label.setMinimumWidth(150)
+            row_layout.addWidget(label)
+            
+            # Spin box
+            spinbox = QDoubleSpinBox()
+            spinbox.setRange(0, 1000000)
+            spinbox.setDecimals(1)
+            spinbox.setValue(float(value))
+            spinbox.setSingleStep(100.0 if name == 'arbitration_tolerance' else 1000.0)
+            spinbox.setObjectName(name)  # Store attribute name
+            
+            # Connect to update function
+            spinbox.valueChanged.connect(lambda v, attr=name: self._on_weight_changed(attr, v))
+            
+            row_layout.addWidget(spinbox)
+            self.weights_layout.addLayout(row_layout)
+            self.weight_spinboxes[name] = spinbox
+            print(f"[UPDATE_WEIGHTS DEBUG] Added spinbox: {name}={value}", flush=True)
+    
+    def _on_weight_changed(self, attr_name: str, value: float):
+        """Called when a weight spinbox value changes."""
+        print(f"[WEIGHT CHANGED] {attr_name} = {value}", flush=True)
+        # The parent window will handle applying these changes to current_weights
+    
+    def get_edited_weights(self, base_weights: BehavioralWeights) -> BehavioralWeights:
+        """Get a new BehavioralWeights object with values from the spin boxes."""
+        weights_dict = base_weights.to_dict()
+        
+        # Update with edited values from spin boxes
+        for name, spinbox in self.weight_spinboxes.items():
+            weights_dict[name] = spinbox.value()
+        
+        # Create new weights object from updated dict
+        from emergent.salmon_abm.rl_training import BehavioralWeights
+        return BehavioralWeights.from_dict(weights_dict)
+    
     def update_diagnostics(self, episode: int, total_episodes: int, reward: float, 
                           best_reward: float, initial_reward: float):
         """Update training diagnostics."""
@@ -977,8 +1026,9 @@ class RLTrainingViewer(QMainWindow):
             # Create simulation factory
             simulation_factory = self.create_simulation_factory(num_agents, num_timesteps)
             
-            # Use current_weights (which may have been randomized/modified)
-            initial_weights = self.current_weights
+            # Get edited weights from the panel (user may have manually edited values)
+            initial_weights = self.weights_panel.get_edited_weights(self.current_weights)
+            self.current_weights = initial_weights  # Update current_weights with edits
             config = {
                 'exploration_noise': exploration_noise,
                 'body_length': 0.3,  # 300mm fish
@@ -1322,11 +1372,34 @@ class RLTrainingViewer(QMainWindow):
         
         # Store completed episode for replay (get original data from process_next_queued_episode)
         # We need to retrieve the positions/headings/battery/alive that were used
-        # Store in completed_episodes list
+        # Store in completed_episodes list (with memory optimization)
         if hasattr(self, '_current_episode_data'):
-            self.completed_episodes.append(self._current_episode_data)
-            # Add to dropdown navigation
-            self.control_panel.add_episode_to_list(episode)
+            episode_num, reward, components, positions, headings, battery, alive, weights = self._current_episode_data
+            
+            # Get storage interval from control panel
+            storage_interval = self.control_panel.storage_interval_spin.value()
+            
+            # Decide whether to store this episode
+            should_store = False
+            
+            # Always store first 5 episodes (show initial chaos)
+            if episode_num < 5:
+                should_store = True
+            # Store every Nth episode
+            elif episode_num % storage_interval == 0:
+                should_store = True
+            
+            if should_store:
+                self.completed_episodes.append(self._current_episode_data)
+                self.control_panel.add_episode_to_list(episode_num)
+                print(f"[STORAGE] Stored episode {episode_num} for replay (interval={storage_interval})", flush=True)
+            
+            # Always track best episode separately
+            if reward > self.best_reward:
+                self.best_reward = reward
+                self.best_episode_data = self._current_episode_data
+                print(f"[STORAGE] New best episode: {episode_num} with reward {reward:.2f}", flush=True)
+            
             delattr(self, '_current_episode_data')
         else:
             # Safety: if _current_episode_data missing, still try to add to list

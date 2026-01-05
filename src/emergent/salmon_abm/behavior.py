@@ -2638,7 +2638,9 @@ class behavior():
         except Exception:
             # If simulation lacks helpers during lightweight probes, skip eddy detection
             pass
-        tolerance = 50000
+        # Get tolerance from test_weights if available, otherwise use default
+        tw = getattr(self.simulation, 'test_weights', None)
+        tolerance = tw.get('arbitration_tolerance', 50000) if tw else 50000
         tol2 = float(tolerance) * float(tolerance)
         vec_sum_migratory = np.zeros_like(rheotaxis)
         vec_sum_tired = np.zeros_like(rheotaxis)
