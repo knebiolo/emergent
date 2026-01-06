@@ -1417,8 +1417,8 @@ class RLTrainingViewer(QMainWindow):
         num_timesteps = self.control_panel.timesteps_spin.value()
         self.trainer = RLTrainer(
             simulation_factory=self.create_simulation_factory(num_agents, num_timesteps),
-            num_agents=num_agents,
-            num_timesteps=num_timesteps
+            initial_weights=self.current_weights,
+            config={'num_timesteps': num_timesteps}
         )
         self.training_thread = None
         self.training_worker = None
@@ -1682,6 +1682,41 @@ class RLTrainingViewer(QMainWindow):
         
         # Re-enable parameter controls
         self.control_panel.set_parameters_enabled(True)
+    
+    def closeEvent(self, event):
+        """Handle window close - ensure thread is stopped properly."""
+        # Stop training thread if running
+        if self.training_thread is not None and self.training_thread.isRunning():
+            print("[VIEWER] Stopping training thread before close...", flush=True)
+            try:
+                if self.training_worker is not None:
+                    self.training_worker.stop()
+                self.training_thread.quit()
+                # Wait up to 3 seconds for thread to finish
+                if not self.training_thread.wait(3000):
+                    print("[VIEWER] WARNING: Thread did not stop in time, terminating", flush=True)
+                    self.training_thread.terminate()
+                    self.training_thread.wait(1000)
+            except Exception as e:
+                print(f"[VIEWER] Error stopping thread: {e}", flush=True)
+        
+        # Stop animation timer
+        if hasattr(self.simulation_canvas, 'replay_widget'):
+            try:
+                self.simulation_canvas.replay_widget.playing = False
+                self.simulation_canvas.replay_widget.timer.stop()
+            except Exception:
+                pass
+        
+        # Close simulation if exists
+        if self.trainer and hasattr(self.trainer, 'sim') and self.trainer.sim:
+            try:
+                self.trainer.sim.close()
+            except Exception:
+                pass
+        
+        print("[VIEWER] Window closed cleanly", flush=True)
+        event.accept()
     
     def on_episode_selected(self, index: int):
         """Replay selected episode from dropdown."""
