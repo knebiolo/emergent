@@ -50,6 +50,51 @@ except Exception:
     raise
 
 
+def _infer_n_agents_from_h5(f) -> Optional[int]:
+    """Infer num agents from common 1D datasets, if present."""
+    if h5py is None:
+        return None
+    for key in (
+        "agent_data/sex",
+        "agent_data/length",
+        "agent_data/weight",
+        "agent_data/body_depth",
+        "sex",
+        "length",
+        "weight",
+        "body_depth",
+    ):
+        try:
+            if key in f and isinstance(f[key], h5py.Dataset):
+                ds = f[key]
+                if len(ds.shape) == 1:
+                    return int(ds.shape[0])
+        except Exception:
+            continue
+    return None
+
+
+def _orient_timeseries_2d(arr: np.ndarray, *, n_agents: Optional[int]) -> np.ndarray:
+    """Return array shaped (T, N) for time-series datasets.
+
+    Handles either (T, N) or (N, T) on disk.
+    """
+    arr = np.asarray(arr)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D time-series array; got shape {arr.shape}")
+
+    if n_agents is not None:
+        if arr.shape[1] == int(n_agents) and arr.shape[0] != int(n_agents):
+            return arr
+        if arr.shape[0] == int(n_agents) and arr.shape[1] != int(n_agents):
+            return arr.T
+
+    # Heuristic fallback: when N >> T, (T,N) has the larger dimension in axis 1.
+    if arr.shape[0] > arr.shape[1]:
+        return arr.T
+    return arr
+
+
 def load_positions_from_h5(path: str) -> np.ndarray:
     """Heuristic loader for HDF5 position datasets.
 
@@ -57,75 +102,80 @@ def load_positions_from_h5(path: str) -> np.ndarray:
     """
     if h5py is None:
         raise RuntimeError("h5py is required to load HDF5 files")
-    f = h5py.File(path, "r")
+    with h5py.File(path, "r") as f:
+        n_agents = _infer_n_agents_from_h5(f)
 
-    datasets = {}
+        datasets = {}
 
-    def collect(group, prefix=""):
-        for k, v in group.items():
-            name = f"{prefix}/{k}" if prefix else k
-            if isinstance(v, h5py.Dataset):
-                datasets[name] = v
-            else:
-                collect(v, name)
+        def collect(group, prefix=""):
+            for k, v in group.items():
+                name = f"{prefix}/{k}" if prefix else k
+                if isinstance(v, h5py.Dataset):
+                    datasets[name] = v
+                else:
+                    collect(v, name)
 
-    collect(f)
+        collect(f)
 
-    # Priority check: agent_data/X and agent_data/Y (headless runner format)
-    if 'agent_data/X' in datasets and 'agent_data/Y' in datasets:
-        X = np.array(datasets['agent_data/X']).T  # Transpose (N, T) to (T, N)
-        Y = np.array(datasets['agent_data/Y']).T
-        f.close()
-        return np.stack((X, Y), axis=2)  # Shape: (T, N, 2)
+        # Priority check: agent_data/X and agent_data/Y (common simulation output format)
+        if 'agent_data/X' in datasets and 'agent_data/Y' in datasets:
+            X_raw = np.array(datasets['agent_data/X'])
+            Y_raw = np.array(datasets['agent_data/Y'])
+            X = _orient_timeseries_2d(X_raw, n_agents=n_agents)
+            Y = _orient_timeseries_2d(Y_raw, n_agents=n_agents)
+            if X.shape != Y.shape:
+                raise RuntimeError(f"agent_data/X shape {X.shape} != agent_data/Y shape {Y.shape}")
+            return np.stack((X, Y), axis=2)  # Shape: (T, N, 2)
 
-    # Common pattern: separate x and y coordinate datasets
-    x_ds = None
-    y_ds = None
-    for name in datasets:
-        ln = name.lower()
-        if ln.endswith("/x") or ln.endswith("_x") or ln.endswith("/x_coords") or ln == "x_coords":
-            x_ds = datasets[name]
-        if ln.endswith("/y") or ln.endswith("_y") or ln.endswith("/y_coords") or ln == "y_coords":
-            y_ds = datasets[name]
+        # Common pattern: separate x and y coordinate datasets
+        x_ds = None
+        y_ds = None
+        for name in datasets:
+            ln = name.lower()
+            if ln.endswith("/x") or ln.endswith("_x") or ln.endswith("/x_coords") or ln == "x_coords":
+                x_ds = datasets[name]
+            if ln.endswith("/y") or ln.endswith("_y") or ln.endswith("/y_coords") or ln == "y_coords":
+                y_ds = datasets[name]
 
-    if x_ds is not None and y_ds is not None and x_ds.shape == y_ds.shape:
-        X = np.array(x_ds)
-        Y = np.array(y_ds)
-        f.close()
-        if X.ndim == 2 and Y.ndim == 2:
-            # Check if shape is (N_agents, T_timesteps) and transpose if needed
-            if X.shape[0] < X.shape[1]:
-                # Likely (N, T) format - transpose to (T, N)
-                X = X.T
-                Y = Y.T
-            # Now stack along last dimension to get (T, N, 2)
-            return np.stack((X, Y), axis=2)
-        raise RuntimeError(f"Unsupported x/y shapes: {X.shape} / {Y.shape}")
+        if x_ds is not None and y_ds is not None and x_ds.shape == y_ds.shape:
+            X_raw = np.array(x_ds)
+            Y_raw = np.array(y_ds)
+            if X_raw.ndim == 2 and Y_raw.ndim == 2:
+                X = _orient_timeseries_2d(X_raw, n_agents=n_agents)
+                Y = _orient_timeseries_2d(Y_raw, n_agents=n_agents)
+                return np.stack((X, Y), axis=2)
+            raise RuntimeError(f"Unsupported x/y shapes: {X_raw.shape} / {Y_raw.shape}")
 
-    # Look for a combined positions dataset
-    for candidate in ("positions", "position", "agents/positions", "agents/position"):
-        if candidate in datasets:
-            d = datasets[candidate]
-            arr = np.array(d)
-            f.close()
-            if arr.ndim == 3 and arr.shape[2] == 2:
-                # normalize to (T, N, 2)
-                if arr.shape[0] < arr.shape[1]:
-                    arr = arr.transpose(1, 0, 2)
+        # Look for a combined positions dataset
+        for candidate in ("positions", "position", "agents/positions", "agents/position"):
+            if candidate in datasets:
+                arr = np.array(datasets[candidate])
+                if arr.ndim == 3 and arr.shape[2] == 2:
+                    # normalize to (T, N, 2) using the same heuristic as timeseries
+                    if n_agents is not None:
+                        if arr.shape[1] == int(n_agents) and arr.shape[0] != int(n_agents):
+                            return arr
+                        if arr.shape[0] == int(n_agents) and arr.shape[1] != int(n_agents):
+                            return arr.transpose(1, 0, 2)
+                    if arr.shape[0] > arr.shape[1]:
+                        return arr.transpose(1, 0, 2)
+                    return arr
+
+        # fallback: any 3D dataset with last dim 2
+        for ds in datasets.values():
+            shp = ds.shape
+            if len(shp) == 3 and shp[2] == 2:
+                arr = np.array(ds)
+                if n_agents is not None:
+                    if arr.shape[1] == int(n_agents) and arr.shape[0] != int(n_agents):
+                        return arr
+                    if arr.shape[0] == int(n_agents) and arr.shape[1] != int(n_agents):
+                        return arr.transpose(1, 0, 2)
+                if arr.shape[0] > arr.shape[1]:
+                    return arr.transpose(1, 0, 2)
                 return arr
 
-    # fallback: any 3D dataset with last dim 2
-    for name, ds in datasets.items():
-        shp = ds.shape
-        if len(shp) == 3 and shp[2] == 2:
-            arr = np.array(ds)
-            if arr.shape[0] < arr.shape[1]:
-                arr = arr.transpose(1, 0, 2)
-            f.close()
-            return arr
-
-    f.close()
-    raise RuntimeError("Could not find positions in HDF5 file; available datasets: " + ",".join(datasets.keys()))
+        raise RuntimeError("Could not find positions in HDF5 file; available datasets: " + ",".join(datasets.keys()))
 
 
 def load_env_from_h5(path: str):
@@ -159,12 +209,11 @@ def load_battery_from_h5(path: str):
     if h5py is None:
         return None
     try:
-        f = h5py.File(path, "r")
-        if 'agent_data/battery' in f:
-            battery = np.array(f['agent_data/battery']).T  # Transpose (N, T) to (T, N)
-            f.close()
-            return battery
-        f.close()
+        with h5py.File(path, "r") as f:
+            if 'agent_data/battery' in f:
+                n_agents = _infer_n_agents_from_h5(f)
+                battery_raw = np.array(f['agent_data/battery'])
+                return _orient_timeseries_2d(battery_raw, n_agents=n_agents)
     except Exception:
         pass
     return None
@@ -180,12 +229,11 @@ def load_heading_from_h5(path: str):
     if h5py is None:
         return None
     try:
-        f = h5py.File(path, "r")
-        if 'agent_data/heading' in f:
-            heading = np.array(f['agent_data/heading']).T  # Transpose (N, T) to (T, N)
-            f.close()
-            return heading
-        f.close()
+        with h5py.File(path, "r") as f:
+            if 'agent_data/heading' in f:
+                n_agents = _infer_n_agents_from_h5(f)
+                heading_raw = np.array(f['agent_data/heading'])
+                return _orient_timeseries_2d(heading_raw, n_agents=n_agents)
     except Exception:
         pass
     return None

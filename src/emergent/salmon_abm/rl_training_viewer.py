@@ -168,7 +168,9 @@ class SimulationCanvas(QWidget):
             battery: Optional array of battery levels for color visualization (green=full, red=depleted)
             alive: Optional boolean array indicating which agents are alive (for dead fish coloring)
         """
+        print(f"[RL VIEWER DEBUG] set_positions called: positions shape={positions.shape if positions is not None else None}", flush=True)
         if positions is None or positions.size == 0:
+            print("[RL VIEWER DEBUG] Positions empty, returning early", flush=True)
             return
             
         # Ensure positions are 3D (T, N, 2)
@@ -209,10 +211,12 @@ class SimulationCanvas(QWidget):
             self.replay_widget.ymax = float(np.nanmax(ys[valid]))
         
         # Start from first frame and auto-play the trajectory
+        print(f"[RL VIEWER DEBUG] Starting animation: T={self.replay_widget.T}, N={self.replay_widget.N}, frame=0", flush=True)
         self.replay_widget.frame = 0
         self.replay_widget.playing = True
         self.replay_widget.start()  # Start animation
         self.replay_widget.update()
+        print(f"[RL VIEWER DEBUG] Animation started, playing={self.replay_widget.playing}", flush=True)
 
 
 class WeightsPanel(QWidget):
@@ -360,6 +364,19 @@ class WeightsPanel(QWidget):
         self.best_reward_label.setText(f"Best Reward: {best_reward:.2f}")
         improvement = reward - initial_reward
         self.improvement_label.setText(f"Improvement: {improvement:+.2f}")
+    
+    def clear_diagnostics(self):
+        """Clear all diagnostic displays."""
+        self.episode_label.setText("Episode: 0 / 0")
+        self.reward_label.setText("Current Reward: 0.00")
+        self.best_reward_label.setText("Best Reward: 0.00")
+        self.improvement_label.setText("Improvement: +0.00")
+        
+        # Clear component labels
+        for label in self.component_labels.values():
+            self.components_layout.removeWidget(label)
+            label.deleteLater()
+        self.component_labels.clear()
         
     def update_components(self, components: Dict[str, float]):
         """Update reward component breakdown."""
@@ -432,6 +449,8 @@ class ControlPanel(QWidget):
     episode_selected = pyqtSignal(int)  # NEW: User selected episode to replay
     next_episode = pyqtSignal()  # NEW: Show next episode
     prev_episode = pyqtSignal()  # NEW: Show previous episode
+    toggle_playback = pyqtSignal()  # Play/pause animation
+    restart_animation = pyqtSignal()  # Restart current episode animation
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -445,23 +464,40 @@ class ControlPanel(QWidget):
         title.setFont(QFont("Arial", 14, QFont.Bold))
         layout.addWidget(title)
         
-        # Control buttons
-        btn_group = QGroupBox("Playback")
-        btn_layout = QVBoxLayout()
+        # Training control buttons
+        train_group = QGroupBox("Training")
+        train_layout = QVBoxLayout()
         
         self.btn_start = QPushButton("▶ Start Training")
-        self.btn_pause = QPushButton("⏸ Pause")
-        self.btn_stop = QPushButton("⏹ Stop")
+        self.btn_pause = QPushButton("⏸ Pause Training")
+        self.btn_stop = QPushButton("⏹ Stop Training")
         
         self.btn_start.clicked.connect(self.start_training.emit)
         self.btn_pause.clicked.connect(self.pause_training.emit)
         self.btn_stop.clicked.connect(self.stop_training.emit)
         
-        btn_layout.addWidget(self.btn_start)
-        btn_layout.addWidget(self.btn_pause)
-        btn_layout.addWidget(self.btn_stop)
-        btn_group.setLayout(btn_layout)
-        layout.addWidget(btn_group)
+        train_layout.addWidget(self.btn_start)
+        train_layout.addWidget(self.btn_pause)
+        train_layout.addWidget(self.btn_stop)
+        train_group.setLayout(train_layout)
+        layout.addWidget(train_group)
+        
+        # Animation playback controls
+        playback_group = QGroupBox("Animation Playback")
+        playback_layout = QHBoxLayout()
+        
+        self.btn_play_pause = QPushButton("⏸ Pause")
+        self.btn_play_pause.setToolTip("Play/Pause current episode animation")
+        self.btn_play_pause.clicked.connect(self.toggle_playback)
+        
+        self.btn_restart_anim = QPushButton("↺ Restart")
+        self.btn_restart_anim.setToolTip("Restart current episode from beginning")
+        self.btn_restart_anim.clicked.connect(self.restart_animation)
+        
+        playback_layout.addWidget(self.btn_play_pause)
+        playback_layout.addWidget(self.btn_restart_anim)
+        playback_group.setLayout(playback_layout)
+        layout.addWidget(playback_group)
         
         # Episode navigation
         nav_group = QGroupBox("Episode Navigation")
@@ -498,7 +534,7 @@ class ControlPanel(QWidget):
         # Episodes
         params_layout.addWidget(QLabel("Episodes:"), 0, 0)
         self.episodes_spin = QSpinBox()
-        self.episodes_spin.setRange(1, 1000)
+        self.episodes_spin.setRange(1, 100000)
         self.episodes_spin.setValue(50)
         self.episodes_spin.setToolTip("Number of training episodes to run. Each episode tests one set of behavioral weights.")
         params_layout.addWidget(self.episodes_spin, 0, 1)
@@ -506,17 +542,17 @@ class ControlPanel(QWidget):
         # Timesteps per episode
         params_layout.addWidget(QLabel("Timesteps:"), 1, 0)
         self.timesteps_spin = QSpinBox()
-        self.timesteps_spin.setRange(10, 1000)
+        self.timesteps_spin.setRange(10, 100000)
         self.timesteps_spin.setValue(100)
-        self.timesteps_spin.setToolTip("Number of simulation timesteps per episode (at 1 second per timestep). Longer episodes allow more behavior to emerge.")
+        self.timesteps_spin.setToolTip("Number of simulation timesteps per episode. Large values increase compute and memory.")
         params_layout.addWidget(self.timesteps_spin, 1, 1)
         
         # Number of agents
         params_layout.addWidget(QLabel("Agents:"), 2, 0)
         self.agents_spin = QSpinBox()
-        self.agents_spin.setRange(10, 1000)
+        self.agents_spin.setRange(10, 50000)
         self.agents_spin.setValue(200)
-        self.agents_spin.setToolTip("Number of fish agents in the simulation. More agents = more realistic schooling but slower computation.")
+        self.agents_spin.setToolTip("Number of fish agents in the simulation. Large values can be slow and memory-heavy.")
         params_layout.addWidget(self.agents_spin, 2, 1)
         
         # Exploration noise
@@ -531,7 +567,7 @@ class ControlPanel(QWidget):
         # Storage interval (memory optimization)
         params_layout.addWidget(QLabel("Store every Nth:"), 4, 0)
         self.storage_interval_spin = QSpinBox()
-        self.storage_interval_spin.setRange(1, 100)
+        self.storage_interval_spin.setRange(1, 10000)
         self.storage_interval_spin.setValue(10)
         self.storage_interval_spin.setToolTip("Store trajectory data for replay every N episodes (plus first 5 and best). 1=all episodes, 10=every 10th. Saves memory for long training runs.")
         params_layout.addWidget(self.storage_interval_spin, 4, 1)
@@ -1011,6 +1047,8 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.episode_selected.connect(self.on_episode_selected)
         self.control_panel.next_episode.connect(self.on_next_episode)
         self.control_panel.prev_episode.connect(self.on_prev_episode)
+        self.control_panel.toggle_playback.connect(self.on_toggle_playback)
+        self.control_panel.restart_animation.connect(self.on_restart_animation)
         
         # Connect animation finished signal
         self.simulation_canvas.animation_finished.connect(self.on_animation_finished)
@@ -1344,23 +1382,49 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.status_label.setText("Ready with shuffled cue order")
     
     def on_reset_training(self):
-        """Reset training to initial state (clear history but keep weights)."""
+        """Reset training to initial state - stop all processes and start fresh."""
+        # Stop training if running
         if self.training_thread is not None and self.training_thread.isRunning():
-            self.control_panel.append_log("Cannot reset during training - stop first")
-            return
+            self.control_panel.append_log("Stopping training for reset...")
+            self.training_worker.stop()
+            self.training_thread.quit()
+            self.training_thread.wait(2000)  # Wait up to 2 seconds
         
-        # Clear trainer and history
-        self.trainer = None
+        # Clear episode data
+        self.episode_queue.clear()
+        self.completed_episodes.clear()
+        self.is_animating = False
+        self.pending_episode_data = None
+        self._current_episode_data = None
+        
+        # Clear visualization
+        if hasattr(self.simulation_canvas, 'replay_widget'):
+            self.simulation_canvas.replay_widget.positions = None
+            self.simulation_canvas.replay_widget.playing = False
+            self.simulation_canvas.replay_widget.timer.stop()
+            self.simulation_canvas.replay_widget.update()
+        
+        # Reset trainer
+        if self.trainer:
+            try:
+                if hasattr(self.trainer, 'sim') and self.trainer.sim:
+                    self.trainer.sim.close()
+            except Exception:
+                pass
+        
+        # Create new trainer with fresh simulation
+        num_agents = self.control_panel.agents_spin.value()
+        num_timesteps = self.control_panel.timesteps_spin.value()
+        self.trainer = RLTrainer(
+            simulation_factory=self.create_simulation_factory(num_agents, num_timesteps),
+            num_agents=num_agents,
+            num_timesteps=num_timesteps
+        )
         self.training_thread = None
         self.training_worker = None
         self.initial_reward = None
-        self.pending_episode_data = None
         
-        # Reset progress display
-        self.control_panel.progress_bar.setValue(0)
-        self.control_panel.status_label.setText("Ready (reset)")
-        
-        # Clear plot if it exists
+        # Clear plot
         if hasattr(self.control_panel, 'has_plot') and self.control_panel.has_plot:
             try:
                 self.control_panel.ax.clear()
@@ -1371,6 +1435,17 @@ class RLTrainingViewer(QMainWindow):
                 self.control_panel.canvas.draw()
             except Exception:
                 pass
+        
+        # Reset UI
+        self.control_panel.progress_bar.setValue(0)
+        self.control_panel.btn_pause.setText("⏸ Pause Training")
+        self.control_panel.btn_play_pause.setText("⏸ Pause")
+        self.control_panel.status_label.setText("Ready (Reset)")
+        self.weights_panel.clear_diagnostics()
+        self.control_panel.append_log("=" * 50)
+        self.control_panel.append_log("Training reset - all processes stopped, new model created")
+        self.control_panel.append_log(f"Ready for new training run ({num_agents} agents, {num_timesteps} timesteps)")
+        self.control_panel.append_log("=" * 50)
         
         # Re-enable parameter controls
         self.control_panel.set_parameters_enabled(True)
@@ -1384,12 +1459,36 @@ class RLTrainingViewer(QMainWindow):
         if self.training_worker is not None:
             if self.training_worker.is_paused:
                 self.training_worker.resume()
-                self.control_panel.btn_pause.setText("⏸ Pause")
+                self.control_panel.btn_pause.setText("⏸ Pause Training")
                 self.control_panel.append_log("Training resumed")
             else:
                 self.training_worker.pause()
-                self.control_panel.btn_pause.setText("▶ Resume")
+                self.control_panel.btn_pause.setText("▶ Resume Training")
                 self.control_panel.append_log("Training paused")
+    
+    def on_toggle_playback(self):
+        """Toggle play/pause for current episode animation."""
+        if hasattr(self.simulation_canvas, 'replay_widget'):
+            if self.simulation_canvas.replay_widget.playing:
+                self.simulation_canvas.replay_widget.playing = False
+                self.simulation_canvas.replay_widget.timer.stop()
+                self.control_panel.btn_play_pause.setText("▶ Play")
+                self.control_panel.append_log("Animation paused")
+            else:
+                self.simulation_canvas.replay_widget.playing = True
+                self.simulation_canvas.replay_widget.timer.start()
+                self.control_panel.btn_play_pause.setText("⏸ Pause")
+                self.control_panel.append_log("Animation playing")
+    
+    def on_restart_animation(self):
+        """Restart current episode animation from beginning."""
+        if hasattr(self.simulation_canvas, 'replay_widget'):
+            self.simulation_canvas.replay_widget.frame = 0
+            self.simulation_canvas.replay_widget.playing = True
+            self.simulation_canvas.replay_widget.timer.start()
+            self.control_panel.btn_play_pause.setText("⏸ Pause")
+            self.simulation_canvas.replay_widget.update()
+            self.control_panel.append_log("Animation restarted")
                 
     def on_stop_training(self):
         """Stop training."""
@@ -1424,14 +1523,18 @@ class RLTrainingViewer(QMainWindow):
     
     def process_next_queued_episode(self):
         """Process next episode from queue."""
+        print(f"[RL VIEWER DEBUG] process_next_queued_episode called, queue length={len(self.episode_queue)}", flush=True)
         if len(self.episode_queue) == 0:
+            print("[RL VIEWER DEBUG] Queue empty, returning", flush=True)
             return
         
         # Mark as animating
         self.is_animating = True
+        print("[RL VIEWER DEBUG] Marked as animating", flush=True)
         
         # Get next episode from queue
         episode, reward, components, positions, headings, battery, alive, weights = self.episode_queue.popleft()
+        print(f"[RL VIEWER DEBUG] Got episode {episode} from queue, positions shape={positions.shape}", flush=True)
         
         # Store full episode data for later saving to completed_episodes
         self._current_episode_data = (episode, reward, components, positions.copy(), headings.copy(), battery.copy(), alive.copy(), weights)
@@ -1445,6 +1548,7 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.status_label.setText(f"Visualizing episode {episode + 1}/{total} (queue: {queue_len})")
         
         # Start visualization - this will trigger animation_finished when done
+        print(f"[RL VIEWER DEBUG] Calling set_positions for episode {episode}", flush=True)
         self.simulation_canvas.set_positions(positions, headings, battery, alive)
         
     def on_animation_finished(self):
