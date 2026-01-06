@@ -13,6 +13,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import time
 
@@ -20,6 +21,8 @@ import numpy as np
 
 from emergent.salmon_abm import simulation as simmod
 from emergent.salmon_abm import hdf5_io, io as salmon_io
+
+logger = logging.getLogger(__name__)
 
 
 def _data_dir() -> str:
@@ -59,7 +62,7 @@ def _prime_env_cache(sim) -> None:
         try:
             sim.get_cached_dataset(k, default=None)
         except Exception:
-            pass
+            logger.debug("Failed priming env cache for %s", k, exc_info=True)
 
 
 def _run_one(
@@ -120,20 +123,20 @@ def _run_one(
         if getattr(sim, "auto_derive_refugia", False) and not getattr(sim, "_refugia_derived", False):
             sim.derive_environment_refugia()
     except Exception:
-        pass
+        logger.debug("derive_environment_refugia failed during benchmark warmup", exc_info=True)
     _prime_env_cache(sim)
 
     # Warmup (disable outputs to avoid measuring I/O / queue effects).
     try:
         sim.disable_output_writes = True
     except Exception:
-        pass
+        logger.debug("Failed setting sim.disable_output_writes=True", exc_info=True)
     for i in range(int(warmup_steps)):
         sim.timestep(i, float(dt))
     try:
         sim.disable_output_writes = False
     except Exception:
-        pass
+        logger.debug("Failed setting sim.disable_output_writes=False", exc_info=True)
 
     # Timed loop: prefer calling `run()` so async backends start correctly.
     # For sync backend, this measures run loop overhead too (small).
@@ -144,7 +147,7 @@ def _run_one(
     try:
         sim.close()
     except Exception:
-        pass
+        logger.debug("sim.close failed after benchmark run", exc_info=True)
 
     elapsed = float(t1 - t0)
     steps_s = (float(steps) / elapsed) if elapsed > 0 else float("nan")

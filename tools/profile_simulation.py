@@ -11,6 +11,7 @@ Usage:
 """
 from __future__ import annotations
 import argparse
+import logging
 import os
 import time
 import cProfile
@@ -23,6 +24,8 @@ from emergent.salmon_abm.behavior import behavior
 from emergent.salmon_abm import simulation as simmod
 from emergent.salmon_abm import hdf5_io, io as salmon_io
 import os
+
+logger = logging.getLogger(__name__)
 
 
 def profile_hotspot(n_agents=1000, iters=100, *, avoid_mode: str = "dense", history_len: int = 1024, seed_k: int = 64):
@@ -65,7 +68,7 @@ def profile_hotspot(n_agents=1000, iters=100, *, avoid_mode: str = "dense", hist
                 try:
                     self.behavior_batch_size = int(bsize)
                 except Exception:
-                    pass
+                    logger.debug("Invalid BEHAVIOR_BATCH_SIZE=%r; ignoring", bsize, exc_info=True)
             # Optional: seed sparse avoid history so behavior takes the sparse path.
             if self.use_sparse_avoid_memory:
                 k = max(1, int(history_len))
@@ -239,7 +242,7 @@ def profile_sim(
     try:
         sim.close()
     except Exception:
-        pass
+        logger.debug("sim.close failed after profiling run", exc_info=True)
 
     return os.path.join(outdir, txt_name)
 

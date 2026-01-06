@@ -10,11 +10,14 @@ from contextlib import contextmanager
 from typing import Any, Optional, Iterable
 import os
 import numpy as np
+import logging
 
 try:
     import h5py
 except Exception:  # pragma: no cover - h5py should be available in normal envs
     h5py = None
+
+logger = logging.getLogger(__name__)
 
 
 def _is_h5py_file(obj: Any) -> bool:
@@ -64,8 +67,8 @@ def open_db(path: str, mode: str = "r"):
     finally:
         try:
             f.close()
-        except Exception:
-            pass
+        except (OSError, ValueError):
+            logger.debug("Failed closing HDF5 file: %s", path, exc_info=True)
 
 
 def read_dataset(hdf5_obj: Any, key: str, default: Optional[Any] = None):
@@ -123,15 +126,15 @@ def write_dataset(hdf5_obj: Any, key: str, data: Any, dtype: Optional[str] = Non
                         if dtype is None or existing.dtype == np.dtype(dtype):
                             existing[...] = arr.astype(existing.dtype, copy=False)
                             return True
-                except Exception:
-                    # fall back to delete/recreate below
-                    pass
+                except (OSError, ValueError, TypeError):
+                    # Fall back to delete/recreate below.
+                    logger.debug("In-place HDF5 dataset overwrite failed for key=%s", key, exc_info=True)
 
             try:
                 del hdf5_obj[key]
-            except Exception:
+            except (KeyError, OSError, ValueError, TypeError):
                 # If we can't delete, fall through to create (may raise)
-                pass
+                logger.debug("Failed deleting existing HDF5 key=%s before recreate", key, exc_info=True)
 
         if dtype:
             hdf5_obj.create_dataset(key, data=arr, dtype=dtype)
@@ -230,7 +233,7 @@ def ensure_timeseries_dataset(
     try:
         key = str(key)
     except Exception:
-        pass
+        raise
     if _key_exists(hdf5_obj, key):
         return True
 
@@ -280,7 +283,7 @@ def ensure_vector_dataset(
     try:
         key = str(key)
     except Exception:
-        pass
+        raise
     if _key_exists(hdf5_obj, key):
         return True
 
@@ -417,19 +420,16 @@ def create_agent_timeseries(hdf5_obj: Any, sim: Any, nsteps: int):
         ensure_timeseries_dataset(hdf5_obj, key, n_agents=n_agents, n_steps=nsteps_i, dtype=np.float32)
 
     # 1-D per-agent scalars (parity with sockeye.py)
-    try:
-        if hasattr(sim, 'length') and not _key_exists(hdf5_obj, 'agent_data/length'):
-            write_dataset(hdf5_obj, 'agent_data/length', np.array(getattr(sim, 'length')))
-        if hasattr(sim, 'weight') and not _key_exists(hdf5_obj, 'agent_data/weight'):
-            write_dataset(hdf5_obj, 'agent_data/weight', np.array(getattr(sim, 'weight')))
-        if hasattr(sim, 'ucrit') and not _key_exists(hdf5_obj, 'agent_data/ucrit'):
-            write_dataset(hdf5_obj, 'agent_data/ucrit', np.array(getattr(sim, 'ucrit')))
-        if hasattr(sim, 'too_shallow') and not _key_exists(hdf5_obj, 'agent_data/too_shallow'):
-            write_dataset(hdf5_obj, 'agent_data/too_shallow', np.array(getattr(sim, 'too_shallow')))
-        if hasattr(sim, 'opt_wat_depth') and not _key_exists(hdf5_obj, 'agent_data/opt_wat_depth'):
-            write_dataset(hdf5_obj, 'agent_data/opt_wat_depth', np.array(getattr(sim, 'opt_wat_depth')))
-    except Exception:
-        pass
+    if hasattr(sim, 'length') and not _key_exists(hdf5_obj, 'agent_data/length'):
+        write_dataset(hdf5_obj, 'agent_data/length', np.array(getattr(sim, 'length')))
+    if hasattr(sim, 'weight') and not _key_exists(hdf5_obj, 'agent_data/weight'):
+        write_dataset(hdf5_obj, 'agent_data/weight', np.array(getattr(sim, 'weight')))
+    if hasattr(sim, 'ucrit') and not _key_exists(hdf5_obj, 'agent_data/ucrit'):
+        write_dataset(hdf5_obj, 'agent_data/ucrit', np.array(getattr(sim, 'ucrit')))
+    if hasattr(sim, 'too_shallow') and not _key_exists(hdf5_obj, 'agent_data/too_shallow'):
+        write_dataset(hdf5_obj, 'agent_data/too_shallow', np.array(getattr(sim, 'too_shallow')))
+    if hasattr(sim, 'opt_wat_depth') and not _key_exists(hdf5_obj, 'agent_data/opt_wat_depth'):
+        write_dataset(hdf5_obj, 'agent_data/opt_wat_depth', np.array(getattr(sim, 'opt_wat_depth')))
 
     return True
 
@@ -457,22 +457,19 @@ def write_agent_timestep(hdf5_obj: Any, sim: Any, col: int):
     ]
 
     for key, getter in keys_and_getters:
+        if not _key_exists(hdf5_obj, key):
+            continue
+        val = getter(sim)
+        if val is None:
+            continue
+
+        arr = np.array(val)
         try:
-            if not _key_exists(hdf5_obj, key):
-                continue
-            val = getter(sim)
-            if val is None:
-                continue
-            # assign column for h5py datasets and dict-like arrays
-            try:
-                hdf5_obj[key][:, col] = np.array(val)
-            except Exception:
-                # fallback: overwrite whole dataset (less efficient)
-                try:
-                    write_dataset(hdf5_obj, key, np.array(val))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            hdf5_obj[key][:, col] = arr
+        except (TypeError, ValueError, KeyError, IndexError, AttributeError) as e:
+            logger.debug("Column write failed for key=%s at col=%s; overwriting dataset", key, col, exc_info=True)
+            ok = write_dataset(hdf5_obj, key, arr)
+            if not ok:
+                raise RuntimeError(f"Failed writing dataset for key={key}") from e
 
     return True

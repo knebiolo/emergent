@@ -1,6 +1,9 @@
 import os
 import h5py
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_parent_dir(path: str) -> None:
@@ -30,23 +33,23 @@ def _write_value(group, key: str, value) -> None:
             group.create_dataset(key, data=arr)
         else:
             group.create_dataset(key, data=arr, compression="gzip")
-    except Exception:
+    except Exception as e:
         try:
             _safe_del(group, key)
             group.create_dataset(key, data=_h5_bytes(str(value)))
-        except Exception:
-            pass
+        except Exception as e2:
+            raise RuntimeError(f"Failed writing diagnostics dataset: {key}") from e2
 
 
 def _flush_file(file) -> None:
     try:
         file.flush()
-    except Exception:
-        return
+    except Exception as e:
+        raise RuntimeError("Failed flushing diagnostics HDF5 file") from e
     try:
         os.fsync(file.id.fileno())
-    except Exception:
-        pass
+    except (AttributeError, OSError, ValueError):
+        logger.debug("fsync() not available or failed for diagnostics file", exc_info=True)
 
 
 class HDF5DiagnosticsWriter:
@@ -64,8 +67,6 @@ class HDF5DiagnosticsWriter:
             return
         try:
             self.file.close()
-        except Exception:
-            pass
         finally:
             self.file = None
 

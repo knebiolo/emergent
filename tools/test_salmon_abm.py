@@ -28,6 +28,7 @@ import time
 import csv
 import json
 import argparse
+import subprocess
 import numpy as np
 import h5py
 
@@ -86,18 +87,55 @@ def ensure_env_coordinate_grids(sim):
     hdf5_io.write_dataset(h5, 'environment/y_coords', y_coords)
 
 
+def _normalize_timeseries_2d(arr: np.ndarray, *, n_agents: int) -> np.ndarray:
+    """Return array shaped (T, N) for time-series datasets.
+
+    HDF5 outputs sometimes store (N, T); viewer expects (T, N).
+    """
+    arr = np.asarray(arr)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D time-series array; got shape {arr.shape}")
+    if arr.shape[0] == int(n_agents) and arr.shape[1] != int(n_agents):
+        return arr.T
+    return arr
+
+
+def _launch_viewer(h5_path: str, *, env_depth: str | None = None) -> None:
+    cmd = [sys.executable, "-m", "emergent.salmon_abm.realtime_viewer", str(h5_path)]
+    if env_depth:
+        cmd.extend(["--env-depth", str(env_depth)])
+    subprocess.run(cmd, check=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Test salmon ABM")
     parser.add_argument('--nagents', type=int, default=200, help='Number of agents')
     parser.add_argument('--nsteps', type=int, default=50, help='Number of simulation steps')
+    parser.add_argument('--dt', type=float, default=1.0, help='Timestep size (s)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--basin', type=str, default='nuyakuk', help='Basin name')
+    parser.add_argument('--water-temp', type=float, default=10.0, help='Water temperature (deg C)')
+    parser.add_argument('--env-dir', type=str, default=None, help='Directory containing environment rasters (depth.tif, vel_*.tif) and start polygons')
+    parser.add_argument('--start-polygon', type=str, default=None, help='Start polygon shapefile path (default: env-dir/start_loc_river_right.shp if present)')
+    parser.add_argument('--longitudinal-profile', type=str, default=None, help='Optional longitudinal profile shapefile path')
+    parser.add_argument('--outdir', type=str, default=None, help='Output directory (default: outputs/test)')
+    parser.add_argument('--model-name', type=str, default=None, help='Optional model name override')
     parser.add_argument('--debug-behavior', action='store_true', help='Enable behavior state tracking')
     parser.add_argument('--debug-movement', action='store_true', help='Enable movement debugging')
     parser.add_argument('--test-weights-file', type=str, default=None, help='Path to test weights JSON')
+    parser.add_argument('--view', action='store_true', help='Launch realtime_viewer after the run completes')
+    parser.add_argument('--open', type=str, default=None, help='Open an existing .h5/.csv in realtime_viewer and exit')
     args = parser.parse_args()
+
+    if args.open:
+        _launch_viewer(args.open)
+        return
     
     # Discover environment files
-    base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'salmon_abm')
+    if args.env_dir is None:
+        base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'salmon_abm')
+    else:
+        base_dir = os.path.abspath(args.env_dir)
     env_files = discover_env_files(base_dir)
     
     if not env_files:
@@ -109,9 +147,9 @@ def main():
         print(f"     - {os.path.basename(ef)}")
     
     # Prepare outputs
-    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs', 'test')
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs', 'test') if args.outdir is None else os.path.abspath(args.outdir)
     os.makedirs(output_dir, exist_ok=True)
-    model_name = f"test_n{args.nagents}_s{args.nsteps}_seed{args.seed}"
+    model_name = args.model_name or f"test_n{args.nagents}_s{args.nsteps}_seed{args.seed}"
     h5_path = os.path.join(output_dir, f"{model_name}.h5")
     trace_path = os.path.join(output_dir, f"{model_name}_trace.csv")
 
@@ -120,19 +158,31 @@ def main():
 
     # Create simulation
     print(f"\n[OK] Creating simulation: {args.nagents} agents, {args.nsteps} steps, seed={args.seed}")
-    start_poly = os.path.join(base_dir, 'start_loc_river_right.shp')
-    if not os.path.exists(start_poly):
+    if args.start_polygon is not None and str(args.start_polygon).strip().lower() in ("none", "null", ""):
         start_poly = None
+    elif args.start_polygon:
+        start_poly = os.path.abspath(args.start_polygon)
+    else:
+        start_poly = os.path.join(base_dir, 'start_loc_river_right.shp')
+        if not os.path.exists(start_poly):
+            start_poly = None
+
+    if args.longitudinal_profile is not None and str(args.longitudinal_profile).strip().lower() in ("none", "null", ""):
+        longitudinal_profile = None
+    elif args.longitudinal_profile:
+        longitudinal_profile = os.path.abspath(args.longitudinal_profile)
+    else:
+        longitudinal_profile = None
 
     sim = simulation(
         model_dir=output_dir,
         model_name=model_name,
         crs=None,
-        basin='nuyakuk',
-        water_temp=10.0,
+        basin=str(args.basin),
+        water_temp=float(args.water_temp),
         start_polygon=start_poly,
         env_files=env_files,
-        longitudinal_profile=None,
+        longitudinal_profile=longitudinal_profile,
         num_timesteps=args.nsteps,
         num_agents=args.nagents,
         db_path=h5_path,
@@ -157,7 +207,7 @@ def main():
     # Run simulation
     print(f"\n[OK] Running simulation...")
     t0 = time.time()
-    sim.run()
+    sim.run(n=int(args.nsteps), dt=float(args.dt))
     elapsed = time.time() - t0
     print(f"[OK] Simulation complete in {elapsed:.2f}s ({args.nsteps/elapsed:.1f} steps/s)")
     
@@ -168,8 +218,8 @@ def main():
     # Export trace CSV from HDF5 time-series (small + deterministic)
     try:
         with h5py.File(h5_path, 'r') as h5:
-            xs = np.asarray(h5['agent_data/X'])
-            ys = np.asarray(h5['agent_data/Y'])
+            xs = _normalize_timeseries_2d(h5['agent_data/X'][:], n_agents=int(args.nagents))
+            ys = _normalize_timeseries_2d(h5['agent_data/Y'][:], n_agents=int(args.nagents))
         if xs.shape != ys.shape:
             raise ValueError(f"agent_data/X shape {xs.shape} != agent_data/Y shape {ys.shape}")
         if xs.ndim != 2:
@@ -206,6 +256,10 @@ def main():
         print(f"\n[WARN] {100*north/args.nagents:.1f}% of agents swimming north - may indicate nodata bug!")
         print(f"       (Expected: agents should follow flow direction)")
     
+    if args.view:
+        print(f"\n[OK] Launching viewer: {h5_path}")
+        _launch_viewer(h5_path)
+
     print(f"\n[OK] Test complete!")
 
 

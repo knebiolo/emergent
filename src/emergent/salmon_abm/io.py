@@ -13,6 +13,7 @@ from rasterio.transform import Affine
 from matplotlib import animation as manimation
 from datetime import datetime
 import numpy as np
+import logging
 from contextlib import contextmanager
 from typing import Dict, Any, Optional, Tuple
 from shapely.geometry import LineString
@@ -20,6 +21,8 @@ from shapely.ops import linemerge
 import math
 
 from emergent.salmon_abm import hdf5_io
+
+logger = logging.getLogger(__name__)
 
 
 def _try_setattr(obj: Any, name: str, value: Any) -> bool:
@@ -42,9 +45,11 @@ def _affine_to_6tuple(transform: Any) -> Optional[Tuple[float, float, float, flo
         d = float(getattr(transform, "d"))
         e = float(getattr(transform, "e"))
         f = float(getattr(transform, "f"))
+    except (TypeError, ValueError, AttributeError):
+        # Fallback: treat as an iterable transform (e.g., a 6-tuple).
+        a = None
+    else:
         return (a, b, c, d, e, f)
-    except Exception:
-        pass
 
     try:
         seq = tuple(transform)
@@ -80,6 +85,7 @@ def output_excel(records, model_dir, model_name):
     output_excel_path = os.path.join(model_dir, f'output_{model_name}.xlsx')
     # Try to write an Excel file; if openpyxl/xlsxwriter are not available,
     # fall back to writing CSV files per sheet.
+    excel_error: Exception | None = None
     try:
         with pd.ExcelWriter(output_excel_path) as writer:
             for generation_name, df in records.items():
@@ -88,8 +94,9 @@ def output_excel(records, model_dir, model_name):
                 except Exception:
                     pd.DataFrame({'error': ['could not write sheet']}).to_excel(writer, sheet_name=str(generation_name))
         return
-    except Exception:
-        pass
+    except (ImportError, OSError, ValueError) as e:
+        excel_error = e
+        logger.warning("Excel export failed; falling back to CSV: %s", output_excel_path, exc_info=True)
 
     # fallback: write CSVs
     for generation_name, df in records.items():
@@ -98,7 +105,9 @@ def output_excel(records, model_dir, model_name):
             df.to_csv(csv_path, index=False)
         except Exception:
             with open(csv_path + '.error', 'w') as fh:
-                fh.write('could not write data')
+                fh.write('could not write data\n')
+                if excel_error is not None:
+                    fh.write(f'Excel export error: {excel_error}\n')
 
 
 def movie_maker(directory, model_name, crs, dt, depth_rast_transform, depth_arr, X_arr=None, Y_arr=None):
@@ -120,14 +129,14 @@ def movie_maker(directory, model_name, crs, dt, depth_rast_transform, depth_arr,
     WriterClass = None
     try:
         WriterClass = manimation.writers['ffmpeg']
-    except Exception:
+    except KeyError:
         WriterClass = None
 
     writer = None
     if WriterClass is not None:
         try:
             writer = WriterClass(fps=fps, metadata=metadata)
-        except Exception:
+        except (OSError, RuntimeError, ValueError):
             writer = None
     writer_available = writer is not None
 
@@ -185,8 +194,8 @@ def write_raster_to_hdf5(h5obj, path, dataset_name=None, sim=None):
             if existing_x is None or np.array(existing_x).shape != x_coords.shape:
                 hdf5_io.write_dataset(h5obj, 'environment/x_coords', x_coords)
                 hdf5_io.write_dataset(h5obj, 'environment/y_coords', y_coords)
-        except Exception:
-            pass
+        except (OSError, ValueError, TypeError, KeyError):
+            logger.warning("Failed writing environment coordinate grids for %s", path, exc_info=True)
 
     return arr, tr_tup, crs
 
@@ -216,8 +225,8 @@ def safe_hdf5_open(path_or_file, mode='a'):
         finally:
             try:
                 f.close()
-            except Exception:
-                pass
+            except (OSError, ValueError):
+                logger.debug("Failed closing HDF5 file: %s", path_or_file, exc_info=True)
         return
 
     # file-like or dict-like
@@ -228,8 +237,8 @@ def safe_hdf5_open(path_or_file, mode='a'):
         if hasattr(path_or_file, 'close') and not isinstance(path_or_file, dict):
             try:
                 path_or_file.close()
-            except Exception:
-                pass
+            except (OSError, ValueError):
+                logger.debug("Failed closing HDF5 object", exc_info=True)
 
 
 def write_sim_initial(

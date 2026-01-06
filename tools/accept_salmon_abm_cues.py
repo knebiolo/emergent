@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from dataclasses import dataclass
 
@@ -20,6 +21,8 @@ from scipy.ndimage import distance_transform_edt
 from emergent.salmon_abm.simulation import simulation
 from emergent.salmon_abm import hdf5_io, io
 from emergent.salmon_abm.utils import geo_to_pixel, pixel_to_geo
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -118,7 +121,7 @@ def ensure_refugia_layer(sim: simulation, velmag_threshold: float) -> bool:
             if ok:
                 return True
     except Exception:
-        pass
+        logger.warning("derive_environment_refugia failed; falling back to vel_mag thresholding", exc_info=True)
 
     vel_mag = hdf5_io.read_dataset(h5, "environment/vel_mag", default=None)
     if vel_mag is None:
@@ -134,7 +137,7 @@ def ensure_refugia_layer(sim: simulation, velmag_threshold: float) -> bool:
             qthr = float(np.nanpercentile(vel_mag_arr[finite], 10))
             mask = finite & (vel_mag_arr <= qthr)
         except Exception:
-            pass
+            logger.debug("Failed computing vel_mag quantile fallback for refugia layer", exc_info=True)
     refugia = np.zeros_like(vel_mag_arr, dtype=np.uint8)
     refugia[mask] = 1
     hdf5_io.write_dataset(h5, "environment/refugia", refugia)
@@ -632,7 +635,7 @@ def expected_direction(sim: simulation, cue: str, x0: np.ndarray, y0: np.ndarray
                 if exp.shape == (sim.num_agents, 2):
                     return exp
         except Exception:
-            pass
+            logger.debug("Failed reading _avoid_expected_unit; using zeros", exc_info=True)
     return np.zeros((sim.num_agents, 2), dtype=float)
 
 
@@ -659,14 +662,14 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
     try:
         sim.record_behavior_state = True
     except Exception:
-        pass
+        logger.warning("Failed setting sim.record_behavior_state; cue vectors may be unavailable", exc_info=True)
 
     # deterministic placement and any random choices (best-effort)
     if seed is not None:
         try:
             sim.rng = np.random.default_rng(int(seed))
         except Exception:
-            pass
+            logger.debug("Failed setting sim.rng; continuing without deterministic seed", exc_info=True)
     # Ensure schooling cues (alignment/cohesion/collision) have neighbors in these
     # acceptance runs even when the start polygons are spatially large.
     try:
@@ -684,7 +687,7 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
     try:
         sim.initialize_headings_from_db()
     except Exception:
-        pass
+        logger.debug("initialize_headings_from_db failed; continuing with default headings", exc_info=True)
 
     # isolate cue under test
     sim.test_weights = {case.name: float(weight)}
@@ -733,7 +736,7 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
                 if hasattr(sim, "seed_avoid_history") and callable(getattr(sim, "seed_avoid_history")):
                     sim.seed_avoid_history(seed_r, seed_c, t=0.0)
             except Exception:
-                pass
+                logger.debug("seed_avoid_history failed; avoid cue may be ineffective", exc_info=True)
 
             # Best-effort: also seed dense per-agent HDF5 rasters if they exist.
             try:
@@ -746,11 +749,11 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
                             cc = int(np.clip(seed_c[i], 0, ds.shape[1] - 1))
                             ds[rr, cc] = 0.0
                         except Exception:
-                            pass
+                            logger.debug("Failed seeding dense avoid memory for agent %s", i, exc_info=True)
             except Exception:
-                pass
+                logger.debug("Dense avoid memory seeding failed", exc_info=True)
         except Exception:
-            pass
+            logger.warning("Avoid seeding block failed; avoid cue acceptance may be unreliable", exc_info=True)
         t0 = 20.0
 
     sim.timestep(float(t0), float(dt))
@@ -787,7 +790,7 @@ def run_case(case: CueCase, *, outdir: str, nagents: int, dt: float, weight: flo
     try:
         sim.close()
     except Exception:
-        pass
+        logger.debug("sim.close failed after run_case", exc_info=True)
     return summary
 
 
@@ -812,14 +815,14 @@ def run_fatigue_check(*, outdir: str, nagents: int, nsteps: int, dt: float, seed
         try:
             sim.rng = np.random.default_rng(int(seed))
         except Exception:
-            pass
+            logger.debug("Failed setting sim.rng; continuing without deterministic seed", exc_info=True)
 
     import_env_to_h5(sim, env_files)
     ensure_distance_to(sim)
     try:
         sim.initialize_headings_from_db()
     except Exception:
-        pass
+        logger.debug("initialize_headings_from_db failed; continuing with default headings", exc_info=True)
 
     # activate low_speed only (per your acceptance focus) and allow rheotaxis to remain 0
     sim.test_weights = {"low_speed": 3000.0}
@@ -845,7 +848,7 @@ def run_fatigue_check(*, outdir: str, nagents: int, nsteps: int, dt: float, seed
     try:
         sim.close()
     except Exception:
-        pass
+        logger.debug("sim.close failed after run_fatigue_check", exc_info=True)
     return out
 
 

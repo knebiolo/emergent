@@ -303,13 +303,14 @@ class simulation:
             hdf5_io.write_dataset(self.db, "agent_data/weight", np.zeros((self.num_agents,), dtype=np.float32))
             hdf5_io.write_dataset(self.db, "agent_data/body_depth", np.zeros((self.num_agents,), dtype=np.float32))
             # minimal placeholders for compatibility; avoid writing large (N,T) arrays here
-            try:
-                hdf5_io.ensure_vector_dataset(self.db, 'X', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0)
-                hdf5_io.ensure_vector_dataset(self.db, 'Y', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0)
-                hdf5_io.ensure_vector_dataset(self.db, 'prev_X', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0)
-                hdf5_io.ensure_vector_dataset(self.db, 'prev_Y', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0)
-            except Exception:
-                pass
+            if not hdf5_io.ensure_vector_dataset(self.db, 'X', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0):
+                raise RuntimeError("Failed to create fallback dataset: X")
+            if not hdf5_io.ensure_vector_dataset(self.db, 'Y', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0):
+                raise RuntimeError("Failed to create fallback dataset: Y")
+            if not hdf5_io.ensure_vector_dataset(self.db, 'prev_X', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0):
+                raise RuntimeError("Failed to create fallback dataset: prev_X")
+            if not hdf5_io.ensure_vector_dataset(self.db, 'prev_Y', n_agents=int(self.num_agents), dtype=np.float32, fillvalue=0.0):
+                raise RuntimeError("Failed to create fallback dataset: prev_Y")
 
         # populate agent attributes using the agents module
         agents.sim_sex(self)
@@ -319,43 +320,37 @@ class simulation:
 
         # Derived quantities that depend on agent attributes (length/body_depth, etc.).
         # These must be computed after the agents module populates the base attributes.
-        try:
-            self.opt_sog = (self.length / 1000.0).astype(np.float32)
-            self.school_sog = (self.length / 1000.0).astype(np.float32)
-            self.ucrit = (self.length / 1000.0 * 1.6).astype(np.float32)
-            # initialize ideal_sog and sog to a non-zero default when unset
-            if not np.any(np.asarray(self.ideal_sog)):
-                self.ideal_sog = self.school_sog.copy()
-            if not np.any(np.asarray(self.sog)):
-                self.sog = self.ideal_sog.copy()
-        except Exception:
-            pass
+        self.opt_sog = (self.length / 1000.0).astype(np.float32)
+        self.school_sog = (self.length / 1000.0).astype(np.float32)
+        self.ucrit = (self.length / 1000.0 * 1.6).astype(np.float32)
+        # initialize ideal_sog and sog to a non-zero default when unset
+        if not np.any(np.asarray(self.ideal_sog)):
+            self.ideal_sog = self.school_sog.copy()
+        if not np.any(np.asarray(self.sog)):
+            self.sog = self.ideal_sog.copy()
 
         # Refugia definition (canonical): places where a fatigued fish can hold
         # station (i.e., water velocity does not exceed sustainable fatigued
         # capacity). The environment layer is computed relative to a reference
         # fish length (mm) to avoid per-agent maps.
-        try:
-            ref_len = getattr(self, 'refugia_ref_length_mm', None)
-            if ref_len is None:
+        ref_len = getattr(self, 'refugia_ref_length_mm', None)
+        if ref_len is None:
+            try:
                 ref_len = float(np.nanmedian(np.asarray(self.length, dtype=float)))
-            if not np.isfinite(ref_len) or ref_len <= 0:
-                ref_len = 500.0
-            self.refugia_ref_length_mm = float(ref_len)
-        except Exception:
-            self.refugia_ref_length_mm = 500.0
+            except (TypeError, ValueError):
+                ref_len = float("nan")
+        if not np.isfinite(ref_len) or ref_len <= 0:
+            ref_len = 500.0
+        self.refugia_ref_length_mm = float(ref_len)
         # Derive `environment/refugia` automatically when possible.
-        try:
-            self.auto_derive_refugia = bool(getattr(self, 'auto_derive_refugia', True))
-        except Exception:
-            self.auto_derive_refugia = True
+        self.auto_derive_refugia = bool(getattr(self, 'auto_derive_refugia', True))
         self._refugia_derived = False
         # Refugia cue sensing/search radius (meters). Default is a fixed 1m to
         # avoid per-agent radii and keep behavior predictable. Set <=0 to
         # disable gating (always point toward nearest refugia cell).
         try:
             self.refugia_search_radius_m = float(getattr(self, 'refugia_search_radius_m', 1.0))
-        except Exception:
+        except (TypeError, ValueError):
             self.refugia_search_radius_m = 1.0
 
         # If a start polygon was provided, sample initial agent positions inside it
@@ -398,20 +393,17 @@ class simulation:
                 self.prev_X = xs.copy()
                 self.prev_Y = ys.copy()
                 # write initial positions into HDF5 (top-level and time-indexed arrays)
-                try:
-                    if self.output_write_mode != 'none':
-                        hdf5_io.write_dataset(self.db, 'X', self.X)
-                        hdf5_io.write_dataset(self.db, 'Y', self.Y)
-                        if self.output_write_mode == 'full':
-                            hdf5_io.write_timeseries_step(self.db, 'agent_data/X', 0, self.X)
-                            hdf5_io.write_timeseries_step(self.db, 'agent_data/Y', 0, self.Y)
-                except Exception:
-                    pass
+                if self.output_write_mode != 'none':
+                    hdf5_io.write_dataset(self.db, 'X', self.X)
+                    hdf5_io.write_dataset(self.db, 'Y', self.Y)
+                    if self.output_write_mode == 'full':
+                        hdf5_io.write_timeseries_step(self.db, 'agent_data/X', 0, self.X)
+                        hdf5_io.write_timeseries_step(self.db, 'agent_data/Y', 0, self.Y)
                 # record that start polygon was used
                 try:
                     hdf5_io.write_dataset(self.db, 'metadata/start_polygon', os.path.basename(start_polygon))
-                except Exception:
-                    pass
+                except (OSError, ValueError, TypeError):
+                    logging.getLogger(__name__).warning("Failed to write metadata/start_polygon", exc_info=True)
             except Exception as e:
                 # FAIL LOUD: polygon sampling is critical for correct initialization
                 raise RuntimeError(f'Failed to sample initial positions from start polygon {start_polygon}: {e}') from e
@@ -427,26 +419,14 @@ class simulation:
         hdf5_io.write_dataset(self.db, "weight", self.weight)
         hdf5_io.write_dataset(self.db, "body_depth", self.body_depth)
         if hasattr(self.db, 'flush'):
-            try:
-                self.db.flush()
-            except Exception:
-                pass
+            self.db.flush()
 
         # import any provided environment files (fail loudly during development)
         # Import provided environment rasters into the simulation HDF5 DB and
         # set raster transform attributes using the centralized helper.
-        try:
-            for ef in self.env_files:
-                try:
-                    base = os.path.splitext(os.path.basename(ef))[0]
-                    # helper writes into HDF5 and returns the transform tuple
-                    arr, tr_tup, crs = io.write_raster_to_hdf5(self.db, ef, dataset_name=base, sim=self)
-                except Exception:
-                    # best-effort per-file: continue on error
-                    continue
-        except Exception:
-            # non-fatal: proceed even if env file handling fails
-            pass
+        for ef in self.env_files:
+            base = os.path.splitext(os.path.basename(ef))[0]
+            io.write_raster_to_hdf5(self.db, ef, dataset_name=base, sim=self)
 
         # ensure minimal environment placeholders exist so downstream modules
         # that read environment/* will have something to sample in unit tests
@@ -543,61 +523,62 @@ class simulation:
                 depth_arr = np.asarray(depth_ds)
                 if depth_arr.ndim == 2 and depth_arr.size > 1:
                     nrows, ncols = depth_arr.shape
+
                     # use existing depth raster transform when available; otherwise fall back
                     transform = getattr(self, 'depth_rast_transform', None)
                     if transform is None:
                         transform = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
                         self.depth_rast_transform = transform
+
                     # ensure related transforms exist
-                    for attr in ('vel_mag_rast_transform', 'vel_dir_rast_transform', 'vel_x_rast_transform', 'vel_y_rast_transform', 'refugia_map_transform'):
+                    for attr in (
+                        'vel_mag_rast_transform',
+                        'vel_dir_rast_transform',
+                        'vel_x_rast_transform',
+                        'vel_y_rast_transform',
+                        'refugia_map_transform',
+                    ):
                         if getattr(self, attr, None) is None:
                             try:
                                 setattr(self, attr, transform)
-                            except Exception:
-                                pass
+                            except (AttributeError, TypeError):
+                                logging.getLogger(__name__).debug("Failed setting %s on simulation", attr, exc_info=True)
 
                     # Only write coordinate grids when missing or mismatched shape.
-                    try:
-                        existing_x = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
-                        existing_y = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
-                        have_ok = False
+                    existing_x = hdf5_io.read_dataset(h5, 'environment/x_coords', default=None)
+                    existing_y = hdf5_io.read_dataset(h5, 'environment/y_coords', default=None)
+                    have_ok = (
+                        existing_x is not None
+                        and existing_y is not None
+                        and (np.asarray(existing_x).shape == (nrows, ncols))
+                        and (np.asarray(existing_y).shape == (nrows, ncols))
+                    )
+                    if not have_ok:
                         try:
-                            if existing_x is not None and existing_y is not None:
-                                have_ok = (np.asarray(existing_x).shape == (nrows, ncols)) and (np.asarray(existing_y).shape == (nrows, ncols))
-                        except Exception:
-                            have_ok = False
-                        if not have_ok:
-                            # compute from affine transform (supports Affine-like objects or 6-tuples)
-                            try:
-                                a = float(getattr(transform, 'a', transform[0]))
-                                b = float(getattr(transform, 'b', transform[1]))
-                                c = float(getattr(transform, 'c', transform[2]))
-                                d = float(getattr(transform, 'd', transform[3]))
-                                e = float(getattr(transform, 'e', transform[4]))
-                                f = float(getattr(transform, 'f', transform[5]))
-                                cols = np.arange(ncols, dtype=float)
-                                rows = np.arange(nrows, dtype=float)
-                                col_indices, row_indices = np.meshgrid(cols, rows)
-                                x_coords = a * col_indices + b * row_indices + c
-                                y_coords = d * col_indices + e * row_indices + f
-                                hdf5_io.write_dataset(h5, 'environment/x_coords', x_coords)
-                                hdf5_io.write_dataset(h5, 'environment/y_coords', y_coords)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-        except Exception:
-            # tolerate any failures here; behavior will be more limited but simulation can still run
+                            a = float(getattr(transform, 'a', transform[0]))
+                            b = float(getattr(transform, 'b', transform[1]))
+                            c = float(getattr(transform, 'c', transform[2]))
+                            d = float(getattr(transform, 'd', transform[3]))
+                            e = float(getattr(transform, 'e', transform[4]))
+                            f = float(getattr(transform, 'f', transform[5]))
+                            cols = np.arange(ncols, dtype=float)
+                            rows = np.arange(nrows, dtype=float)
+                            col_indices, row_indices = np.meshgrid(cols, rows)
+                            x_coords = a * col_indices + b * row_indices + c
+                            y_coords = d * col_indices + e * row_indices + f
+                            hdf5_io.write_dataset(h5, 'environment/x_coords', x_coords)
+                            hdf5_io.write_dataset(h5, 'environment/y_coords', y_coords)
+                        except (TypeError, ValueError, IndexError):
+                            logging.getLogger(__name__).warning("Failed creating environment coordinate grids", exc_info=True)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            logging.getLogger(__name__).warning("Failed ensuring raster transforms/coordinate grids", exc_info=True)
             if getattr(self, 'depth_rast_transform', None) is None:
                 self.depth_rast_transform = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 
         # Best-effort: derive an environment refugia mask using the canonical
         # fatigued station-holding definition.
-        try:
-            if getattr(self, 'auto_derive_refugia', False):
-                self.derive_environment_refugia()
-        except Exception:
-            pass
+        if getattr(self, 'auto_derive_refugia', False):
+            self.derive_environment_refugia()
 
         # heading initialization deferred until behavior helper is available
 
@@ -605,15 +586,9 @@ class simulation:
         self._movement = movement_mod.movement(self)
         self._behavior = behavior_mod.behavior(1.0, self)
         # If debug flags are enabled, start the diagnostics worker to accept queued writes
-        try:
-            if getattr(self, 'debug_behavior', False) or getattr(self, 'debug_movement', False):
-                try:
-                    if hasattr(self._behavior, '_start_diag_thread'):
-                        self._behavior._start_diag_thread()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        if getattr(self, 'debug_behavior', False) or getattr(self, 'debug_movement', False):
+            if hasattr(self._behavior, '_start_diag_thread'):
+                self._behavior._start_diag_thread()
         # Initialize headings by sampling rasters from the DB (callable so
         # external code can re-run initialization after injecting rasters).
         import logging
@@ -622,12 +597,9 @@ class simulation:
         except Exception as e:
             logging.getLogger(__name__).warning('initialize_headings_from_db failed during simulation init: %s', e)
         # set initial fish velocity so agents start with non-zero fish velocity
-        try:
-            fv_x = self.ideal_sog * np.cos(self.heading)
-            fv_y = self.ideal_sog * np.sin(self.heading)
-            self.initial_fish_vel = np.stack((fv_x, fv_y), axis=1)
-        except Exception:
-            self.initial_fish_vel = np.zeros((self.num_agents, 2), dtype=float)
+        fv_x = self.ideal_sog * np.cos(self.heading)
+        fv_y = self.ideal_sog * np.sin(self.heading)
+        self.initial_fish_vel = np.stack((fv_x, fv_y), axis=1)
         self._fatigue = None
 
     def _neighbor_radius_m(self) -> float:
@@ -640,14 +612,14 @@ class simulation:
         where `length` is in mm.
         """
         # fixed-radius override in meters
-        try:
-            r = getattr(self, 'neighbor_buffer_radius', None)
-            if r is not None:
+        r = getattr(self, 'neighbor_buffer_radius', None)
+        if r is not None:
+            try:
                 r = float(r)
-                if np.isfinite(r) and r > 0.0:
-                    return float(r)
-        except Exception:
-            pass
+            except (TypeError, ValueError):
+                r = None
+            if r is not None and np.isfinite(r) and r > 0.0:
+                return float(r)
 
         try:
             bl = float(getattr(self, 'neighbor_buffer_lengths', 2.0))
@@ -720,81 +692,66 @@ class simulation:
         # try raw component rasters first
         vel_x_ds = hdf5_io.read_dataset(h5, 'environment/vel_x', default=None)
         vel_y_ds = hdf5_io.read_dataset(h5, 'environment/vel_y', default=None)
-        try:
-            if vel_x_ds is not None and vel_y_ds is not None:
-                vel_x_arr = np.array(vel_x_ds)
-                vel_y_arr = np.array(vel_y_ds)
-                from emergent.salmon_abm.utils import geo_to_pixel
-                rows, cols = geo_to_pixel(self.X, self.Y, self.depth_rast_transform)
-                rows = np.asarray(rows, dtype=int)
-                cols = np.asarray(cols, dtype=int)
-                valid = (rows >= 0) & (cols >= 0) & (rows < vel_x_arr.shape[0]) & (cols < vel_x_arr.shape[1])
-                vx = np.full(self.num_agents, np.nan)
-                vy = np.full(self.num_agents, np.nan)
-                if np.any(valid):
-                    vx[valid] = vel_x_arr[rows[valid], cols[valid]]
-                    vy[valid] = vel_y_arr[rows[valid], cols[valid]]
-                # Record sampled water velocity components on simulation so alignment
-                # and other cues can use neighbor velocities before movement updates.
-                try:
-                    self.x_vel = np.where(np.isnan(vx), 0.0, vx).astype(np.float32)
-                    self.y_vel = np.where(np.isnan(vy), 0.0, vy).astype(np.float32)
-                except Exception:
-                    pass
-                both_nan = np.isnan(vx) & np.isnan(vy)
-                raw_heading = np.arctan2(-vy, -vx)
-                raw_heading = np.where(both_nan, self.heading, raw_heading)
-                self.heading = np.asarray(raw_heading, dtype=np.float32)
-                heading_set = True
-        except Exception:
-            heading_set = False
+        if vel_x_ds is not None and vel_y_ds is not None:
+            vel_x_arr = np.array(vel_x_ds)
+            vel_y_arr = np.array(vel_y_ds)
+            from emergent.salmon_abm.utils import geo_to_pixel
+            rows, cols = geo_to_pixel(self.X, self.Y, self.depth_rast_transform)
+            rows = np.asarray(rows, dtype=int)
+            cols = np.asarray(cols, dtype=int)
+            valid = (rows >= 0) & (cols >= 0) & (rows < vel_x_arr.shape[0]) & (cols < vel_x_arr.shape[1])
+            vx = np.full(self.num_agents, np.nan)
+            vy = np.full(self.num_agents, np.nan)
+            if np.any(valid):
+                vx[valid] = vel_x_arr[rows[valid], cols[valid]]
+                vy[valid] = vel_y_arr[rows[valid], cols[valid]]
+            # Record sampled water velocity components on simulation so alignment
+            # and other cues can use neighbor velocities before movement updates.
+            self.x_vel = np.asarray(vx, dtype=np.float32)
+            self.y_vel = np.asarray(vy, dtype=np.float32)
+            both_nan = np.isnan(vx) & np.isnan(vy)
+            raw_heading = np.arctan2(-vy, -vx)
+            raw_heading = np.where(both_nan, self.heading, raw_heading)
+            self.heading = np.asarray(raw_heading, dtype=np.float32)
+            heading_set = True
 
         # fallback to magnitude+direction rasters
         if not heading_set:
             vel_mag_ds = hdf5_io.read_dataset(h5, 'environment/vel_mag', default=None)
             vel_dir_ds = hdf5_io.read_dataset(h5, 'environment/vel_dir', default=None)
-            try:
-                if vel_mag_ds is not None and vel_dir_ds is not None:
-                    mag = np.array(vel_mag_ds)
-                    vdir = np.array(vel_dir_ds)
-                    from emergent.salmon_abm.utils import geo_to_pixel
-                    rows, cols = geo_to_pixel(self.X, self.Y, self.depth_rast_transform)
-                    rows = np.asarray(rows, dtype=int)
-                    cols = np.asarray(cols, dtype=int)
-                    valid = (rows >= 0) & (cols >= 0) & (rows < mag.shape[0]) & (cols < mag.shape[1])
-                    vx = np.full(self.num_agents, np.nan)
-                    vy = np.full(self.num_agents, np.nan)
-                    if np.any(valid):
-                        vals_mag = mag[rows[valid], cols[valid]]
-                        vals_dir = vdir[rows[valid], cols[valid]]
-                        vx[valid] = vals_mag * np.cos(vals_dir)
-                        vy[valid] = vals_mag * np.sin(vals_dir)
-                    try:
-                        self.x_vel = np.where(np.isnan(vx), 0.0, vx).astype(np.float32)
-                        self.y_vel = np.where(np.isnan(vy), 0.0, vy).astype(np.float32)
-                    except Exception:
-                        pass
-                    both_nan = np.isnan(vx) & np.isnan(vy)
-                    raw_heading = np.arctan2(-vy, -vx)
-                    raw_heading = np.where(both_nan, self.heading, raw_heading)
-                    self.heading = np.asarray(raw_heading, dtype=np.float32)
-                    heading_set = True
-            except Exception:
-                heading_set = False
+            if vel_mag_ds is not None and vel_dir_ds is not None:
+                mag = np.array(vel_mag_ds)
+                vdir = np.array(vel_dir_ds)
+                from emergent.salmon_abm.utils import geo_to_pixel
+                rows, cols = geo_to_pixel(self.X, self.Y, self.depth_rast_transform)
+                rows = np.asarray(rows, dtype=int)
+                cols = np.asarray(cols, dtype=int)
+                valid = (rows >= 0) & (cols >= 0) & (rows < mag.shape[0]) & (cols < mag.shape[1])
+                vx = np.full(self.num_agents, np.nan)
+                vy = np.full(self.num_agents, np.nan)
+                if np.any(valid):
+                    vals_mag = mag[rows[valid], cols[valid]]
+                    vals_dir = vdir[rows[valid], cols[valid]]
+                    vx[valid] = vals_mag * np.cos(vals_dir)
+                    vy[valid] = vals_mag * np.sin(vals_dir)
+                self.x_vel = np.asarray(vx, dtype=np.float32)
+                self.y_vel = np.asarray(vy, dtype=np.float32)
+                both_nan = np.isnan(vx) & np.isnan(vy)
+                raw_heading = np.arctan2(-vy, -vx)
+                raw_heading = np.where(both_nan, self.heading, raw_heading)
+                self.heading = np.asarray(raw_heading, dtype=np.float32)
+                heading_set = True
 
         # Persist initial ideal_sog into the HDF5 time-indexed array (column 0)
-        try:
-            if getattr(self, 'output_write_mode', 'full') == 'full':
-                h5 = hdf5_io.get_hdf5_obj(self)
-                arr = hdf5_io.read_dataset(h5, 'agent_data/ideal_sog', default=None)
-                if arr is not None:
-                    try:
-                        arr[:, 0] = np.array(self.ideal_sog)
-                        hdf5_io.write_dataset(h5, 'agent_data/ideal_sog', arr)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        if getattr(self, 'output_write_mode', 'full') == 'full':
+            h5 = hdf5_io.get_hdf5_obj(self)
+            arr = hdf5_io.read_dataset(h5, 'agent_data/ideal_sog', default=None)
+            if arr is not None:
+                arr = np.asarray(arr)
+                if arr.ndim != 2 or arr.shape[0] != int(self.num_agents) or arr.shape[1] < 1:
+                    raise ValueError(f"agent_data/ideal_sog has invalid shape {arr.shape} (expected (N,T) with T>=1)")
+                arr[:, 0] = np.asarray(self.ideal_sog).reshape((-1,))[: arr.shape[0]]
+                hdf5_io.write_dataset(h5, 'agent_data/ideal_sog', arr)
 
         return heading_set
 
@@ -866,8 +823,8 @@ class simulation:
                     try:
                         if np.asarray(existing).shape == (avoid_height, avoid_width):
                             continue
-                    except Exception:
-                        pass
+                    except (TypeError, ValueError):
+                        logging.getLogger(__name__).debug("Invalid avoid memory dataset shape for %s", key, exc_info=True)
                 hdf5_io.write_dataset(h5, key, np.full((avoid_height, avoid_width), np.nan, dtype=np.float32))
         return True
 
@@ -1019,13 +976,6 @@ class simulation:
 
         # sparse history update (preferred)
         if bool(getattr(self, 'use_sparse_avoid_memory', True)):
-            if self._avoid_map_shape is None:
-                # best-effort infer from existing datasets or initialize_mental_map metadata
-                try:
-                    if hasattr(self, '_avoid_map_shape') and self._avoid_map_shape is not None:
-                        pass
-                except Exception:
-                    pass
             if not self.ensure_avoid_history():
                 return False
             n = int(self.num_agents)
@@ -1260,10 +1210,7 @@ class simulation:
                     self.closest_agent = nearest
                     self.nearest_neighbor_distance = nearest_d
 
-                try:
-                    self._neighbor_last_build_step = step_i
-                except Exception:
-                    pass
+                self._neighbor_last_build_step = step_i
             except StopIteration:
                 # Normal control flow: neighbor update not due yet.
                 pass
@@ -1409,7 +1356,7 @@ class simulation:
                 logging.getLogger(__name__).debug('DEBUG movement: is_stuck[:10]=%s', self.is_stuck[:10])
                 logging.getLogger(__name__).debug('DEBUG movement: prev_Hz[:10]=%s', self.prev_Hz[:10])
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("debug_freq logging failed")
 
         # apply movement (support both (N,2) and (N,) displacements)
         dxdy = np.asarray(dxdy)
@@ -1450,13 +1397,10 @@ class simulation:
         self.Y = new_Y
 
         # X/Y changed; invalidate any cached samples from the pre-movement state.
-        try:
-            if getattr(self, 'cache_env_samples', True) and isinstance(getattr(self, '_env_sample_cache', None), dict):
-                self._env_sample_cache_gen = int(getattr(self, '_env_sample_cache_gen', 0) or 0) + 1
-                self._env_sample_cache = {}
-                self._env_pixel_cache = {}
-        except Exception:
-            pass
+        if getattr(self, 'cache_env_samples', True) and isinstance(getattr(self, '_env_sample_cache', None), dict):
+            self._env_sample_cache_gen = int(getattr(self, '_env_sample_cache_gen', 0) or 0) + 1
+            self._env_sample_cache = {}
+            self._env_pixel_cache = {}
 
         # update fish kinematics (do not overwrite water velocity fields)
         self.fish_x_vel = np.asarray((self.X - self.prev_X) / dt, dtype=np.float32)
@@ -1478,12 +1422,13 @@ class simulation:
         # write per-timestep slices into time-indexed agent_data arrays
         h5 = hdf5_io.get_hdf5_obj(self)
         ts = int(max(0, min(int(self.cumulative_time) - 1, self.num_timesteps - 1)))
+        t_int: int | None = None
         try:
             t_int = int(t)
-            if 0 <= t_int < int(self.num_timesteps):
-                ts = t_int
-        except Exception:
-            pass
+        except (TypeError, ValueError):
+            t_int = None
+        if t_int is not None and 0 <= t_int < int(self.num_timesteps):
+            ts = t_int
 
         write_frequency = int(getattr(self, 'write_frequency', 1) or 0)
         if backend == 'sync':
@@ -1536,8 +1481,8 @@ class simulation:
                     payload[k] = np.asarray(val)
                 try:
                     writer.submit(int(ts), payload, copy=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    raise RuntimeError("Async writer submit() failed") from e
 
         # flush when supported (best-effort)
         flush_frequency_raw = getattr(self, 'flush_frequency', None)
@@ -1546,10 +1491,7 @@ class simulation:
         flush_frequency = int(flush_frequency_raw or 0)
         do_flush = (not disable_sync_writes) and flush_frequency > 0 and (ts % flush_frequency == 0)
         if backend == 'sync' and do_flush and hasattr(self.db, 'flush'):
-            try:
-                self.db.flush()
-            except Exception:
-                pass
+            self.db.flush()
 
         return True
 
@@ -1565,17 +1507,17 @@ class simulation:
             return np.full(self.num_agents, np.nan)
 
         # Per-timestep cache (dedupe repeated sampling across multiple cues).
-        try:
-            if getattr(self, 'cache_env_samples', True):
+        if getattr(self, 'cache_env_samples', True):
+            try:
                 step_i = int(getattr(self, 'current_step', -1))
-                cache_step = getattr(self, '_env_sample_cache_step', None)
-                cache = getattr(self, '_env_sample_cache', None)
-                if cache_step is not None and int(cache_step) == step_i and isinstance(cache, dict):
-                    k = self._env_sample_cache_key(transform, raster_name)
-                    if k in cache:
-                        return cache[k]
-        except Exception:
-            pass
+            except (TypeError, ValueError):
+                step_i = -1
+            cache_step = getattr(self, '_env_sample_cache_step', None)
+            cache = getattr(self, '_env_sample_cache', None)
+            if cache_step is not None and int(cache_step) == step_i and isinstance(cache, dict):
+                k = self._env_sample_cache_key(transform, raster_name)
+                if k in cache:
+                    return cache[k]
 
         ds_arr = self.get_cached_dataset(f'environment/{raster_name}', default=None)
         if ds_arr is None:
@@ -1584,27 +1526,20 @@ class simulation:
 
         rows = None
         cols = None
-        try:
+        if getattr(self, 'cache_env_samples', True):
+            pcache = getattr(self, '_env_pixel_cache', None)
+            if isinstance(pcache, dict):
+                pk = self._env_pixel_cache_key(transform)
+                if pk in pcache:
+                    rows, cols = pcache[pk]
+
+        if rows is None or cols is None:
+            rows, cols = utils.geo_to_pixel(self.X, self.Y, transform)
             if getattr(self, 'cache_env_samples', True):
                 pcache = getattr(self, '_env_pixel_cache', None)
                 if isinstance(pcache, dict):
                     pk = self._env_pixel_cache_key(transform)
-                    if pk in pcache:
-                        rows, cols = pcache[pk]
-        except Exception:
-            rows = None
-            cols = None
-
-        if rows is None or cols is None:
-            rows, cols = utils.geo_to_pixel(self.X, self.Y, transform)
-            try:
-                if getattr(self, 'cache_env_samples', True):
-                    pcache = getattr(self, '_env_pixel_cache', None)
-                    if isinstance(pcache, dict):
-                        pk = self._env_pixel_cache_key(transform)
-                        pcache[pk] = (rows, cols)
-            except Exception:
-                pass
+                    pcache[pk] = (rows, cols)
 
         rows = np.asarray(rows, dtype=int)
         cols = np.asarray(cols, dtype=int)
@@ -1627,7 +1562,7 @@ class simulation:
                 logging.getLogger(__name__).debug('rows sample (first 5): %s cols sample (first 5): %s', rows[:5], cols[:5])
                 logging.getLogger(__name__).debug('valid count: %s', int(np.sum(valid)))
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("debug_env logging failed")
 
         if getattr(self, 'cache_env_samples', True):
             step_i = int(getattr(self, 'current_step', -1))
@@ -1668,14 +1603,11 @@ class simulation:
         orig_output_write_mode = getattr(self, 'output_write_mode', 'full')
         orig_backend = getattr(self, 'output_write_backend', 'sync')
         writer = None
-        try:
-            # When streaming live frames over TCP, default to minimizing HDF writes
-            # because the viewer does not need per-step HDF outputs.
-            if viewer_live and bool(getattr(self, 'viewer_live_minimize_hdf_writes', True)):
-                if str(getattr(self, 'output_write_mode', 'full')).lower() == 'full':
-                    self.output_write_mode = 'none'
-        except Exception:
-            pass
+        # When streaming live frames over TCP, default to minimizing HDF writes
+        # because the viewer does not need per-step HDF outputs.
+        if viewer_live and bool(getattr(self, 'viewer_live_minimize_hdf_writes', True)):
+            if str(getattr(self, 'output_write_mode', 'full')).lower() == 'full':
+                self.output_write_mode = 'none'
 
         # Async output backend: set up dedicated writer (Phase 2: thread backend).
         try:
@@ -1687,27 +1619,24 @@ class simulation:
                 from emergent.salmon_abm.async_output import AsyncWriteConfig, ThreadHdfWriter
                 # Ensure only the requested datasets exist (and are chunked for
                 # efficient column writes) before the writer starts.
-                try:
-                    for key in getattr(self, 'output_write_keys', ()):
-                        k = str(key)
-                        if k.startswith('agent_data/'):
-                            hdf5_io.ensure_timeseries_dataset(
-                                getattr(self, 'db', None),
-                                k,
-                                n_agents=int(getattr(self, 'num_agents', 0)),
-                                n_steps=int(getattr(self, 'num_timesteps', 0)),
-                                dtype=np.float32,
-                            )
-                        elif k in ('X', 'Y', 'prev_X', 'prev_Y'):
-                            hdf5_io.ensure_vector_dataset(
-                                getattr(self, 'db', None),
-                                k,
-                                n_agents=int(getattr(self, 'num_agents', 0)),
-                                dtype=np.float32,
-                                fillvalue=0.0,
-                            )
-                except Exception:
-                    pass
+                for key in getattr(self, 'output_write_keys', ()):
+                    k = str(key)
+                    if k.startswith('agent_data/'):
+                        hdf5_io.ensure_timeseries_dataset(
+                            getattr(self, 'db', None),
+                            k,
+                            n_agents=int(getattr(self, 'num_agents', 0)),
+                            n_steps=int(getattr(self, 'num_timesteps', 0)),
+                            dtype=np.float32,
+                        )
+                    elif k in ('X', 'Y', 'prev_X', 'prev_Y'):
+                        hdf5_io.ensure_vector_dataset(
+                            getattr(self, 'db', None),
+                            k,
+                            n_agents=int(getattr(self, 'num_agents', 0)),
+                            dtype=np.float32,
+                            fillvalue=0.0,
+                        )
                 cfg = AsyncWriteConfig(
                     h5_path=str(getattr(self, 'db_path', '')),
                     n_agents=int(getattr(self, 'num_agents', 0)),
@@ -1735,68 +1664,47 @@ class simulation:
 
                 # Ensure environment datasets needed for stepping are cached in-memory
                 # before we close the HDF handle to avoid concurrent HDF access.
-                try:
-                    if getattr(self, 'auto_derive_refugia', False) and not getattr(self, '_refugia_derived', False):
-                        try:
-                            self.derive_environment_refugia()
-                        except Exception:
-                            pass
-                    for k in (
-                        'environment/depth',
-                        'environment/vel_x',
-                        'environment/vel_y',
-                        'environment/vel_mag',
-                        'environment/vel_dir',
-                        'environment/distance_to',
-                        'environment/refugia',
-                        'environment/x_coords',
-                        'environment/y_coords',
-                    ):
-                        try:
-                            _ = self.get_cached_dataset(k, default=None)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                if getattr(self, 'auto_derive_refugia', False) and not getattr(self, '_refugia_derived', False):
+                    self.derive_environment_refugia()
+                for k in (
+                    'environment/depth',
+                    'environment/vel_x',
+                    'environment/vel_y',
+                    'environment/vel_mag',
+                    'environment/vel_dir',
+                    'environment/distance_to',
+                    'environment/refugia',
+                    'environment/x_coords',
+                    'environment/y_coords',
+                ):
+                    _ = self.get_cached_dataset(k, default=None)
 
                 # Pre-create only requested datasets for the writer.
-                try:
-                    with h5py.File(str(getattr(self, 'db_path', '')), "a") as h5:
-                        for key in getattr(self, 'output_write_keys', ()):
-                            k = str(key)
-                            if k.startswith('agent_data/'):
-                                hdf5_io.ensure_timeseries_dataset(
-                                    h5,
-                                    k,
-                                    n_agents=int(getattr(self, 'num_agents', 0)),
-                                    n_steps=int(getattr(self, 'num_timesteps', 0)),
-                                    dtype=np.float32,
-                                )
-                            elif k in ('X', 'Y', 'prev_X', 'prev_Y'):
-                                hdf5_io.ensure_vector_dataset(
-                                    h5,
-                                    k,
-                                    n_agents=int(getattr(self, 'num_agents', 0)),
-                                    dtype=np.float32,
-                                    fillvalue=0.0,
-                                )
-                        try:
-                            h5.flush()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                with h5py.File(str(getattr(self, 'db_path', '')), "a") as h5:
+                    for key in getattr(self, 'output_write_keys', ()):
+                        k = str(key)
+                        if k.startswith('agent_data/'):
+                            hdf5_io.ensure_timeseries_dataset(
+                                h5,
+                                k,
+                                n_agents=int(getattr(self, 'num_agents', 0)),
+                                n_steps=int(getattr(self, 'num_timesteps', 0)),
+                                dtype=np.float32,
+                            )
+                        elif k in ('X', 'Y', 'prev_X', 'prev_Y'):
+                            hdf5_io.ensure_vector_dataset(
+                                h5,
+                                k,
+                                n_agents=int(getattr(self, 'num_agents', 0)),
+                                dtype=np.float32,
+                                fillvalue=0.0,
+                            )
+                    h5.flush()
 
                 # Close sim-side HDF handle to avoid concurrent file access.
-                try:
-                    if getattr(self, 'db', None) is not None:
-                        try:
-                            self.db.close()
-                        except Exception:
-                            pass
-                    self.db = None
-                except Exception:
-                    pass
+                if getattr(self, 'db', None) is not None:
+                    self.db.close()
+                self.db = None
 
                 cfg = AsyncWriteConfig(
                     h5_path=str(getattr(self, 'db_path', '')),
@@ -1825,68 +1733,47 @@ class simulation:
 
                 # Ensure environment datasets needed for stepping are cached in-memory
                 # before we close the HDF handle to avoid concurrent file access.
-                try:
-                    if getattr(self, 'auto_derive_refugia', False) and not getattr(self, '_refugia_derived', False):
-                        try:
-                            self.derive_environment_refugia()
-                        except Exception:
-                            pass
-                    for k in (
-                        'environment/depth',
-                        'environment/vel_x',
-                        'environment/vel_y',
-                        'environment/vel_mag',
-                        'environment/vel_dir',
-                        'environment/distance_to',
-                        'environment/refugia',
-                        'environment/x_coords',
-                        'environment/y_coords',
-                    ):
-                        try:
-                            _ = self.get_cached_dataset(k, default=None)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                if getattr(self, 'auto_derive_refugia', False) and not getattr(self, '_refugia_derived', False):
+                    self.derive_environment_refugia()
+                for k in (
+                    'environment/depth',
+                    'environment/vel_x',
+                    'environment/vel_y',
+                    'environment/vel_mag',
+                    'environment/vel_dir',
+                    'environment/distance_to',
+                    'environment/refugia',
+                    'environment/x_coords',
+                    'environment/y_coords',
+                ):
+                    _ = self.get_cached_dataset(k, default=None)
 
                 # Pre-create only requested datasets for the writer.
-                try:
-                    with h5py.File(str(getattr(self, 'db_path', '')), "a") as h5:
-                        for key in getattr(self, 'output_write_keys', ()):
-                            k = str(key)
-                            if k.startswith('agent_data/'):
-                                hdf5_io.ensure_timeseries_dataset(
-                                    h5,
-                                    k,
-                                    n_agents=int(getattr(self, 'num_agents', 0)),
-                                    n_steps=int(getattr(self, 'num_timesteps', 0)),
-                                    dtype=np.float32,
-                                )
-                            elif k in ('X', 'Y', 'prev_X', 'prev_Y'):
-                                hdf5_io.ensure_vector_dataset(
-                                    h5,
-                                    k,
-                                    n_agents=int(getattr(self, 'num_agents', 0)),
-                                    dtype=np.float32,
-                                    fillvalue=0.0,
-                                )
-                        try:
-                            h5.flush()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                with h5py.File(str(getattr(self, 'db_path', '')), "a") as h5:
+                    for key in getattr(self, 'output_write_keys', ()):
+                        k = str(key)
+                        if k.startswith('agent_data/'):
+                            hdf5_io.ensure_timeseries_dataset(
+                                h5,
+                                k,
+                                n_agents=int(getattr(self, 'num_agents', 0)),
+                                n_steps=int(getattr(self, 'num_timesteps', 0)),
+                                dtype=np.float32,
+                            )
+                        elif k in ('X', 'Y', 'prev_X', 'prev_Y'):
+                            hdf5_io.ensure_vector_dataset(
+                                h5,
+                                k,
+                                n_agents=int(getattr(self, 'num_agents', 0)),
+                                dtype=np.float32,
+                                fillvalue=0.0,
+                            )
+                    h5.flush()
 
                 # Close sim-side HDF handle to avoid concurrent file access.
-                try:
-                    if getattr(self, 'db', None) is not None:
-                        try:
-                            self.db.close()
-                        except Exception:
-                            pass
-                    self.db = None
-                except Exception:
-                    pass
+                if getattr(self, 'db', None) is not None:
+                    self.db.close()
+                self.db = None
 
                 cfg = AsyncWriteConfig(
                     h5_path=str(getattr(self, 'db_path', '')),
@@ -1925,14 +1812,11 @@ class simulation:
             controller = self.pid_controller
 
         if controller is not None and k_p is not None:
-            try:
-                controller.k_p = np.array([k_p]) if np.isscalar(k_p) else np.array(k_p)
-                if k_i is not None:
-                    controller.k_i = np.array([k_i]) if np.isscalar(k_i) else np.array(k_i)
-                if k_d is not None:
-                    controller.k_d = np.array([k_d]) if np.isscalar(k_d) else np.array(k_d)
-            except Exception:
-                pass
+            controller.k_p = np.array([k_p]) if np.isscalar(k_p) else np.array(k_p)
+            if k_i is not None:
+                controller.k_i = np.array([k_i]) if np.isscalar(k_i) else np.array(k_i)
+            if k_d is not None:
+                controller.k_d = np.array([k_d]) if np.isscalar(k_d) else np.array(k_d)
 
         status = {'steps': 0, 'errors': [], 'video_frames': 0}
 
@@ -2017,10 +1901,17 @@ class simulation:
                                     try:
                                         client_conn.close()
                                     except Exception:
-                                        pass
+                                        logging.getLogger(__name__).exception("Failed closing viewer_live client connection")
                                     client_conn = None
-                        except Exception:
-                            pass
+                                    status['errors'].append("viewer_live_send_error")
+                        except Exception as e:
+                            status['errors'].append(f'viewer_live_stream_error:{e}')
+                            try:
+                                if client_conn is not None:
+                                    client_conn.close()
+                            except Exception:
+                                logging.getLogger(__name__).exception("Failed closing viewer_live client connection")
+                            client_conn = None
                 except Exception as e:
                     status['errors'].append(str(e))
                     # continue running unless unrecoverable
@@ -2032,29 +1923,17 @@ class simulation:
                     writer.close(timeout_s=float(getattr(self, 'output_write_close_timeout_s', 10.0)))
             except Exception as e:
                 status['errors'].append(f'async_writer_close_error:{e}')
-            try:
-                self._async_writer = None
-            except Exception:
-                pass
-            try:
-                self.output_write_mode = orig_output_write_mode
-            except Exception:
-                pass
+            self._async_writer = None
+            self.output_write_mode = orig_output_write_mode
 
         # flush and close viewer process if requested
         if backend == 'sync' and hasattr(self.db, 'flush'):
-            try:
-                self.db.flush()
-            except Exception:
-                pass
+            self.db.flush()
 
         # If we launched the viewer and the user wants blocking behavior, wait
         if viewer and viewer_proc is not None:
-            try:
-                if viewer_blocking:
-                    viewer_proc.wait()
-            except Exception:
-                pass
+            if viewer_blocking:
+                viewer_proc.wait()
 
         # preserve legacy return value for backwards compatibility
         self.last_run_status = status
@@ -2259,20 +2138,20 @@ class simulation:
             try:
                 stop_thread()
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("Failed stopping behavior diagnostics thread")
 
         db = getattr(self, "db", None)
         if db is not None:
             try:
                 db.close()
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("Failed closing simulation HDF5 DB")
 
         if getattr(self, "_created_db_file", False):
             try:
                 os.remove(self.db_path)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug("Failed removing temporary DB file: %s", self.db_path, exc_info=True)
         return True
 
 

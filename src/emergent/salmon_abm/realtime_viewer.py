@@ -1630,19 +1630,30 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Realtime Simulation Viewer")
         self._watchdog_seconds = float(watchdog_seconds)
         self._point_size = point_size
-        self.viewer = ReplayWidget(positions, point_size=point_size)
-        # Set initial max_agents to all agents
-        self.viewer.max_agents = positions.shape[1]
+        self._last_open_dir = None
         # view state
         self._pad = float(pad)
         self._force_vbo = bool(force_vbo)
         self._pan_x = 0.0
         self._pan_y = 0.0
+        self.viewer = ReplayWidget(
+            positions,
+            pad=self._pad,
+            pan_x=self._pan_x,
+            pan_y=self._pan_y,
+            point_size=point_size,
+        )
+        # Set initial max_agents to all agents
+        self.viewer.max_agents = positions.shape[1]
 
-        btn_start = QPushButton("Start")
-        btn_pause = QPushButton("Pause")
-        btn_stop = QPushButton("Stop")
-        btn_restart = QPushButton("Restart")
+        self.btn_open = QPushButton("Open…")
+        self.btn_open.setToolTip("Open another model output (.h5/.csv) in this viewer")
+        self.btn_open.clicked.connect(self._on_open_file)
+
+        self.btn_start = QPushButton("Start")
+        self.btn_pause = QPushButton("Pause")
+        self.btn_stop = QPushButton("Stop")
+        self.btn_restart = QPushButton("Restart")
         self.speed_slider = QSlider(Qt.Horizontal)
         self.speed_slider.setRange(1, 400)
         self.speed_slider.setValue(100)
@@ -1650,32 +1661,33 @@ class MainWindow(QMainWindow):
         
         # Agent count control
         from PyQt5.QtWidgets import QSpinBox
-        lbl_agents = QLabel("Max Agents:")
+        lbl_agents = QLabel("Display Agents:")
         self.agent_count_spin = QSpinBox()
         self.agent_count_spin.setRange(1, 100000)
         self.agent_count_spin.setValue(positions.shape[1])  # Default to all agents
-        self.agent_count_spin.setToolTip("Maximum number of agents to display")
+        self.agent_count_spin.setToolTip("Maximum number of agents to draw (playback only)")
         self.agent_count_spin.valueChanged.connect(self._on_agent_count_changed)
         
         # Timesteps control
-        lbl_timesteps = QLabel("Max Timesteps:")
+        lbl_timesteps = QLabel("Playback Steps:")
         self.timesteps_spin = QSpinBox()
         self.timesteps_spin.setRange(1, 100000)
         self.timesteps_spin.setValue(positions.shape[0])  # Default to all timesteps
-        self.timesteps_spin.setToolTip("Maximum number of timesteps to display")
+        self.timesteps_spin.setToolTip("Maximum number of timesteps to play back (does not rerun simulation)")
         self.timesteps_spin.valueChanged.connect(self._on_timesteps_changed)
 
-        btn_start.clicked.connect(self.viewer.start)
-        btn_pause.clicked.connect(self.viewer.pause)
-        btn_stop.clicked.connect(self.viewer.stop)
-        btn_restart.clicked.connect(self.viewer.restart)
+        self.btn_start.clicked.connect(self._on_start_clicked)
+        self.btn_pause.clicked.connect(self._on_pause_clicked)
+        self.btn_stop.clicked.connect(self._on_stop_clicked)
+        self.btn_restart.clicked.connect(self._on_restart_clicked)
         self.speed_slider.valueChanged.connect(self._on_speed)
 
         hl = QHBoxLayout()
-        hl.addWidget(btn_start)
-        hl.addWidget(btn_pause)
-        hl.addWidget(btn_stop)
-        hl.addWidget(btn_restart)
+        hl.addWidget(self.btn_open)
+        hl.addWidget(self.btn_start)
+        hl.addWidget(self.btn_pause)
+        hl.addWidget(self.btn_stop)
+        hl.addWidget(self.btn_restart)
         hl.addWidget(lbl_speed)
         hl.addWidget(self.speed_slider)
         hl.addWidget(lbl_agents)
@@ -1746,33 +1758,145 @@ class MainWindow(QMainWindow):
     def _on_speed(self, v: int):
         mult = v / 100.0
         self.viewer.set_speed(mult if mult > 0 else 1.0)
-    
+
+    def _on_start_clicked(self):
+        self.viewer.start()
+
+    def _on_pause_clicked(self):
+        self.viewer.pause()
+
+    def _on_stop_clicked(self):
+        self.viewer.stop()
+
+    def _on_restart_clicked(self):
+        self.viewer.restart()
+     
     def _on_agent_count_changed(self, value: int):
         """Update max agents displayed in viewer."""
-        print(f"Agent count changed to: {value}", flush=True)
         if hasattr(self.viewer, 'max_agents'):
             self.viewer.max_agents = value
-            print(f"Viewer max_agents set to: {self.viewer.max_agents}, N={self.viewer.N}", flush=True)
-            self.viewer.repaint()  # Force immediate repaint instead of update()
-        else:
-            print(f"WARNING: Viewer does not have max_agents attribute", flush=True)
-    
+            self.viewer.update()
+     
     def _on_timesteps_changed(self, value: int):
         """Update max timesteps displayed in viewer."""
-        print(f"Timesteps changed to: {value}", flush=True)
         if hasattr(self.viewer, 'positions') and self.viewer.positions is not None:
             # Limit the number of timesteps by truncating the positions array
             original_T = self.viewer.positions.shape[0]
             new_T = min(value, original_T)
             if hasattr(self.viewer, 'T'):
                 self.viewer.T = new_T
-                print(f"Viewer T set to: {self.viewer.T}", flush=True)
                 # Reset to frame 0 if current frame is beyond new limit
                 if self.viewer.frame >= new_T:
                     self.viewer.frame = 0
                 self.viewer.update()
+
+    def _apply_display_limits(self) -> None:
+        try:
+            if hasattr(self.viewer, 'max_agents'):
+                self.viewer.max_agents = int(self.agent_count_spin.value())
+        except Exception:
+            pass
+        try:
+            if hasattr(self.viewer, 'positions') and getattr(self.viewer, 'positions', None) is not None:
+                tmax = int(self.timesteps_spin.value())
+                self.viewer.T = min(tmax, int(self.viewer.positions.shape[0]))
+        except Exception:
+            pass
+
+    def _on_open_file(self):
+        dlg = QFileDialog(self)
+        dlg.setFileMode(QFileDialog.ExistingFile)
+        dlg.setNameFilters(["HDF5 files (*.h5 *.hdf5)", "CSV files (*.csv)", "All files (*)"])
+        if self._last_open_dir:
+            try:
+                dlg.setDirectory(self._last_open_dir)
+            except Exception:
+                pass
+        if not dlg.exec_():
+            return
+        selected = dlg.selectedFiles()
+        if not selected:
+            return
+        path = selected[0]
+        try:
+            self._last_open_dir = os.path.dirname(os.path.abspath(path))
+        except Exception:
+            pass
+        self.load_model_file(path)
+
+    def load_model_file(self, path: str) -> None:
+        """Load a new playback dataset into the existing window."""
+        path = os.path.abspath(path)
+        positions = load_any(path)
+
+        env_depth_array, env_x_coords, env_y_coords = None, None, None
+        battery_array = None
+        heading_array = None
+        if path.lower().endswith(('.h5', '.hdf5')):
+            try:
+                depth, x_coords, y_coords = load_env_from_h5(path)
+                if depth is not None:
+                    env_depth_array = depth
+                    env_x_coords = x_coords
+                    env_y_coords = y_coords
+            except Exception:
+                pass
+            try:
+                battery_array = load_battery_from_h5(path)
+            except Exception:
+                pass
+            try:
+                heading_array = load_heading_from_h5(path)
+            except Exception:
+                pass
+
+        nagents = int(positions.shape[1]) if positions.ndim == 3 else 0
+        if nagents < 5001:
+            new_view = ReplayWidget(
+                positions,
+                pad=self._pad,
+                pan_x=self._pan_x,
+                pan_y=self._pan_y,
+                point_size=self._point_size,
+                env_depth_array=env_depth_array,
+                env_x_coords=env_x_coords,
+                env_y_coords=env_y_coords,
+                battery_array=battery_array,
+                heading_array=heading_array,
+            )
         else:
-            print(f"WARNING: Viewer does not have positions array", flush=True)
+            new_view = GLViewer(
+                positions,
+                pad=self._pad,
+                force_vbo=self._force_vbo,
+                point_size=self._point_size,
+                env_depth_array=env_depth_array,
+                env_x_coords=env_x_coords,
+                env_y_coords=env_y_coords,
+                battery_array=battery_array,
+                heading_array=heading_array,
+            )
+
+        swap_viewer_in_main(self, new_view)
+
+        try:
+            self.agent_count_spin.blockSignals(True)
+            self.timesteps_spin.blockSignals(True)
+            self.agent_count_spin.setRange(1, max(1, int(positions.shape[1])))
+            self.timesteps_spin.setRange(1, max(1, int(positions.shape[0])))
+            self.agent_count_spin.setValue(int(positions.shape[1]))
+            self.timesteps_spin.setValue(int(positions.shape[0]))
+        finally:
+            try:
+                self.agent_count_spin.blockSignals(False)
+                self.timesteps_spin.blockSignals(False)
+            except Exception:
+                pass
+        self._apply_display_limits()
+        try:
+            self.setWindowTitle(f"Realtime Simulation Viewer - {os.path.basename(path)}")
+        except Exception:
+            pass
 
 
 def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
@@ -1799,44 +1923,16 @@ def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
             pass
         win.viewer = new_widget
         new_widget.show()
-        
-        # Reconnect buttons and controls to the new viewer
+
+        # Re-apply UI state (speed + display limits) to the new viewer.
         try:
-            # Reconnect agent count spinbox and set initial value
-            from PyQt5.QtWidgets import QSpinBox
-            agent_spin = None
-            for child in win.centralWidget().findChildren(QSpinBox):
-                # Find the agent count spinbox by checking if it has the right range
-                if child.minimum() == 1 and child.maximum() == 100000:
-                    agent_spin = child
-                    break
-            
-            if agent_spin is not None:
-                # Set initial max_agents from current spinbox value
-                new_widget.max_agents = agent_spin.value()
-                # Reconnect the signal
-                try:
-                    agent_spin.valueChanged.disconnect()
-                except:
-                    pass
-                agent_spin.valueChanged.connect(lambda value: setattr(new_widget, 'max_agents', value) or new_widget.update())
-            
-            # Find the buttons and reconnect them
-            for child in win.centralWidget().findChildren(QPushButton):
-                if child.text() == "Start":
-                    child.clicked.disconnect()
-                    child.clicked.connect(new_widget.start)
-                elif child.text() == "Pause":
-                    child.clicked.disconnect()
-                    child.clicked.connect(new_widget.pause)
-                elif child.text() == "Stop":
-                    child.clicked.disconnect()
-                    child.clicked.connect(new_widget.stop)
-                elif child.text() == "Restart":
-                    child.clicked.disconnect()
-                    child.clicked.connect(new_widget.restart)
-        except Exception as e:
-            print(f"Warning: Could not reconnect controls: {e}")
+            win._on_speed(int(win.speed_slider.value()))
+        except Exception:
+            pass
+        try:
+            win._apply_display_limits()
+        except Exception:
+            pass
     except Exception:
         # best-effort fallback
         try:
@@ -1846,6 +1942,10 @@ def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
             except Exception:
                 pass
             win.viewer = new_widget
+            try:
+                win._apply_display_limits()
+            except Exception:
+                pass
         except Exception:
             pass
 

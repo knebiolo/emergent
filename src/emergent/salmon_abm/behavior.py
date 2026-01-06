@@ -13,6 +13,7 @@ import time
 import sys
 import threading
 import queue
+logger = logging.getLogger(__name__)
 try:
     import psutil
     _PSUTIL_AVAILABLE = True
@@ -450,11 +451,11 @@ class behavior():
                 self._buf_nc = np.empty(conservative_batch, dtype=np.int64)
                 self._out_x = np.empty(conservative_batch, dtype=np.float64)
                 self._out_y = np.empty(conservative_batch, dtype=np.float64)
-            except Exception:
+            except (MemoryError, ValueError):
                 # fall back to lazy allocation if memory allocation fails
-                pass
-        except Exception:
-            pass
+                logging.getLogger(__name__).warning("Behavior preallocation failed; falling back to lazy allocation", exc_info=True)
+        except (OSError, ValueError, TypeError):
+            logging.getLogger(__name__).warning("Behavior preallocation setup failed; falling back to lazy allocation", exc_info=True)
         # set numba threads to CPU count if available and not already set via env
         try:
             if _NUMBA_AVAILABLE:
@@ -468,19 +469,19 @@ class behavior():
                                 from numba import set_num_threads
                                 set_num_threads(cpu_count())
                             except Exception:
-                                pass
+                                logging.getLogger(__name__).debug("Failed setting NUMBA_NUM_THREADS", exc_info=True)
                         try:
                             self._warmup_numba_kernels()
                         except Exception:
-                            pass
+                            logging.getLogger(__name__).debug("Failed warming up numba kernels", exc_info=True)
                         try:
                             setattr(self.__class__, '_numba_initialized', True)
                         except Exception:
-                            pass
+                            logging.getLogger(__name__).debug("Failed setting _numba_initialized flag", exc_info=True)
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug("Numba initialization failed", exc_info=True)
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("Behavior initialization encountered an error", exc_info=True)
 
     def _safe_npz_dump(self, outdir, fname_prefix, payload):
         """Write a compressed NPZ of `payload` to `outdir` with `fname_prefix`.
@@ -493,7 +494,7 @@ class behavior():
                     self._enqueue_diag(outdir, fname_prefix, payload)
                     return None
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug("_enqueue_diag failed; falling back to synchronous NPZ write", exc_info=True)
             import numpy as _np
             import os, time
             os.makedirs(outdir, exist_ok=True)
@@ -539,12 +540,12 @@ class behavior():
                             for k, v in payload.items():
                                 try:
                                     ser[k] = _np.asarray(v).astype(float)
-                                except Exception:
+                                except (TypeError, ValueError):
                                     # try scalar conversion
                                     try:
                                         ser[k] = float(v)
-                                    except Exception:
-                                        pass
+                                    except (TypeError, ValueError):
+                                        continue
                         # write at least something
                         if ser:
                             _np.savez_compressed(fname, **ser)
@@ -575,7 +576,7 @@ class behavior():
         try:
             self._diag_thread.join(timeout=1.0)
         except Exception:
-            pass
+            logging.getLogger(__name__).exception("Failed joining diagnostics thread")
 
     def _enqueue_diag(self, outdir, fname_prefix, payload):
         if self._diag_queue is None:
@@ -600,7 +601,7 @@ class behavior():
                 return True
             except Exception:
                 # try NPZ fallback when explicitly requested
-                pass
+                logging.getLogger(__name__).warning("diagnostics_writer.write_step failed; falling back", exc_info=True)
 
         if outdir is None:
             outdir = getattr(self.simulation, 'model_dir', None) or os.path.join('outputs', 'diagnostics')
@@ -608,7 +609,7 @@ class behavior():
             try:
                 self._safe_npz_dump(outdir, f'behavior_debug_guarded_step_{step_i}', payload)
             except Exception:
-                pass
+                logging.getLogger(__name__).warning("NPZ diagnostics fallback failed", exc_info=True)
         return False
 
     def _safe_set_sim_attr(self, name, value):
@@ -617,11 +618,12 @@ class behavior():
         """
         try:
             setattr(self.simulation, name, value)
-        except Exception:
+        except Exception as e:
+            logging.getLogger(__name__).debug("setattr failed for sim.%s; falling back to __dict__", name, exc_info=True)
             try:
                 self.simulation.__dict__[name] = value
-            except Exception:
-                pass
+            except Exception as e2:
+                raise RuntimeError(f"Failed setting sim attribute {name}") from e2
 
     def _safe_asarray(self, v, dtype=float, default=None):
         """Return np.asarray(v, dtype) or `default` on failure."""
@@ -642,7 +644,7 @@ class behavior():
             if callable(getter) and key.startswith('environment/'):
                 return getter(key, default=default)
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("get_cached_dataset failed for %s; falling back to read_dataset", key, exc_info=True)
         h5 = hdf5_io.get_hdf5_obj(sim)
         return hdf5_io.read_dataset(h5, key, default=default)
 
@@ -764,11 +766,8 @@ class behavior():
         n = int(getattr(self.simulation, 'num_agents', 0) or 0)
 
         if n > 0:
-            try:
-                if arr.shape == (n, 2):
-                    return arr
-            except Exception:
-                pass
+            if arr.shape == (n, 2):
+                return arr
 
             if arr.ndim == 2 and arr.shape[0] == 2 and arr.shape[1] == n:
                 return arr.T
@@ -803,7 +802,7 @@ class behavior():
             try:
                 self._enqueue_diag_json(outdir, f'cue_shapes_{step_i}', shapes)
             except Exception:
-                pass
+                logging.getLogger(__name__).warning("Failed writing cue_shapes diagnostics", exc_info=True)
 
     def _rawvecs_payload(self, raw_vecs: dict, cue_magnitudes: dict) -> dict:
         payload = {}
@@ -811,12 +810,12 @@ class behavior():
             try:
                 payload[f'{k}_vec'] = np.asarray(v).astype(float)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug("Failed serializing raw_vec for %s", k, exc_info=True)
         for k, v in (cue_magnitudes or {}).items():
             try:
                 payload[f'{k}_mag'] = np.asarray(v).astype(float)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug("Failed serializing cue_magnitude for %s", k, exc_info=True)
 
         try:
             # Prefer CSR neighbors when available (avoids list-of-arrays construction).
@@ -836,9 +835,10 @@ class behavior():
                     try:
                         payload['neighbors_concat'] = np.concatenate(self.simulation.agents_within_buffers).astype(np.int32)
                     except Exception:
+                        logging.getLogger(__name__).debug("Failed concatenating agents_within_buffers", exc_info=True)
                         payload['neighbors_concat'] = np.array([], dtype=np.int32)
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("Failed building neighbor payload", exc_info=True)
 
         if not payload:
             payload['marker'] = np.array([1], dtype=np.int8)
@@ -853,17 +853,14 @@ class behavior():
             try:
                 self._safe_npz_dump(outdir, f'behavior_debug_rawvecs_step_{step_i}', payload)
             except Exception:
-                pass
+                logging.getLogger(__name__).warning("Failed writing behavior rawvecs diagnostics", exc_info=True)
 
         if os.environ.get('FORCE_RAWVECS', '').lower() == 'true':
             payload = self._rawvecs_payload(raw_vecs, cue_magnitudes)
             try:
                 self._safe_npz_dump(outdir, f'behavior_debug_rawvecs_FORCE_step_{step_i}', payload)
             except Exception as e:
-                try:
-                    logging.getLogger(__name__).debug('FORCE_RAWVECS failed to write NPZ: %s', e)
-                except Exception:
-                    pass
+                logging.getLogger(__name__).warning('FORCE_RAWVECS failed to write NPZ: %s', e, exc_info=True)
 
     def _warmup_numba_kernels(self):
         # Call numba kernels with tiny dummy data to force compilation ahead of timed runs
@@ -884,11 +881,11 @@ class behavior():
             try:
                 _repulsive_batched_core_safe(axs, ays, mmap_flat, mmap_offsets, rows_min, cols_min, nr, nc, affine, 1.0, 0.0)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug("Numba warmup failed (_repulsive_batched_core_safe)", exc_info=True)
             try:
                 _repulsive_core_safe(0.0, 0.0, _np.array([0.0]), _np.array([0.0]), _np.array([1.0]), 1.0)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug("Numba warmup failed (_repulsive_core_safe)", exc_info=True)
             try:
                 ar = _np.array([0, 1], dtype=_np.int32)
                 ac = _np.array([0, 1], dtype=_np.int32)
@@ -902,7 +899,7 @@ class behavior():
                 out_fy = _np.zeros(2, dtype=_np.float64)
                 _already_been_here_sparse_core_affine(ax, ay, hr, hc, ht, hp, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 20.0, 7200.0, 1, out_fx, out_fy)
             except Exception:
-                pass
+                logging.getLogger(__name__).debug("Numba warmup failed (_already_been_here_sparse_core_affine)", exc_info=True)
             try:
                 # Warm up schooling kernels (cohesion/alignment) with a tiny graph.
                 offsets = _np.array([0, 1, 2], dtype=_np.int64)  # 2 agents, 1 neighbor each
@@ -921,9 +918,9 @@ class behavior():
                 counts = _np.zeros(2, dtype=_np.int32)
                 _alignment_from_neighbors_offsets(offsets, neighbors, headings_neighbors, X, Y, x_vel, y_vel, sog, _np.int8(0), outx, outy, mean_sog, counts)
             except Exception:
-                pass
+                logger.debug("Numba warmup failed (_alignment_from_neighbors_offsets)", exc_info=True)
         except Exception:
-            pass
+            logger.debug("Numba warmup failed (schooling kernels)", exc_info=True)
 
     def _get_psutil_proc(self):
         """Lazily create and cache a psutil.Process() object for repeated sampling."""
@@ -1133,20 +1130,19 @@ class behavior():
         return np.column_stack((fx, fy))
 
     def already_been_here(self, weight, t):
-        try:
-            if float(weight) == 0.0:
-                return np.zeros((self.simulation.num_agents, 2), dtype=float)
-        except Exception:
-            pass
+        weight_f = float(weight)
+        if weight_f == 0.0:
+            return np.zeros((self.simulation.num_agents, 2), dtype=float)
 
         # Fast path: sparse avoid history (no per-agent HDF5 memory rasters).
-        try:
-            if bool(getattr(self.simulation, 'use_sparse_avoid_memory', False)):
-                out = self._already_been_here_sparse(weight=float(weight), t=float(t))
+        if bool(getattr(self.simulation, 'use_sparse_avoid_memory', False)):
+            try:
+                out = self._already_been_here_sparse(weight=weight_f, t=float(t))
+            except Exception:
+                logger.warning("Sparse avoid history failed; falling back to dense memory rasters", exc_info=True)
+            else:
                 if out is not None:
                     return out
-        except Exception:
-            pass
 
         x, y = np.nan_to_num(self.simulation.X), np.nan_to_num(self.simulation.Y)
 
@@ -1343,7 +1339,7 @@ class behavior():
                         run_tag = getattr(self.simulation, 'run_tag', None) or os.environ.get('RUN_TAG')
                         self._batch_log.append({'start': bstart, 'end': bend, 'time': None, 'rss_before': rss_before, 'rss_after': rss_after, 'batch_total': batch_total, 'n_agents': int(agent_count), 'batch_size': int(batch_size), 'run_tag': run_tag})
                     except Exception:
-                        pass
+                        logger.debug("Failed appending batch log entry", exc_info=True)
 
                     # Call batched kernel for this batch
                     axs = agent_xs[bstart:bend]
@@ -1389,7 +1385,7 @@ class behavior():
                             if self._batch_log:
                                 self._batch_log[-1]['time'] = t1 - t0
                         except Exception:
-                            pass
+                            logger.debug("Failed updating last batch log time", exc_info=True)
                         # adaptive memory check moved to after batch assembly (use per-method samples)
                         pass
                     except Exception:
@@ -1415,7 +1411,7 @@ class behavior():
                             if 'rss_after' not in entry or entry.get('rss_after') is None:
                                 entry['rss_after'] = rss_after_method
                 except Exception:
-                    pass
+                    logger.debug("Failed updating batch log rss samples", exc_info=True)
 
                 # if memory spiked beyond threshold, reduce batch size for future batches based on method-level samples
                 try:
@@ -1424,7 +1420,7 @@ class behavior():
                         setattr(self.simulation, 'behavior_batch_size', new_bs)
                         batch_size = new_bs
                 except Exception:
-                    pass
+                    logger.debug("Failed adjusting behavior_batch_size after rss spike", exc_info=True)
 
                 repulsive_forces_per_agent = repulsive_out
             except Exception:
@@ -1459,7 +1455,7 @@ class behavior():
                     for r in self._batch_log:
                         w.writerow({k: r.get(k) for k in fieldnames})
         except Exception:
-            pass
+            logger.warning("Failed writing batch log CSV", exc_info=True)
 
         # Debug: write raw repulsive vectors only when debug_behavior is enabled
         if getattr(self.simulation, 'debug_behavior', False):
@@ -1475,13 +1471,8 @@ class behavior():
                 else:
                     # HDF5 exclusive writes can block; instead enqueue as NPZ via diagnostics queue
                     self._safe_npz_dump(os.path.join(os.getcwd(), 'outputs', 'diagnostics'), f'debug_already_been_here_step_{int(t)}', {'already_been_here': repulsive_forces_per_agent})
-            except Exception as ex:
-                # non-fatal debug failure; swallow
-                try:
-                    import logging
-                    logging.getLogger(__name__).debug('debug already_been_here write failed: %s', ex)
-                except Exception:
-                    pass
+            except Exception:
+                logger.debug("debug already_been_here write failed", exc_info=True)
 
         return repulsive_forces_per_agent
 
@@ -1522,7 +1513,7 @@ class behavior():
             try:
                 self._world_grid_cache[cache_key] = (world_x, world_y)
             except Exception:
-                pass
+                logger.debug("Failed caching world grid window", exc_info=True)
 
         agent_x = float(self.simulation.X[agent_idx])
         agent_y = float(self.simulation.Y[agent_idx])
@@ -1599,7 +1590,7 @@ class behavior():
                                 try:
                                     setattr(self.simulation, '_refugia_nearest_indices', cache)
                                 except Exception:
-                                    pass
+                                    logger.debug("Failed persisting _refugia_nearest_indices cache", exc_info=True)
                                 need_recompute = False
                     except Exception:
                         need_recompute = True
@@ -1822,7 +1813,7 @@ class behavior():
                     print(f"RHEO DEBUG: Raw flow=(x={raw_x:.3f}, y={raw_y:.3f}), sign={sign}, rheotaxis will be=(x={v[0,0]:.3f}, y={v[0,1]:.3f})")
                     self.simulation._rheo_debug_printed = True
             except Exception:
-                pass
+                logger.debug("RHEO debug print failed", exc_info=True)
         
         # FAIL LOUD: Agents should NEVER sample nodata during migration
         # If they do, they've left the valid domain and the simulation is invalid
@@ -2235,7 +2226,7 @@ class behavior():
                 logging.getLogger(__name__).debug('sim.heading sample=%s', np.asarray(self.simulation.heading)[:20])
             except Exception:
                 # non-fatal: continue without verbose logs
-                pass
+                logger.debug("alignment_cue debug logging failed", exc_info=True)
         # read raw headings
         if not hasattr(self.simulation, 'heading'):
             raise AttributeError("alignment_cue: simulation.heading not available - cannot compute alignment")
@@ -2261,7 +2252,7 @@ class behavior():
                         import logging
                         logging.getLogger(__name__).debug('alignment_cue: used velocity fallback; sample headings_neighbors=%s', headings_neighbors[:20])
                     except Exception:
-                        pass
+                        logger.debug("alignment_cue fallback debug logging failed", exc_info=True)
         # Only build heavy diagnostics when explicitly requested.
         want_diag = bool(getattr(self.simulation, 'debug_behavior', False)) or (os.environ.get('FORCE_RAWVECS', '').lower() == 'true')
         if want_diag:
@@ -2519,7 +2510,7 @@ class behavior():
                     sample,
                 )
             except Exception:
-                pass
+                logger.debug("arbitrate heading debug summary failed", exc_info=True)
         self._safe_set_sim_attr('heading_in', self._safe_asarray(self.simulation.heading, dtype=np.float32, default=None))
         if self.simulation.pid_tuning:
             # allow test-time override of weights via simulation.test_weights dict
@@ -2541,8 +2532,8 @@ class behavior():
                     try:
                         if k in default_weights:
                             default_weights[k] = float(v)
-                    except Exception:
-                        pass
+                    except (TypeError, ValueError):
+                        logger.warning("Ignoring non-numeric test_weight %s=%r", k, v, exc_info=True)
             else:
                 default_weights = {
                     'rheotaxis': 25000,
@@ -2637,7 +2628,7 @@ class behavior():
             self.is_in_eddy(t)
         except Exception:
             # If simulation lacks helpers during lightweight probes, skip eddy detection
-            pass
+            logger.debug("is_in_eddy failed; skipping eddy detection", exc_info=True)
         # Get tolerance from test_weights if available, otherwise use default
         tw = getattr(self.simulation, 'test_weights', None)
         tolerance = tw.get('arbitration_tolerance', 50000) if tw else 50000
@@ -2727,7 +2718,7 @@ class behavior():
             try:
                 logging.getLogger(__name__).debug('DBG raw_vecs keys/shapes=%s cue_magnitudes shapes=%s', kv, km)
             except Exception:
-                pass
+                logger.debug("Failed logging raw_vecs/cue_magnitudes shapes", exc_info=True)
 
         if want_record:
             # persist rawvecs/magnitudes for downstream diagnostics tools (best-effort)
@@ -2856,17 +2847,10 @@ class behavior():
             # Fast path: if we aren't recording diagnostics/state, return the new headings now.
             if not want_record:
                 try:
-                    try:
-                        self._window_cache_enabled = False
-                    except Exception:
-                        pass
-                    return proposed_heading
+                    self._window_cache_enabled = False
                 except Exception:
-                    try:
-                        self._window_cache_enabled = False
-                    except Exception:
-                        pass
-                    return np.asarray(self.simulation.heading)
+                    logger.debug("Failed disabling window cache", exc_info=True)
+                return proposed_heading
             # debug snapshot of cue magnitudes when debug_behavior is enabled
             if debug_behavior:
                 try:
@@ -2894,9 +2878,9 @@ class behavior():
                         }
                         self._enqueue_diag_json(outdir, f'behavior_cues_step_{int(getattr(self.simulation, "current_step", t))}', snap)
                     except Exception:
-                        pass
+                        logger.debug("Failed enqueueing behavior cue snapshot", exc_info=True)
                 except Exception:
-                    pass
+                    logger.debug("Failed building behavior cue snapshot", exc_info=True)
             # store last head_vec and cue magnitudes on simulation for quick inspection
             try:
                 self.simulation.last_head_vec = np.asarray(head_vec)
@@ -2906,9 +2890,9 @@ class behavior():
                     self.simulation.last_cue_vecs = {k: np.asarray(v) for k, v in raw_vecs.items()}
                 except Exception:
                     # best-effort: skip if raw_vecs are not serializable
-                    pass
+                    logger.debug("Failed setting simulation.last_cue_vecs", exc_info=True)
             except Exception:
-                pass
+                logger.debug("Failed setting behavior state on simulation", exc_info=True)
 
             # Robust final assignment: ensure attributes exist, correct shapes, and are serializable.
             n_agents = int(getattr(self.simulation, 'num_agents', 0)) or int(getattr(self.simulation, 'n_agents', 0))
@@ -2953,7 +2937,7 @@ class behavior():
             try:
                 self._safe_set_sim_attr('last_cue_vecs', last_cue_vecs_final)
             except Exception:
-                pass
+                logger.debug("Failed setting last_cue_vecs on simulation", exc_info=True)
 
             # magnitudes
             last_cue_mags = {}
@@ -2970,7 +2954,7 @@ class behavior():
             try:
                 self._safe_set_sim_attr('last_cue_magnitudes', last_cue_mags)
             except Exception:
-                pass
+                logger.debug("Failed setting last_cue_magnitudes on simulation", exc_info=True)
 
             # head vector
             try:
@@ -2983,7 +2967,7 @@ class behavior():
             try:
                 self._safe_set_sim_attr('last_head_vec', hv)
             except Exception:
-                pass
+                logger.debug("Failed setting last_head_vec on simulation", exc_info=True)
 
             try:
                 step_i = int(getattr(self.simulation, 'current_step', t))
@@ -3002,10 +2986,10 @@ class behavior():
                 try:
                     self._safe_write_diagnostics(step_i, payload)
                 except Exception:
-                    pass
+                    logger.debug("Failed writing diagnostics payload", exc_info=True)
             except Exception:
                 # non-fatal: skip diagnostics on any failure
-                pass
+                logger.debug("Failed building diagnostics payload", exc_info=True)
 
             # optional behavior debugging: simplified dump
             if debug_behavior:
@@ -3022,7 +3006,7 @@ class behavior():
                         for k, v in cue_magnitudes.items():
                             payload[f'{k}_mag'] = np.asarray(v).astype(float)
                     except Exception:
-                        pass
+                        logger.debug("Failed building cue magnitude payload", exc_info=True)
                     try:
                         self._safe_write_diagnostics(step_i, payload, outdir=outdir)
                     except Exception:
@@ -3031,16 +3015,13 @@ class behavior():
                             serial = {'head_vec': payload.get('head_vec', []).tolist(), 'cue_magnitudes': {k: v.tolist() for k, v in payload.items() if k.endswith('_mag')}}
                             self._enqueue_diag_json(outdir, f'behavior_headvecs_step_{step_i}', serial)
                         except Exception:
-                            pass
+                            logger.debug("Failed enqueueing behavior headvecs JSON", exc_info=True)
                 except Exception:
-                    try:
-                        logging.getLogger(__name__).debug('simplified behavior debug dump failed')
-                    except Exception:
-                        pass
+                    logger.debug("simplified behavior debug dump failed", exc_info=True)
             try:
                 self._window_cache_enabled = False
             except Exception:
-                pass
+                logger.debug("Failed disabling window cache (end of arbitrate)", exc_info=True)
             # Return the rate-limited heading computed earlier (already stored in proposed_heading)
             return proposed_heading
         else:
@@ -3076,13 +3057,13 @@ class behavior():
                                         if arr.ndim == 2 and arr.shape[0] == n_agents and arr.shape[1] == 2:
                                             last_cue_vecs_final[k] = arr
                                     except Exception:
-                                        pass
+                                        logger.debug("Failed coercing raw_vecs[%s] to (n_agents,2)", k, exc_info=True)
                             self.simulation.last_cue_vecs = last_cue_vecs_final
                         except Exception:
                             try:
                                 setattr(self.simulation, 'last_cue_vecs', {})
                             except Exception:
-                                pass
+                                logger.debug("Failed setting last_cue_vecs fallback", exc_info=True)
                     # set last_head_vec to safe_hv coerced
                     try:
                         hv_safe = np.asarray(safe_hv, dtype=np.float32)
@@ -3093,19 +3074,19 @@ class behavior():
                         try:
                             setattr(self.simulation, 'last_head_vec', np.zeros((n_agents if n_agents else 1, 2), dtype=np.float32))
                         except Exception:
-                            pass
+                            logger.debug("Failed setting last_head_vec fallback", exc_info=True)
                 except Exception:
-                    pass
+                    logger.debug("Failed setting final behavior state on simulation", exc_info=True)
                 try:
                     self._window_cache_enabled = False
                 except Exception:
-                    pass
+                    logger.debug("Failed disabling window cache (final fallback)", exc_info=True)
                 return np.arctan2(safe_hv[:, 1], safe_hv[:, 0])
             except Exception:
                 # ultimate fallback: return previous heading
                 try:
                     self._window_cache_enabled = False
                 except Exception:
-                    pass
+                    logger.debug("Failed disabling window cache (ultimate fallback)", exc_info=True)
                 return np.asarray(self.simulation.heading)
         # end of arbitrate: handled 2D and attempted safe fallback above

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
+import logging
+import queue
 import threading
 import time
 from collections import deque
@@ -27,6 +29,8 @@ try:  # optional dependency in some test contexts
     import h5py
 except Exception:  # pragma: no cover
     h5py = None
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -114,8 +118,8 @@ class ThreadHdfWriter:
                 if policy == "drop_oldest":
                     try:
                         self._queue.popleft()
-                    except Exception:
-                        pass
+                    except IndexError:
+                        logger.debug("ThreadHdfWriter queue empty while applying drop_oldest policy")
                 elif policy == "drop_newest":
                     return False
 
@@ -195,7 +199,7 @@ class ThreadHdfWriter:
                 v = a.reshape((-1,))
                 try:
                     ds[...] = v[: ds.shape[0]]
-                except Exception:
+                except (TypeError, ValueError):
                     ds[...] = np.asarray(v[: ds.shape[0]], dtype=ds.dtype)
                 continue
 
@@ -248,20 +252,17 @@ class ThreadHdfWriter:
                 if flush_every > 0 and int(step) != last_flush_step and (int(step) % flush_every == 0):
                     try:
                         h5.flush()
-                    except Exception:
-                        pass
+                    except (OSError, ValueError) as e:
+                        raise RuntimeError(f"ThreadHdfWriter failed to flush HDF5: {cfg.h5_path}") from e
                     last_flush_step = int(step)
 
             # Final flush
             try:
                 h5.flush()
-            except Exception:
-                pass
+            except (OSError, ValueError) as e:
+                raise RuntimeError(f"ThreadHdfWriter failed to flush HDF5: {cfg.h5_path}") from e
             if h5_ctx is not None:
-                try:
-                    h5_ctx.close()
-                except Exception:
-                    pass
+                h5_ctx.close()
         except BaseException as e:  # keep exception for propagation
             self._error = e
 
@@ -277,7 +278,7 @@ def _process_writer_main(cfg: AsyncWriteConfig, q, stop_evt) -> None:
                     break
                 try:
                     item = q.get(timeout=0.25)
-                except Exception:
+                except queue.Empty:
                     continue
                 if item is None:
                     break
@@ -294,15 +295,12 @@ def _process_writer_main(cfg: AsyncWriteConfig, q, stop_evt) -> None:
                     k = str(key)
                     a = np.asarray(arr)
                     # Ensure groups exist for path-like keys.
-                    try:
-                        parts = k.split("/")
-                        if len(parts) > 1:
-                            grp = h5
-                            for name in parts[:-1]:
-                                if name:
-                                    grp = grp.require_group(name)
-                    except Exception:
-                        pass
+                    parts = k.split("/")
+                    if len(parts) > 1:
+                        grp = h5
+                        for name in parts[:-1]:
+                            if name:
+                                grp = grp.require_group(name)
                     if k not in h5:
                         # create time-series dataset by default for agent_data/*
                         n_agents = int(cfg.n_agents)
@@ -333,17 +331,12 @@ def _process_writer_main(cfg: AsyncWriteConfig, q, stop_evt) -> None:
 
                 flush_every = int(cfg.flush_every_steps or 0)
                 if flush_every > 0 and int(step) != last_flush_step and (int(step) % flush_every == 0):
-                    try:
-                        h5.flush()
-                    except Exception:
-                        pass
+                    h5.flush()
                     last_flush_step = int(step)
-            try:
-                h5.flush()
-            except Exception:
-                pass
-    except Exception:
-        return
+            h5.flush()
+    except BaseException:
+        logger.exception("Process writer crashed")
+        raise
 
 
 class ProcessHdfWriter:
@@ -391,34 +384,28 @@ class ProcessHdfWriter:
             try:
                 self._queue.put((int(step), norm), block=False)
                 return True
-            except Exception:
+            except queue.Full:
                 try:
                     _ = self._queue.get(block=False)
-                except Exception:
-                    pass
+                except queue.Empty:
+                    logger.debug("ProcessHdfWriter queue empty while dropping oldest")
                 try:
                     self._queue.put((int(step), norm), block=False)
                     return True
-                except Exception:
+                except queue.Full:
                     return False
-        except Exception:
+        except (OSError, ValueError):
             return False
 
     def close(self, timeout_s: float | None = None) -> bool:
         if not self._started:
             return True
-        try:
-            self._stop_evt.set()
-        except Exception:
-            pass
+        self._stop_evt.set()
         try:
             self._queue.put(None, block=False)
-        except Exception:
-            pass
-        try:
-            self._proc.join(timeout=None if timeout_s is None else float(timeout_s))
-        except Exception:
-            pass
+        except queue.Full:
+            logger.debug("ProcessHdfWriter queue full; sentinel not enqueued")
+        self._proc.join(timeout=None if timeout_s is None else float(timeout_s))
         return True
 
 
@@ -435,14 +422,14 @@ def _shm_ring_writer_main(cfg: AsyncWriteConfig, shm_meta: dict[str, tuple[str, 
             shm = shared_memory.SharedMemory(name=str(name), create=False)
             shms[key] = shm
             views[key] = np.ndarray(tuple(shape), dtype=np.dtype(dtype_str), buffer=shm.buf)
-    except Exception:
+    except (FileNotFoundError, OSError, ValueError) as e:
         # Best-effort close
         for shm in shms.values():
             try:
                 shm.close()
-            except Exception:
-                pass
-        return
+            except (FileNotFoundError, OSError, BufferError):
+                logger.debug("Failed closing shared memory during attach cleanup", exc_info=True)
+        raise RuntimeError("Failed to attach shared-memory ring buffer segments") from e
 
     try:
         with h5py.File(str(cfg.h5_path), str(cfg.mode or "a")) as h5:
@@ -457,20 +444,14 @@ def _shm_ring_writer_main(cfg: AsyncWriteConfig, shm_meta: dict[str, tuple[str, 
             while True:
                 try:
                     sem_full.acquire()
-                except Exception:
+                except (OSError, ValueError):
                     break
 
-                try:
-                    step = int(steps_arr[read_idx])
-                except Exception:
-                    step = None
+                step = int(steps_arr[read_idx])
 
                 # Sentinel ends the loop.
-                if step is None or step < 0:
-                    try:
-                        sem_empty.release()
-                    except Exception:
-                        pass
+                if step < 0:
+                    sem_empty.release()
                     break
 
                 every = int(cfg.write_every_steps or 1)
@@ -479,10 +460,7 @@ def _shm_ring_writer_main(cfg: AsyncWriteConfig, shm_meta: dict[str, tuple[str, 
 
                 if int(step) % every == 0:
                     for k, arr in views.items():
-                        try:
-                            key = str(k)
-                        except Exception:
-                            continue
+                        key = str(k)
                         a = np.asarray(arr[read_idx, :]).reshape((-1,))
 
                         if key not in h5:
@@ -527,29 +505,20 @@ def _shm_ring_writer_main(cfg: AsyncWriteConfig, shm_meta: dict[str, tuple[str, 
 
                     flush_every = int(cfg.flush_every_steps or 0)
                     if flush_every > 0 and int(step) != last_flush_step and (int(step) % flush_every == 0):
-                        try:
-                            h5.flush()
-                        except Exception:
-                            pass
+                        h5.flush()
                         last_flush_step = int(step)
 
                 # Advance ring buffer.
                 read_idx = (read_idx + 1) % max(1, int(ring_slots))
-                try:
-                    sem_empty.release()
-                except Exception:
-                    pass
+                sem_empty.release()
 
-            try:
-                h5.flush()
-            except Exception:
-                pass
+            h5.flush()
     finally:
         for shm in shms.values():
             try:
                 shm.close()
-            except Exception:
-                pass
+            except (FileNotFoundError, OSError, BufferError):
+                logger.debug("Failed closing shared memory segment", exc_info=True)
 
 
 class ShmRingHdfWriter:
@@ -608,28 +577,18 @@ class ShmRingHdfWriter:
         if not self._started:
             self.start()
 
-        try:
-            step_i = int(step)
-        except Exception:
+        step_i = int(step)
+        if self._stop_evt.is_set():
             return False
-
-        try:
-            if bool(getattr(self._stop_evt, "is_set", lambda: False)()):
-                return False
-        except Exception:
-            pass
 
         # Backpressure: block until an empty slot is available.
         try:
             self._sem_empty.acquire()
-        except Exception:
+        except (OSError, ValueError):
             return False
 
         idx = int(self._write_idx)
-        try:
-            pl = dict(payload)
-        except Exception:
-            pl = {}
+        pl = dict(payload)
 
         # Copy per-key arrays into shared memory slot.
         for key in self.keys:
@@ -645,15 +604,12 @@ class ShmRingHdfWriter:
             if n < int(dst.shape[0]):
                 dst[n:].fill(0.0)
 
-        try:
-            self._steps[idx] = int(step_i)
-        except Exception:
-            pass
+        self._steps[idx] = int(step_i)
 
         self._write_idx = (idx + 1) % int(self.ring_slots)
         try:
             self._sem_full.release()
-        except Exception:
+        except (OSError, ValueError):
             return False
         return True
 
@@ -663,18 +619,15 @@ class ShmRingHdfWriter:
             for shm in self._shms.values():
                 try:
                     shm.close()
-                except Exception:
-                    pass
+                except (FileNotFoundError, OSError, BufferError):
+                    logger.debug("Failed closing shared memory segment", exc_info=True)
                 try:
                     shm.unlink()
-                except Exception:
-                    pass
+                except (FileNotFoundError, OSError):
+                    logger.debug("Failed unlinking shared memory segment", exc_info=True)
             return True
 
-        try:
-            self._stop_evt.set()
-        except Exception:
-            pass
+        self._stop_evt.set()
 
         # Send sentinel (-1) to ensure the writer wakes and exits.
         acquired = False
@@ -683,48 +636,36 @@ class ShmRingHdfWriter:
                 acquired = bool(self._sem_empty.acquire())
             else:
                 acquired = bool(self._sem_empty.acquire(timeout=float(timeout_s)))
-        except Exception:
+        except (OSError, ValueError):
             acquired = False
         if acquired:
             idx = int(self._write_idx)
-            try:
-                self._steps[idx] = -1
-            except Exception:
-                pass
+            self._steps[idx] = -1
             self._write_idx = (idx + 1) % int(self.ring_slots)
             try:
                 self._sem_full.release()
-            except Exception:
-                pass
-        try:
-            self._proc.join(timeout=None if timeout_s is None else float(timeout_s))
-        except Exception:
-            pass
+            except (OSError, ValueError):
+                logger.debug("Failed releasing sem_full during shutdown", exc_info=True)
+        self._proc.join(timeout=None if timeout_s is None else float(timeout_s))
 
-        try:
-            if getattr(self._proc, "is_alive", lambda: False)():
-                try:
-                    self._proc.terminate()
-                except Exception:
-                    pass
-                return False
-        except Exception:
-            pass
-        try:
-            ec = getattr(self._proc, "exitcode", None)
-            if ec not in (0, None):
-                return False
-        except Exception:
-            pass
+        if getattr(self._proc, "is_alive", lambda: False)():
+            try:
+                self._proc.terminate()
+            except (OSError, ValueError):
+                logger.debug("Failed terminating shm writer process", exc_info=True)
+            return False
+        ec = getattr(self._proc, "exitcode", None)
+        if ec not in (0, None):
+            return False
 
         # Cleanup shared memory segments (parent unlinks).
         for shm in self._shms.values():
             try:
                 shm.close()
-            except Exception:
-                pass
+            except (FileNotFoundError, OSError, BufferError):
+                logger.debug("Failed closing shared memory segment", exc_info=True)
             try:
                 shm.unlink()
-            except Exception:
-                pass
+            except (FileNotFoundError, OSError):
+                logger.debug("Failed unlinking shared memory segment", exc_info=True)
         return True
