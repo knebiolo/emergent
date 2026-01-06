@@ -555,6 +555,120 @@ class ControlPanel(QWidget):
         
         layout.addLayout(blanket_layout)
         
+        # Reward weights section (SEPARATE from behavioral weights - controls scoring, not training)
+        reward_group = QGroupBox("Reward Weights (Objective Function)")
+        reward_layout = QGridLayout()
+        
+        # Three columns: Label, Spinbox | Label, Spinbox | Label, Spinbox
+        # Column 1: Positive rewards
+        reward_layout.addWidget(QLabel("<b>Positive:</b>"), 0, 0, 1, 2)
+        
+        reward_layout.addWidget(QLabel("Upstream:"), 1, 0)
+        self.upstream_weight_spin = QDoubleSpinBox()
+        self.upstream_weight_spin.setRange(0, 100)
+        self.upstream_weight_spin.setValue(10.0)
+        self.upstream_weight_spin.setDecimals(2)
+        self.upstream_weight_spin.setToolTip("Multiplier for meters traveled upstream (PRIMARY)")
+        reward_layout.addWidget(self.upstream_weight_spin, 1, 1)
+        
+        reward_layout.addWidget(QLabel("Cohesion:"), 2, 0)
+        self.cohesion_reward_spin = QDoubleSpinBox()
+        self.cohesion_reward_spin.setRange(0, 100)
+        self.cohesion_reward_spin.setValue(0.001)
+        self.cohesion_reward_spin.setDecimals(4)
+        self.cohesion_reward_spin.setToolTip("Multiplier for cohesion score sum")
+        reward_layout.addWidget(self.cohesion_reward_spin, 2, 1)
+        
+        reward_layout.addWidget(QLabel("Alignment:"), 3, 0)
+        self.alignment_reward_spin = QDoubleSpinBox()
+        self.alignment_reward_spin.setRange(0, 100)
+        self.alignment_reward_spin.setValue(0.01)
+        self.alignment_reward_spin.setDecimals(4)
+        self.alignment_reward_spin.setToolTip("Multiplier for alignment score sum")
+        reward_layout.addWidget(self.alignment_reward_spin, 3, 1)
+        
+        reward_layout.addWidget(QLabel("Energy eff:"), 4, 0)
+        self.energy_reward_spin = QDoubleSpinBox()
+        self.energy_reward_spin.setRange(0, 100)
+        self.energy_reward_spin.setValue(2.0)
+        self.energy_reward_spin.setDecimals(2)
+        self.energy_reward_spin.setToolTip("Multiplier for distance/speed² ratio")
+        reward_layout.addWidget(self.energy_reward_spin, 4, 1)
+        
+        reward_layout.addWidget(QLabel("Drafting:"), 5, 0)
+        self.drafting_reward_spin = QDoubleSpinBox()
+        self.drafting_reward_spin.setRange(0, 100)
+        self.drafting_reward_spin.setValue(20.0)
+        self.drafting_reward_spin.setDecimals(1)
+        self.drafting_reward_spin.setToolTip("Multiplier for formation benefits (disabled)")
+        reward_layout.addWidget(self.drafting_reward_spin, 5, 1)
+        
+        # Column 2: Penalties (negative)
+        reward_layout.addWidget(QLabel("<b>Penalties:</b>"), 0, 2, 1, 2)
+        
+        reward_layout.addWidget(QLabel("Rheotaxis:"), 1, 2)
+        self.rheotaxis_penalty_spin = QDoubleSpinBox()
+        self.rheotaxis_penalty_spin.setRange(-100, 100)
+        self.rheotaxis_penalty_spin.setValue(-1.0)
+        self.rheotaxis_penalty_spin.setDecimals(2)
+        self.rheotaxis_penalty_spin.setToolTip("Penalty for facing wrong direction")
+        reward_layout.addWidget(self.rheotaxis_penalty_spin, 1, 3)
+        
+        reward_layout.addWidget(QLabel("Separation:"), 2, 2)
+        self.separation_penalty_spin = QDoubleSpinBox()
+        self.separation_penalty_spin.setRange(-100, 100)
+        self.separation_penalty_spin.setValue(0.005)
+        self.separation_penalty_spin.setDecimals(4)
+        self.separation_penalty_spin.setToolTip("Penalty for crowding violations")
+        reward_layout.addWidget(self.separation_penalty_spin, 2, 3)
+        
+        reward_layout.addWidget(QLabel("Mortality:"), 3, 2)
+        self.mortality_penalty_spin = QDoubleSpinBox()
+        self.mortality_penalty_spin.setRange(-100, 100)
+        self.mortality_penalty_spin.setValue(-50.0)
+        self.mortality_penalty_spin.setDecimals(1)
+        self.mortality_penalty_spin.setToolTip("Penalty per fish death")
+        reward_layout.addWidget(self.mortality_penalty_spin, 3, 3)
+        
+        reward_layout.addWidget(QLabel("Fatigue:"), 4, 2)
+        self.fatigue_penalty_spin = QDoubleSpinBox()
+        self.fatigue_penalty_spin.setRange(-100, 100)
+        self.fatigue_penalty_spin.setValue(-0.1)
+        self.fatigue_penalty_spin.setDecimals(3)
+        self.fatigue_penalty_spin.setToolTip("Penalty for low battery timesteps")
+        reward_layout.addWidget(self.fatigue_penalty_spin, 4, 3)
+        
+        reward_layout.addWidget(QLabel("Stagnation:"), 5, 2)
+        self.stagnation_penalty_spin = QDoubleSpinBox()
+        self.stagnation_penalty_spin.setRange(-100, 100)
+        self.stagnation_penalty_spin.setValue(-0.2)
+        self.stagnation_penalty_spin.setDecimals(3)
+        self.stagnation_penalty_spin.setToolTip("Penalty for stationary timesteps")
+        reward_layout.addWidget(self.stagnation_penalty_spin, 5, 3)
+        
+        # Column 3: More penalties
+        reward_layout.addWidget(QLabel("<b>Other:</b>"), 0, 4, 1, 2)
+        
+        reward_layout.addWidget(QLabel("Smoothness:"), 1, 4)
+        self.smoothness_penalty_spin = QDoubleSpinBox()
+        self.smoothness_penalty_spin.setRange(-100, 100)
+        self.smoothness_penalty_spin.setValue(-0.001)
+        self.smoothness_penalty_spin.setDecimals(4)
+        self.smoothness_penalty_spin.setToolTip("Penalty for jerky movement (jerk sum)")
+        reward_layout.addWidget(self.smoothness_penalty_spin, 1, 5)
+        
+        reward_layout.addWidget(QLabel("Boundary:"), 2, 4)
+        self.boundary_penalty_spin = QDoubleSpinBox()
+        self.boundary_penalty_spin.setRange(-100, 100)
+        self.boundary_penalty_spin.setValue(0.0)
+        self.boundary_penalty_spin.setDecimals(2)
+        self.boundary_penalty_spin.setToolTip("Penalty for boundary proximity (disabled)")
+        reward_layout.addWidget(self.boundary_penalty_spin, 2, 5)
+        
+        reward_group.setLayout(reward_layout)
+        reward_group.setToolTip("These weights define WHAT YOU VALUE (objective function). They are NOT trained by RL.")
+        layout.addWidget(reward_group)
+        
         # Randomize buttons
         self.btn_randomize = QPushButton("🎲 Randomize Weights")
         self.btn_randomize.clicked.connect(self.randomize_weights.emit)
@@ -1029,11 +1143,29 @@ class RLTrainingViewer(QMainWindow):
             # Get edited weights from the panel (user may have manually edited values)
             initial_weights = self.weights_panel.get_edited_weights(self.current_weights)
             self.current_weights = initial_weights  # Update current_weights with edits
+            
+            # Get reward weights from control panel (all exposed in UI)
+            reward_weights = {
+                'cohesion': self.control_panel.cohesion_reward_spin.value(),
+                'alignment': self.control_panel.alignment_reward_spin.value(),
+                'separation': self.control_panel.separation_penalty_spin.value(),
+                'upstream_progress': self.control_panel.upstream_weight_spin.value(),
+                'energy_efficiency': self.control_panel.energy_reward_spin.value(),
+                'drafting_benefit': self.control_panel.drafting_reward_spin.value(),
+                'boundary_penalty': self.control_panel.boundary_penalty_spin.value(),
+                'mortality_penalty': self.control_panel.mortality_penalty_spin.value(),
+                'smoothness_penalty': self.control_panel.smoothness_penalty_spin.value(),
+                'fatigue_penalty': self.control_panel.fatigue_penalty_spin.value(),
+                'stagnation_penalty': self.control_panel.stagnation_penalty_spin.value(),
+                'rheotaxis_alignment': self.control_panel.rheotaxis_penalty_spin.value(),
+            }
+            
             config = {
                 'exploration_noise': exploration_noise,
                 'body_length': 0.3,  # 300mm fish
                 'dt': 1.0,
-                'num_timesteps': num_timesteps
+                'num_timesteps': num_timesteps,
+                'reward_weights': reward_weights  # Pass reward weights to trainer
             }
             self.trainer = RLTrainer(
                 simulation_factory=simulation_factory,

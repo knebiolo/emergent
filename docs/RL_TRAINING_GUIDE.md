@@ -64,17 +64,29 @@ python tools/train_behavioral_weights.py --episodes 50 --timesteps 100 --agents 
 ### 2. Use Trained Weights in Simulations
 
 ```python
-from emergent.salmon_abm.sockeye import simulation
+from emergent.salmon_abm.simulation import simulation
 
-# Initialize simulation
-sim = simulation(**config)
+# Initialize simulation (current run path uses static rasters)
+sim = simulation(
+    model_dir="outputs/test",
+    model_name="example",
+    crs=None,
+    basin="nuyakuk",
+    water_temp=10.0,
+    start_polygon="data/salmon_abm/start_loc_river_right.shp",
+    env_files=[],  # supply env rasters or let tools import them into the DB
+    longitudinal_profile=None,
+    num_timesteps=100,
+    num_agents=200,
+    db_path="outputs/test/example.h5",
+)
 
 # Load pre-trained behavioral weights
-sim.load_behavioral_weights('outputs/rl_training/behavioral_weights.json')
+sim.load_behavioral_weights(weights_path='outputs/rl_training/behavioral_weights.json')
 
 # Run simulation - agents exhibit learned schooling/migration behavior
 for t in range(num_timesteps):
-    sim.timestep(t, dt=1.0, gravity=9.81, pid_controller=pid)
+    sim.timestep(t, dt=1.0, g=9.81, pid_controller=pid)
 ```
 
 ### 3. Reset Spatial State Between Runs
@@ -110,14 +122,15 @@ reward = (
 
 ## Key Files
 
-- **`src/emergent/salmon_abm/sockeye.py`** (formerly `sockeye_SoA_OpenGL_RL.py`): Main simulation with RL infrastructure
+- **`src/emergent/salmon_abm/simulation.py`**: Simulation runtime
+  - `simulation.load_behavioral_weights(...)`: Apply learned weights (populates `sim.test_weights`)
+  - `simulation.reset_spatial_state()`: Reset ephemeral state
+- **`src/emergent/salmon_abm/rl_training.py`**: RL infrastructure
   - `BehavioralWeights`: Container for instinctual parameters
   - `RLTrainer`: Training loop with reward computation
-  - `simulation.apply_behavioral_weights()`: Apply learned weights
-  - `simulation.reset_spatial_state()`: Reset ephemeral state
   
 - **`tools/train_behavioral_weights.py`**: Training script
-  - Sets up HECRAS-based simulation
+  - Sets up raster-based simulation episodes
   - Runs RL training loop
   - Saves best weights to JSON
 
@@ -145,11 +158,8 @@ reward = (
 # 1. Train behavioral weights (one-time, ~30 minutes)
 python tools/train_behavioral_weights.py --episodes 100 --timesteps 200 --agents 500
 
-# 2. Run production simulations with learned weights
-python tools/run_hecras_opengl.py --agents 1000 --timesteps 500 --weights outputs/rl_training/behavioral_weights.json
-
-# 3. Test on new geometry (weights transfer automatically)
-python tools/run_hecras_opengl.py --hecras-plan data/new_river.p05.hdf --agents 1000 --weights outputs/rl_training/behavioral_weights.json
+# 2. Smoke-test learned weights in a small run
+python tools/test_salmon_abm.py --nagents 200 --nsteps 50 --test-weights-file outputs/rl_training/best_weights.json
 ```
 
 ## Technical Details
@@ -172,4 +182,4 @@ python tools/run_hecras_opengl.py --hecras-plan data/new_river.p05.hdf --agents 
 
 ---
 
-**Questions?** See the code comments in `src/emergent/salmon_abm/sockeye.py` (legacy name: `sockeye_SoA_OpenGL_RL.py`) for implementation details.
+**Questions?** Start with `src/emergent/salmon_abm/rl_training.py` (weights + trainer) and `src/emergent/salmon_abm/simulation.py` (runtime).

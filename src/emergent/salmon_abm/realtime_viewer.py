@@ -237,6 +237,7 @@ class ReplayWidget(QOpenGLWidget):
         self.tail_segments = 3  # number of tail segments for animation
         self.battery_array = battery_array  # Battery data for fatigue visualization
         self.heading_array = heading_array  # Heading data for oriented fish rendering
+        self.max_agents = None  # Maximum number of agents to display (None = show all)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -541,8 +542,8 @@ class ReplayWidget(QOpenGLWidget):
             QColor: Green (100% battery) to Red (0% battery)
         """
         if self.battery_array is None or self.frame >= len(self.battery_array) or agent_idx >= self.N:
-            # Default red color if no battery data
-            return QColor(220, 30, 30)
+            # Default to GREEN when no battery data (assume full charge)
+            return QColor(30, 220, 30)
         
         try:
             battery = float(self.battery_array[self.frame, agent_idx])
@@ -557,7 +558,7 @@ class ReplayWidget(QOpenGLWidget):
             
             return QColor(r, g, b)
         except Exception:
-            return QColor(220, 30, 30)
+            return QColor(30, 220, 30)  # Default to green on error
 
     def _tick(self):
         if not getattr(self, 'playing', False):
@@ -836,7 +837,16 @@ class ReplayWidget(QOpenGLWidget):
                 pass
 
             # draw current points (newest) as fish bodies
-            for i in range(self.N):
+            n_to_draw = self.N if self.max_agents is None else min(self.N, self.max_agents)
+            
+            # DEBUG: Log when max_agents changes (sparse sampling to avoid spam)
+            if not hasattr(self, '_last_logged_max_agents'):
+                self._last_logged_max_agents = None
+            if self._last_logged_max_agents != self.max_agents:
+                print(f"paintGL: N={self.N}, max_agents={self.max_agents}, n_to_draw={n_to_draw}", flush=True)
+                self._last_logged_max_agents = self.max_agents
+            
+            for i in range(n_to_draw):
                 x, y = pts[i]
                 if not (np.isfinite(x) and np.isfinite(y)):
                     continue
@@ -865,13 +875,10 @@ class ReplayWidget(QOpenGLWidget):
                 
                 # Get heading from heading_array if available, otherwise compute from velocity
                 heading_deg = 0.0
-                if self.heading_array is not None and self.frame < len(self.heading_array):
-                    # Use heading from HDF5 data (in radians, convert to degrees)
-                    heading_rad = self.heading_array[self.frame, i]
-                    if np.isfinite(heading_rad):
-                        heading_deg = np.degrees(heading_rad)
-                elif self.frame > 0 and self.frame < len(self.positions):
-                    # Fallback: Compute heading from velocity (difference between current and previous position)
+                heading_computed = False
+                
+                # Always compute from velocity when available (more accurate than stored heading)
+                if self.frame > 0 and self.frame < len(self.positions):
                     prev_pts = self.positions[self.frame - 1]
                     if i < prev_pts.shape[0]:
                         prev_x, prev_y = prev_pts[i]
@@ -880,6 +887,13 @@ class ReplayWidget(QOpenGLWidget):
                             dy = y - prev_y
                             if abs(dx) > 1e-6 or abs(dy) > 1e-6:
                                 heading_deg = np.degrees(np.arctan2(dy, dx))
+                                heading_computed = True
+                
+                # Fallback to stored heading only if velocity-based computation failed
+                if not heading_computed and self.heading_array is not None and self.frame < len(self.heading_array) and i < self.heading_array.shape[1]:
+                    heading_rad = self.heading_array[self.frame, i]
+                    if np.isfinite(heading_rad) and abs(heading_rad) > 1e-6:
+                        heading_deg = np.degrees(heading_rad)
                 
                 # Draw fish body with line
                 self._draw_fish_body(painter, sxp, syp, heading_deg, r, s)
@@ -1021,6 +1035,7 @@ class GLViewer(QOpenGLWidget):
         self._env_texture = None
         self.battery_array = battery_array  # Battery data for fatigue visualization
         self.heading_array = heading_array  # Heading data for oriented fish rendering
+        self.max_agents = None  # Maximum number of agents to display (None = show all)
 
         try:
             from OpenGL import GL
@@ -1616,6 +1631,8 @@ class MainWindow(QMainWindow):
         self._watchdog_seconds = float(watchdog_seconds)
         self._point_size = point_size
         self.viewer = ReplayWidget(positions, point_size=point_size)
+        # Set initial max_agents to all agents
+        self.viewer.max_agents = positions.shape[1]
         # view state
         self._pad = float(pad)
         self._force_vbo = bool(force_vbo)
@@ -1630,6 +1647,23 @@ class MainWindow(QMainWindow):
         self.speed_slider.setRange(1, 400)
         self.speed_slider.setValue(100)
         lbl_speed = QLabel("Speed")
+        
+        # Agent count control
+        from PyQt5.QtWidgets import QSpinBox
+        lbl_agents = QLabel("Max Agents:")
+        self.agent_count_spin = QSpinBox()
+        self.agent_count_spin.setRange(1, 100000)
+        self.agent_count_spin.setValue(positions.shape[1])  # Default to all agents
+        self.agent_count_spin.setToolTip("Maximum number of agents to display")
+        self.agent_count_spin.valueChanged.connect(self._on_agent_count_changed)
+        
+        # Timesteps control
+        lbl_timesteps = QLabel("Max Timesteps:")
+        self.timesteps_spin = QSpinBox()
+        self.timesteps_spin.setRange(1, 100000)
+        self.timesteps_spin.setValue(positions.shape[0])  # Default to all timesteps
+        self.timesteps_spin.setToolTip("Maximum number of timesteps to display")
+        self.timesteps_spin.valueChanged.connect(self._on_timesteps_changed)
 
         btn_start.clicked.connect(self.viewer.start)
         btn_pause.clicked.connect(self.viewer.pause)
@@ -1644,6 +1678,10 @@ class MainWindow(QMainWindow):
         hl.addWidget(btn_restart)
         hl.addWidget(lbl_speed)
         hl.addWidget(self.speed_slider)
+        hl.addWidget(lbl_agents)
+        hl.addWidget(self.agent_count_spin)
+        hl.addWidget(lbl_timesteps)
+        hl.addWidget(self.timesteps_spin)
         hl.addStretch()
         
         # Mouse controls: Left-click drag to pan, scroll wheel to zoom
@@ -1708,6 +1746,33 @@ class MainWindow(QMainWindow):
     def _on_speed(self, v: int):
         mult = v / 100.0
         self.viewer.set_speed(mult if mult > 0 else 1.0)
+    
+    def _on_agent_count_changed(self, value: int):
+        """Update max agents displayed in viewer."""
+        print(f"Agent count changed to: {value}", flush=True)
+        if hasattr(self.viewer, 'max_agents'):
+            self.viewer.max_agents = value
+            print(f"Viewer max_agents set to: {self.viewer.max_agents}, N={self.viewer.N}", flush=True)
+            self.viewer.repaint()  # Force immediate repaint instead of update()
+        else:
+            print(f"WARNING: Viewer does not have max_agents attribute", flush=True)
+    
+    def _on_timesteps_changed(self, value: int):
+        """Update max timesteps displayed in viewer."""
+        print(f"Timesteps changed to: {value}", flush=True)
+        if hasattr(self.viewer, 'positions') and self.viewer.positions is not None:
+            # Limit the number of timesteps by truncating the positions array
+            original_T = self.viewer.positions.shape[0]
+            new_T = min(value, original_T)
+            if hasattr(self.viewer, 'T'):
+                self.viewer.T = new_T
+                print(f"Viewer T set to: {self.viewer.T}", flush=True)
+                # Reset to frame 0 if current frame is beyond new limit
+                if self.viewer.frame >= new_T:
+                    self.viewer.frame = 0
+                self.viewer.update()
+        else:
+            print(f"WARNING: Viewer does not have positions array", flush=True)
 
 
 def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
@@ -1735,8 +1800,27 @@ def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
         win.viewer = new_widget
         new_widget.show()
         
-        # Reconnect buttons to the new viewer
+        # Reconnect buttons and controls to the new viewer
         try:
+            # Reconnect agent count spinbox and set initial value
+            from PyQt5.QtWidgets import QSpinBox
+            agent_spin = None
+            for child in win.centralWidget().findChildren(QSpinBox):
+                # Find the agent count spinbox by checking if it has the right range
+                if child.minimum() == 1 and child.maximum() == 100000:
+                    agent_spin = child
+                    break
+            
+            if agent_spin is not None:
+                # Set initial max_agents from current spinbox value
+                new_widget.max_agents = agent_spin.value()
+                # Reconnect the signal
+                try:
+                    agent_spin.valueChanged.disconnect()
+                except:
+                    pass
+                agent_spin.valueChanged.connect(lambda value: setattr(new_widget, 'max_agents', value) or new_widget.update())
+            
             # Find the buttons and reconnect them
             for child in win.centralWidget().findChildren(QPushButton):
                 if child.text() == "Start":
@@ -1752,7 +1836,7 @@ def swap_viewer_in_main(win: MainWindow, new_widget: QWidget):
                     child.clicked.disconnect()
                     child.clicked.connect(new_widget.restart)
         except Exception as e:
-            print(f"Warning: Could not reconnect buttons: {e}")
+            print(f"Warning: Could not reconnect controls: {e}")
     except Exception:
         # best-effort fallback
         try:

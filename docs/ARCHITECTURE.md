@@ -1,37 +1,29 @@
-**Emergent Repo — High-Level Architecture**
+# Emergent Repo — High-Level Architecture
 
-- **Purpose**: single-file reference describing module responsibilities, data ownership, and important runtime defaults to avoid duplicated logic and drift.
+Purpose: single-file reference describing module responsibilities, data ownership, and important runtime defaults to avoid duplicated logic and drift.
 
-Core modules (one-liners):
-- `src/emergent/salmon_abm/sockeye.py` (formerly `sockeye_SoA_OpenGL_RL.py`): Simulation core — owns HECRAS ingestion, wetted-perimeter inference, `perimeter_points` / `perimeter_polygon` / `wetted_mask`, agent state, and PID controllers. This is the authoritative source for environment geometry.
-- `src/emergent/salmon_abm/salmon_viewer_v2.py`: GL viewer — visualizes the simulation; reads perimeter and mesh payloads from `sim` (does NOT compute perimeter). Performs mesh clipping for display only.
-- `src/emergent/salmon_abm/tin_helpers.py`: Spatial helpers — `sample_evenly()` for stratified sampling and `alpha_shape()` for concave hull polygonization.
-- `tools/`: Experiment and diagnostic scripts — exploratory code, not authoritative. These may be archived or removed after integration.
-- `data/`: External data (HECRAS .hdf files, start polygon). Use `data/salmon_abm/...` for HECRAS inputs.
-- `outputs/`: Generated artifacts and previews. Large experimental outputs should be pruned or moved to `outputs/archive/` after verification.
+## Core Modules (Salmon ABM)
 
-Key invariants (single-source rules):
-- Wetted-perimeter MUST be computed by the simulation at startup and stored on the sim object (`sim.perimeter_points`, `sim.perimeter_polygon`, `sim.wetted_mask`). Viewers and ABM code MUST read these attributes and treat the sim as authoritative.
-- Viewer MUST NOT compute or re-infer the perimeter in production. Viewer may have lightweight preview helpers only for developer convenience (but prefer disabled by default). Recent changes removed viewer fallback perimeter logic.
-- Default HECRAS perimeter settings:
-  - `hecras_perim_depth` default: `1e-5` (meters)
-  - `hecras_perim_timestep` default: middle timestep when available
-  - `tin_max_nodes` default: 5000 (viewer sampling limit)
-- Polygonization: prefer vector-first `alpha_shape()` (concave hull). If that fails, fallback to convex hull. Store result as a Shapely geometry on `sim.perimeter_polygon`.
+- `src/emergent/salmon_abm/simulation.py`: Current simulation core (raster-driven). Owns agent state, stepping (`timestep`/`run`), and output writing.
+- `src/emergent/salmon_abm/io.py` + `src/emergent/salmon_abm/hdf5_io.py`: Environment ingestion + persistence. Writes/reads static rasters (depth/velocity) into the HDF5 DB under `environment/*`.
+- `src/emergent/salmon_abm/realtime_viewer.py`: Runtime viewer. Visualizes simulation outputs from the HDF5 DB.
+- `src/emergent/salmon_abm/rl_training.py` + `src/emergent/salmon_abm/rl_training_viewer.py`: RL training + visualization. Optimizes `BehavioralWeights` and applies them via `sim.load_behavioral_weights(...)`.
+- `src/emergent/salmon_abm/sockeye.py`: Deprecated legacy/compatibility shim (kept for parity tests and historical reference). Do not add new imports/features here; port forward into `simulation.py` and related modules.
+- `tools/`: Experiment and diagnostic scripts. Prefer editing existing scripts (e.g., `tools/test_salmon_abm.py`, `tools/run_salmon_production.py`) rather than adding new ones.
+- `data/`: External data. Current runs use `data/salmon_abm/*.tif` (static rasters) plus start polygons; direct HECRAS ingestion is not wired into the production run path yet.
+- `outputs/`: Generated artifacts and previews.
 
-Developer workflow notes:
-- When changing perimeter inference, update the canonical simulation module (`src/emergent/salmon_abm/sockeye.py`) and ensure `sim.perimeter_*` attributes are set. Legacy filenames (e.g. `sockeye_SoA_OpenGL_RL.py`) may still appear in older logs; treat `sockeye.py` as the source of truth.
-- Avoid copying inference logic into viewers, tools, or ABM modules. If a tool needs to run experiments, keep it under `tools/` and mark it as experimental.
-- Keep `tin_helpers.py` small and dependency-light (alpha-shape uses `scipy` + `shapely`).
+## Key Invariants
 
-Recent edits (integration summary):
-- Simulation now computes HECRAS wetted perimeter on init using `infer_wetted_perimeter_from_hecras(...)` and polygonizes using `tin_helpers.alpha_shape()`; outputs are attached to `sim`.
-- Viewer `salmon_viewer_v2.py` now reads `sim.perimeter_points` and `sim.perimeter_polygon` and clips TIN triangles for display; viewer fallback logic removed.
+- The current Salmon ABM run path is raster-based: depth/velocity fields are imported from static rasters and stored in the HDF5 DB under `environment/*`.
+- Do not assume any direct-HECRAS objects (e.g., `HECRASMap`, `sim.perimeter_*`) exist in production until the HECRAS interface is implemented and wired into `simulation.py`.
+- When the direct HECRAS interface is implemented, the simulation should remain the single source of truth for derived geometry (e.g., wetted masks/perimeters); viewers should only visualize.
 
-How to update this document:
+## Developer Workflow Notes
+
+- When migrating code out of `sockeye.py`, port into focused modules under `src/emergent/salmon_abm/` and update callers to import the new locations.
+- Avoid copying core logic into viewers or tools. If a tool needs experimental logic, keep it under `tools/` and clearly label it as experimental.
+
+## Updating This Document
+
 - Edit `docs/ARCHITECTURE.md` for any change in ownership or data flow.
-- Add a short changelog entry and increment the module index if modules are refactored.
-
-Quick contacts for repo knowledge:
-- If something looks duplicated, first check `ARCHITECTURE.md` before editing.
-

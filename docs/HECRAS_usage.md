@@ -1,9 +1,10 @@
-**HECRAS Integration (HECRAS-only Mode)**
+**HECRAS Integration (Planned / Not Yet Wired)**
 
-This project supports using HECRAS HDF5 plan files as a read-only source for environmental fields
-(`depth`, `x_vel`, `y_vel`, `wsel`, etc.) via an IDW k-NN mapping (fast, approximate).
+Status note: as of early 2026 the Salmon ABM production run path still imports **static environmental rasters** (e.g., `data/salmon_abm/depth.tif`, `vel_x.tif`, `vel_y.tif`). Direct ingestion of HECRAS plan HDF5 files is not currently wired into `src/emergent/salmon_abm/simulation.py`.
 
-Enable HECRAS-only mode by providing the following arguments to `simulation` (or via the headless runner):
+This document is a design/reference note for a future "HECRAS-only mode" where HECRAS HDF5 plan files are used as a read-only source for environmental fields (`depth`, `x_vel`, `y_vel`, `wsel`, etc.) via an IDW k-NN mapping (fast, approximate).
+
+Planned interface (not implemented yet):
 
 - `hecras_plan_path` (string): path to the HECRAS HDF5 plan file.
 - `hecras_fields` (list): list of field names to map from the HECRAS HDF (e.g. `['Cells Minimum Elevation','Water Surface','Cell Velocity - Velocity X','Cell Velocity - Velocity Y']`).
@@ -12,16 +13,8 @@ Enable HECRAS-only mode by providing the following arguments to `simulation` (or
 
 Headless benchmark runner
 
-There is a helper script `tools/run_headless_hecras_sim.py` that runs the simulation in HECRAS-only
-mode and records per-timestep `environment()` timings to CSV.
-
-Usage (PowerShell):
-
-```powershell
-python tools/run_headless_hecras_sim.py --timesteps 200 --num-agents 200 --out outputs/hecras_benchmark.csv
-```
-
-The CSV contains columns: `timestep`, `duration_s`, `sample_depth_0`, `sample_xvel_0`.
+- There is currently no canonical `tools/run_headless_hecras_sim.py` runner in the repo.
+- When HECRAS-only mode is implemented, add a dedicated benchmark runner under `tools/` and keep it explicitly marked as experimental until validated.
 
 Notes
 - When running with `use_hecras=True` the code will avoid raster imports and derive safe transforms

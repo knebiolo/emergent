@@ -3,7 +3,7 @@ You are an assistant that is resumed across chat sessions by reading an on-disk 
 - Read the journal files in `.ai_journal/` when asked to "resume" or "onboard". Summarize the most recent `session` entries, and then summarize `long_term` highlights. Provide a concise onboarding bullet list with: (1) Important changes since last session, (2) Outstanding tasks, (3) Blockers/requirements, (4) Suggested immediate next steps.
 - Read all long term memory files in `.ai_journal/`, they contain important notes on style, preferences, and lessons learned
 - Treat any session separated by more than 60 minutes of inactivity as a new session. When a session has been idle for >60 minutes, start a new `session` entry on the next write.
-- When appending to the journal during a session, write under `session/YYYY-MM-DD-HHMMSS.md` files. When elevating an item to `long_term`, move it or copy it to `long_term/YYYY-MM-DD.md` and add a one-line reason and tags.
+- When appending to the journal during a session, write under `session/YYYY-MM-DD-HHMMSS.md` files. When elevating an item to `long_term`, move it or copy it to `long term/YYYY-MM-DD.md` and add a one-line reason and tags.
 - Keep the journal private; do not commit `.ai_journal/` to version control if `.gitignore` contains it.
 - When producing summaries, be concise: one-paragraph status, 4-8 bullets of open tasks, and 1-3 risks/blockers.
 - If the user asks to "resume", read the last N session files (default 5) and produce the onboarding summary; ask if the user wants more detail if the log is long.
@@ -23,7 +23,7 @@ README.md
 docs\ARCHITECTURE.md
 docs\HECRAS_HDF5_STRUCTURE.md
 docs\USER_CONFIG_OPTIONS.md
-.ai_journal\long_term\personality.md
+src\emergent\salmon_abm\.ai_journal\long term\personality.md
 
 # Additional assistant preferences (added 2025-12-10)
 
@@ -61,10 +61,10 @@ docs\USER_CONFIG_OPTIONS.md
 	- Simulation outputs being analyzed (with timestamps/file names)
 	- Current debugging focus (e.g., "rheotaxis nodata bug in behavior.py:1775")
 	- This allows future sessions to resume exactly where work stopped
-- save sessions here: C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\data\salmon_abm
+ - Do NOT write session reports to `data/salmon_abm` (that directory is for inputs/outputs, not journal state).
 
 # Handoff Priorities (what the next AI should read first)
-- `src/emergent/salmon_abm/sockeye.py` - this is getting deprecated, but it is where we came from.  
+ - `src/emergent/salmon_abm/sockeye.py` - legacy/compatibility module; avoid adding new dependencies on it and migrate remaining call sites to `src/emergent/salmon_abm/simulation.py`.
 
 # Test & Progress Rules
 - After edits touching code, run targeted tests for changed modules; report results as a one-line summary plus failing test names if any.
@@ -75,7 +75,7 @@ docs\USER_CONFIG_OPTIONS.md
 
 # Project Directory Structure (CRITICAL - added 2026-01-01)
 **Tools, tests, and temporary files have designated locations:**
-- **Tools/scripts**: `tools/` (e.g., run_nuyakuk_headless.py, debug utilities, benchmarks)
+- **Tools/scripts**: `tools/` (e.g., `test_salmon_abm.py`, `run_salmon_production.py`, debug utilities, benchmarks)
 - **Tests**: `src/emergent/salmon_abm/tests/` (pytest test files)
 - **Test temp directory**: `src/emergent/salmon_abm/tests/_tmp_io/` (temporary test outputs)
 - When creating diagnostic/utility scripts, place them in `tools/`
@@ -89,7 +89,7 @@ docs\USER_CONFIG_OPTIONS.md
 - **Production**: `tools/run_salmon_production.py` — Large-scale, optimized (requires --nagents --nsteps)
 	- Use for: real runs, benchmarks, performance testing
 	- Features: Async I/O backends, minimal logging, timestamped outputs
-- **Deprecated/Do NOT use**: `run_salmon_headless.py`, `run_nuyakuk_headless.py`, `run_headless_*.py` (old/deprecated)
+- **Deprecated/Do NOT use**: `run_salmon_headless.py`, `run_nuyakuk_headless.py`, `tools/run_nuyakuk_headless.py`, `run_headless_*.py` (old/deprecated)
 
 # git
 - The user will handle all git actions, commit, PR, push, etc. 
@@ -115,35 +115,28 @@ if not validate(result):
     raise ValueError(f"do_something_critical() failed validation: {diagnostic_info}")
 ```
 ## to run a Simulation
-python tools/run_nuyakuk_headless.py --nagents 100 --nsteps 200 --out outputs/test_collision_100 --model-name collision_100 --start-polygon data/salmon_abm/start_loc_river_right.shp
+python tools/test_salmon_abm.py --nagents 200 --nsteps 50
 
 ## to view Simulation
-python -m emergent.salmon_abm.realtime_viewer outputs/test_collision_100/collision_100_headless.h5
+python -m emergent.salmon_abm.realtime_viewer outputs/test/<model_name>.h5
+
+## Current IO Reality (CRITICAL)
+- The current Salmon ABM pipeline uses **static environmental rasters** (e.g., `data/salmon_abm/depth.tif`, `vel_x.tif`, `vel_y.tif`, etc.).
+- The software does **NOT** directly ingest HECRAS plan HDF5 in the main run path yet.
+- Wetted-perimeter inference for a future direct-HECRAS interface is **not implemented** yet; do not assume `sim.perimeter_*` exists unless you confirm it in code.
 
 ## Behavioral Weights (CRITICAL)
-**Behavioral weights are set in TWO locations - the script overrides the code:**
-1. **Source code defaults**: `src/emergent/salmon_abm/behavior.py` (lines ~2539-2549) - These are IGNORED by run_nuyakuk_headless.py
-2. **Script overrides**: `tools/run_nuyakuk_headless.py` (lines ~242-252) - `sim.test_weights` dict OVERRIDES behavior.py defaults
+Behavioral weights are applied via the simulation's `test_weights` mechanism.
 
-**To change behavioral weights for simulations, you MUST edit `tools/run_nuyakuk_headless.py`, NOT behavior.py!**
+Preferred workflows:
+1. Use `tools/train_behavioral_weights.py` to produce a weights JSON.
+2. In scripts/tests, call `sim.load_behavioral_weights(weights_path=...)` (or `weights_dict=...`) to populate `sim.test_weights`.
 
-Current weights in run_nuyakuk_headless.py (lines 242-252):
-```python
-sim.test_weights = {
-    'rheotaxis': 25000,
-    'alignment': 20500,
-    'cohesion': 11000,  # <-- Edit this value, not behavior.py
-    'low_speed': 1500,
-    'wave_drag': 0,
-    'refugia': 50000,
-    'border': 200000,
-    'shallow': 500000,
-    'avoid': 25000,
-    'collision': 1000,  # <-- Edit this value, not behavior.py
-}
-```
+Avoid:
+- Editing or relying on `tools/run_nuyakuk_headless.py` for weights overrides (deprecated runner).
 
-Alternative: Use `--test-weights-file weights.json` to load custom weights from JSON file.
+Legacy note:
+- Source-code defaults in `src/emergent/salmon_abm/behavior.py` are defaults only; prefer explicit weights files + `sim.load_behavioral_weights(...)` for experiments.
 
 Create a journal entry (.ai_journal/session/) when:
 - A major feature/fix is complete and validated

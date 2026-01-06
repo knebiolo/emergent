@@ -114,7 +114,7 @@ class BehavioralWeights:
         Convert to format used by simulation.test_weights.
         
         Maps BehavioralWeights attribute names to the keys expected by
-        tools/run_nuyakuk_headless.py and simulation.py.
+        simulation.test_weights (legacy/deprecated runners may also rely on these keys).
         """
         return {
             # Behavioral cue weights
@@ -544,7 +544,8 @@ def compute_episode_reward(
     behavioral_weights: Optional[Dict[str, float]] = None,
     battery_history: Optional[np.ndarray] = None,
     longitudinal_profile: Optional[Any] = None,
-    velocity_field_history: Optional[np.ndarray] = None
+    velocity_field_history: Optional[np.ndarray] = None,
+    reward_weights: Optional[Dict[str, float]] = None
 ) -> Tuple[float, Dict[str, float]]:
     """
     Compute total reward for a training episode.
@@ -584,6 +585,23 @@ def compute_episode_reward(
     - Mortality: -50.0 per death (strong survival penalty)
     - Smoothness: -0.2 (Δaccel penalty for jerky movement)
     """
+    # Use provided reward weights or defaults
+    if reward_weights is None:
+        reward_weights = {
+            'cohesion': 0.001,
+            'alignment': 0.01,
+            'separation': 0.005,
+            'upstream_progress': 10.0,
+            'energy_efficiency': 2.0,
+            'drafting_benefit': 20.0,
+            'boundary_penalty': 0.0,
+            'mortality_penalty': -50.0,
+            'smoothness_penalty': -0.001,
+            'fatigue_penalty': -0.1,
+            'stagnation_penalty': -0.2,
+            'rheotaxis_alignment': -1.0,
+        }
+    
     T, N = positions_history.shape[0], positions_history.shape[1]
     
     if T == 0 or N == 0:
@@ -907,35 +925,35 @@ def compute_episode_reward(
             weight_diversity_bonus = entropy * 5.0  # Scale to ~5-10 range
     
     reward = (
-        sum_cohesion * 0.001 +  # Reduced 10× - tight clustering less valuable
-        sum_alignment * 0.01 +  # Maintain - coordinated swimming important
-        sum_separation * 0.005 +  # Back to original - let collisions emerge naturally
-        sum_upstream_progress * 10.0 +  # Increased 10× - PRIMARY OBJECTIVE
-        energy_efficiency * 2.0 +
-        mean_drafting_benefit * 20.0 +
-        agents_near_boundary * 0.0 +  # DISABLED: boundary_coords never passed
-        dead_count * -50.0 +  # Count of deaths
-        accel_smoothness_penalty * -0.001 +  # Sum of jerk
-        fatigue_penalty * -0.1 +  # Count of low-battery agent-timesteps
-        stagnation_penalty * -0.2 +  # Count of stagnant agent-timesteps
-        rheotaxis_alignment_penalty * -1.0 +  # Increased 10× - must face upstream
-        min_schooling_weight_penalty +  # CRITICAL: Prevent zero schooling weights
-        weight_diversity_bonus  # Encourage balanced weight distribution
+        sum_cohesion * reward_weights['cohesion'] +
+        sum_alignment * reward_weights['alignment'] +
+        sum_separation * reward_weights['separation'] +
+        sum_upstream_progress * reward_weights['upstream_progress'] +
+        energy_efficiency * reward_weights['energy_efficiency'] +
+        mean_drafting_benefit * reward_weights['drafting_benefit'] +
+        agents_near_boundary * reward_weights['boundary_penalty'] +
+        dead_count * reward_weights['mortality_penalty'] +
+        accel_smoothness_penalty * reward_weights['smoothness_penalty'] +
+        fatigue_penalty * reward_weights['fatigue_penalty'] +
+        stagnation_penalty * reward_weights['stagnation_penalty'] +
+        rheotaxis_alignment_penalty * reward_weights['rheotaxis_alignment'] +
+        min_schooling_weight_penalty +
+        weight_diversity_bonus
     )
     
     components = {
-        'cohesion': sum_cohesion * 0.001,
-        'alignment': sum_alignment * 0.01,
-        'separation': sum_separation * 0.005,
-        'upstream_progress': sum_upstream_progress * 10.0,
-        'energy_efficiency': energy_efficiency * 2.0,
-        'drafting_benefit': mean_drafting_benefit * 20.0,
-        'boundary_penalty': agents_near_boundary * -0.05,
-        'mortality_penalty': dead_count * -50.0,
-        'smoothness_penalty': accel_smoothness_penalty * -0.001,
-        'fatigue_penalty': fatigue_penalty * -0.1,
-        'stagnation_penalty': stagnation_penalty * -0.2,
-        'rheotaxis_alignment': rheotaxis_alignment_penalty * -1.0,
+        'cohesion': sum_cohesion * reward_weights['cohesion'],
+        'alignment': sum_alignment * reward_weights['alignment'],
+        'separation': sum_separation * reward_weights['separation'],
+        'upstream_progress': sum_upstream_progress * reward_weights['upstream_progress'],
+        'energy_efficiency': energy_efficiency * reward_weights['energy_efficiency'],
+        'drafting_benefit': mean_drafting_benefit * reward_weights['drafting_benefit'],
+        'boundary_penalty': agents_near_boundary * reward_weights['boundary_penalty'],
+        'mortality_penalty': dead_count * reward_weights['mortality_penalty'],
+        'smoothness_penalty': accel_smoothness_penalty * reward_weights['smoothness_penalty'],
+        'fatigue_penalty': fatigue_penalty * reward_weights['fatigue_penalty'],
+        'stagnation_penalty': stagnation_penalty * reward_weights['stagnation_penalty'],
+        'rheotaxis_alignment': rheotaxis_alignment_penalty * reward_weights['rheotaxis_alignment'],
         'min_schooling_penalty': min_schooling_weight_penalty,
         'weight_diversity_bonus': weight_diversity_bonus,
         'total': reward
@@ -983,6 +1001,7 @@ class RLTrainer:
                 - body_length: Fish body length in meters (default 0.5)
                 - dt: Timestep duration in seconds (default 1.0)
                 - num_timesteps: Steps per episode (optional, for factory)
+                - reward_weights: Dict of reward multipliers (optional)
         """
         self.simulation_factory = simulation_factory
         self.initial_weights = initial_weights if initial_weights else BehavioralWeights()
@@ -993,6 +1012,22 @@ class RLTrainer:
         self.body_length = config.get('body_length', 0.5)
         self.dt = config.get('dt', 1.0)
         self.num_timesteps = config.get('num_timesteps', 100)
+        
+        # Reward weights (objective function) - can be customized
+        self.reward_weights = config.get('reward_weights', {
+            'cohesion': 0.001,
+            'alignment': 0.01,
+            'separation': 0.005,
+            'upstream_progress': 10.0,
+            'energy_efficiency': 2.0,
+            'drafting_benefit': 20.0,
+            'boundary_penalty': 0.0,
+            'mortality_penalty': -50.0,
+            'smoothness_penalty': -0.001,
+            'fatigue_penalty': -0.1,
+            'stagnation_penalty': -0.2,
+            'rheotaxis_alignment': -1.0,
+        })
         
         # Training state
         self.best_weights = self.initial_weights
@@ -1089,7 +1124,8 @@ class RLTrainer:
                 body_length=self.body_length,
                 threat_level=current_weights.threat_level,
                 battery_history=battery,
-                velocity_field_history=velocity_field
+                velocity_field_history=velocity_field,
+                reward_weights=self.reward_weights  # Pass customizable reward weights
             )
             
             elapsed = time.time() - start_time
