@@ -2445,40 +2445,156 @@ class behavior():
         
         return collision_cue_mm
 
+    def _init_eddy_history(self, n_agents, window_steps):
+        dtype = np.float32
+        self._eddy_hist_x = np.full((n_agents, window_steps), np.nan, dtype=dtype)
+        self._eddy_hist_y = np.full((n_agents, window_steps), np.nan, dtype=dtype)
+        self._eddy_hist_heading = np.full((n_agents, window_steps), np.nan, dtype=dtype)
+        self._eddy_hist_upstream = np.full((n_agents, window_steps), np.nan, dtype=dtype)
+        self._eddy_hist_sog = np.full((n_agents, window_steps), np.nan, dtype=dtype)
+        self._eddy_hist_index = -1
+        self._eddy_hist_count = 0
+
     def is_in_eddy(self, t):
-        linear_positions = self.simulation.compute_linear_positions(self.simulation.longitudinal)
-        self.current_longitudes = linear_positions
-        self.simulation.past_longitudes[:, :-1] = self.simulation.past_longitudes[:, 1:]
-        self.simulation.swim_speeds[:, :-1] = self.simulation.swim_speeds[:, 1:]
-        self.simulation.past_longitudes[:, -1] = linear_positions
-        self.simulation.swim_speeds[:, -1] = self.simulation.sog
-        valid_entries = ~np.isnan(self.simulation.swim_speeds[:, 0]) & ~np.isnan(self.simulation.swim_speeds[:, -1])
+        sim = self.simulation
+        n_agents = int(getattr(sim, 'num_agents', 0) or 0)
+        if n_agents <= 0:
+            return
 
-        avg_speeds = np.full(self.simulation.swim_speeds.shape[0], np.nan)
-        avg_speeds[valid_entries] = np.max(self.simulation.swim_speeds[valid_entries], axis=-1)
+        dt = float(self.dt) if self.dt else 1.0
+        if not np.isfinite(dt) or dt <= 0.0:
+            dt = 1.0
 
-        total_displacement = np.full(self.simulation.past_longitudes.shape[0], np.nan)
-        total_displacement[valid_entries] = self.simulation.past_longitudes[valid_entries, -1] - self.simulation.past_longitudes[valid_entries, 0]
+        window_s = float(getattr(sim, 'eddy_window_seconds', 60.0))
+        if not np.isfinite(window_s) or window_s <= 0.0:
+            window_s = 60.0
+        window_steps = max(3, int(round(window_s / dt)))
 
-        delta = self.simulation.past_longitudes[valid_entries, 0] - self.simulation.past_longitudes[valid_entries, -1]
-        dt = self.simulation.past_longitudes.shape[1]
-        expected_displacement = avg_speeds * dt
-        long_dir = self.simulation.past_longitudes[:, -2] - self.simulation.past_longitudes[:, -1]
+        if (not hasattr(self, '_eddy_hist_x')) or (self._eddy_hist_x.shape != (n_agents, window_steps)):
+            self._init_eddy_history(n_agents, window_steps)
 
-        if delta.shape == total_displacement.shape and t >= 1800.:
-            stuck_conditions = (expected_displacement >= 5. * np.abs(total_displacement)) & (self.simulation.swim_behav == 1)
+        last_t = getattr(self, '_eddy_last_t', None)
+        if last_t is not None and t < last_t:
+            self._init_eddy_history(n_agents, window_steps)
+        self._eddy_last_t = float(t)
+
+        # Water velocity at agent positions (prefer HECRAS-mapped values).
+        vx = None
+        vy = None
+        if bool(getattr(sim, 'use_hecras', False)):
+            try:
+                vx = np.asarray(sim.x_vel, dtype=float).reshape((-1,))
+                vy = np.asarray(sim.y_vel, dtype=float).reshape((-1,))
+            except Exception:
+                vx = None
+                vy = None
+        if vx is None or vy is None or vx.shape[0] != n_agents or vy.shape[0] != n_agents:
+            tx = getattr(sim, 'vel_x_rast_transform', None) or getattr(sim, 'vel_dir_rast_transform', None)
+            ty = getattr(sim, 'vel_y_rast_transform', None) or getattr(sim, 'vel_dir_rast_transform', None)
+            if tx is not None and ty is not None and hasattr(sim, 'sample_environment'):
+                vx = np.asarray(sim.sample_environment(tx, 'vel_x'), dtype=float).reshape((-1,))
+                vy = np.asarray(sim.sample_environment(ty, 'vel_y'), dtype=float).reshape((-1,))
+            else:
+                vx = np.asarray(getattr(sim, 'x_vel', np.zeros(n_agents)), dtype=float).reshape((-1,))
+                vy = np.asarray(getattr(sim, 'y_vel', np.zeros(n_agents)), dtype=float).reshape((-1,))
+
+        flow_mag = np.sqrt(vx * vx + vy * vy)
+        eps = 1e-6
+        valid_flow = np.isfinite(flow_mag) & (flow_mag > eps)
+        upstream_x = np.zeros(n_agents, dtype=float)
+        upstream_y = np.zeros(n_agents, dtype=float)
+        upstream_x[valid_flow] = -vx[valid_flow] / flow_mag[valid_flow]
+        upstream_y[valid_flow] = -vy[valid_flow] / flow_mag[valid_flow]
+
+        fx = getattr(sim, 'fish_x_vel', None)
+        fy = getattr(sim, 'fish_y_vel', None)
+        if fx is None or fy is None:
+            fx = (sim.X - sim.prev_X) / dt
+            fy = (sim.Y - sim.prev_Y) / dt
+        fx = np.asarray(fx, dtype=float).reshape((-1,))
+        fy = np.asarray(fy, dtype=float).reshape((-1,))
+
+        sog = np.sqrt(fx * fx + fy * fy)
+        upstream_prog = fx * upstream_x + fy * upstream_y
+        upstream_ratio = np.full(n_agents, np.nan, dtype=float)
+        valid_ratio = valid_flow & np.isfinite(sog) & (sog > eps)
+        upstream_ratio[valid_ratio] = upstream_prog[valid_ratio] / sog[valid_ratio]
+
+        idx = (self._eddy_hist_index + 1) % window_steps
+        self._eddy_hist_index = idx
+        self._eddy_hist_count = min(self._eddy_hist_count + 1, window_steps)
+        self._eddy_hist_x[:, idx] = np.asarray(sim.X, dtype=float)
+        self._eddy_hist_y[:, idx] = np.asarray(sim.Y, dtype=float)
+        self._eddy_hist_heading[:, idx] = np.asarray(sim.heading, dtype=float)
+        self._eddy_hist_upstream[:, idx] = upstream_ratio
+        self._eddy_hist_sog[:, idx] = sog
+
+        min_samples = int(getattr(sim, 'eddy_min_samples', window_steps))
+        min_samples = max(3, min_samples)
+        if self._eddy_hist_count < min_samples:
+            in_eddy = np.asarray(sim.in_eddy, dtype=bool).reshape((-1,))
+            if np.any(in_eddy):
+                sim.time_since_eddy_escape[in_eddy] += dt
+                not_in_eddy_anymore = sim.time_since_eddy_escape >= sim.max_eddy_escape_seconds
+                sim.in_eddy[not_in_eddy_anymore] = False
+                sim.time_since_eddy_escape[not_in_eddy_anymore] = 0.0
+            return
+
+        if self._eddy_hist_count < window_steps:
+            hist_x = self._eddy_hist_x[:, :self._eddy_hist_count]
+            hist_y = self._eddy_hist_y[:, :self._eddy_hist_count]
+            hist_heading = self._eddy_hist_heading[:, :self._eddy_hist_count]
+            hist_up = self._eddy_hist_upstream[:, :self._eddy_hist_count]
+            hist_sog = self._eddy_hist_sog[:, :self._eddy_hist_count]
         else:
-            stuck_conditions = np.zeros_like(self.simulation.X)
+            order = np.concatenate((np.arange(idx + 1, window_steps), np.arange(0, idx + 1)))
+            hist_x = self._eddy_hist_x[:, order]
+            hist_y = self._eddy_hist_y[:, order]
+            hist_heading = self._eddy_hist_heading[:, order]
+            hist_up = self._eddy_hist_upstream[:, order]
+            hist_sog = self._eddy_hist_sog[:, order]
 
-        not_in_eddy_anymore = self.simulation.time_since_eddy_escape >= self.simulation.max_eddy_escape_seconds
-        self.simulation.swim_speeds[not_in_eddy_anymore, :] = np.nan
-        self.simulation.past_longitudes[not_in_eddy_anymore, :] = np.nan
-        self.simulation.time_since_eddy_escape[not_in_eddy_anymore] = 0.0
+        dx = hist_x[:, -1] - hist_x[:, 0]
+        dy = hist_y[:, -1] - hist_y[:, 0]
+        net_disp = np.sqrt(dx * dx + dy * dy)
+        step_dx = np.diff(hist_x, axis=1)
+        step_dy = np.diff(hist_y, axis=1)
+        path_len = np.nansum(np.sqrt(step_dx * step_dx + step_dy * step_dy), axis=1)
+        loopiness = np.where(path_len > eps, net_disp / path_len, np.inf)
 
-        already_in_eddy = self.simulation.in_eddy == True
-        self.simulation.in_eddy = np.where(np.logical_or(stuck_conditions, already_in_eddy), True, False)
-        self.simulation.in_eddy[not_in_eddy_anymore] = False
-        self.simulation.time_since_eddy_escape[self.simulation.in_eddy == True] += 1
+        dtheta = np.diff(hist_heading, axis=1)
+        dtheta = np.arctan2(np.sin(dtheta), np.cos(dtheta))
+        turn_total = np.nansum(np.abs(dtheta), axis=1)
+        valid_turn = np.sum(np.isfinite(dtheta), axis=1) > 0
+
+        mean_upstream = np.nanmean(hist_up, axis=1)
+        mean_sog = np.nanmean(hist_sog, axis=1)
+
+        min_upstream_ratio = float(getattr(sim, 'eddy_min_upstream_ratio', 0.1))
+        max_loopiness = float(getattr(sim, 'eddy_max_loopiness', 0.3))
+        min_turns = float(getattr(sim, 'eddy_min_turns', 0.75))
+        min_sog = float(getattr(sim, 'eddy_min_sog', 0.01))
+
+        low_upstream = np.isfinite(mean_upstream) & (mean_upstream <= min_upstream_ratio)
+        loop_ok = np.isfinite(loopiness) & (loopiness <= max_loopiness)
+        turn_ok = valid_turn & np.isfinite(turn_total) & (turn_total >= (min_turns * 2.0 * np.pi))
+        moving = np.isfinite(mean_sog) & (mean_sog >= min_sog)
+
+        try:
+            swim_behav = np.asarray(sim.swim_behav).reshape((-1,))
+        except Exception:
+            swim_behav = np.ones(n_agents, dtype=int)
+        migratory = swim_behav == 1
+
+        stuck_conditions = low_upstream & loop_ok & turn_ok & moving & migratory
+
+        not_in_eddy_anymore = sim.time_since_eddy_escape >= sim.max_eddy_escape_seconds
+        sim.time_since_eddy_escape[not_in_eddy_anymore] = 0.0
+
+        already_in_eddy = sim.in_eddy == True
+        sim.in_eddy = np.where(np.logical_or(stuck_conditions, already_in_eddy), True, False)
+        sim.in_eddy[not_in_eddy_anymore] = False
+        sim.time_since_eddy_escape[sim.in_eddy == True] += dt
 
     def arbitrate(self, t):
         # Enable per-step caching for window-based cues. We explicitly disable

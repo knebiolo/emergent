@@ -17,7 +17,7 @@ try:
 except Exception:  # pragma: no cover
     cKDTree = None
 from typing import Optional
-from emergent.salmon_abm import utils, io, pid, agents, hdf5_io
+from emergent.salmon_abm import utils, io, pid, agents, hdf5_io, hecras_io
 from emergent.salmon_abm import movement as movement_mod, behavior as behavior_mod, fatigue as fatigue_mod
 
 
@@ -38,7 +38,13 @@ class simulation:
                  pid_tuning = False,
                  db_path: Optional[str] = None,
                  output_write_mode: Optional[str] = None,
-                 output_write_backend: Optional[str] = None):
+                 output_write_backend: Optional[str] = None,
+                 hecras_plan_path: Optional[str] = None,
+                 hecras_start_index: int = 0,
+                 hecras_k: int = 8,
+                 hecras_time_mode: Optional[str] = None,
+                 hecras_cell_size: Optional[float] = None,
+                 hecras_wetted_threshold: float = 0.05):
         self.model_dir = model_dir
         self.model_name = model_name
         self.crs = crs
@@ -53,6 +59,28 @@ class simulation:
         self.cumulative_time = 0.0
         self.env_files = env_files or []
         self.longitudinal_profile = longitudinal_profile
+        # HECRAS direct mode (time-varying)
+        self.hecras_plan_path = hecras_plan_path
+        self.hecras_area_name = "2D area"
+        self.hecras_start_index = int(hecras_start_index or 0)
+        self.hecras_k = int(hecras_k or 8)
+        self.hecras_time_mode = str(hecras_time_mode or "time").strip().lower()
+        if self.hecras_time_mode not in ("time", "index", "loop", "clamp", "hold"):
+            self.hecras_time_mode = "time"
+        self.hecras_cell_size = hecras_cell_size
+        self.hecras_wetted_threshold = (
+            float(hecras_wetted_threshold)
+            if hecras_wetted_threshold is not None
+            else None
+        )
+        self.use_hecras = bool(self.hecras_plan_path)
+        self._hecras_plan = None
+        self._hecras_time_s = None
+        self._hecras_start_time_s = 0.0
+        self._hecras_dt_s = None
+        self._hecras_loop_period_s = None
+        self._hecras_cached_index = None
+        self._hecras_cached_fields = None
         # Output write cadence (timesteps). Defaults preserve existing behavior.
         # - write_frequency <= 0: skip writing agent_data/* time-series each step.
         # - flush_frequency <= 0: never flush each step (caller can flush/close).
@@ -424,9 +452,12 @@ class simulation:
         # import any provided environment files (fail loudly during development)
         # Import provided environment rasters into the simulation HDF5 DB and
         # set raster transform attributes using the centralized helper.
-        for ef in self.env_files:
-            base = os.path.splitext(os.path.basename(ef))[0]
-            io.write_raster_to_hdf5(self.db, ef, dataset_name=base, sim=self)
+        if self.use_hecras:
+            self._init_hecras_mode()
+        else:
+            for ef in self.env_files:
+                base = os.path.splitext(os.path.basename(ef))[0]
+                io.write_raster_to_hdf5(self.db, ef, dataset_name=base, sim=self)
 
         # ensure minimal environment placeholders exist so downstream modules
         # that read environment/* will have something to sample in unit tests
@@ -452,7 +483,10 @@ class simulation:
                     "Expected 2D array with size > 1 to compute distance_to."
                 )
             # Wetted area = finite depth values (not nodata -9999)
-            wetted = np.isfinite(depth_arr) & (depth_arr != -9999.0)
+            if self.use_hecras and self.hecras_wetted_threshold is not None:
+                wetted = np.isfinite(depth_arr) & (depth_arr > float(self.hecras_wetted_threshold))
+            else:
+                wetted = np.isfinite(depth_arr) & (depth_arr != -9999.0)
             if not np.any(wetted):
                 raise ValueError(
                     "Depth raster contains no valid (wetted) cells! "
@@ -754,6 +788,130 @@ class simulation:
                 hdf5_io.write_dataset(h5, 'agent_data/ideal_sog', arr)
 
         return heading_set
+
+    def _init_hecras_mode(self) -> bool:
+        """Initialize HECRAS direct mode (cached KDTree + static t0 rasters)."""
+        if not self.use_hecras:
+            return False
+        if not self.hecras_plan_path:
+            raise ValueError("hecras_plan_path is required when use_hecras is True")
+        plan = hecras_io.HecrasPlan(self.hecras_plan_path, area_name=self.hecras_area_name)
+        self._hecras_plan = plan
+        self._hecras_time_s = plan.time_s
+        if self._hecras_time_s is not None and len(self._hecras_time_s) > 0:
+            n_time = int(len(self._hecras_time_s))
+            if self.hecras_start_index < 0 or self.hecras_start_index >= n_time:
+                raise ValueError(
+                    f"hecras_start_index out of range: {self.hecras_start_index} (0..{n_time - 1})"
+                )
+            self._hecras_start_time_s = float(self._hecras_time_s[self.hecras_start_index])
+            if n_time > 1:
+                dt_arr = np.diff(self._hecras_time_s)
+                dt_med = float(np.median(dt_arr))
+                if np.isfinite(dt_med) and dt_med > 0.0:
+                    self._hecras_dt_s = dt_med
+                    self._hecras_loop_period_s = (
+                        float(self._hecras_time_s[-1]) - self._hecras_start_time_s + dt_med
+                    )
+        elif self.hecras_start_index < 0:
+            raise ValueError(f"hecras_start_index must be >= 0, got {self.hecras_start_index}")
+
+        # Build static rasters at t0 for distance_to + heading initialization.
+        transform, shape = hecras_io.compute_grid_from_coords(
+            plan.coords, target_cell_size=self.hecras_cell_size
+        )
+        grids = plan.map_fields_to_grid(
+            self.hecras_start_index,
+            field_aliases=("depth", "vel_x", "vel_y"),
+            shape=shape,
+            transform=transform,
+            k=self.hecras_k,
+        )
+        depth_grid = grids["depth"].astype(np.float32)
+        vel_x_grid = grids["vel_x"].astype(np.float32)
+        vel_y_grid = grids["vel_y"].astype(np.float32)
+
+        hdf5_io.write_dataset(self.db, "environment/depth", depth_grid)
+        hdf5_io.write_dataset(self.db, "environment/vel_x", vel_x_grid)
+        hdf5_io.write_dataset(self.db, "environment/vel_y", vel_y_grid)
+
+        vel_mag = np.sqrt(vel_x_grid**2 + vel_y_grid**2).astype(np.float32)
+        vel_dir = np.arctan2(vel_y_grid, vel_x_grid).astype(np.float32)
+        hdf5_io.write_dataset(self.db, "environment/vel_mag", vel_mag)
+        hdf5_io.write_dataset(self.db, "environment/vel_dir", vel_dir)
+
+        # Use a simple north-up transform for all raster-backed cues.
+        self.depth_rast_transform = transform
+        self.vel_x_rast_transform = transform
+        self.vel_y_rast_transform = transform
+        self.vel_mag_rast_transform = transform
+        self.vel_dir_rast_transform = transform
+        self._hecras_grid_shape = shape
+        return True
+
+    def _hecras_time_index(self, t, dt) -> int:
+        if self.hecras_time_mode == "hold":
+            return self.hecras_start_index
+
+        if self._hecras_time_s is None or self.hecras_time_mode == "index":
+            idx = self.hecras_start_index + int(t)
+            if self.hecras_time_mode == "loop" and self._hecras_time_s is not None:
+                total = len(self._hecras_time_s) - self.hecras_start_index
+                if total <= 0:
+                    return self.hecras_start_index
+                rel = int(t) % total
+                return self.hecras_start_index + rel
+            return idx
+
+        sim_time = float(t) * float(dt)
+        if self.hecras_time_mode == "loop":
+            period = self._hecras_loop_period_s
+            if period is None or not np.isfinite(period) or period <= 0.0:
+                period = float(self._hecras_time_s[-1]) - float(self._hecras_start_time_s)
+            if period > 0.0:
+                sim_time = sim_time % period
+        target = float(self._hecras_start_time_s) + sim_time
+        idx = int(np.searchsorted(self._hecras_time_s, target, side="right") - 1)
+        idx = max(self.hecras_start_index, min(idx, len(self._hecras_time_s) - 1))
+        return idx
+
+    def _update_hecras_environment(self, t, dt) -> bool:
+        plan = self._hecras_plan
+        if plan is None:
+            raise RuntimeError("HECRAS plan not initialized")
+        agent_xy = np.column_stack((self.X, self.Y))
+        idx = self._hecras_time_index(t, dt)
+        if self._hecras_cached_index != idx:
+            fields = plan.read_fields(idx, ("depth", "vel_x", "vel_y"))
+            self._hecras_cached_fields = fields
+            self._hecras_cached_index = idx
+        else:
+            fields = self._hecras_cached_fields
+        if not isinstance(fields, dict):
+            raise RuntimeError("HECRAS field cache not initialized")
+
+        mapped = plan.map_values_to_points(fields, agent_xy, k=self.hecras_k)
+        depth = mapped.get("depth")
+        x_vel = mapped.get("vel_x")
+        y_vel = mapped.get("vel_y")
+        if depth is None or x_vel is None or y_vel is None:
+            raise RuntimeError("HECRAS mapping missing required fields (depth, vel_x, vel_y)")
+
+        for name, arr in (("depth", depth), ("vel_x", x_vel), ("vel_y", y_vel)):
+            bad = ~np.isfinite(arr)
+            if np.any(bad):
+                bad_idx = np.where(bad)[0][:5]
+                bad_pos = [(float(self.X[i]), float(self.Y[i])) for i in bad_idx]
+                raise ValueError(
+                    f"HECRAS mapping produced non-finite {name} for {int(np.sum(bad))} agents at step {t}. "
+                    f"First bad positions: {bad_pos}"
+                )
+
+        self.depth = np.asarray(depth, dtype=np.float32)
+        self.x_vel = np.asarray(x_vel, dtype=np.float32)
+        self.y_vel = np.asarray(y_vel, dtype=np.float32)
+        self.hecras_time_index = int(idx)
+        return True
 
     def initialize_mental_map(self, avoid_cell_size: float | None = None, *, create_datasets: bool = True) -> bool:
         """Create per-agent memory rasters and `mental_map_transform` for the avoid cue.
@@ -1061,15 +1219,18 @@ class simulation:
 
         # --- environment sampling: populate water velocities / depth at current positions
         # movement and fatigue modules treat `x_vel/y_vel` as water velocities.
-        depth = self.sample_environment(getattr(self, 'depth_rast_transform', None), 'depth')
-        self.depth = np.asarray(depth, dtype=np.float32)
+        if getattr(self, "use_hecras", False):
+            self._update_hecras_environment(t, dt)
+        else:
+            depth = self.sample_environment(getattr(self, 'depth_rast_transform', None), 'depth')
+            self.depth = np.asarray(depth, dtype=np.float32)
 
-        tx = getattr(self, 'vel_x_rast_transform', None) or getattr(self, 'depth_rast_transform', None)
-        ty = getattr(self, 'vel_y_rast_transform', None) or getattr(self, 'depth_rast_transform', None)
-        x_vel = self.sample_environment(tx, 'vel_x')
-        y_vel = self.sample_environment(ty, 'vel_y')
-        self.x_vel = np.where(np.isnan(x_vel), 0.0, x_vel).astype(np.float32)
-        self.y_vel = np.where(np.isnan(y_vel), 0.0, y_vel).astype(np.float32)
+            tx = getattr(self, 'vel_x_rast_transform', None) or getattr(self, 'depth_rast_transform', None)
+            ty = getattr(self, 'vel_y_rast_transform', None) or getattr(self, 'depth_rast_transform', None)
+            x_vel = self.sample_environment(tx, 'vel_x')
+            y_vel = self.sample_environment(ty, 'vel_y')
+            self.x_vel = np.where(np.isnan(x_vel), 0.0, x_vel).astype(np.float32)
+            self.y_vel = np.where(np.isnan(y_vel), 0.0, y_vel).astype(np.float32)
 
         # ensure refugia mask exists when enabled (computed once per run)
         if getattr(self, 'auto_derive_refugia', False) and not getattr(self, '_refugia_derived', False):
@@ -2146,6 +2307,13 @@ class simulation:
                 db.close()
             except Exception:
                 logging.getLogger(__name__).exception("Failed closing simulation HDF5 DB")
+
+        plan = getattr(self, "_hecras_plan", None)
+        if plan is not None:
+            try:
+                plan.close()
+            except Exception:
+                logging.getLogger(__name__).exception("Failed closing HECRAS plan")
 
         if getattr(self, "_created_db_file", False):
             try:

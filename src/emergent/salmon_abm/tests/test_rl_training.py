@@ -30,7 +30,7 @@ class TestBehavioralWeights:
         assert weights.alignment_weight == 25000.0
         assert weights.collision_weight == 2000.0
         assert weights.sensory_range == 2.0  # Biological constant
-        assert weights.threat_level == 0.3
+        assert weights.threat_level == 0.0
     
     def test_custom_initialization(self):
         """Test creation with custom values."""

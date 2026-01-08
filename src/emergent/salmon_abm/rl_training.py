@@ -58,7 +58,7 @@ class BehavioralWeights:
     arbitration_tolerance: float = 50000.0  # Tolerance for cue accumulation (how many 'f4cks' a fish has)
     
     # Threat parameters (FIXED - not trainable)
-    threat_level: float = 1.0  # Fixed at 1.0 (high threat - tight schooling)
+    threat_level: float = 0.0  # Default relaxed; set to 1.0 for tight schooling
     
     # Dynamic cohesion parameters (threat-responsive)
     cohesion_radius_relaxed: float = 3.0  # Body lengths

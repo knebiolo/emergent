@@ -747,6 +747,9 @@ class ControlPanel(QWidget):
             self.figure = Figure(figsize=(5, 3), dpi=80)
             self.canvas = FigureCanvasQTAgg(self.figure)
             
+            # Set minimum size to prevent negative dimensions
+            self.canvas.setMinimumSize(200, 150)
+            
             # Disable matplotlib's default scroll/pan/zoom navigation toolbar behavior
             # We need to disconnect the NavigationToolbar2QT scroll handler
             try:

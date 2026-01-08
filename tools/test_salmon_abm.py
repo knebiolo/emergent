@@ -125,26 +125,44 @@ def main():
     parser.add_argument('--test-weights-file', type=str, default=None, help='Path to test weights JSON')
     parser.add_argument('--view', action='store_true', help='Launch realtime_viewer after the run completes')
     parser.add_argument('--open', type=str, default=None, help='Open an existing .h5/.csv in realtime_viewer and exit')
+    parser.add_argument('--hecras-plan', type=str, default=None, help='Path to HECRAS plan HDF (direct mode)')
+    parser.add_argument('--hecras-start-index', type=int, default=None, help='Start index into HECRAS time series (default: 30 when hecras-plan set)')
+    parser.add_argument('--hecras-time-mode', type=str, default=None, help='HECRAS time mode: time, index, loop, clamp, hold (default: loop when hecras-plan set)')
+    parser.add_argument('--hecras-k', type=int, default=8, help='HECRAS IDW neighbors (k)')
+    parser.add_argument('--hecras-cell-size', type=float, default=None, help='Optional HECRAS grid cell size (m) for t0 rasters')
+    parser.add_argument('--hecras-wetted-threshold', type=float, default=None, help='Optional depth threshold for wetted mask at t0 (m)')
     args = parser.parse_args()
 
     if args.open:
         _launch_viewer(args.open)
         return
     
-    # Discover environment files
+    # Discover environment files (unless using HECRAS direct mode)
     if args.env_dir is None:
         base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'salmon_abm')
     else:
         base_dir = os.path.abspath(args.env_dir)
-    env_files = discover_env_files(base_dir)
-    
-    if not env_files:
-        print(f"[ERR] No environment files found in {base_dir}")
-        return
-    
-    print(f"[OK] Found {len(env_files)} environment files")
-    for ef in env_files:
-        print(f"     - {os.path.basename(ef)}")
+
+    hecras_plan = None
+    hecras_start_index = None
+    hecras_time_mode = None
+    if args.hecras_plan:
+        hecras_plan = os.path.abspath(args.hecras_plan)
+        if not os.path.exists(hecras_plan):
+            print(f"[ERR] HECRAS plan not found: {hecras_plan}")
+            return
+        hecras_start_index = 30 if args.hecras_start_index is None else int(args.hecras_start_index)
+        hecras_time_mode = str(args.hecras_time_mode or "loop").strip().lower()
+        print(f"[OK] HECRAS direct mode: {os.path.basename(hecras_plan)} (start_index={hecras_start_index}, mode={hecras_time_mode})")
+        env_files = []
+    else:
+        env_files = discover_env_files(base_dir)
+        if not env_files:
+            print(f"[ERR] No environment files found in {base_dir}")
+            return
+        print(f"[OK] Found {len(env_files)} environment files")
+        for ef in env_files:
+            print(f"     - {os.path.basename(ef)}")
     
     # Prepare outputs
     output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs', 'test') if args.outdir is None else os.path.abspath(args.outdir)
@@ -188,6 +206,12 @@ def main():
         db_path=h5_path,
         output_write_mode='full',
         output_write_backend='sync',
+        hecras_plan_path=hecras_plan,
+        hecras_start_index=hecras_start_index,
+        hecras_time_mode=hecras_time_mode,
+        hecras_k=int(args.hecras_k or 8),
+        hecras_cell_size=args.hecras_cell_size,
+        hecras_wetted_threshold=args.hecras_wetted_threshold,
     )
 
     sim.debug_behavior = bool(args.debug_behavior)

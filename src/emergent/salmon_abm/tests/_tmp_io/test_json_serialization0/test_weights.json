@@ -9,6 +9,7 @@
   "refugia_weight": 50000.0,
   "shallow_weight": 500000.0,
   "avoid_weight": 25000.0,
+  "arbitration_tolerance": 50000.0,
   "threat_level": 0.35,
   "cohesion_radius_relaxed": 3.0,
   "cohesion_radius_threatened": 1.5,
