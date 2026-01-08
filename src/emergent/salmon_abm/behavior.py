@@ -1229,6 +1229,10 @@ class behavior():
                 self._repulsive_out = np.zeros((agent_count, 2), dtype=np.float64)
             repulsive_out = self._repulsive_out[:agent_count]
             try:
+                write_batch_logs = bool(getattr(self.simulation, 'debug_behavior', False) or os.environ.get('SWEEP_DEBUG'))
+                # Clear batch log each call to avoid unbounded growth.
+                if self._batch_log:
+                    self._batch_log = []
                 # Cache psutil.Process() and sample RSS once per-method to reduce sampling overhead
                 ps_proc = self._get_psutil_proc()
                 rss_before_method = None
@@ -1335,11 +1339,12 @@ class behavior():
                     rss_after = None
 
                     # log batch
-                    try:
-                        run_tag = getattr(self.simulation, 'run_tag', None) or os.environ.get('RUN_TAG')
-                        self._batch_log.append({'start': bstart, 'end': bend, 'time': None, 'rss_before': rss_before, 'rss_after': rss_after, 'batch_total': batch_total, 'n_agents': int(agent_count), 'batch_size': int(batch_size), 'run_tag': run_tag})
-                    except Exception:
-                        logger.debug("Failed appending batch log entry", exc_info=True)
+                    if write_batch_logs:
+                        try:
+                            run_tag = getattr(self.simulation, 'run_tag', None) or os.environ.get('RUN_TAG')
+                            self._batch_log.append({'start': bstart, 'end': bend, 'time': None, 'rss_before': rss_before, 'rss_after': rss_after, 'batch_total': batch_total, 'n_agents': int(agent_count), 'batch_size': int(batch_size), 'run_tag': run_tag})
+                        except Exception:
+                            logger.debug("Failed appending batch log entry", exc_info=True)
 
                     # Call batched kernel for this batch
                     axs = agent_xs[bstart:bend]
@@ -1381,11 +1386,12 @@ class behavior():
                         repulsive_out[bstart:bend, 0] = out_x
                         repulsive_out[bstart:bend, 1] = out_y
                         # update last batch log entry with time
-                        try:
-                            if self._batch_log:
-                                self._batch_log[-1]['time'] = t1 - t0
-                        except Exception:
-                            logger.debug("Failed updating last batch log time", exc_info=True)
+                        if write_batch_logs:
+                            try:
+                                if self._batch_log:
+                                    self._batch_log[-1]['time'] = t1 - t0
+                            except Exception:
+                                logger.debug("Failed updating last batch log time", exc_info=True)
                         # adaptive memory check moved to after batch assembly (use per-method samples)
                         pass
                     except Exception:
@@ -1403,15 +1409,16 @@ class behavior():
                     rss_after_method = None
 
                 # Update batch_log entries with method-level rss samples where available
-                try:
-                    if self._batch_log:
-                        for entry in self._batch_log:
-                            if 'rss_before' not in entry or entry.get('rss_before') is None:
-                                entry['rss_before'] = rss_before_method
-                            if 'rss_after' not in entry or entry.get('rss_after') is None:
-                                entry['rss_after'] = rss_after_method
-                except Exception:
-                    logger.debug("Failed updating batch log rss samples", exc_info=True)
+                if write_batch_logs:
+                    try:
+                        if self._batch_log:
+                            for entry in self._batch_log:
+                                if 'rss_before' not in entry or entry.get('rss_before') is None:
+                                    entry['rss_before'] = rss_before_method
+                                if 'rss_after' not in entry or entry.get('rss_after') is None:
+                                    entry['rss_after'] = rss_after_method
+                    except Exception:
+                        logger.debug("Failed updating batch log rss samples", exc_info=True)
 
                 # if memory spiked beyond threshold, reduce batch size for future batches based on method-level samples
                 try:
@@ -1433,7 +1440,6 @@ class behavior():
         # dump per-batch CSV log for offline analysis
         # Only write detailed per-batch CSVs when debugging or explicit SWEEP_DEBUG is set
         try:
-            write_batch_logs = bool(getattr(self.simulation, 'debug_behavior', False) or os.environ.get('SWEEP_DEBUG'))
             if write_batch_logs:
                 import csv
                 ts = int(time.time())
