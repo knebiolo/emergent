@@ -22,7 +22,9 @@ import os
 import time
 import threading
 import argparse
-from typing import Optional, Dict, List, Tuple
+import multiprocessing as mp
+import queue as queue_mod
+from typing import Optional, Dict, List, Tuple, Any
 from pathlib import Path
 
 import numpy as np
@@ -63,6 +65,181 @@ try:
 except ImportError as e:
     raise ImportError(f"Could not import RL training components: {e}")
 
+
+def _drain_control_messages(control_queue, paused: bool, stopped: bool) -> Tuple[bool, bool]:
+    """Return (paused, stopped) after draining control messages."""
+    while True:
+        try:
+            msg = control_queue.get_nowait()
+        except queue_mod.Empty:
+            break
+        if msg == "stop":
+            stopped = True
+            paused = False
+        elif msg == "pause":
+            paused = True
+        elif msg == "resume":
+            paused = False
+    return paused, stopped
+
+
+def _training_process_main(config: Dict[str, Any], output_queue, control_queue) -> None:
+    """Run RL training in a subprocess to avoid UI/GIL contention."""
+    import traceback
+    import numpy as np
+    from emergent.salmon_abm.rl_training import BehavioralWeights, RLTrainer, compute_episode_reward
+    from emergent.salmon_abm.simulation import simulation
+
+    try:
+        env_files = config.get("env_files") or []
+        if not env_files:
+            raise ValueError("No environment files provided for training process")
+
+        longitudinal_path = config.get("longitudinal_path")
+        if not longitudinal_path or not os.path.exists(longitudinal_path):
+            raise FileNotFoundError(f"Longitudinal profile shapefile required but not found: {longitudinal_path}")
+
+        num_episodes = int(config.get("num_episodes", 1))
+        num_timesteps = int(config.get("num_timesteps", 50))
+        num_agents = int(config.get("num_agents", 200))
+        exploration_noise = float(config.get("exploration_noise", 0.1))
+        reward_weights = config.get("reward_weights") or None
+        body_length = float(config.get("body_length", 0.3))
+        dt = float(config.get("dt", 1.0))
+
+        initial_weights = BehavioralWeights.from_dict(config.get("initial_weights") or {})
+
+        def simulation_factory(weights: BehavioralWeights):
+            sim = simulation(
+                model_dir=config.get("model_dir"),
+                model_name=config.get("model_name"),
+                crs=config.get("crs"),
+                basin=config.get("basin"),
+                water_temp=float(config.get("water_temp", 12.0)),
+                start_polygon=config.get("start_polygon"),
+                env_files=env_files,
+                longitudinal_profile=longitudinal_path,
+                fish_length=None,
+                num_timesteps=num_timesteps,
+                num_agents=num_agents,
+                use_gpu=False,
+                pid_tuning=False,
+                db_path=None,
+                output_write_mode="none",
+                output_write_backend="sync",
+            )
+
+            sim.load_behavioral_weights(weights_dict=weights.to_dict())
+
+            fish_length_m = 0.3
+            sensory_range = 5.0
+            sim.neighbor_buffer_radius = sensory_range * fish_length_m
+            sim.neighbor_buffer_lengths = sensory_range
+
+            sim.heading = np.random.uniform(0, 2 * np.pi, sim.num_agents).astype(np.float32)
+            sim.sog = np.random.uniform(0.1, 1.5, sim.num_agents).astype(np.float32)
+            return sim
+
+        trainer = RLTrainer(
+            simulation_factory=simulation_factory,
+            initial_weights=initial_weights,
+            config={
+                "exploration_noise": exploration_noise,
+                "body_length": body_length,
+                "dt": dt,
+                "num_timesteps": num_timesteps,
+                "reward_weights": reward_weights,
+            },
+        )
+
+        longitudinal_profile = None
+        try:
+            sim = trainer.simulation_factory(trainer.initial_weights)
+            longitudinal_profile = getattr(sim, "longitudinal", None)
+            sim.close()
+        except Exception as e:
+            raise RuntimeError(f"Failed to cache longitudinal profile: {e}") from e
+
+        if longitudinal_profile is None:
+            raise ValueError("Longitudinal profile not loaded from simulation")
+
+        current_weights = trainer.initial_weights
+        paused = False
+        stopped = False
+
+        for episode in range(num_episodes):
+            paused, stopped = _drain_control_messages(control_queue, paused, stopped)
+            if stopped:
+                break
+            while paused and not stopped:
+                time.sleep(0.1)
+                paused, stopped = _drain_control_messages(control_queue, paused, stopped)
+            if stopped:
+                break
+
+            output_queue.put({"type": "episode_started", "episode": episode, "total": num_episodes})
+
+            positions, headings, velocities, battery, alive, velocity_field = trainer.run_episode(current_weights)
+
+            reward, components = compute_episode_reward(
+                positions,
+                headings,
+                velocities,
+                alive,
+                body_length=trainer.body_length,
+                threat_level=current_weights.threat_level,
+                behavioral_weights=current_weights.to_dict(),
+                battery_history=battery,
+                longitudinal_profile=longitudinal_profile,
+                velocity_field_history=velocity_field,
+                reward_weights=trainer.reward_weights,
+            )
+
+            if reward > trainer.best_reward:
+                trainer.best_reward = reward
+                trainer.best_weights = current_weights
+
+            trainer.episode_history.append((episode, float(reward)))
+
+            output_queue.put(
+                {
+                    "type": "episode_computed",
+                    "episode": episode,
+                    "reward": float(reward),
+                    "components": components,
+                    "positions": positions,
+                    "headings": headings,
+                    "battery": battery,
+                    "alive": alive,
+                    "weights": current_weights.to_dict(),
+                    "best_reward": float(trainer.best_reward),
+                }
+            )
+
+            current_weights = trainer.best_weights.mutate(mutation_scale=trainer.exploration_noise)
+
+        if stopped:
+            output_queue.put(
+                {
+                    "type": "training_stopped",
+                    "best_weights": trainer.best_weights.to_dict(),
+                    "history": trainer.episode_history,
+                }
+            )
+        else:
+            output_queue.put(
+                {
+                    "type": "training_completed",
+                    "best_weights": trainer.best_weights.to_dict(),
+                    "history": trainer.episode_history,
+                }
+            )
+    except Exception as exc:
+        msg = f"Training error: {exc}\n{traceback.format_exc()}"
+        try:
+            output_queue.put({"type": "error", "message": msg})
+        finally:
+            raise
 
 class SimulationCanvas(QWidget):
     """
@@ -136,6 +313,10 @@ class SimulationCanvas(QWidget):
             self.replay_widget._vel_transform = self.vel_transform
         
         # Connect to replay widget's timer to detect when animation finishes
+        self._animation_finished_emitted = False
+        self._animation_watchdog = QTimer(self)
+        self._animation_watchdog.setInterval(100)
+        self._animation_watchdog.timeout.connect(self._poll_animation_complete)
         self.replay_widget.timer.timeout.connect(self._check_animation_complete)
         
         # Layout
@@ -146,11 +327,28 @@ class SimulationCanvas(QWidget):
         
     def _check_animation_complete(self):
         """Check if animation reached the end and emit signal."""
-        if self.replay_widget.playing and self.replay_widget.frame >= self.replay_widget.T - 1:
+        if self.replay_widget.frame >= self.replay_widget.T - 1:
             # Animation reached the end
             self.replay_widget.playing = False
-            self.replay_widget.timer.stop()
-            self.animation_finished.emit()
+            if self.replay_widget.timer.isActive():
+                self.replay_widget.timer.stop()
+            self._emit_animation_finished()
+
+    def _poll_animation_complete(self):
+        """Fallback watchdog in case timer callbacks miss the last frame."""
+        if self._animation_finished_emitted:
+            return
+        if self.replay_widget.frame >= self.replay_widget.T - 1 and not self.replay_widget.timer.isActive():
+            self._emit_animation_finished()
+
+    def _emit_animation_finished(self):
+        """Emit animation_finished once per episode."""
+        if self._animation_finished_emitted:
+            return
+        self._animation_finished_emitted = True
+        if self._animation_watchdog.isActive():
+            self._animation_watchdog.stop()
+        self.animation_finished.emit()
     
     def wheelEvent(self, event):
         """Forward wheel events to replay widget for zooming only."""
@@ -216,6 +414,9 @@ class SimulationCanvas(QWidget):
         self.replay_widget.playing = True
         self.replay_widget.start()  # Start animation
         self.replay_widget.update()
+        self._animation_finished_emitted = False
+        if not self._animation_watchdog.isActive():
+            self._animation_watchdog.start()
         print(f"[RL VIEWER DEBUG] Animation started, playing={self.replay_widget.playing}", flush=True)
 
 
@@ -1003,6 +1204,11 @@ class RLTrainingViewer(QMainWindow):
         self.trainer = None
         self.training_thread = None
         self.training_worker = None
+        self.training_process = None
+        self.training_queue = None
+        self.training_control_queue = None
+        self.training_poll_timer = None
+        self.training_paused = False
         self.initial_reward = None
         
         # Episode visualization queue (for parallel computation)
@@ -1014,6 +1220,7 @@ class RLTrainingViewer(QMainWindow):
         self.completed_episodes = []  # List of (episode, reward, components, positions, headings, battery, alive, weights)
         self.best_episode_data = None  # Always keep best episode: (episode, reward, components, positions, headings, battery, alive, weights)
         self.best_reward = float('-inf')  # Track best reward seen
+        self.best_weights = None
         
         # Current behavioral weights (modified by randomize buttons)
         from emergent.salmon_abm.rl_training import BehavioralWeights
@@ -1069,6 +1276,90 @@ class RLTrainingViewer(QMainWindow):
         
         # Display initial weights
         self.weights_panel.update_weights(self.current_weights)
+
+    def _is_training_active(self) -> bool:
+        return self.training_process is not None and self.training_process.is_alive()
+
+    def _start_training_poll(self) -> None:
+        if self.training_poll_timer is None:
+            self.training_poll_timer = QTimer(self)
+            self.training_poll_timer.setInterval(100)
+            self.training_poll_timer.timeout.connect(self._poll_training_queue)
+        if not self.training_poll_timer.isActive():
+            self.training_poll_timer.start()
+
+    def _stop_training_poll(self) -> None:
+        if self.training_poll_timer is not None and self.training_poll_timer.isActive():
+            self.training_poll_timer.stop()
+
+    def _poll_training_queue(self) -> None:
+        if self.training_queue is None:
+            return
+        handled = 0
+        while handled < 20:
+            try:
+                msg = self.training_queue.get_nowait()
+            except queue_mod.Empty:
+                break
+            self._handle_training_message(msg)
+            handled += 1
+        if self.training_process is not None and not self.training_process.is_alive():
+            if self.training_queue is None or self.training_queue.empty():
+                self._cleanup_training_process()
+
+    def _handle_training_message(self, msg: Dict[str, Any]) -> None:
+        msg_type = msg.get("type")
+        if msg_type == "episode_started":
+            self.on_episode_started(int(msg.get("episode", 0)))
+            return
+        if msg_type == "episode_computed":
+            weights_dict = msg.get("weights") or {}
+            current_weights = BehavioralWeights.from_dict(weights_dict) if weights_dict else None
+            reward = float(msg.get("reward", 0.0))
+            if reward > self.best_reward:
+                self.best_reward = reward
+                self.best_weights = current_weights
+            self.on_episode_computed(
+                int(msg.get("episode", 0)),
+                reward,
+                msg.get("components", {}),
+                msg.get("positions"),
+                msg.get("headings"),
+                msg.get("battery"),
+                msg.get("alive"),
+                current_weights,
+            )
+            return
+        if msg_type == "training_completed":
+            best_weights = BehavioralWeights.from_dict(msg.get("best_weights") or {})
+            self.best_weights = best_weights
+            history = msg.get("history", [])
+            self.on_training_completed(best_weights, history)
+            self._cleanup_training_process()
+            return
+        if msg_type == "training_stopped":
+            best_weights = BehavioralWeights.from_dict(msg.get("best_weights") or {})
+            self.best_weights = best_weights
+            self._cleanup_training_process()
+            self.control_panel.append_log("Training stopped")
+            self.control_panel.status_label.setText("Stopped")
+            self.control_panel.set_parameters_enabled(True)
+            return
+        if msg_type == "error":
+            self.on_error_occurred(msg.get("message", "Unknown training error"))
+            self._cleanup_training_process()
+            return
+
+    def _cleanup_training_process(self) -> None:
+        self._stop_training_poll()
+        if self.training_process is not None and self.training_process.is_alive():
+            self.training_process.join(timeout=1.0)
+        self.training_process = None
+        self.training_queue = None
+        self.training_control_queue = None
+        self.training_paused = False
+        self.training_thread = None
+        self.training_worker = None
         
     def create_simulation_factory(self, num_agents: int, num_timesteps: int):
         """
@@ -1145,7 +1436,7 @@ class RLTrainingViewer(QMainWindow):
         
     def on_start_training(self):
         """Start training with current parameters."""
-        if self.training_thread is not None and self.training_thread.isRunning():
+        if self._is_training_active():
             self.control_panel.append_log("Training already in progress!")
             return
         
@@ -1178,14 +1469,28 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.status_label.setText("Initializing...")
         
         try:
-            # Create simulation factory
-            simulation_factory = self.create_simulation_factory(num_agents, num_timesteps)
-            
+            # Resolve environment files for subprocess
+            env_files = []
+            for fname in ['depth.tif', 'vel_x.tif', 'vel_y.tif', 'vel_mag.tif', 'vel_dir.tif']:
+                fpath = os.path.join(self.model_dir, fname)
+                if os.path.exists(fpath):
+                    env_files.append(fpath)
+            if not env_files:
+                raise FileNotFoundError(f"No environment files found in {self.model_dir}")
+            self.control_panel.append_log(f"Found {len(env_files)} environment files")
+
+            longitudinal_path = os.path.join(self.model_dir, 'longitudinal.shp')
+            if not os.path.exists(longitudinal_path):
+                raise FileNotFoundError(
+                    f"Longitudinal profile shapefile required but not found: {longitudinal_path}\n"
+                    f"The reward function requires this to compute upstream progress accurately."
+                )
+            self.control_panel.append_log(f"Found longitudinal profile: {longitudinal_path}")
+
             # Get edited weights from the panel (user may have manually edited values)
             initial_weights = self.weights_panel.get_edited_weights(self.current_weights)
             self.current_weights = initial_weights  # Update current_weights with edits
-            
-            # Get reward weights from control panel (all exposed in UI)
+
             reward_weights = {
                 'cohesion': self.control_panel.cohesion_reward_spin.value(),
                 'alignment': self.control_panel.alignment_reward_spin.value(),
@@ -1200,26 +1505,36 @@ class RLTrainingViewer(QMainWindow):
                 'stagnation_penalty': self.control_panel.stagnation_penalty_spin.value(),
                 'rheotaxis_alignment': self.control_panel.rheotaxis_penalty_spin.value(),
             }
-            
+
             config = {
-                'exploration_noise': exploration_noise,
-                'body_length': 0.3,  # 300mm fish
-                'dt': 1.0,
-                'num_timesteps': num_timesteps,
-                'reward_weights': reward_weights  # Pass reward weights to trainer
+                "model_dir": self.model_dir,
+                "model_name": self.model_name,
+                "crs": self.crs,
+                "basin": self.basin,
+                "water_temp": self.water_temp,
+                "start_polygon": self.start_polygon,
+                "env_files": env_files,
+                "longitudinal_path": longitudinal_path,
+                "num_episodes": num_episodes,
+                "num_timesteps": num_timesteps,
+                "num_agents": num_agents,
+                "exploration_noise": exploration_noise,
+                "reward_weights": reward_weights,
+                "body_length": 0.3,
+                "dt": 1.0,
+                "initial_weights": initial_weights.to_dict(),
             }
-            self.trainer = RLTrainer(
-                simulation_factory=simulation_factory,
-                initial_weights=initial_weights,
-                config=config
-            )
-            
-            self.control_panel.append_log("Trainer initialized successfully")
-            
+
+            self.best_reward = float('-inf')
+            self.best_weights = None
+            self.initial_reward = None
+            self.training_paused = False
+
+            self.control_panel.append_log("Trainer initialized successfully (subprocess)")
+
             # Display initial weights
             self.weights_panel.update_weights(initial_weights)
-            
-            # Display default arbitration order (from behavior.py)
+
             default_order = {
                 0: 'shallow',
                 1: 'border',
@@ -1233,28 +1548,21 @@ class RLTrainingViewer(QMainWindow):
                 9: 'wave_drag',
             }
             self.weights_panel.update_order(default_order, initial_weights)
-            
+
             # Disable parameter controls during training
             self.control_panel.set_parameters_enabled(False)
-            
-            # Create worker thread
-            self.training_worker = TrainingWorker(self.trainer, num_episodes)
-            self.training_thread = QThread()
-            self.training_worker.moveToThread(self.training_thread)
-            
-            # Connect signals
-            self.training_thread.started.connect(self.training_worker.run)
-            self.training_worker.episode_started.connect(self.on_episode_started)
-            self.training_worker.episode_computed.connect(self.on_episode_computed)
-            self.training_worker.training_completed.connect(self.on_training_completed)
-            self.training_worker.error_occurred.connect(self.on_error_occurred)
-            self.training_worker.training_completed.connect(self.training_thread.quit)
-            self.training_worker.error_occurred.connect(self.training_thread.quit)
-            
-            # Start training
-            self.training_thread.start()
-            self.control_panel.append_log("Training thread started")
-            
+
+            ctx = mp.get_context("spawn")
+            self.training_queue = ctx.Queue(maxsize=2)
+            self.training_control_queue = ctx.Queue()
+            self.training_process = ctx.Process(
+                target=_training_process_main,
+                args=(config, self.training_queue, self.training_control_queue),
+            )
+            self.training_process.start()
+            self._start_training_poll()
+            self.control_panel.append_log("Training process started")
+
         except Exception as e:
             import traceback
             self.control_panel.append_log(f"ERROR: Failed to start training")
@@ -1264,7 +1572,7 @@ class RLTrainingViewer(QMainWindow):
     
     def on_set_blanket_value(self):
         """Set all behavioral weights to a uniform blanket value."""
-        if self.training_thread is not None and self.training_thread.isRunning():
+        if self._is_training_active():
             self.control_panel.append_log("Cannot set blanket value during training")
             return
         
@@ -1307,7 +1615,7 @@ class RLTrainingViewer(QMainWindow):
     
     def on_randomize_weights(self):
         """Regenerate random initial weights."""
-        if self.training_thread is not None and self.training_thread.isRunning():
+        if self._is_training_active():
             self.control_panel.append_log("Cannot randomize during training")
             return
         
@@ -1354,7 +1662,7 @@ class RLTrainingViewer(QMainWindow):
     
     def on_randomize_order(self):
         """Shuffle cue application order."""
-        if self.training_thread is not None and self.training_thread.isRunning():
+        if self._is_training_active():
             self.control_panel.append_log("Cannot randomize order during training")
             return
         
@@ -1387,11 +1695,15 @@ class RLTrainingViewer(QMainWindow):
     def on_reset_training(self):
         """Reset training to initial state - stop all processes and start fresh."""
         # Stop training if running
-        if self.training_thread is not None and self.training_thread.isRunning():
+        if self._is_training_active():
             self.control_panel.append_log("Stopping training for reset...")
-            self.training_worker.stop()
-            self.training_thread.quit()
-            self.training_thread.wait(2000)  # Wait up to 2 seconds
+            if self.training_control_queue is not None:
+                self.training_control_queue.put("stop")
+            if self.training_process is not None:
+                self.training_process.join(timeout=2.0)
+                if self.training_process.is_alive():
+                    self.training_process.terminate()
+            self._cleanup_training_process()
         
         # Clear episode data
         self.episode_queue.clear()
@@ -1407,25 +1719,14 @@ class RLTrainingViewer(QMainWindow):
             self.simulation_canvas.replay_widget.timer.stop()
             self.simulation_canvas.replay_widget.update()
         
-        # Reset trainer
-        if self.trainer:
-            try:
-                if hasattr(self.trainer, 'sim') and self.trainer.sim:
-                    self.trainer.sim.close()
-            except Exception:
-                pass
-        
-        # Create new trainer with fresh simulation
         num_agents = self.control_panel.agents_spin.value()
         num_timesteps = self.control_panel.timesteps_spin.value()
-        self.trainer = RLTrainer(
-            simulation_factory=self.create_simulation_factory(num_agents, num_timesteps),
-            initial_weights=self.current_weights,
-            config={'num_timesteps': num_timesteps}
-        )
+        self.trainer = None
         self.training_thread = None
         self.training_worker = None
         self.initial_reward = None
+        self.best_reward = float('-inf')
+        self.best_weights = None
         
         # Clear plot
         if hasattr(self.control_panel, 'has_plot') and self.control_panel.has_plot:
@@ -1459,15 +1760,20 @@ class RLTrainingViewer(QMainWindow):
         
     def on_pause_training(self):
         """Pause/resume training."""
-        if self.training_worker is not None:
-            if self.training_worker.is_paused:
-                self.training_worker.resume()
-                self.control_panel.btn_pause.setText("⏸ Pause Training")
-                self.control_panel.append_log("Training resumed")
-            else:
-                self.training_worker.pause()
-                self.control_panel.btn_pause.setText("▶ Resume Training")
-                self.control_panel.append_log("Training paused")
+        if not self._is_training_active():
+            return
+        if self.training_control_queue is None:
+            return
+        if self.training_paused:
+            self.training_control_queue.put("resume")
+            self.training_paused = False
+            self.control_panel.btn_pause.setText("⏸ Pause Training")
+            self.control_panel.append_log("Training resumed")
+        else:
+            self.training_control_queue.put("pause")
+            self.training_paused = True
+            self.control_panel.btn_pause.setText("▶ Resume Training")
+            self.control_panel.append_log("Training paused")
     
     def on_toggle_playback(self):
         """Toggle play/pause for current episode animation."""
@@ -1495,12 +1801,11 @@ class RLTrainingViewer(QMainWindow):
                 
     def on_stop_training(self):
         """Stop training."""
-        if self.training_worker is not None:
-            self.training_worker.stop()
+        if self._is_training_active():
+            if self.training_control_queue is not None:
+                self.training_control_queue.put("stop")
             self.control_panel.append_log("Stopping training...")
             self.control_panel.status_label.setText("Stopping...")
-            
-            # Re-enable parameter controls
             self.control_panel.set_parameters_enabled(True)
             
     def on_episode_started(self, episode: int):
@@ -1563,8 +1868,8 @@ class RLTrainingViewer(QMainWindow):
         episode, reward, components, current_weights = self.pending_episode_data
         
         # Diagnostic logging: Track weight evolution and warn about collapse
-        if hasattr(self.trainer, 'best_weights'):
-            weights_dict = self.trainer.best_weights.to_dict()
+        if self.best_weights is not None:
+            weights_dict = self.best_weights.to_dict()
             cohesion_w = weights_dict.get('cohesion', 0)
             alignment_w = weights_dict.get('alignment', 0)
             rheotaxis_w = weights_dict.get('rheotaxis', 0)
@@ -1588,7 +1893,7 @@ class RLTrainingViewer(QMainWindow):
         if self.initial_reward is None:
             self.initial_reward = reward
             
-        best_reward = self.trainer.best_reward if self.trainer else reward
+        best_reward = self.best_reward if self.best_reward != float('-inf') else reward
         self.weights_panel.update_diagnostics(episode + 1, total, reward, best_reward, self.initial_reward)
         self.weights_panel.update_components(components)
         
@@ -1634,7 +1939,7 @@ class RLTrainingViewer(QMainWindow):
                 print(f"[STORAGE] Stored episode {episode_num} for replay (interval={storage_interval})", flush=True)
             
             # Always track best episode separately
-            if reward > self.best_reward:
+            if self.best_episode_data is None or reward >= self.best_reward:
                 self.best_reward = reward
                 self.best_episode_data = self._current_episode_data
                 print(f"[STORAGE] New best episode: {episode_num} with reward {reward:.2f}", flush=True)
@@ -1660,15 +1965,18 @@ class RLTrainingViewer(QMainWindow):
         """Handle training completion."""
         self.control_panel.append_log("=" * 40)
         self.control_panel.append_log("Training completed!")
-        if self.trainer:
-            self.control_panel.append_log(f"Best reward: {self.trainer.best_reward:.2f}")
+        self.best_weights = best_weights
+        if history:
+            self.best_reward = max(r for _, r in history)
+            self.control_panel.append_log(f"Best reward: {self.best_reward:.2f}")
         
-        initial = history[0][1]
-        final = history[-1][1]
-        improvement = final - initial
-        self.control_panel.append_log(f"Initial reward: {initial:.2f}")
-        self.control_panel.append_log(f"Final reward: {final:.2f}")
-        self.control_panel.append_log(f"Improvement: {improvement:+.2f}")
+        if history:
+            initial = history[0][1]
+            final = history[-1][1]
+            improvement = final - initial
+            self.control_panel.append_log(f"Initial reward: {initial:.2f}")
+            self.control_panel.append_log(f"Final reward: {final:.2f}")
+            self.control_panel.append_log(f"Improvement: {improvement:+.2f}")
         
         self.control_panel.status_label.setText("Training complete")
         self.control_panel.set_progress(100, 100)
@@ -1687,34 +1995,27 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.set_parameters_enabled(True)
     
     def closeEvent(self, event):
-        """Handle window close - ensure thread is stopped properly."""
-        # Stop training thread if running
-        if self.training_thread is not None and self.training_thread.isRunning():
-            print("[VIEWER] Stopping training thread before close...", flush=True)
+        """Handle window close - ensure process is stopped properly."""
+        if self._is_training_active():
+            print("[VIEWER] Stopping training process before close...", flush=True)
             try:
-                if self.training_worker is not None:
-                    self.training_worker.stop()
-                self.training_thread.quit()
-                # Wait up to 3 seconds for thread to finish
-                if not self.training_thread.wait(3000):
-                    print("[VIEWER] WARNING: Thread did not stop in time, terminating", flush=True)
-                    self.training_thread.terminate()
-                    self.training_thread.wait(1000)
+                if self.training_control_queue is not None:
+                    self.training_control_queue.put("stop")
+                if self.training_process is not None:
+                    self.training_process.join(timeout=3.0)
+                    if self.training_process.is_alive():
+                        print("[VIEWER] WARNING: Process did not stop in time, terminating", flush=True)
+                        self.training_process.terminate()
+                        self.training_process.join(timeout=1.0)
+                self._cleanup_training_process()
             except Exception as e:
-                print(f"[VIEWER] Error stopping thread: {e}", flush=True)
+                print(f"[VIEWER] Error stopping process: {e}", flush=True)
         
         # Stop animation timer
         if hasattr(self.simulation_canvas, 'replay_widget'):
             try:
                 self.simulation_canvas.replay_widget.playing = False
                 self.simulation_canvas.replay_widget.timer.stop()
-            except Exception:
-                pass
-        
-        # Close simulation if exists
-        if self.trainer and hasattr(self.trainer, 'sim') and self.trainer.sim:
-            try:
-                self.trainer.sim.close()
             except Exception:
                 pass
         
@@ -1730,7 +2031,7 @@ class RLTrainingViewer(QMainWindow):
         
         # Update weights and diagnostics
         total = self.control_panel.episodes_spin.value()
-        best_reward = self.trainer.best_reward if self.trainer else reward
+        best_reward = self.best_reward if self.best_reward != float('-inf') else reward
         initial_reward = self.initial_reward if self.initial_reward else reward
         
         self.weights_panel.update_diagnostics(episode + 1, total, reward, best_reward, initial_reward)
@@ -1761,6 +2062,7 @@ class RLTrainingViewer(QMainWindow):
 def main():
     """Run RL training visualizer."""
     print("RL Viewer starting...", flush=True)
+    mp.freeze_support()
     try:
         print("Parsing arguments...", flush=True)
         parser = argparse.ArgumentParser(description="RL Training Visualizer for Behavioral Weights")
