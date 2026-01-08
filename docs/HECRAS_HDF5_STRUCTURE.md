@@ -2,7 +2,7 @@
 
 **Document Purpose**: Reference guide for understanding HEC-RAS plan HDF5 files and how the emergent salmon ABM uses them.
 
-**Status note (2026)**: The Salmon ABM production run path currently uses **static environmental rasters** (imported into the HDF5 DB under `environment/*`). Direct ingestion of HECRAS plan HDF5 files is not yet wired into `src/emergent/salmon_abm/simulation.py`; HECRAS content below is reference/design material for the future direct-HECRAS interface.
+**Status note (2026)**: The Salmon ABM production run path now supports an optional **direct HECRAS mode** in `src/emergent/salmon_abm/simulation.py` that maps time-varying HECRAS fields directly to agent positions. Static t0 rasters are still created for distance-to-bank and other raster-only cues.
 
 **Example File**: `C:\Users\Kevin.Nebiolo\OneDrive - Kleinschmidt Associates\Software\emergent\data\salmon_abm\20240506\Nuyakuk_Production_.p05.hdf`
 

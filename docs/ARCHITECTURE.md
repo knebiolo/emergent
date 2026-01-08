@@ -15,8 +15,8 @@ Purpose: single-file reference describing module responsibilities, data ownershi
 
 ## Key Invariants
 
-- The current Salmon ABM run path is raster-based: depth/velocity fields are imported from static rasters and stored in the HDF5 DB under `environment/*`.
-- Do not assume any direct-HECRAS objects (e.g., `HECRASMap`, `sim.perimeter_*`) exist in production until the HECRAS interface is implemented and wired into `simulation.py`.
+- The Salmon ABM run path is raster-based by default, but `simulation.py` now supports an optional HECRAS direct mode that maps time-varying HECRAS fields directly to agent positions (with static t0 rasters used for distance-to-bank).
+- Do not assume any direct-HECRAS mesh objects (e.g., `sim.perimeter_*`) exist in production; only per-agent HECRAS sampling is supported in the new mode.
 - When the direct HECRAS interface is implemented, the simulation should remain the single source of truth for derived geometry (e.g., wetted masks/perimeters); viewers should only visualize.
 
 ## Developer Workflow Notes
