@@ -499,6 +499,10 @@ class ReplayWidget(QOpenGLWidget):
 
     def mouseMoveEvent(self, event):
         """Pan view during drag."""
+        if not (event.buttons() & Qt.LeftButton):
+            self._mouse_drag_start = None
+            event.accept()
+            return
         if self._mouse_drag_start is not None:
             dx = event.x() - self._mouse_drag_start[0]
             dy = event.y() - self._mouse_drag_start[1]
@@ -1164,6 +1168,10 @@ class GLViewer(QOpenGLWidget):
     def mouseMoveEvent(self, event):
         """Pan view during drag."""
         try:
+            if not (event.buttons() & Qt.LeftButton):
+                self._mouse_drag_start = None
+                event.accept()
+                return
             if hasattr(self, '_mouse_drag_start') and self._mouse_drag_start is not None:
                 dx = event.x() - self._mouse_drag_start[0]
                 dy = event.y() - self._mouse_drag_start[1]
