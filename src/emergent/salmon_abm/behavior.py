@@ -418,6 +418,12 @@ class behavior():
         self._scratch_offsets = None
         # per-batch logging entries: list of dicts with keys 'start','end','time','rss_before','rss_after','batch_total'
         self._batch_log = []
+        # eddy escape state (per-agent randomized exit timing/heading/speed)
+        self._eddy_exit_delay = None
+        self._eddy_exit_speed_scale = None
+        self._eddy_exit_heading_offset = None
+        self._eddy_spin_rate = None
+        self._eddy_spin_phase = None
         # threshold in bytes to consider reducing batch size (default 200MB)
         self._rss_threshold_bytes = int(getattr(self.simulation, 'behavior_memory_threshold_bytes', 200 * 1024 * 1024))
         # small cache to reuse world grids for repeated windows
@@ -1816,7 +1822,8 @@ class behavior():
             try:
                 if len(v) > 0 and np.isfinite(v[0, 0]) and np.isfinite(v[0, 1]):
                     raw_x, raw_y = x_vel[0] / sign, y_vel[0] / sign  # Original flow before sign flip
-                    print(f"RHEO DEBUG: Raw flow=(x={raw_x:.3f}, y={raw_y:.3f}), sign={sign}, rheotaxis will be=(x={v[0,0]:.3f}, y={v[0,1]:.3f})")
+                    if getattr(self.simulation, 'debug_behavior', False) and not getattr(self.simulation, 'quiet', False):
+                        print(f"RHEO DEBUG: Raw flow=(x={raw_x:.3f}, y={raw_y:.3f}), sign={sign}, rheotaxis will be=(x={v[0,0]:.3f}, y={v[0,1]:.3f})")
                     self.simulation._rheo_debug_printed = True
             except Exception:
                 logger.debug("RHEO debug print failed", exc_info=True)
@@ -2014,7 +2021,8 @@ class behavior():
         active = (total_x_force != 0) | (total_y_force != 0)
         if np.any(active):
             max_force = np.max(np.sqrt(total_x_force**2 + total_y_force**2))
-            print(f"SHALLOW: {np.sum(active)}/100 agents, max force={max_force:.0f}")
+            if getattr(self.simulation, 'debug_behavior', False) and not getattr(self.simulation, 'quiet', False):
+                print(f"SHALLOW: {np.sum(active)}/100 agents, max force={max_force:.0f}")
         
         # FAIL LOUD: Check for astronomical forces from nodata/singularities
         result = np.column_stack((total_x_force, total_y_force))
@@ -2435,8 +2443,9 @@ class behavior():
         
         if current_step in log_steps and current_step not in self._collision_steps_logged:
             if len(valid_collision_dists) > 0:
-                print(f"\nCOLLISION STEP {current_step}: weight={weight:.1f}, min_sep={min_separation:.3f}m")
-                print(f"  Distance stats: min={np.min(valid_collision_dists):.3f}m, median={np.median(valid_collision_dists):.3f}m, max={np.max(valid_collision_dists):.3f}m")
+                if getattr(self.simulation, 'debug_behavior', False) and not getattr(self.simulation, 'quiet', False):
+                    print(f"\nCOLLISION STEP {current_step}: weight={weight:.1f}, min_sep={min_separation:.3f}m")
+                    print(f"  Distance stats: min={np.min(valid_collision_dists):.3f}m, median={np.median(valid_collision_dists):.3f}m, max={np.max(valid_collision_dists):.3f}m")
                 self._collision_steps_logged.add(current_step)
         
         # Disabled: Warning spam slows down production runs with dense schooling
@@ -2461,6 +2470,14 @@ class behavior():
         self._eddy_hist_index = -1
         self._eddy_hist_count = 0
 
+    def _ensure_eddy_exit_state(self, n_agents):
+        if self._eddy_exit_delay is None or self._eddy_exit_delay.shape[0] != n_agents:
+            self._eddy_exit_delay = np.full(n_agents, np.nan, dtype=np.float32)
+            self._eddy_exit_speed_scale = np.ones(n_agents, dtype=np.float32)
+            self._eddy_exit_heading_offset = np.zeros(n_agents, dtype=np.float32)
+            self._eddy_spin_rate = np.zeros(n_agents, dtype=np.float32)
+            self._eddy_spin_phase = np.zeros(n_agents, dtype=np.float32)
+
     def is_in_eddy(self, t):
         sim = self.simulation
         n_agents = int(getattr(sim, 'num_agents', 0) or 0)
@@ -2478,10 +2495,12 @@ class behavior():
 
         if (not hasattr(self, '_eddy_hist_x')) or (self._eddy_hist_x.shape != (n_agents, window_steps)):
             self._init_eddy_history(n_agents, window_steps)
+        self._ensure_eddy_exit_state(n_agents)
 
         last_t = getattr(self, '_eddy_last_t', None)
         if last_t is not None and t < last_t:
             self._init_eddy_history(n_agents, window_steps)
+            self._ensure_eddy_exit_state(n_agents)
         self._eddy_last_t = float(t)
 
         # Water velocity at agent positions (prefer HECRAS-mapped values).
@@ -2594,13 +2613,52 @@ class behavior():
 
         stuck_conditions = low_upstream & loop_ok & turn_ok & moving & migratory
 
-        not_in_eddy_anymore = sim.time_since_eddy_escape >= sim.max_eddy_escape_seconds
-        sim.time_since_eddy_escape[not_in_eddy_anymore] = 0.0
-
         already_in_eddy = sim.in_eddy == True
+        entering = stuck_conditions & (~already_in_eddy)
+        if np.any(entering):
+            rng = getattr(sim, 'rng', None)
+            if rng is None:
+                rng = np.random.default_rng()
+            delay_min, delay_max = getattr(sim, 'eddy_exit_delay_range_s', (15.0, 90.0))
+            speed_min, speed_max = getattr(sim, 'eddy_exit_speed_scale_range', (0.9, 1.7))
+            spin_min, spin_max = getattr(sim, 'eddy_spin_rate_range_deg_s', (45.0, 180.0))
+            heading_spread = float(getattr(sim, 'eddy_exit_heading_spread_deg', 120.0))
+
+            n_enter = int(np.sum(entering))
+            self._eddy_exit_delay[entering] = rng.uniform(delay_min, delay_max, size=n_enter).astype(np.float32)
+            self._eddy_exit_speed_scale[entering] = rng.uniform(speed_min, speed_max, size=n_enter).astype(np.float32)
+            self._eddy_exit_heading_offset[entering] = np.deg2rad(
+                rng.uniform(-heading_spread, heading_spread, size=n_enter)
+            ).astype(np.float32)
+            spin_mag = np.deg2rad(rng.uniform(spin_min, spin_max, size=n_enter)).astype(np.float32)
+            spin_dir = rng.choice(np.array([-1.0, 1.0], dtype=np.float32), size=n_enter)
+            self._eddy_spin_rate[entering] = (spin_mag * spin_dir).astype(np.float32)
+            self._eddy_spin_phase[entering] = rng.uniform(0.0, 2.0 * np.pi, size=n_enter).astype(np.float32)
+
         sim.in_eddy = np.where(np.logical_or(stuck_conditions, already_in_eddy), True, False)
-        sim.in_eddy[not_in_eddy_anymore] = False
         sim.time_since_eddy_escape[sim.in_eddy == True] += dt
+
+        exit_burst = float(getattr(sim, 'eddy_exit_burst_seconds', 5.0))
+        exit_delay = self._eddy_exit_delay
+        exit_done = sim.in_eddy & np.isfinite(exit_delay) & (sim.time_since_eddy_escape >= (exit_delay + exit_burst))
+        if np.any(exit_done):
+            sim.in_eddy[exit_done] = False
+            sim.time_since_eddy_escape[exit_done] = 0.0
+            self._eddy_exit_delay[exit_done] = np.nan
+            self._eddy_exit_speed_scale[exit_done] = 1.0
+            self._eddy_exit_heading_offset[exit_done] = 0.0
+            self._eddy_spin_rate[exit_done] = 0.0
+            self._eddy_spin_phase[exit_done] = 0.0
+
+        not_in_eddy_anymore = sim.time_since_eddy_escape >= sim.max_eddy_escape_seconds
+        if np.any(not_in_eddy_anymore):
+            sim.in_eddy[not_in_eddy_anymore] = False
+            sim.time_since_eddy_escape[not_in_eddy_anymore] = 0.0
+            self._eddy_exit_delay[not_in_eddy_anymore] = np.nan
+            self._eddy_exit_speed_scale[not_in_eddy_anymore] = 1.0
+            self._eddy_exit_heading_offset[not_in_eddy_anymore] = 0.0
+            self._eddy_spin_rate[not_in_eddy_anymore] = 0.0
+            self._eddy_spin_phase[not_in_eddy_anymore] = 0.0
 
     def arbitrate(self, t):
         # Enable per-step caching for window-based cues. We explicitly disable
@@ -2736,6 +2794,69 @@ class behavior():
                 'cohesion': cohesion,
                 'collision': collision,
                 'refugia': refugia}
+
+        # Recovery/staging behavior: recovering fish prioritize refugia/school over rheotaxis.
+        try:
+            battery = np.asarray(getattr(self.simulation, 'battery', None), dtype=float).reshape((-1,))
+            swim_mode = np.asarray(getattr(self.simulation, 'swim_mode', None), dtype=int).reshape((-1,))
+        except Exception:
+            battery = None
+            swim_mode = None
+        if battery is not None and swim_mode is not None and battery.size == int(getattr(self.simulation, 'num_agents', 0) or 0):
+            recovering = (swim_mode == 1) & (battery < 1.0 - 1e-6)
+            if np.any(recovering):
+                counts = getattr(self.simulation, 'neighbor_counts', None)
+                if counts is None:
+                    offsets = getattr(self.simulation, 'neighbors_offsets', None)
+                    if offsets is not None:
+                        try:
+                            offsets = np.asarray(offsets, dtype=np.int64)
+                            counts = np.diff(offsets) - 1
+                        except Exception:
+                            counts = None
+                if counts is None:
+                    buffers = getattr(self.simulation, 'agents_within_buffers', None)
+                    if isinstance(buffers, list) and len(buffers) == battery.size:
+                        try:
+                            counts = np.array([max(0, len(buf) - 1) for buf in buffers], dtype=float)
+                        except Exception:
+                            counts = None
+                if counts is None:
+                    counts = np.zeros_like(battery, dtype=float)
+                else:
+                    counts = np.asarray(counts, dtype=float).reshape((-1,))
+
+                target = float(getattr(self.simulation, 'recovery_neighbor_target', 5.0))
+                scale = float(getattr(self.simulation, 'recovery_neighbor_scale', 1.5))
+                if not np.isfinite(scale) or scale <= 0.0:
+                    scale = 1.5
+                alone_factor = 1.0 / (1.0 + np.exp((counts - target) / scale))
+                recover_factor = np.clip(1.0 - battery, 0.0, 1.0)
+                power = float(getattr(self.simulation, 'recovery_priority_power', 1.0))
+                if np.isfinite(power) and power != 1.0:
+                    recover_factor = np.power(recover_factor, power)
+
+                stage = recover_factor * alone_factor
+                stage = np.where(recovering, stage, 0.0)
+                school_factor = recover_factor * (1.0 - alone_factor)
+                school_factor = np.where(recovering, school_factor, 0.0)
+
+                rheo_suppress = float(getattr(self.simulation, 'recovery_rheotaxis_suppress', 0.9))
+                refugia_boost = float(getattr(self.simulation, 'recovery_refugia_boost', 2.0))
+                low_speed_boost = float(getattr(self.simulation, 'recovery_low_speed_boost', 1.5))
+                shore_weight = float(getattr(self.simulation, 'recovery_shore_weight', 0.75))
+                cohesion_boost = float(getattr(self.simulation, 'recovery_school_boost', 0.75))
+
+                stage_v = stage[:, np.newaxis]
+                school_v = school_factor[:, np.newaxis]
+                cue_dict['rheotaxis'] = cue_dict['rheotaxis'] * (1.0 - stage_v * rheo_suppress)
+                cue_dict['refugia'] = cue_dict['refugia'] * (1.0 + stage_v * refugia_boost)
+                cue_dict['low_speed'] = cue_dict['low_speed'] * (1.0 + stage_v * low_speed_boost)
+                # Move toward shore when recovering+alone (inverse of border repulsion).
+                cue_dict['refugia'] = cue_dict['refugia'] + (-cue_dict['border'] * (stage_v * shore_weight))
+                # If a nearby school is present, gently boost schooling cues.
+                cue_dict['cohesion'] = cue_dict['cohesion'] * (1.0 + school_v * cohesion_boost)
+                cue_dict['alignment'] = cue_dict['alignment'] * (1.0 + school_v * cohesion_boost)
 
         debug_behavior = bool(getattr(self.simulation, 'debug_behavior', False))
         force_rawvecs = os.environ.get('FORCE_RAWVECS', '').lower() == 'true'
@@ -2892,13 +3013,68 @@ class behavior():
         if np.any(tired):
             head_vec[tired] = vec_sum_tired[tired]
 
-        # in-eddy override uses border+shallow (already coerced/clipped in cue_dict)
+        # in-eddy override uses randomized spiral + exit burst
         try:
             in_eddy = np.asarray(self.simulation.in_eddy).reshape((-1,)) == 1
         except Exception:
             in_eddy = None
         if in_eddy is not None and np.any(in_eddy):
-            head_vec[in_eddy] = cue_dict['border'][in_eddy] + cue_dict['shallow'][in_eddy]
+            n_agents = int(getattr(self.simulation, 'num_agents', 0) or 0)
+            vx = np.asarray(getattr(self.simulation, 'x_vel', np.zeros(n_agents)), dtype=float).reshape((-1,))
+            vy = np.asarray(getattr(self.simulation, 'y_vel', np.zeros(n_agents)), dtype=float).reshape((-1,))
+            flow_mag = np.sqrt(vx * vx + vy * vy)
+            eps = 1e-6
+            valid_flow = np.isfinite(flow_mag) & (flow_mag > eps)
+            upstream_x = np.zeros_like(flow_mag)
+            upstream_y = np.zeros_like(flow_mag)
+            upstream_x[valid_flow] = -vx[valid_flow] / flow_mag[valid_flow]
+            upstream_y[valid_flow] = -vy[valid_flow] / flow_mag[valid_flow]
+            if np.any(~valid_flow):
+                upstream_x[~valid_flow] = np.cos(np.asarray(self.simulation.heading, dtype=float)[~valid_flow])
+                upstream_y[~valid_flow] = np.sin(np.asarray(self.simulation.heading, dtype=float)[~valid_flow])
+
+            exit_delay = getattr(self, '_eddy_exit_delay', None)
+            exit_offset = getattr(self, '_eddy_exit_heading_offset', None)
+            spin_rate = getattr(self, '_eddy_spin_rate', None)
+            spin_phase = getattr(self, '_eddy_spin_phase', None)
+            speed_scale = getattr(self, '_eddy_exit_speed_scale', None)
+
+            if exit_delay is None or spin_rate is None or spin_phase is None:
+                head_vec[in_eddy] = cue_dict['border'][in_eddy] + cue_dict['shallow'][in_eddy]
+            else:
+                t_since = np.asarray(self.simulation.time_since_eddy_escape, dtype=float).reshape((-1,))
+                exit_ready = in_eddy & np.isfinite(exit_delay) & (t_since >= exit_delay)
+                angle = spin_phase + spin_rate * t_since
+                cos_a = np.cos(angle)
+                sin_a = np.sin(angle)
+                spiral_x = upstream_x * cos_a - upstream_y * sin_a
+                spiral_y = upstream_x * sin_a + upstream_y * cos_a
+
+                exit_vec_x = upstream_x
+                exit_vec_y = upstream_y
+                if exit_offset is not None:
+                    cos_e = np.cos(exit_offset)
+                    sin_e = np.sin(exit_offset)
+                    exit_vec_x = upstream_x * cos_e - upstream_y * sin_e
+                    exit_vec_y = upstream_x * sin_e + upstream_y * cos_e
+
+                eddy_vec = np.zeros_like(head_vec)
+                not_exit = in_eddy & (~exit_ready)
+                if np.any(not_exit):
+                    eddy_vec[not_exit, 0] = spiral_x[not_exit]
+                    eddy_vec[not_exit, 1] = spiral_y[not_exit]
+                if np.any(exit_ready):
+                    eddy_vec[exit_ready, 0] = exit_vec_x[exit_ready]
+                    eddy_vec[exit_ready, 1] = exit_vec_y[exit_ready]
+                head_vec[in_eddy] = eddy_vec[in_eddy]
+
+                if speed_scale is not None:
+                    try:
+                        scale = np.ones_like(t_since, dtype=float)
+                        scale[exit_ready] = np.asarray(speed_scale, dtype=float)[exit_ready]
+                        self.simulation.ideal_sog = np.asarray(self.simulation.ideal_sog, dtype=float) * scale
+                    except Exception:
+                        logger.debug("Failed applying eddy exit speed scaling", exc_info=True)
 
         if debug_behavior:
             logging.getLogger(__name__).debug(

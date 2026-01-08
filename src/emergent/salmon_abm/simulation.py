@@ -1458,7 +1458,7 @@ class simulation:
                 time_flopping = t - self.time_landed[self.on_land]
                 died_on_land = self.on_land & (time_flopping > self.max_flop_time)
                 if np.any(died_on_land):
-                    if getattr(self, 'verbose', False):
+                    if getattr(self, 'verbose', False) and not getattr(self, 'quiet', False):
                         print(f"MORTALITY: {np.sum(died_on_land)} fish died after flopping on dry land for {self.max_flop_time}s at t={t}")
                     self.dead[died_on_land] = 1
                     self.on_land[died_on_land] = False  # Stop flopping (they're dead)
@@ -1478,7 +1478,7 @@ class simulation:
             # Check for mortality due to prolonged shallow water exposure
             died_shallow = (self.shallow_water_timesteps > self.max_shallow_timesteps) & (self.dead == 0)
             if np.any(died_shallow):
-                if getattr(self, 'verbose', False):
+                if getattr(self, 'verbose', False) and not getattr(self, 'quiet', False):
                     print(f"MORTALITY: {np.sum(died_shallow)} fish died after {self.max_shallow_timesteps} timesteps in shallow water at t={t}")
                 self.dead[died_shallow] = 1
                 self.shallow_water_timesteps[died_shallow] = 0  # Reset counter
@@ -1980,6 +1980,42 @@ class simulation:
                 controller.k_d = np.array([k_d]) if np.isscalar(k_d) else np.array(k_d)
 
         status = {'steps': 0, 'errors': [], 'video_frames': 0}
+        progress_enabled = bool(getattr(self, 'progress', False))
+        progress_width = int(getattr(self, 'progress_width', 30) or 30)
+        progress_every = getattr(self, 'progress_every', None)
+        if progress_every is None:
+            progress_every = max(1, int(round(n / 100.0))) if n > 0 else 1
+        try:
+            progress_every = max(1, int(progress_every))
+        except Exception:
+            progress_every = 1
+
+        last_progress_step = -1
+        last_progress_final = False
+
+        def _emit_progress(step_idx: int, *, final: bool = False) -> None:
+            nonlocal last_progress_step, last_progress_final
+            if not progress_enabled or n <= 0:
+                return
+            step_i = int(step_idx)
+            if final and last_progress_final and last_progress_step == step_i:
+                return
+            if (not final) and ((step_i + 1) % progress_every != 0) and (step_i + 1 != n):
+                return
+            pct = (step_i + 1) / float(n)
+            filled = int(progress_width * pct)
+            if filled < 0:
+                filled = 0
+            if filled > progress_width:
+                filled = progress_width
+            bar = "#" * filled + "-" * (progress_width - filled)
+            sys.stdout.write(f"\r[{bar}] {pct*100:5.1f}% ({step_i + 1}/{n})")
+            if final or (step_i + 1 >= n):
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+            last_progress_step = step_i
+            if final or (step_i + 1 >= n):
+                last_progress_final = True
 
         # Optionally launch the realtime viewer as a subprocess that reads
         # the HDF5 database written by this simulation. If `viewer_blocking` is
@@ -2018,6 +2054,7 @@ class simulation:
                 try:
                     self.timestep(i, dt, pid_controller=controller)
                     status['steps'] += 1
+                    _emit_progress(i)
                     # optional video hook called after each timestep
                     if video_hook is not None:
                         try:
@@ -2078,6 +2115,8 @@ class simulation:
                     # continue running unless unrecoverable
                     continue
         finally:
+            if progress_enabled and status['steps'] > 0:
+                _emit_progress(status['steps'] - 1, final=True)
             # Stop async writer first so subsequent flush/close is safe.
             try:
                 if writer is not None:
