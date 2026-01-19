@@ -40,6 +40,8 @@ def fetch_hrrr_wind_10m(bbox: Tuple[float, float, float, float],
     ).rename({"u": "u10", "v": "v10"})
     ds = ds.sel(longitude=slice(bbox[0], bbox[1]),
                 latitude =slice(bbox[3], bbox[2]))          # HRRR lat desc
+    ds.attrs["source_desc"] = "NOAA HRRR (noaa-hrrr-pds)"
+    ds.attrs["source_urls"] = [url]
     return (ds.rename({"longitude": "lon", "latitude": "lat"})
               .isel(time=slice(0, 2))            # this hour + next
               .load()
@@ -55,17 +57,21 @@ def _era_key(var: str, when: dt.datetime) -> str:
 def fetch_era5_wind_10m(bbox: Tuple[float, float, float, float],
                         when: dt.datetime) -> xr.Dataset:
     files = []
+    urls = []
     for var in ("u10", "v10"):
         url = f"s3://{_ERA_BUCKET}/{_era_key(var, when)}"
         try:
             files.append(xr.open_dataset(_era_fs.open(url),
                                          engine="h5netcdf", chunks={}))
+            urls.append(url)
         except FileNotFoundError:
             raise FileNotFoundError("ERA5 slice absent")
     ds = xr.merge(files, combine_attrs="override")
     ds = ds.sel(longitude=slice(bbox[0], bbox[1]),
                 latitude =slice(bbox[3], bbox[2]),
                 time     =[when, when + dt.timedelta(hours=1)])
+    ds.attrs["source_desc"] = "ECMWF ERA5 (era5-pds)"
+    ds.attrs["source_urls"] = urls
     return (ds.rename({"longitude": "lon", "latitude": "lat"})
               .load()
               .astype(np.float32))
@@ -105,6 +111,8 @@ def fetch_noaa_ofs_wind(bbox: Tuple[float, float, float, float],
         ds = ds.expand_dims("time")
         ds["time"] = [np.datetime64(when)]
 
+    if "source_desc" not in ds.attrs:
+        ds.attrs["source_desc"] = f"NOAA OFS MET {model}"
     return ds.astype(np.float32)
 
 
@@ -124,6 +132,25 @@ def build_wind_sampler(ds: xr.Dataset):
 
     u_vals = ds.u10.values
     v_vals = ds.v10.values
+    def _attach_source(sampler):
+        src = None
+        urls = None
+        try:
+            src = ds.attrs.get("source_desc") or ds.attrs.get("source")
+            urls = ds.attrs.get("source_urls")
+        except Exception:
+            pass
+        if src:
+            try:
+                sampler._source = src
+            except Exception:
+                pass
+        if urls:
+            try:
+                sampler._source_urls = urls
+            except Exception:
+                pass
+        return sampler
     # Diagnostic: print u10/v10 shapes and dataset coordinate shapes
     try:
         print(f"[wind_sampler][diag] u10.shape={u_vals.shape} v10.shape={v_vals.shape}")
@@ -319,7 +346,7 @@ def build_wind_sampler(ds: xr.Dataset):
 
             return out
 
-        return sample
+        return _attach_source(sample)
 
     # ─────────────────────────────────────────────────────────────
     # Structured Grid Interpolation using RegularGridInterpolator
@@ -356,7 +383,7 @@ def build_wind_sampler(ds: xr.Dataset):
         pts   = np.column_stack((np.full_like(lon, t_int), lat, lon))
         return np.column_stack((u_fun(pts), v_fun(pts)))
 
-    return sample
+    return _attach_source(sample)
 
 # ---------- One-liner your ABM can import -------------------------
 def wind_sampler(bbox: Tuple[float, float, float, float],

@@ -588,18 +588,18 @@ def compute_episode_reward(
     # Use provided reward weights or defaults
     if reward_weights is None:
         reward_weights = {
-            'cohesion': 0.001,
-            'alignment': 0.01,
-            'separation': 0.005,
+            'cohesion': 0.1,
+            'alignment': 1.0,
+            'separation': -0.2,
             'upstream_progress': 10.0,
             'energy_efficiency': 2.0,
             'drafting_benefit': 20.0,
-            'boundary_penalty': 0.0,
+            'boundary_penalty': -10.0,
             'mortality_penalty': -50.0,
-            'smoothness_penalty': -0.001,
-            'fatigue_penalty': -0.1,
-            'stagnation_penalty': -0.2,
-            'rheotaxis_alignment': -1.0,
+            'smoothness_penalty': 1.0,
+            'fatigue_penalty': -0.9,
+            'stagnation_penalty': -0.9,
+            'rheotaxis_alignment': -100.0,
         }
     
     T, N = positions_history.shape[0], positions_history.shape[1]
@@ -1015,18 +1015,18 @@ class RLTrainer:
         
         # Reward weights (objective function) - can be customized
         self.reward_weights = config.get('reward_weights', {
-            'cohesion': 0.001,
-            'alignment': 0.01,
-            'separation': 0.005,
+            'cohesion': 0.1,
+            'alignment': 1.0,
+            'separation': -0.2,
             'upstream_progress': 10.0,
             'energy_efficiency': 2.0,
             'drafting_benefit': 20.0,
-            'boundary_penalty': 0.0,
+            'boundary_penalty': -10.0,
             'mortality_penalty': -50.0,
-            'smoothness_penalty': -0.001,
-            'fatigue_penalty': -0.1,
-            'stagnation_penalty': -0.2,
-            'rheotaxis_alignment': -1.0,
+            'smoothness_penalty': 1.0,
+            'fatigue_penalty': -0.9,
+            'stagnation_penalty': -0.9,
+            'rheotaxis_alignment': -100.0,
         })
         
         # Training state

@@ -30,6 +30,8 @@ indepe    print(f"[ofs_loader] → opening wind {url}")
         chunks={"time": 1},
         drop_variables=["siglay", "siglev"],  # drop vars whose names collide with dims
     )
+    ds_w.attrs["source_desc"] = f"NOAA OFS MET {model}"
+    ds_w.attrs["source_urls"] = [url]
     
     # Find coordinate names - could be lon/lat, lonc/latc, x/y, etc.
     lon_coord = None
@@ -67,6 +69,7 @@ from typing import Callable, Iterable, Tuple, List
 
 import fsspec
 import os
+import re
 import tempfile
 import shutil
 import io
@@ -86,6 +89,279 @@ LAYERS:  tuple[str, ...] = ("n000",)#, "f000")     # nowcast | 0‑h fcst
 
 # Anonymous read‑only S3 filesystem
 fs = fsspec.filesystem("s3", anon=True, requester_pays=True)
+
+# Cache monthly listings to avoid repeated S3 list calls
+_MONTHLY_LIST_CACHE: dict[tuple[str, str], list[str]] = {}
+
+_REGULARGRID_RE = re.compile(r"\.t(\d{2})z\.(\d{8})\.regulargrid\.f(\d{3})\.nc$")
+
+
+def _list_monthly_paths(model: str, day: date) -> list[str]:
+    """List S3 paths under the monthly archive for the given model/day."""
+    y, m = day.strftime("%Y"), day.strftime("%m")
+    prefix = f"{model}/netcdf/{y}{m}/"
+    out: list[str] = []
+    for bucket in BUCKETS:
+        cache_key = (bucket, prefix)
+        if cache_key not in _MONTHLY_LIST_CACHE:
+            try:
+                _MONTHLY_LIST_CACHE[cache_key] = fs.ls(f"{bucket}/{prefix}")
+            except Exception:
+                _MONTHLY_LIST_CACHE[cache_key] = []
+        out.extend(_MONTHLY_LIST_CACHE[cache_key])
+    return out
+
+
+def _monthly_urls_for_day(model: str, day: date) -> list[str]:
+    """Return monthly-archive URLs for a specific day (current-related only)."""
+    ymd = day.strftime("%Y%m%d")
+    urls: list[str] = []
+    for item in _list_monthly_paths(model, day):
+        if not item or item.endswith("/"):
+            continue
+        if ymd not in item:
+            continue
+        name = os.path.basename(item)
+        if not name.endswith(".nc"):
+            continue
+        if "regulargrid" in name or f"nos.{model}.fields" in name or name.startswith(f"{model}.t"):
+            urls.append(f"s3://{item}" if not item.startswith("s3://") else item)
+    return urls
+
+
+def _parse_regulargrid_time(url: str) -> dt.datetime | None:
+    name = os.path.basename(url)
+    match = _REGULARGRID_RE.search(name)
+    if not match:
+        return None
+    cyc, ymd, fhr = match.groups()
+    try:
+        base = dt.datetime.strptime(f"{ymd}{cyc}", "%Y%m%d%H")
+    except Exception:
+        return None
+    return base + dt.timedelta(hours=int(fhr))
+
+
+def _open_dataset_any(url: str, drop_vars: list[str] | None = None) -> xr.Dataset:
+    """Open a remote OFS netCDF file, supporting both netCDF4 and netCDF3."""
+    try:
+        return xr.open_dataset(
+            fs.open(url),
+            engine="h5netcdf",
+            chunks={"time": 1},
+            drop_variables=drop_vars,
+        )
+    except Exception as e_h5:
+        # netCDF3 files (CDF) need the scipy engine
+        try:
+            return xr.open_dataset(fs.open(url), engine="scipy", drop_variables=drop_vars)
+        except Exception:
+            # Fallback: stream to local tempfile for netCDF4 readers
+            try:
+                emsg = str(e_h5)
+            except Exception:
+                emsg = repr(e_h5)
+            print(f"[ofs_loader] [WARN] direct open failed: {emsg.encode('ascii','backslashreplace').decode('ascii')}; attempting tempfile fallback")
+            tmp_path = None
+            try:
+                suffix = os.path.splitext(url)[1] if os.path.splitext(url)[1] else ".nc"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmpf:
+                    tmp_path = tmpf.name
+                    with fs.open(url, "rb") as fin:
+                        shutil.copyfileobj(fin, tmpf)
+                return xr.open_dataset(
+                    tmp_path,
+                    engine="h5netcdf",
+                    chunks={"time": 1},
+                    drop_variables=drop_vars,
+                )
+            finally:
+                try:
+                    if tmp_path and os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+
+
+def _select_uv_vars(ds: xr.Dataset, url: str) -> xr.Dataset:
+    # Variable aliases (depth-avg and surface)
+    var_pairs = [
+        ("u_sur", "v_sur"),     # WCOFS/ROMS surface-only files
+        ("ua", "va"),
+        ("us", "vs"),
+        ("u", "v"),
+        ("water_u", "water_v"),
+        ("u_eastward", "v_northward"),
+        ("u_2d", "v_2d"),
+    ]
+    # Add CF-compliant via standard_name if present
+    east = [v for v, da in ds.data_vars.items() if "eastward" in da.attrs.get("standard_name", "")]
+    north = [v for v, da in ds.data_vars.items() if "northward" in da.attrs.get("standard_name", "")]
+    var_pairs.extend(zip(east, north))
+
+    for var_u, var_v in var_pairs:
+        if var_u in ds and var_v in ds:
+            return ds[[var_u, var_v]].rename({var_u: "u", var_v: "v"})
+
+    raise KeyError(f"No recognizable 2D current variables found in {url}. Available: {list(ds.data_vars)}")
+
+
+def _normalize_time_coord(ds: xr.Dataset, file_time: dt.datetime | None = None) -> xr.Dataset:
+    # Rename time dimension if needed
+    if "ocean_time" in ds.dims:
+        ds = ds.rename({"ocean_time": "time"})
+    elif "time" not in ds.dims:
+        for d in ds.dims:
+            if "time" in d.lower():
+                ds = ds.rename({d: "time"})
+                break
+
+    if "time" in ds.coords:
+        try:
+            if file_time is not None and not np.issubdtype(ds["time"].dtype, np.datetime64):
+                if ds["time"].size == 1:
+                    ds = ds.assign_coords(time=[np.datetime64(file_time)])
+        except Exception:
+            pass
+    elif file_time is not None:
+        ds = ds.expand_dims("time")
+        ds = ds.assign_coords(time=[np.datetime64(file_time)])
+    return ds
+
+
+def _regularize_lon_lat(ds: xr.Dataset) -> xr.Dataset:
+    """Convert separable 2D lon/lat grids into 1D coords for interp."""
+    if "lon" not in ds or "lat" not in ds:
+        return ds
+    try:
+        if ds.lon.ndim != 2 or ds.lat.ndim != 2:
+            return ds
+        if ds.lon.dims != ds.lat.dims or len(ds.lon.dims) != 2:
+            return ds
+        dim_y, dim_x = ds.lon.dims
+        lon2 = ds.lon.values
+        lat2 = ds.lat.values
+        lon1 = lon2[0, :]
+        lat1 = lat2[:, 0]
+        if not (np.allclose(lon2, lon1[None, :]) and np.allclose(lat2, lat1[:, None])):
+            return ds
+        ds = ds.drop_vars(["lon", "lat"])
+        ds = ds.assign_coords(lon=(dim_x, lon1), lat=(dim_y, lat1))
+        ds = ds.swap_dims({dim_x: "lon", dim_y: "lat"})
+        if {"time", "lat", "lon"} <= set(ds.dims):
+            ds = ds.transpose("time", "lat", "lon")
+    except Exception:
+        return ds
+    return ds
+
+
+def _crop_to_bbox(ds: xr.Dataset, bbox: Tuple[float, float, float, float]) -> xr.Dataset:
+    lon_min, lon_max, lat_min, lat_max = _convert_bbox_for_dataset(ds, bbox)
+    if "lon" in ds and "lat" in ds:
+        if ds.lon.ndim == 1 and ds.lat.ndim == 1:
+            ds = ds.sel(lon=slice(lon_min, lon_max), lat=slice(lat_min, lat_max))
+        elif ds.lon.ndim == 2:
+            ds = ds.where(
+                (ds.lon > lon_min) & (ds.lon < lon_max) &
+                (ds.lat > lat_min) & (ds.lat < lat_max),
+                drop=True,
+            )
+    return ds
+
+
+def _normalize_current_ds(
+    ds: xr.Dataset,
+    bbox: Tuple[float, float, float, float],
+    url: str,
+    file_time: dt.datetime | None = None,
+) -> xr.Dataset:
+    ds = _select_uv_vars(ds, url)
+    ds = _normalize_time_coord(ds, file_time=file_time)
+
+    if "Depth" in ds.dims:
+        try:
+            ds = ds.isel(Depth=0)
+        except Exception:
+            try:
+                ds = ds.sel(Depth=0, method="nearest")
+            except Exception:
+                pass
+
+    # Normalize coordinates to lon/lat if present
+    for lon_name, lat_name in (("lon", "lat"), ("lonc", "latc"), ("longitude", "latitude"), ("Longitude", "Latitude")):
+        if lon_name in ds and lat_name in ds:
+            if lon_name != "lon" or lat_name != "lat":
+                ds = ds.rename({lon_name: "lon", lat_name: "lat"})
+            break
+
+    if {"lon", "lat"} <= set(ds):
+        ds = ds.set_coords(["lon", "lat"])
+        ds = _regularize_lon_lat(ds)
+        ds = _crop_to_bbox(ds, bbox)
+
+    return ds
+
+
+def _open_ofs_time_series(
+    model: str,
+    start_dt: dt.datetime,
+    bbox: Tuple[float, float, float, float],
+    time_window_hours: float,
+) -> xr.Dataset | None:
+    """Attempt to open a time-varying regulargrid series from monthly archives."""
+    if time_window_hours <= 0:
+        return None
+    pad = dt.timedelta(hours=1)
+    window_start = start_dt - pad
+    window_end = start_dt + dt.timedelta(hours=time_window_hours)
+
+    start_day = window_start.date()
+    end_day = window_end.date()
+    urls: list[tuple[dt.datetime, str]] = []
+    for i in range((end_day - start_day).days + 1):
+        day = start_day + dt.timedelta(days=i)
+        for url in _monthly_urls_for_day(model, day):
+            if "regulargrid" not in url:
+                continue
+            t = _parse_regulargrid_time(url)
+            if t is None:
+                continue
+            if window_start <= t <= window_end:
+                urls.append((t, url))
+
+    if not urls:
+        return None
+
+    urls.sort(key=lambda x: x[0])
+    ds_list: list[xr.Dataset] = []
+    source_urls: list[str] = []
+    for t, url in urls:
+        try:
+            ds = _open_dataset_any(url, drop_vars=["siglay", "siglev"])
+            ds = _normalize_current_ds(ds, bbox, url=url, file_time=t)
+            ds_list.append(ds)
+            source_urls.append(url)
+        except Exception as e:
+            print(f"[ofs_loader] [WARN] Failed to open time-slice {url}: {e}")
+
+    if not ds_list:
+        return None
+
+    if len(ds_list) == 1:
+        ds = ds_list[0]
+    else:
+        ds = xr.concat(ds_list, dim="time")
+        if "time" in ds.coords:
+            ds = ds.sortby("time")
+            try:
+                ds = ds.sel(time=slice(np.datetime64(window_start), np.datetime64(window_end)))
+            except Exception:
+                pass
+
+    ds.attrs["source_urls"] = source_urls
+    ds.attrs["source_desc"] = f"NOAA OFS {model} regulargrid archive"
+    ds.attrs["source_window"] = (window_start.isoformat(), window_end.isoformat())
+    return ds
 
 
 # ----------------------------------------------------------------------
@@ -124,6 +400,16 @@ def candidate_urls(model: str, day: date) -> List[str]:
     print(f"[ofs_loader] BUCKETS = {BUCKETS}")
     urls = [f"s3://{bucket}/{key}" for key in keys_list for bucket in BUCKETS]
     print(f"[ofs_loader] generated {len(urls)} candidate URLs")
+    # Include monthly archive URLs (historical)
+    try:
+        monthly_urls = _monthly_urls_for_day(model, day)
+        if monthly_urls:
+            urls.extend(monthly_urls)
+    except Exception:
+        pass
+    # de-duplicate while preserving order
+    seen = set()
+    urls = [u for u in urls if not (u in seen or seen.add(u))]
     return urls  
 
 def first_existing_url(urls: List[str]) -> str | None:
@@ -178,115 +464,43 @@ def _convert_bbox_for_dataset(ds: xr.Dataset, bbox: Tuple[float, float, float, f
 
 def open_ofs_subset(
 model: str,
-start: date,
+start,
 bbox: Tuple[float, float, float, float], # lon_min, lon_max, lat_min, lat_max
+time_window_hours: float = 0.0,
 ) -> xr.Dataset:
-    """Open latest surface-current file ≤14 days old and crop to *bbox*.
-    Handles 0–360 longitude datasets and multiple current var-name pairs.
-    """
-    # Find a file within the last 14 days - STOP AT FIRST SUCCESS
+    start_dt = start if isinstance(start, dt.datetime) else dt.datetime.combine(start, dt.time(0))
+
+    # Try time-series first (regulargrid monthly archives)
+    if time_window_hours and time_window_hours > 0:
+        ds_ts = _open_ofs_time_series(model, start_dt, bbox, time_window_hours)
+        if ds_ts is not None:
+            return ds_ts
+
+    # Find a single file within the last 14 days - STOP AT FIRST SUCCESS
     ds = None
-    for day in (start - timedelta(n) for n in range(0, 15)):
+    for day in (start_dt.date() - timedelta(n) for n in range(0, 15)):
         url = first_existing_url(candidate_urls(model, day))
         if url:
             try:
-                print(f"[ofs_loader] Opening: {url}")
-                # First attempt: let xarray open the fsspec file-like directly
-                try:
-                    ds = xr.open_dataset(
-                        fs.open(url),
-                        engine="h5netcdf",
-                        chunks={"time": 1},
-                        drop_variables=["siglay", "siglev"],  # FVCOM: drop vars that collide with dims
-                    )
-                except Exception as e_inner:
-                    # Fallback: stream the remote file to a temporary local file and open that
-                    try:
-                        emsg = str(e_inner)
-                    except Exception:
-                        emsg = repr(e_inner)
-                    # ascii-safe print
-                    print(f"[ofs_loader] [WARN] direct open failed: {emsg.encode('ascii','backslashreplace').decode('ascii')}; attempting tempfile fallback")
-                    try:
-                        suffix = os.path.splitext(url)[1] if os.path.splitext(url)[1] else ".nc"
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmpf:
-                            tmp_path = tmpf.name
-                            with fs.open(url, "rb") as fin:
-                                shutil.copyfileobj(fin, tmpf)
-                        ds = xr.open_dataset(
-                            tmp_path,
-                            engine="h5netcdf",
-                            chunks={"time": 1},
-                            drop_variables=["siglay", "siglev"],
-                        )
-                    finally:
-                        try:
-                            if 'tmp_path' in locals() and os.path.exists(tmp_path):
-                                os.remove(tmp_path)
-                        except Exception:
-                            pass
-
-                print(f"[ofs_loader] [OK] Successfully opened dataset from {day}")
+                print('[ofs_loader] Opening: ' + str(url))
+                ds = _open_dataset_any(url, drop_vars=['siglay', 'siglev'])
+                ds = _normalize_current_ds(ds, bbox, url=url, file_time=None)
+                ds.attrs['source_urls'] = [url]
+                ds.attrs['source_desc'] = 'NOAA OFS ' + str(model)
+                print('[ofs_loader] [OK] Successfully opened dataset from ' + str(day))
                 break  # SUCCESS - stop searching!
             except Exception as e:
                 try:
                     emsg = str(e)
                 except Exception:
                     emsg = repr(e)
-                print(f"[ofs_loader] [ERR] Failed to open {url}: {emsg.encode('ascii','backslashreplace').decode('ascii')}")
+                print('[ofs_loader] [ERR] Failed to open ' + str(url) + ': ' + emsg.encode('ascii','backslashreplace').decode('ascii'))
                 continue  # Try next day
-    
-    if ds is None:
-        raise FileNotFoundError(f"No {model.upper()} data could be opened in last 14 days")
-       
-    # Variable aliases (depth-avg and surface)
-    var_pairs = [
-    ("u_sur", "v_sur"),     # WCOFS/ROMS surface-only files
-    ("ua", "va"),
-    ("us", "vs"),
-    ("u", "v"),
-    ("water_u", "water_v"),
-    ("u_eastward", "v_northward"),
-    ("u_2d", "v_2d"),
-    ]
-    # Add CF-compliant via standard_name if present
-    east = [v for v, da in ds.data_vars.items() if "eastward" in da.attrs.get("standard_name", "")]
-    north = [v for v, da in ds.data_vars.items() if "northward" in da.attrs.get("standard_name", "")]
-    var_pairs.extend(zip(east, north))
-       
-    found = False
-    for var_u, var_v in var_pairs:
-        if var_u in ds and var_v in ds:
-            ds = ds[[var_u, var_v]].rename({var_u: "u", var_v: "v"})
-            found = True
-            break
-    
-    if not found:
-        raise KeyError(f"No recognizable 2D current variables found in {url}. Available: {list(ds.data_vars)}")
-        
-    # Normalize coordinates → lon/lat
-    for lon_name, lat_name in (("lon", "lat"), ("lonc", "latc"), ("longitude", "latitude")):
-        if lon_name in ds and lat_name in ds:
-            ds = ds.rename({lon_name: "lon", lat_name: "lat"})
-            break
-        
-    if {"lon", "lat"} <= set(ds):
-        ds = ds.set_coords(["lon", "lat"]) # make query-able
-        
-    print(f"[ofs_loader] [OK] opened {url}")
-        
-    # Spatial crop – structured 2D only; for unstructured we keep all and sample by KD-tree
-    lon_min, lon_max, lat_min, lat_max = _convert_bbox_for_dataset(ds, bbox)
-        
-    if "lon" in ds and ds.lon.ndim == 2:
-        ds = ds.where(
-        (ds.lon > lon_min) & (ds.lon < lon_max) &
-        (ds.lat > lat_min) & (ds.lat < lat_max),
-        drop=True,
-        )
-        
-    return ds
 
+    if ds is None:
+        raise FileNotFoundError('No ' + str(model).upper() + ' data could be opened in last 14 days')
+
+    return ds
 
 # def open_ofs_subset(
 #     model: str,
@@ -405,6 +619,7 @@ def get_current_fn(
     port: str,
     start: dt.datetime | None = None,
     land_gdf=None,
+    time_window_hours: float | None = None,
 ) -> Callable[[np.ndarray, np.ndarray, dt.datetime], np.ndarray]:
     """Return f(lon, lat, when)->(N,2) m/s.
     Tries regional OFS → RTOFS, then falls back to a tidal proxy.
@@ -419,23 +634,57 @@ def get_current_fn(
         
     if start is None:
         start = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    start_dt = start
+    window_hours = time_window_hours if time_window_hours is not None else 0.0
         
     model = OFS_MODEL_MAP.get(port, "rtofs").lower()
     
     ds = None
     try:
-        ds = open_ofs_subset(model, start.date(), bbox)
+        ds = open_ofs_subset(model, start_dt, bbox, time_window_hours=window_hours)
         print(f"[ofs_loader] [OK] Using {model.upper()} data")
     except Exception as e:
         print(f"[ofs_loader] WARN: {model.upper()} open failed ({str(e)}); trying RTOFS...")
         try:
-            ds = open_ofs_subset("rtofs", start.date(), bbox)
+            ds = open_ofs_subset("rtofs", start_dt, bbox, time_window_hours=window_hours)
             print(f"[ofs_loader] [OK] Using RTOFS data")
         except Exception as e2:
             print(f"[ofs_loader] WARN: RTOFS open failed ({str(e2)}); using tidal proxy.")
             # Reasonable Puget/Salish defaults; adjust per-port via OFS_MODEL_MAP if desired
-            return make_tidal_proxy_current(axis_deg=320.0, A_M2=0.30, A_S2=0.10)
+            proxy = make_tidal_proxy_current(axis_deg=320.0, A_M2=0.30, A_S2=0.10)
+            try:
+                proxy._source = "Tidal proxy (synthetic)"
+            except Exception:
+                pass
+            return proxy
     
+    def _attach_source(sampler, source_override: str | None = None):
+        src = source_override
+        urls = None
+        try:
+            if src is None:
+                src = ds.attrs.get("source_desc")
+            urls = ds.attrs.get("source_urls")
+        except Exception:
+            pass
+        if src:
+            try:
+                sampler._source = src
+            except Exception:
+                pass
+        if urls:
+            try:
+                sampler._source_urls = urls
+            except Exception:
+                pass
+        if window_hours and start_dt:
+            try:
+                end_dt = start_dt + dt.timedelta(hours=float(window_hours))
+                sampler._source_window = (start_dt.isoformat(), end_dt.isoformat())
+            except Exception:
+                pass
+        return sampler
+
     # Build sampler from ds (structured vs unstructured)
     # If lon uses 0–360, we’ll convert query points on the fly.
     lon_0360 = False
@@ -445,6 +694,35 @@ def get_current_fn(
         except Exception:
             lon_0360 = False
             
+    if "lon" in ds and "lat" in ds and ds.lon.ndim == 1 and ds.lat.ndim == 1:
+        # Structured 1-D rectilinear grid: bilinear interp
+        def sample(lons: np.ndarray, lats: np.ndarray, when: dt.datetime):
+            lons = np.asarray(lons, dtype=float)
+            lats = np.asarray(lats, dtype=float)
+
+            if lon_0360:
+                lons = np.where(lons < 0.0, lons + 360.0, lons)
+            arr = ds.interp(
+                time=np.datetime64(when),
+                lon=("points", lons),
+                lat=("points", lats),
+                method="linear",
+                kwargs={"fill_value": np.nan},
+            )
+            u = arr.u.values
+            v = arr.v.values
+            if u.ndim == 2:  # squeeze time
+                u = u[0]
+                v = v[0]
+            return np.column_stack((u, v))
+        # annotate sampler for downstream resampling/diagnostics
+        try:
+            sample._native = 'rectilinear'
+            sample._lon_0360 = lon_0360
+        except Exception:
+            pass
+        return _attach_source(sample)
+
     if "lon" in ds and ds.lon.ndim == 2:
         # Structured 2-D grid: bilinear interp
         def sample(lons: np.ndarray, lats: np.ndarray, when: dt.datetime):
@@ -472,7 +750,7 @@ def get_current_fn(
             sample._lon_0360 = lon_0360
         except Exception:
             pass
-        return sample
+        return _attach_source(sample)
     
     # ROMS curvilinear C-grid: Use NearestNDInterpolator (FAST, no Delaunay)
     is_roms = "lon_rho" in ds or "lon_u" in ds
@@ -594,8 +872,7 @@ def get_current_fn(
             sample._v_valid = v_valid
         except Exception:
             pass
-
-        return sample
+        return _attach_source(sample)
     
     # Unstructured FVCOM grid: use fast nearest-neighbor (NO slow Delaunay!)
     from scipy.interpolate import NearestNDInterpolator
@@ -725,8 +1002,7 @@ def get_current_fn(
         sample._v_valid = v_valid
     except Exception:
         pass
-
-    return sample
+    return _attach_source(sample)
 
     return sample
 

@@ -88,7 +88,7 @@ src\emergent\salmon_abm\.ai_journal\long term\personality.md
 	- Features: Debug modes, trace CSV, heading analysis, nodata validation
 - **Production**: `tools/run_salmon_production.py` — Large-scale, optimized (requires --nagents --nsteps)
 	- Use for: real runs, benchmarks, performance testing
-	- Features: Async I/O backends, minimal logging, timestamped outputs
+	- Features: Async I/O backends, minimal logging, timestamped outputs, `--env-dir/--start-polygon/--view`
 - **Deprecated/Do NOT use**: `run_salmon_headless.py`, `run_nuyakuk_headless.py`, `tools/run_nuyakuk_headless.py`, `run_headless_*.py` (old/deprecated)
 
 # git
@@ -115,10 +115,14 @@ if not validate(result):
     raise ValueError(f"do_something_critical() failed validation: {diagnostic_info}")
 ```
 ## to run a Simulation
-python tools/test_salmon_abm.py --nagents 200 --nsteps 50
+python tools/test_salmon_abm.py --nagents 200 --nsteps 50 --dt 1.0 --env-dir data/salmon_abm --view
 
-## to view Simulation
+## to view Simulation / load other models
 python -m emergent.salmon_abm.realtime_viewer outputs/test/<model_name>.h5
+# (Viewer is playback: it opens any .h5/.csv; in-app use the "Open…" button to load another model.)
+
+## to run RL training viewer
+python -m emergent.salmon_abm.rl_training_viewer --model-dir data/salmon_abm --start-polygon data/salmon_abm/start_loc_river_right.shp
 
 ## Current IO Reality (CRITICAL)
 - The current Salmon ABM pipeline uses **static environmental rasters** (e.g., `data/salmon_abm/depth.tif`, `vel_x.tif`, `vel_y.tif`, etc.).

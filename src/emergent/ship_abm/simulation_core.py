@@ -613,6 +613,45 @@ class simulation:
             start = datetime.utcnow()
         print(f"[Simulation] Loading environmental forcing for {self.port_name} (start={start.date()})...")
 
+        # Estimate a reasonable time window for historical forcing
+        window_hours = None
+        try:
+            if getattr(self, 'T', None) is not None:
+                window_hours = max(1.0, min(24.0, float(self.T) / 3600.0 + 1.0))
+        except Exception:
+            window_hours = None
+
+        def _log_source(kind: str, sampler):
+            src = getattr(sampler, '_source', None)
+            urls = getattr(sampler, '_source_urls', None)
+            window = getattr(sampler, '_source_window', None)
+            if not (src or urls or window):
+                return
+            parts = []
+            if src:
+                parts.append(str(src))
+            if urls:
+                if isinstance(urls, (list, tuple)):
+                    if len(urls) > 3:
+                        url_str = f"{urls[0]} (+{len(urls)-1} more)"
+                    else:
+                        url_str = ", ".join([str(u) for u in urls])
+                else:
+                    url_str = str(urls)
+                parts.append(f"urls={url_str}")
+            if window:
+                if isinstance(window, (list, tuple)) and len(window) >= 2:
+                    parts.append(f"window={window[0]}..{window[1]}")
+                else:
+                    parts.append(f"window={window}")
+            msg = f"[SOURCE] {kind}: " + "; ".join(parts)
+            log.info(msg)
+            try:
+                self.log_lines.insert(0, msg)
+                self.log_lines = self.log_lines[: self.max_log_lines]
+            except Exception:
+                pass
+
         # Helper: wrap a sampler so it always returns values aligned with query points.
         def wrap_sampler_for_queries(raw_sampler):
             """Return a sampler(lons, lats, when) that guarantees output length == len(lons).
@@ -766,11 +805,17 @@ class simulation:
                 except Exception:
                     land_gdf = None
 
-                raw_current = get_current_fn(self.port_name, start=start, land_gdf=land_gdf)
+                raw_current = get_current_fn(
+                    self.port_name,
+                    start=start,
+                    land_gdf=land_gdf,
+                    time_window_hours=window_hours,
+                )
                 # wrap with robust query wrapper then normalize output shape
                 self.current_fn = _normalize_env_sampler(wrap_sampler_for_queries(raw_current))
                 msg = f"[Simulation] [OK] Ocean currents loaded (attempt {attempt+1})"
                 print(msg)
+                _log_source("currents", raw_current)
                 # Diagnostic: sample the current_fn at our quiver points (if available) and print shapes
                 try:
                     if hasattr(self, '_quiver_lon'):
@@ -836,6 +881,7 @@ class simulation:
                 self.wind_fn = _normalize_env_sampler(wrap_sampler_for_queries(raw_wind))
                 msg = f"[Simulation] [OK] Winds loaded (from OFS loader) (attempt {attempt+1})"
                 print(msg)
+                _log_source("winds", raw_wind)
                 # Diagnostic: sample the wind_fn at our quiver points (if available) and print shapes
                 try:
                     if hasattr(self, '_quiver_lon'):
@@ -867,6 +913,7 @@ class simulation:
                     self.wind_fn = wind_sampler(bbox, start)
                     msg2 = f"[Simulation] [OK] Winds loaded (from atmospheric.wind_sampler) (attempt {attempt+1})"
                     print(msg2)
+                    _log_source("winds", self.wind_fn)
                     try:
                         self.log_lines.insert(0, msg2)
                         self.log_lines = self.log_lines[: self.max_log_lines]
