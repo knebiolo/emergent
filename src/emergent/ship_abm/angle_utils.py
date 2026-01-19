@@ -33,11 +33,7 @@ def heading_diff_rad(hd: float, psi: float) -> np.ndarray:
     hd_a = np.asarray(hd)
     psi_a = np.asarray(psi)
     # broadcast to common shape
-    try:
-        hd_b, psi_b = np.broadcast_arrays(hd_a, psi_a)
-    except Exception:
-        hd_b = np.asarray(hd_a)
-        psi_b = np.asarray(psi_a)
+    hd_b, psi_b = np.broadcast_arrays(hd_a, psi_a)
     return wrap_rad(hd_b - psi_b)
 
 

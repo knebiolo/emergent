@@ -106,7 +106,7 @@ def _list_monthly_paths(model: str, day: date) -> list[str]:
         if cache_key not in _MONTHLY_LIST_CACHE:
             try:
                 _MONTHLY_LIST_CACHE[cache_key] = fs.ls(f"{bucket}/{prefix}")
-            except Exception:
+            except FileNotFoundError:
                 _MONTHLY_LIST_CACHE[cache_key] = []
         out.extend(_MONTHLY_LIST_CACHE[cache_key])
     return out
@@ -135,10 +135,7 @@ def _parse_regulargrid_time(url: str) -> dt.datetime | None:
     if not match:
         return None
     cyc, ymd, fhr = match.groups()
-    try:
-        base = dt.datetime.strptime(f"{ymd}{cyc}", "%Y%m%d%H")
-    except Exception:
-        return None
+    base = dt.datetime.strptime(f"{ymd}{cyc}", "%Y%m%d%H")
     return base + dt.timedelta(hours=int(fhr))
 
 
@@ -151,36 +148,33 @@ def _open_dataset_any(url: str, drop_vars: list[str] | None = None) -> xr.Datase
             chunks={"time": 1},
             drop_variables=drop_vars,
         )
-    except Exception as e_h5:
-        # netCDF3 files (CDF) need the scipy engine
+    except (OSError, IOError, ValueError) as e_h5:
+        # Detect netCDF3 via magic number and download locally for scipy
+        with fs.open(url, "rb") as fin:
+            magic = fin.read(4)
+
+        tmp_path = None
         try:
-            return xr.open_dataset(fs.open(url), engine="scipy", drop_variables=drop_vars)
-        except Exception:
-            # Fallback: stream to local tempfile for netCDF4 readers
-            try:
-                emsg = str(e_h5)
-            except Exception:
-                emsg = repr(e_h5)
+            emsg = str(e_h5)
             print(f"[ofs_loader] [WARN] direct open failed: {emsg.encode('ascii','backslashreplace').decode('ascii')}; attempting tempfile fallback")
-            tmp_path = None
-            try:
-                suffix = os.path.splitext(url)[1] if os.path.splitext(url)[1] else ".nc"
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmpf:
-                    tmp_path = tmpf.name
-                    with fs.open(url, "rb") as fin:
-                        shutil.copyfileobj(fin, tmpf)
-                return xr.open_dataset(
-                    tmp_path,
-                    engine="h5netcdf",
-                    chunks={"time": 1},
-                    drop_variables=drop_vars,
-                )
-            finally:
-                try:
-                    if tmp_path and os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                except Exception:
-                    pass
+            suffix = os.path.splitext(url)[1] if os.path.splitext(url)[1] else ".nc"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmpf:
+                tmp_path = tmpf.name
+                with fs.open(url, "rb") as fin:
+                    shutil.copyfileobj(fin, tmpf)
+
+            if magic and magic.startswith(b"CDF"):
+                return xr.open_dataset(tmp_path, engine="scipy")
+
+            return xr.open_dataset(
+                tmp_path,
+                engine="h5netcdf",
+                chunks={"time": 1},
+                drop_variables=drop_vars,
+            )
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
 
 def _select_uv_vars(ds: xr.Dataset, url: str) -> xr.Dataset:
@@ -217,12 +211,10 @@ def _normalize_time_coord(ds: xr.Dataset, file_time: dt.datetime | None = None) 
                 break
 
     if "time" in ds.coords:
-        try:
-            if file_time is not None and not np.issubdtype(ds["time"].dtype, np.datetime64):
-                if ds["time"].size == 1:
-                    ds = ds.assign_coords(time=[np.datetime64(file_time)])
-        except Exception:
-            pass
+        if file_time is not None and not np.issubdtype(ds["time"].dtype, np.datetime64):
+            if ds["time"].size != 1:
+                raise ValueError("Non-datetime time coordinate with size != 1 cannot be coerced.")
+            ds = ds.assign_coords(time=[np.datetime64(file_time)])
     elif file_time is not None:
         ds = ds.expand_dims("time")
         ds = ds.assign_coords(time=[np.datetime64(file_time)])
@@ -233,25 +225,26 @@ def _regularize_lon_lat(ds: xr.Dataset) -> xr.Dataset:
     """Convert separable 2D lon/lat grids into 1D coords for interp."""
     if "lon" not in ds or "lat" not in ds:
         return ds
-    try:
-        if ds.lon.ndim != 2 or ds.lat.ndim != 2:
-            return ds
-        if ds.lon.dims != ds.lat.dims or len(ds.lon.dims) != 2:
-            return ds
-        dim_y, dim_x = ds.lon.dims
-        lon2 = ds.lon.values
-        lat2 = ds.lat.values
-        lon1 = lon2[0, :]
-        lat1 = lat2[:, 0]
-        if not (np.allclose(lon2, lon1[None, :]) and np.allclose(lat2, lat1[:, None])):
-            return ds
-        ds = ds.drop_vars(["lon", "lat"])
-        ds = ds.assign_coords(lon=(dim_x, lon1), lat=(dim_y, lat1))
-        ds = ds.swap_dims({dim_x: "lon", dim_y: "lat"})
-        if {"time", "lat", "lon"} <= set(ds.dims):
-            ds = ds.transpose("time", "lat", "lon")
-    except Exception:
+    if ds.lon.ndim != 2 or ds.lat.ndim != 2:
         return ds
+    if ds.lon.dims != ds.lat.dims or len(ds.lon.dims) != 2:
+        return ds
+    dim_y, dim_x = ds.lon.dims
+    lon2 = ds.lon.values
+    lat2 = ds.lat.values
+    lon1 = lon2[0, :]
+    lat1 = lat2[:, 0]
+    diff_lon = np.nanmax(np.abs(lon2 - lon1[None, :]))
+    diff_lat = np.nanmax(np.abs(lat2 - lat1[:, None]))
+    if not (np.isfinite(diff_lon) and np.isfinite(diff_lat)):
+        raise ValueError("Non-finite lon/lat values found while regularizing grid.")
+    if diff_lon > 1e-6 or diff_lat > 1e-6:
+        return ds
+    ds = ds.drop_vars(["lon", "lat"])
+    ds = ds.assign_coords(lon=(dim_x, lon1), lat=(dim_y, lat1))
+    ds = ds.swap_dims({dim_x: "lon", dim_y: "lat"})
+    if {"time", "lat", "lon"} <= set(ds.dims):
+        ds = ds.transpose("time", "lat", "lon")
     return ds
 
 
@@ -279,13 +272,7 @@ def _normalize_current_ds(
     ds = _normalize_time_coord(ds, file_time=file_time)
 
     if "Depth" in ds.dims:
-        try:
-            ds = ds.isel(Depth=0)
-        except Exception:
-            try:
-                ds = ds.sel(Depth=0, method="nearest")
-            except Exception:
-                pass
+        ds = ds.isel(Depth=0)
 
     # Normalize coordinates to lon/lat if present
     for lon_name, lat_name in (("lon", "lat"), ("lonc", "latc"), ("longitude", "latitude"), ("Longitude", "Latitude")):
@@ -336,13 +323,10 @@ def _open_ofs_time_series(
     ds_list: list[xr.Dataset] = []
     source_urls: list[str] = []
     for t, url in urls:
-        try:
-            ds = _open_dataset_any(url, drop_vars=["siglay", "siglev"])
-            ds = _normalize_current_ds(ds, bbox, url=url, file_time=t)
-            ds_list.append(ds)
-            source_urls.append(url)
-        except Exception as e:
-            print(f"[ofs_loader] [WARN] Failed to open time-slice {url}: {e}")
+        ds = _open_dataset_any(url, drop_vars=["siglay", "siglev"])
+        ds = _normalize_current_ds(ds, bbox, url=url, file_time=t)
+        ds_list.append(ds)
+        source_urls.append(url)
 
     if not ds_list:
         return None
@@ -353,10 +337,7 @@ def _open_ofs_time_series(
         ds = xr.concat(ds_list, dim="time")
         if "time" in ds.coords:
             ds = ds.sortby("time")
-            try:
-                ds = ds.sel(time=slice(np.datetime64(window_start), np.datetime64(window_end)))
-            except Exception:
-                pass
+            ds = ds.sel(time=slice(np.datetime64(window_start), np.datetime64(window_end)))
 
     ds.attrs["source_urls"] = source_urls
     ds.attrs["source_desc"] = f"NOAA OFS {model} regulargrid archive"
@@ -394,19 +375,17 @@ def regional_keys(model: str, day: date) -> List[str]:
                 keys.append(f"{model}/netcdf/{y}/{m}/{d}/{name}")
     return keys
         
-def candidate_urls(model: str, day: date) -> List[str]:
+def candidate_urls(model: str, day: date, include_monthly: bool = True) -> List[str]:
     keys_list = regional_keys(model, day)
     print(f"[ofs_loader] got {len(keys_list)} keys for model={model} day={day}")
     print(f"[ofs_loader] BUCKETS = {BUCKETS}")
     urls = [f"s3://{bucket}/{key}" for key in keys_list for bucket in BUCKETS]
     print(f"[ofs_loader] generated {len(urls)} candidate URLs")
     # Include monthly archive URLs (historical)
-    try:
+    if include_monthly:
         monthly_urls = _monthly_urls_for_day(model, day)
         if monthly_urls:
             urls.extend(monthly_urls)
-    except Exception:
-        pass
     # de-duplicate while preserving order
     seen = set()
     urls = [u for u in urls if not (u in seen or seen.add(u))]
@@ -415,14 +394,15 @@ def candidate_urls(model: str, day: date) -> List[str]:
 def first_existing_url(urls: List[str]) -> str | None:
     """Check URLs in order, return first that exists."""
     for url in urls:
-        try:
-            bucket, key = url[5:].split("/", 1)
-            if fs.exists(f"{bucket}/{key}"):
-                print(f"[ofs_loader] [OK] Found: {url}")
-                return url
-        except Exception as e:
-            # Skip malformed URLs
-            continue
+        if not url.startswith("s3://"):
+            raise ValueError(f"Malformed URL (expected s3://): {url}")
+        bucket_key = url[5:]
+        if "/" not in bucket_key:
+            raise ValueError(f"Malformed S3 URL (missing key): {url}")
+        bucket, key = bucket_key.split("/", 1)
+        if fs.exists(f"{bucket}/{key}"):
+            print(f"[ofs_loader] [OK] Found: {url}")
+            return url
     return None
 
 # def candidate_urls(model: str, day: date) -> List[str]:
@@ -477,30 +457,39 @@ time_window_hours: float = 0.0,
             return ds_ts
 
     # Find a single file within the last 14 days - STOP AT FIRST SUCCESS
-    ds = None
     for day in (start_dt.date() - timedelta(n) for n in range(0, 15)):
-        url = first_existing_url(candidate_urls(model, day))
+        # Prefer daily netCDF4 first; fall back to monthly archive only if needed
+        url = first_existing_url(candidate_urls(model, day, include_monthly=False))
         if url:
-            try:
+            print('[ofs_loader] Opening: ' + str(url))
+            ds = _open_dataset_any(url, drop_vars=['siglay', 'siglev'])
+            ds = _normalize_current_ds(ds, bbox, url=url, file_time=None)
+            ds.attrs['source_urls'] = [url]
+            ds.attrs['source_desc'] = 'NOAA OFS ' + str(model)
+            print('[ofs_loader] [OK] Successfully opened dataset from ' + str(day))
+            return ds
+
+        # Only try monthly archives if no daily file was found
+        monthly_urls = _monthly_urls_for_day(model, day)
+        if monthly_urls:
+            def _pref_key(u: str):
+                if f"nos.{model}.fields" in u:
+                    return (0, u)
+                if "fields" in u:
+                    return (1, u)
+                if "regulargrid" in u:
+                    return (2, u)
+                return (3, u)
+            for url in sorted(monthly_urls, key=_pref_key):
                 print('[ofs_loader] Opening: ' + str(url))
                 ds = _open_dataset_any(url, drop_vars=['siglay', 'siglev'])
                 ds = _normalize_current_ds(ds, bbox, url=url, file_time=None)
                 ds.attrs['source_urls'] = [url]
                 ds.attrs['source_desc'] = 'NOAA OFS ' + str(model)
                 print('[ofs_loader] [OK] Successfully opened dataset from ' + str(day))
-                break  # SUCCESS - stop searching!
-            except Exception as e:
-                try:
-                    emsg = str(e)
-                except Exception:
-                    emsg = repr(e)
-                print('[ofs_loader] [ERR] Failed to open ' + str(url) + ': ' + emsg.encode('ascii','backslashreplace').decode('ascii'))
-                continue  # Try next day
+                return ds
 
-    if ds is None:
-        raise FileNotFoundError('No ' + str(model).upper() + ' data could be opened in last 14 days')
-
-    return ds
+    raise FileNotFoundError('No ' + str(model).upper() + ' data could be opened in last 14 days')
 
 # def open_ofs_subset(
 #     model: str,
@@ -639,62 +628,39 @@ def get_current_fn(
         
     model = OFS_MODEL_MAP.get(port, "rtofs").lower()
     
-    ds = None
     try:
         ds = open_ofs_subset(model, start_dt, bbox, time_window_hours=window_hours)
         print(f"[ofs_loader] [OK] Using {model.upper()} data")
-    except Exception as e:
+    except FileNotFoundError as e:
         print(f"[ofs_loader] WARN: {model.upper()} open failed ({str(e)}); trying RTOFS...")
-        try:
-            ds = open_ofs_subset("rtofs", start_dt, bbox, time_window_hours=window_hours)
-            print(f"[ofs_loader] [OK] Using RTOFS data")
-        except Exception as e2:
-            print(f"[ofs_loader] WARN: RTOFS open failed ({str(e2)}); using tidal proxy.")
-            # Reasonable Puget/Salish defaults; adjust per-port via OFS_MODEL_MAP if desired
-            proxy = make_tidal_proxy_current(axis_deg=320.0, A_M2=0.30, A_S2=0.10)
-            try:
-                proxy._source = "Tidal proxy (synthetic)"
-            except Exception:
-                pass
-            return proxy
+        ds = open_ofs_subset("rtofs", start_dt, bbox, time_window_hours=window_hours)
+        print(f"[ofs_loader] [OK] Using RTOFS data")
     
     def _attach_source(sampler, source_override: str | None = None):
         src = source_override
-        urls = None
-        try:
-            if src is None:
-                src = ds.attrs.get("source_desc")
-            urls = ds.attrs.get("source_urls")
-        except Exception:
-            pass
+        if src is None:
+            src = ds.attrs.get("source_desc")
+        urls = ds.attrs.get("source_urls")
         if src:
-            try:
-                sampler._source = src
-            except Exception:
-                pass
+            sampler._source = src
         if urls:
-            try:
-                sampler._source_urls = urls
-            except Exception:
-                pass
+            sampler._source_urls = urls
         if window_hours and start_dt:
-            try:
-                end_dt = start_dt + dt.timedelta(hours=float(window_hours))
-                sampler._source_window = (start_dt.isoformat(), end_dt.isoformat())
-            except Exception:
-                pass
+            end_dt = start_dt + dt.timedelta(hours=float(window_hours))
+            sampler._source_window = (start_dt.isoformat(), end_dt.isoformat())
         return sampler
 
     # Build sampler from ds (structured vs unstructured)
     # If lon uses 0–360, we’ll convert query points on the fly.
     lon_0360 = False
     if "lon" in ds:
-        try:
-            lon_0360 = float(ds["lon"].max()) > 180.0
-        except Exception:
-            lon_0360 = False
+        lon_0360 = float(ds["lon"].max()) > 180.0
             
-    if "lon" in ds and "lat" in ds and ds.lon.ndim == 1 and ds.lat.ndim == 1:
+    if (
+        "lon" in ds.dims and "lat" in ds.dims
+        and ds.lon.ndim == 1 and ds.lat.ndim == 1
+        and ds.lon.dims == ("lon",) and ds.lat.dims == ("lat",)
+    ):
         # Structured 1-D rectilinear grid: bilinear interp
         def sample(lons: np.ndarray, lats: np.ndarray, when: dt.datetime):
             lons = np.asarray(lons, dtype=float)
@@ -716,11 +682,8 @@ def get_current_fn(
                 v = v[0]
             return np.column_stack((u, v))
         # annotate sampler for downstream resampling/diagnostics
-        try:
-            sample._native = 'rectilinear'
-            sample._lon_0360 = lon_0360
-        except Exception:
-            pass
+        sample._native = 'rectilinear'
+        sample._lon_0360 = lon_0360
         return _attach_source(sample)
 
     if "lon" in ds and ds.lon.ndim == 2:
@@ -745,11 +708,8 @@ def get_current_fn(
                 v = v[0]
             return np.column_stack((u, v))
         # annotate sampler for downstream resampling/diagnostics
-        try:
-            sample._native = 'structured'
-            sample._lon_0360 = lon_0360
-        except Exception:
-            pass
+        sample._native = 'structured'
+        sample._lon_0360 = lon_0360
         return _attach_source(sample)
     
     # ROMS curvilinear C-grid: Use NearestNDInterpolator (FAST, no Delaunay)
@@ -804,50 +764,48 @@ def get_current_fn(
         print(f"[ofs_loader] U: range=[{u_valid.min():.3f}, {u_valid.max():.3f}] m/s")
         print(f"[ofs_loader] V: range=[{v_valid.min():.3f}, {v_valid.max():.3f}] m/s")
         
+        u_pts = np.column_stack((lon_u_valid, lat_u_valid))
+        v_pts = np.column_stack((lon_v_valid, lat_v_valid))
+
         # Optionally filter out points that lie on land (ENC LNDARE) so
         # nearest-neighbour picks do not snap to inland grid points.
-        try:
-            if land_gdf is not None:
-                from shapely.geometry import Point
-                from shapely.ops import unary_union
-                from shapely.prepared import prep
+        if land_gdf is not None:
+            from shapely.geometry import Point
+            from shapely.ops import unary_union
+            from shapely.prepared import prep
 
-                land_union = unary_union(list(getattr(land_gdf, 'geometry', [])))
-                land_prep = prep(land_union)
+            land_union = unary_union(list(getattr(land_gdf, 'geometry', [])))
+            land_prep = prep(land_union)
 
-                u_pts_all = np.column_stack((lon_u_valid, lat_u_valid))
-                v_pts_all = np.column_stack((lon_v_valid, lat_v_valid))
+            u_pts_all = np.column_stack((lon_u_valid, lat_u_valid))
+            v_pts_all = np.column_stack((lon_v_valid, lat_v_valid))
 
-                u_on_land = np.array([land_prep.contains(Point(xy)) for xy in u_pts_all])
-                v_on_land = np.array([land_prep.contains(Point(xy)) for xy in v_pts_all])
+            u_on_land = np.array([land_prep.contains(Point(xy)) for xy in u_pts_all])
+            v_on_land = np.array([land_prep.contains(Point(xy)) for xy in v_pts_all])
 
-                u_keep = ~u_on_land
-                v_keep = ~v_on_land
+            u_keep = ~u_on_land
+            v_keep = ~v_on_land
 
-                # Apply masks, but fall back to original arrays if filtering removes all points
-                if np.count_nonzero(u_keep) > 0:
-                    u_pts = u_pts_all[u_keep]
-                    u_valid = u_valid[u_keep]
-                else:
-                    print("[ofs_loader] WARN: land filtering removed all U-grid points — keeping originals")
-                    u_pts = u_pts_all
+            # Apply masks, but fall back to original arrays if filtering removes all points
+            if np.count_nonzero(u_keep) > 0:
+                u_pts = u_pts_all[u_keep]
+                u_valid = u_valid[u_keep]
+            else:
+                print("[ofs_loader] WARN: land filtering removed all U-grid points — keeping originals")
+                u_pts = u_pts_all
 
-                if np.count_nonzero(v_keep) > 0:
-                    v_pts = v_pts_all[v_keep]
-                    v_valid = v_valid[v_keep]
-                else:
-                    print("[ofs_loader] WARN: land filtering removed all V-grid points — keeping originals")
-                    v_pts = v_pts_all
-        except Exception:
-            # If anything goes wrong with filtering, fall back to unfiltered points
-            u_pts = np.column_stack((lon_u_valid, lat_u_valid))
-            v_pts = np.column_stack((lon_v_valid, lat_v_valid))
+            if np.count_nonzero(v_keep) > 0:
+                v_pts = v_pts_all[v_keep]
+                v_valid = v_valid[v_keep]
+            else:
+                print("[ofs_loader] WARN: land filtering removed all V-grid points — keeping originals")
+                v_pts = v_pts_all
 
         # Build separate KDTrees for U and V grids (FAST!)
         u_tree = cKDTree(u_pts)
         v_tree = cKDTree(v_pts)
         
-        print(f"[ofs_loader] ✓ Built FAST nearest-neighbor interpolators for staggered grids")
+        print("[ofs_loader] Built FAST nearest-neighbor interpolators for staggered grids")
         
         def sample(lons: np.ndarray, lats: np.ndarray, when: dt.datetime):
             lons = np.asarray(lons, dtype=float)
@@ -864,14 +822,11 @@ def get_current_fn(
             
             return np.column_stack((u_vals, v_vals))
         # annotate sampler with native grids and valid data for resampling
-        try:
-            sample._native = 'roms'
-            sample._u_pts = u_pts
-            sample._v_pts = v_pts
-            sample._u_valid = u_valid
-            sample._v_valid = v_valid
-        except Exception:
-            pass
+        sample._native = 'roms'
+        sample._u_pts = u_pts
+        sample._v_pts = v_pts
+        sample._u_valid = u_valid
+        sample._v_valid = v_valid
         return _attach_source(sample)
     
     # Unstructured FVCOM grid: use fast nearest-neighbor (NO slow Delaunay!)
@@ -897,25 +852,22 @@ def get_current_fn(
     pts = np.column_stack((lon_coords, lat_coords))
 
     # Optionally filter out points that lie on land (if ENC LNDARE provided)
-    try:
-        if land_gdf is not None:
-            from shapely.geometry import Point
-            from shapely.ops import unary_union
-            from shapely.prepared import prep
+    if land_gdf is not None:
+        from shapely.geometry import Point
+        from shapely.ops import unary_union
+        from shapely.prepared import prep
 
-            land_union = unary_union(list(getattr(land_gdf, 'geometry', [])))
-            land_prep = prep(land_union)
+        land_union = unary_union(list(getattr(land_gdf, 'geometry', [])))
+        land_prep = prep(land_union)
 
-            on_land = np.array([land_prep.contains(Point(xy)) for xy in pts])
-            keep = ~on_land
-            if np.count_nonzero(keep) > 0:
-                valid_pts = pts[keep]
-            else:
-                print("[ofs_loader] WARN: land filtering removed all FVCOM points — keeping originals")
-                valid_pts = pts
+        on_land = np.array([land_prep.contains(Point(xy)) for xy in pts])
+        keep = ~on_land
+        if np.count_nonzero(keep) > 0:
+            valid_pts = pts[keep]
         else:
+            print("[ofs_loader] WARN: land filtering removed all FVCOM points — keeping originals")
             valid_pts = pts
-    except Exception:
+    else:
         valid_pts = pts
 
     tree = cKDTree(valid_pts)
@@ -956,28 +908,25 @@ def get_current_fn(
     valid_pts = np.column_stack((lon_valid, lat_valid))
 
     # If land_gdf was provided earlier for the FVCOM/unstructured branch, try to filter
-    try:
-        if land_gdf is not None:
-            from shapely.geometry import Point
-            from shapely.ops import unary_union
-            from shapely.prepared import prep
+    if land_gdf is not None:
+        from shapely.geometry import Point
+        from shapely.ops import unary_union
+        from shapely.prepared import prep
 
-            land_union = unary_union(list(getattr(land_gdf, 'geometry', [])))
-            land_prep = prep(land_union)
-            on_land = np.array([land_prep.contains(Point(xy)) for xy in valid_pts])
-            keep = ~on_land
-            if np.count_nonzero(keep) > 0:
-                valid_pts = valid_pts[keep]
-                u_valid = u_valid[keep]
-                v_valid = v_valid[keep]
-            else:
-                print("[ofs_loader] WARN: land filtering removed all valid FVCOM points — keeping originals")
-    except Exception:
-        pass
+        land_union = unary_union(list(getattr(land_gdf, 'geometry', [])))
+        land_prep = prep(land_union)
+        on_land = np.array([land_prep.contains(Point(xy)) for xy in valid_pts])
+        keep = ~on_land
+        if np.count_nonzero(keep) > 0:
+            valid_pts = valid_pts[keep]
+            u_valid = u_valid[keep]
+            v_valid = v_valid[keep]
+        else:
+            print("[ofs_loader] WARN: land filtering removed all valid FVCOM points — keeping originals")
 
     valid_tree = cKDTree(valid_pts)
     
-    print(f"[ofs_loader] ✓ Built FAST nearest-neighbor interpolator")
+    print("[ofs_loader] Built FAST nearest-neighbor interpolator")
     
     def sample(lons: np.ndarray, lats: np.ndarray, when: dt.datetime):
         lons = np.asarray(lons, dtype=float)
@@ -995,13 +944,10 @@ def get_current_fn(
         v_vals = v_valid[indices]
         return np.column_stack((u_vals, v_vals))
     # annotate sampler for downstream resampling/diagnostics
-    try:
-        sample._native = 'unstructured'
-        sample._valid_pts = valid_pts
-        sample._u_valid = u_valid
-        sample._v_valid = v_valid
-    except Exception:
-        pass
+    sample._native = 'unstructured'
+    sample._valid_pts = valid_pts
+    sample._u_valid = u_valid
+    sample._v_valid = v_valid
     return _attach_source(sample)
 
     return sample
@@ -1162,7 +1108,7 @@ def open_met_subset(
     else:
         raise FileNotFoundError(f"No {model.upper()} MET data found in last 14 days")
 
-    print(f"[ofs_loader] → opening wind {url}")
+    print(f"[ofs_loader] -> opening wind {url}")
     # drop the problematic 'siglay' variable at load time
     ds_w = xr.open_dataset(
         fs.open(url),
@@ -1196,7 +1142,7 @@ def open_met_subset(
         if lat_coord != "lat":
             rename_dict[lat_coord] = "lat"
         ds_w = ds_w.rename(rename_dict)
-        print(f"[ofs_loader] Renamed {rename_dict} → lon/lat")
+        print(f"[ofs_loader] Renamed {rename_dict} -> lon/lat")
     
     ds_w = ds_w.set_coords(["lon", "lat"])
     # drop everything except horizontal wind vars (you’ll need to adjust names)

@@ -3,20 +3,18 @@ from emergent.ship_abm.config import SHIP_PHYSICS, \
     CONTROLLER_GAINS, \
         ADVANCED_CONTROLLER, \
             COLLISION_AVOIDANCE, \
-                PROPULSION
+                PROPULSION, \
+                    SHIP_AERO_DEFAULTS
 from emergent.ship_abm.config import PID_DEBUG
 
 # Helper: normalize a heading to the nearest angular equivalent relative to a
 # reference heading (psi). Uses the shared angle utilities when available and
 # falls back to a safe modular arithmetic implementation.
-try:
-    from emergent.ship_abm.angle_utils import heading_diff_rad
-    def _nearest_heading(hd, psi_ref):
-        # heading_diff_rad(hd, psi_ref) returns (hd - psi_ref) wrapped to [-pi,pi]
-        return psi_ref + heading_diff_rad(hd, psi_ref)
-except Exception:
-    def _nearest_heading(hd, psi_ref):
-        return psi_ref + ((hd - psi_ref + np.pi) % (2 * np.pi) - np.pi)
+from emergent.ship_abm.angle_utils import heading_diff_rad
+
+def _nearest_heading(hd, psi_ref):
+    # heading_diff_rad(hd, psi_ref) returns (hd - psi_ref) wrapped to [-pi,pi]
+    return psi_ref + heading_diff_rad(hd, psi_ref)
 
 class ship:
     """
@@ -149,10 +147,7 @@ class ship:
         # derivative low-pass time constant (seconds)
         self.deriv_tau = ADVANCED_CONTROLLER.get('deriv_tau', 1.0)
         # filtered derivative state (initialized per-ship)
-        try:
-            self.deriv_filtered = np.zeros(self.n)
-        except Exception:
-            self.deriv_filtered = 0.0
+        self.deriv_filtered = np.zeros(self.n)
         self._deadzone_off_state = np.zeros(self.n, dtype=bool)
         # dead-reckoning tuning (from config)
         self.dead_reck_sensitivity = ADVANCED_CONTROLLER.get('dead_reck_sensitivity', 0.25)
@@ -164,28 +159,17 @@ class ship:
         # speed & propulsion settings
         init_sp = PROPULSION['initial_speed']
         # initialize current_speed as array of length n for vectorized control
-        try:
-            # multi-ship case: fill an array of length n
-            self.current_speed = np.full(self.n, init_sp, dtype=float)
-        except Exception:
-            # fallback to scalar for single-ship case
-            self.current_speed = float(init_sp)
+        self.current_speed = np.full(self.n, init_sp, dtype=float)
 
         # deceleration limit: max acceleration (m/s²), fallback to max_speed if not configured
         accel_limit = PROPULSION.get('max_accel', PROPULSION['max_speed'])
-        try:
-            self.max_accel = np.full(self.n, accel_limit, dtype=float)
-        except Exception:
-            self.max_accel = float(accel_limit)
+        self.max_accel = np.full(self.n, accel_limit, dtype=float)
             
         self.desired_speed = np.full(n, PROPULSION['desired_speed'])
         self.cruise_speed  = self.desired_speed.copy()
         self.max_speed     = np.full(n, PROPULSION['max_speed'])
         # maximum reverse speed (positive magnitude) – default to 30% of max_speed
-        try:
-            self.max_reverse_speed = 0.3 * np.array(self.max_speed)
-        except Exception:
-            self.max_reverse_speed = 0.3 * PROPULSION['max_speed']
+        self.max_reverse_speed = 0.3 * np.array(self.max_speed)
         self.rho = PROPULSION['rho']
         self.K_T = PROPULSION['K_T']
         self.max_rpm = PROPULSION['max_rpm']
@@ -211,43 +195,25 @@ class ship:
         self.crossing_speed   = np.zeros(n)
         # linger timer: after a crossing lock clears, keep role='give_way'
         # for a brief period to avoid chatter (seconds)
-        try:
-            from emergent.ship_abm.config import COLLISION_AVOIDANCE
-            self.crossing_linger_default = float(COLLISION_AVOIDANCE.get('crossing_linger', 6.0))
-        except Exception:
-            self.crossing_linger_default = 6.0
+        self.crossing_linger_default = float(COLLISION_AVOIDANCE.get('crossing_linger', 6.0))
         self.crossing_linger_timer = np.zeros(n, dtype=float)
         # UI-visible persistent flag: mark vessels that recently had to give way.
         # This flag is intended to be shown in the UI and not automatically
         # cleared by COLREGS logic; it must be cleared explicitly by the UI
         # or higher-level code when the operator acknowledges it.
-        try:
-            self.flagged_give_way = np.zeros(n, dtype=bool)
-        except Exception:
-            self.flagged_give_way = np.array([False] * n)
+        self.flagged_give_way = np.zeros(n, dtype=bool)
         # Instrumentation state: previous goal heading for HD jump detection,
         # rudder saturation timers and reporting flags
-        try:
-            self._instr_prev_hd = None
-            self._sat_timer = np.zeros(self.n)
-            self._sat_reported = np.zeros(self.n, dtype=bool)
-        except Exception:
-            self._instr_prev_hd = None
-            self._sat_timer = 0.0
-            self._sat_reported = False
+        self._instr_prev_hd = None
+        self._sat_timer = np.zeros(self.n)
+        self._sat_reported = np.zeros(self.n, dtype=bool)
         # transient integrator-flush indicator per-agent (set when integrator is cleared,
         # cleared at the end of the colregs pass so it only signals for one tick)
-        try:
-            self._last_integrator_flushed = np.zeros(self.n, dtype=bool)
-        except Exception:
-            self._last_integrator_flushed = np.array([False] * self.n)
+        self._last_integrator_flushed = np.zeros(self.n, dtype=bool)
         # safety counter: if a give-way vessel issues near-zero rudder for many
         # consecutive ticks, escalate by nudging prev_rudder to a small avoidance
         # value to ensure motion (defensive fallback)
-        try:
-            self._giveway_no_rudder_counts = np.zeros(self.n, dtype=int)
-        except Exception:
-            self._giveway_no_rudder_counts = np.zeros(self.n, dtype=int)
+        self._giveway_no_rudder_counts = np.zeros(self.n, dtype=int)
 
     def cut_power(self, idx: int):
         """
@@ -256,24 +222,16 @@ class ship:
         # Support both scalar and vector storage just in case.
         # Before zeroing, write a best-effort log entry so we can detect
         # where commanded_rpm gets zeroed during headless runs.
-        try:
-            import os, datetime
-            # prefer workspace-relative logs/ but fall back to package-relative
-            workspace_logs = os.path.abspath(os.path.join(os.getcwd(), 'logs'))
-            os.makedirs(workspace_logs, exist_ok=True)
-            evfile = os.path.join(workspace_logs, 'cut_power_events.log')
-            ts = datetime.datetime.utcnow().isoformat() + 'Z'
-            prev = None
-            try:
-                # read prev value safely
-                prev = float(self.commanded_rpm[idx]) if np.ndim(self.commanded_rpm) != 0 else float(self.commanded_rpm)
-            except Exception:
-                prev = None
-            with open(evfile, 'a') as fh:
-                fh.write(f"{ts} cut_power called idx={idx} prev_cmd={prev}\n")
-        except Exception:
-            # best-effort logging; do not allow logging failure to raise
-            pass
+        import os, datetime
+        # prefer workspace-relative logs/ but fall back to package-relative
+        workspace_logs = os.path.abspath(os.path.join(os.getcwd(), 'logs'))
+        os.makedirs(workspace_logs, exist_ok=True)
+        evfile = os.path.join(workspace_logs, 'cut_power_events.log')
+        ts = datetime.datetime.utcnow().isoformat() + 'Z'
+        # read prev value safely
+        prev = float(self.commanded_rpm[idx]) if np.ndim(self.commanded_rpm) != 0 else float(self.commanded_rpm)
+        with open(evfile, 'a') as fh:
+            fh.write(f"{ts} cut_power called idx={idx} prev_cmd={prev}\n")
 
         if np.ndim(self.commanded_rpm) == 0:        # single-vessel scalar
             self.commanded_rpm = 0.0
@@ -370,12 +328,8 @@ class ship:
             rel_angle = np.arctan2(rel_vec[1], rel_vec[0])  # global angle
             beta = (rel_angle - psi_local + np.pi) % (2*np.pi) - np.pi
             # projection factor: baseline + scale*|sin(beta)| → beam-on maximized
-            try:
-                from emergent.ship_abm.config import SHIP_AERO_DEFAULTS
-                baseline = SHIP_AERO_DEFAULTS.get('wind_proj_baseline', 0.2)
-                scale = SHIP_AERO_DEFAULTS.get('wind_proj_scale', 0.8)
-            except Exception:
-                baseline, scale = 0.2, 0.8
+            baseline = SHIP_AERO_DEFAULTS.get('wind_proj_baseline', 0.2)
+            scale = SHIP_AERO_DEFAULTS.get('wind_proj_scale', 0.8)
             proj = baseline + scale * abs(np.sin(beta))
             A_proj = (A_override if (A_override is not None) else baseA) * proj
             F     = 0.5 * rho * Cd * A_proj * mag**2              # scalar
@@ -389,13 +343,8 @@ class ship:
         rel_current = current_vec - np.vstack([u_e, v_e])
 
         # allow per-ship aero overrides from config; default to instance attributes
-        try:
-            from emergent.ship_abm.config import SHIP_AERO_DEFAULTS
-            A_ref = SHIP_AERO_DEFAULTS.get('A_air_ref', None) or None
-            Cd_air = SHIP_AERO_DEFAULTS.get('Cd_air', self.Cd_air)
-        except Exception:
-            A_ref = None
-            Cd_air = self.Cd_air
+        A_ref = SHIP_AERO_DEFAULTS.get('A_air_ref', None) or None
+        Cd_air = SHIP_AERO_DEFAULTS.get('Cd_air', self.Cd_air)
 
         # compute per-ship wind force: vectorized over ships
         nships = rel_wind.shape[1]
@@ -405,10 +354,7 @@ class ship:
         psi_arr = np.atleast_1d(psi)
         if psi_arr.size != nships:
             # broadcast or repeat scalar heading to match nships
-            try:
-                psi_val = float(psi_arr.flat[0])
-            except Exception:
-                psi_val = 0.0
+            psi_val = float(psi_arr.flat[0])
             psi_arr = np.full(nships, psi_val)
 
         for i in range(nships):
@@ -421,11 +367,7 @@ class ship:
         wind_force = np.hstack(wind_force_cols)
         current_force = np.hstack(current_force_cols)
         # apply a global wind-force scaling factor (configurable)
-        try:
-            from emergent.ship_abm.config import SHIP_AERO_DEFAULTS
-            wscale = float(SHIP_AERO_DEFAULTS.get('wind_force_scale', 1.0))
-        except Exception:
-            wscale = 1.0
+        wscale = float(SHIP_AERO_DEFAULTS.get('wind_force_scale', 1.0))
         if abs(wscale - 1.0) > 1e-12:
             wind_force = wind_force * wscale
         return wind_force, current_force      # shape (2, n) each

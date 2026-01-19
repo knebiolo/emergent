@@ -163,28 +163,24 @@ def compute_ais_heatmap(
         log.info(f"Downloading AIS data for {current.isoformat()}: {url}")
 
         try:
-            response = requests.get(url, stream=True, timeout=60, verify = False)
+            response = requests.get(url, stream=True, timeout=60, verify=False)
             response.raise_for_status()
         except requests.HTTPError as e:
-            log.warning(f"HTTPError for {url} - skipping date: {e}")
-            continue
+            raise requests.HTTPError(f"HTTPError for {url}") from e
         except requests.RequestException as e:
-            log.warning(f"Connection error for {url} - skipping date: {e}")
-            continue
+            raise requests.RequestException(f"Connection error for {url}") from e
 
         # Open ZIP in-memory
         try:
             zf = zipfile.ZipFile(io.BytesIO(response.content))
-        except zipfile.BadZipFile:
-            log.error(f"Bad ZIP file on {current.isoformat()} - skipping")
-            continue
+        except zipfile.BadZipFile as e:
+            raise zipfile.BadZipFile(f"Bad ZIP file on {current.isoformat()}") from e
 
         # Find CSV within ZIP
         csv_candidates = [n for n in zf.namelist() if n.lower().endswith(".csv")]
         if not csv_candidates:
-            log.error(f"No CSV found in ZIP for {current.isoformat()} - skipping")
             zf.close()
-            continue
+            raise FileNotFoundError(f"No CSV found in ZIP for {current.isoformat()}")
 
         csv_name = csv_candidates[0]
         log.debug(f"Found CSV in ZIP: {csv_name}")
@@ -197,10 +193,9 @@ def compute_ais_heatmap(
                     usecols=["LON", "LAT"],
                     dtype={"LON": float, "LAT": float},
                 )
-        except Exception as e:
-            log.error(f"Error reading CSV for {current.isoformat()}: {e}")
+        except (ValueError, KeyError, UnicodeDecodeError, pd.errors.ParserError) as e:
             zf.close()
-            continue
+            raise ValueError(f"Error reading CSV for {current.isoformat()}") from e
 
         zf.close()
 

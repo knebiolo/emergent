@@ -15,7 +15,7 @@ from scipy.spatial import cKDTree
 
 
 # ---------- HRRR (3 km CONUS, 2014-present, hourly) ----------------
-_HRRR_BUCKET = "noaa-hrrr-pds"
+_HRRR_BUCKET = "noaa-hrrr-bdp-pds"
 _hrrr_fs     = fsspec.filesystem("s3", anon=True)
 
 # HRRR path pattern:
@@ -24,7 +24,7 @@ _hrrr_fs     = fsspec.filesystem("s3", anon=True)
 def _hrrr_key(when: dt.datetime) -> str:
     ymd = when.strftime("%Y%m%d")
     cyc = f"{when:%H}"        # "14", no trailing "Z"
-    fxx = "000"               # we almost always want the analysis (f00)
+    fxx = "00"                # we almost always want the analysis (f00)
     return f"hrrr.{ymd}/conus/hrrr.t{cyc}z.wrfprsf{fxx}.grib2"
 
 def fetch_hrrr_wind_10m(bbox: Tuple[float, float, float, float],
@@ -92,10 +92,7 @@ def fetch_noaa_ofs_wind(bbox: Tuple[float, float, float, float],
     else:
         model = "rtofs"
 
-    try:
-        ds = open_met_subset(model, when.date(), bbox)
-    except Exception as e:
-        raise FileNotFoundError("NOAA OFS wind not available") from e
+    ds = open_met_subset(model, when.date(), bbox)
 
     # Guess wind variable names
     var_u = next((v for v in ds.data_vars if "eastward" in ds[v].attrs.get("standard_name", "").lower()
@@ -133,32 +130,18 @@ def build_wind_sampler(ds: xr.Dataset):
     u_vals = ds.u10.values
     v_vals = ds.v10.values
     def _attach_source(sampler):
-        src = None
-        urls = None
-        try:
-            src = ds.attrs.get("source_desc") or ds.attrs.get("source")
-            urls = ds.attrs.get("source_urls")
-        except Exception:
-            pass
+        src = ds.attrs.get("source_desc") or ds.attrs.get("source")
+        urls = ds.attrs.get("source_urls")
         if src:
-            try:
-                sampler._source = src
-            except Exception:
-                pass
+            sampler._source = src
         if urls:
-            try:
-                sampler._source_urls = urls
-            except Exception:
-                pass
+            sampler._source_urls = urls
         return sampler
     # Diagnostic: print u10/v10 shapes and dataset coordinate shapes
-    try:
-        print(f"[wind_sampler][diag] u10.shape={u_vals.shape} v10.shape={v_vals.shape}")
-        coord_info = {name: getattr(coord, 'values', None).shape if getattr(coord, 'values', None) is not None else None for name, coord in ds.coords.items()}
-        print(f"[wind_sampler][diag] ds.coords shapes: {coord_info}")
-        print(f"[wind_sampler][diag] ds.u10.dims={ds.u10.dims}")
-    except Exception:
-        pass
+    print(f"[wind_sampler][diag] u10.shape={u_vals.shape} v10.shape={v_vals.shape}")
+    coord_info = {name: getattr(coord, 'values', None).shape if getattr(coord, 'values', None) is not None else None for name, coord in ds.coords.items()}
+    print(f"[wind_sampler][diag] ds.coords shapes: {coord_info}")
+    print(f"[wind_sampler][diag] ds.u10.dims={ds.u10.dims}")
     # print("u10:", u_vals)
     # print("v10:", v_vals)
 
@@ -181,14 +164,14 @@ def build_wind_sampler(ds: xr.Dataset):
         time_dim = dims[0]
 
     # build t_axis from the chosen time_dim if it contains datetimes
-    t_axis = None
-    try:
-        t_axis = ds.coords[time_dim].values.astype('datetime64[s]').astype(np.int64)
-    except Exception:
-        try:
-            t_axis = ds.coords[time_dim].values
-        except Exception:
-            t_axis = None
+    coord = ds.coords.get(time_dim)
+    if coord is None:
+        raise KeyError(f"Missing time coordinate '{time_dim}' in wind dataset")
+    coord_vals = coord.values
+    if np.issubdtype(coord_vals.dtype, np.datetime64):
+        t_axis = coord_vals.astype('datetime64[s]').astype(np.int64)
+    else:
+        t_axis = coord_vals
 
     # Ensure u_vals has a leading time axis at position 0 matching time_dim
     # Move the time_dim to axis 0 then reshape spatial dims later.
@@ -217,14 +200,14 @@ def build_wind_sampler(ds: xr.Dataset):
         spatial_shape = u_vals.shape[1:]
         # Look for coords attached to u10 that have the same spatial shape
         for name, coord in getattr(ds.u10, 'coords', {}).items():
-            try:
-                if hasattr(coord.values, 'shape') and coord.values.shape == spatial_shape:
-                    if 'lon' in name.lower() or 'x' in name.lower():
-                        lon = coord
-                    if 'lat' in name.lower() or 'y' in name.lower():
-                        lat = coord
-            except Exception:
+            coord_vals = getattr(coord, 'values', None)
+            if coord_vals is None:
                 continue
+            if hasattr(coord_vals, 'shape') and coord_vals.shape == spatial_shape:
+                if 'lon' in name.lower() or 'x' in name.lower():
+                    lon = coord
+                if 'lat' in name.lower() or 'y' in name.lower():
+                    lat = coord
 
         # If we didn't find explicit lon/lat coords attached to u10, try the dataset-level lon/lat
         if lon is None or lat is None:
@@ -236,14 +219,14 @@ def build_wind_sampler(ds: xr.Dataset):
             else:
                 # last resort: try any coords in dataset matching spatial shape
                 for name, coord in ds.coords.items():
-                    try:
-                        if hasattr(coord.values, 'shape') and coord.values.shape == spatial_shape:
-                            if lon is None:
-                                lon = coord
-                            elif lat is None:
-                                lat = coord
-                    except Exception:
+                    coord_vals = getattr(coord, 'values', None)
+                    if coord_vals is None:
                         continue
+                    if hasattr(coord_vals, 'shape') and coord_vals.shape == spatial_shape:
+                        if lon is None:
+                            lon = coord
+                        elif lat is None:
+                            lat = coord
 
         if lon is None or lat is None:
             raise ValueError(f"'u10' variable lacks aligned lon/lat coordinates. Tried spatial_shape={spatial_shape}")
@@ -309,15 +292,11 @@ def build_wind_sampler(ds: xr.Dataset):
         # Diagnostic: print basic stats about the native u/v arrays so we can
         # detect empty or all-zero data early. This helps debug station-based
         # OFS files that end up producing zero winds in the viewer.
-        try:
-            u0 = u_flat[0]
-            v0 = v_flat[0]
-            print(f"[wind_sampler][debug] native u: shape={u_vals.shape} min={np.nanmin(u0):.6f} max={np.nanmax(u0):.6f} nonzero={int(np.count_nonzero(u0))}")
-            print(f"[wind_sampler][debug] native v: shape={v_vals.shape} min={np.nanmin(v0):.6f} max={np.nanmax(v0):.6f} nonzero={int(np.count_nonzero(v0))}")
-            print(f"[wind_sampler][debug] sample lon/lat pts (first 5): {xy[:5].tolist()}")
-        except Exception:
-            # non-fatal; continue
-            pass
+        u0 = u_flat[0]
+        v0 = v_flat[0]
+        print(f"[wind_sampler][debug] native u: shape={u_vals.shape} min={np.nanmin(u0):.6f} max={np.nanmax(u0):.6f} nonzero={int(np.count_nonzero(u0))}")
+        print(f"[wind_sampler][debug] native v: shape={v_vals.shape} min={np.nanmin(v0):.6f} max={np.nanmax(v0):.6f} nonzero={int(np.count_nonzero(v0))}")
+        print(f"[wind_sampler][debug] sample lon/lat pts (first 5): {xy[:5].tolist()}")
 
         warned = {"once": False}
 
@@ -338,11 +317,8 @@ def build_wind_sampler(ds: xr.Dataset):
             if not warned["once"]:
                 if np.allclose(out, 0.0):
                     warned["once"] = True
-                    try:
-                        sample_idx = idx[:10]
-                        print(f"[wind_sampler][warn] sampler returned all zeros for t_idx={t_idx}.\n first_query_idxs={sample_idx.tolist()}\n first_u={u_slice[sample_idx].tolist()}\n first_v={v_slice[sample_idx].tolist()}")
-                    except Exception:
-                        print(f"[wind_sampler][warn] sampler returned all zeros for t_idx={t_idx} (could not print samples)")
+                    sample_idx = idx[:10]
+                    print(f"[wind_sampler][warn] sampler returned all zeros for t_idx={t_idx}.\n first_query_idxs={sample_idx.tolist()}\n first_u={u_slice[sample_idx].tolist()}\n first_v={v_slice[sample_idx].tolist()}")
 
             return out
 
