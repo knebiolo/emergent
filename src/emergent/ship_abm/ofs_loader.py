@@ -129,6 +129,14 @@ def _monthly_urls_for_day(model: str, day: date) -> list[str]:
     return urls
 
 
+def _iter_nearby_days(target: date, max_days: int) -> Iterable[date]:
+    """Yield dates nearest to target (0, +1, -1, +2, -2, ...)."""
+    yield target
+    for offset in range(1, max_days + 1):
+        yield target + timedelta(days=offset)
+        yield target - timedelta(days=offset)
+
+
 def _parse_regulargrid_time(url: str) -> dt.datetime | None:
     name = os.path.basename(url)
     match = _REGULARGRID_RE.search(name)
@@ -178,6 +186,15 @@ def _open_dataset_any(url: str, drop_vars: list[str] | None = None) -> xr.Datase
 
 
 def _select_uv_vars(ds: xr.Dataset, url: str) -> xr.Dataset:
+    # Preserve horizontal coordinate variables that are often stored as data_vars
+    coord_candidates = [
+        "lon", "lat", "lonc", "latc", "longitude", "latitude", "Longitude", "Latitude",
+        "lon_rho", "lat_rho", "lon_u", "lat_u", "lon_v", "lat_v",
+    ]
+    coord_to_set = [name for name in coord_candidates if name in ds and name not in ds.coords]
+    if coord_to_set:
+        ds = ds.set_coords(coord_to_set)
+
     # Variable aliases (depth-avg and surface)
     var_pairs = [
         ("u_sur", "v_sur"),     # WCOFS/ROMS surface-only files
@@ -286,6 +303,20 @@ def _normalize_current_ds(
         ds = _regularize_lon_lat(ds)
         ds = _crop_to_bbox(ds, bbox)
 
+    return ds
+
+
+def _daily_average_current(ds: xr.Dataset, target_dt: dt.datetime) -> xr.Dataset:
+    """Collapse time to a single daily-average snapshot and set time to target_dt."""
+    if "time" in ds.dims:
+        if ds.sizes.get("time", 1) > 1:
+            ds = ds.mean(dim="time", skipna=True, keep_attrs=True)
+        if "time" not in ds.dims:
+            ds = ds.expand_dims("time")
+    else:
+        ds = ds.expand_dims("time")
+    ds = ds.assign_coords(time=[np.datetime64(target_dt)])
+    ds.attrs["daily_average"] = True
     return ds
 
 
@@ -447,6 +478,9 @@ model: str,
 start,
 bbox: Tuple[float, float, float, float], # lon_min, lon_max, lat_min, lat_max
 time_window_hours: float = 0.0,
+search_days: int = 14,
+nearest: bool = False,
+prefer_daily: bool = True,
 ) -> xr.Dataset:
     start_dt = start if isinstance(start, dt.datetime) else dt.datetime.combine(start, dt.time(0))
 
@@ -456,20 +490,29 @@ time_window_hours: float = 0.0,
         if ds_ts is not None:
             return ds_ts
 
-    # Find a single file within the last 14 days - STOP AT FIRST SUCCESS
-    for day in (start_dt.date() - timedelta(n) for n in range(0, 15)):
-        # Prefer daily netCDF4 first; fall back to monthly archive only if needed
-        url = first_existing_url(candidate_urls(model, day, include_monthly=False))
-        if url:
-            print('[ofs_loader] Opening: ' + str(url))
-            ds = _open_dataset_any(url, drop_vars=['siglay', 'siglev'])
-            ds = _normalize_current_ds(ds, bbox, url=url, file_time=None)
-            ds.attrs['source_urls'] = [url]
-            ds.attrs['source_desc'] = 'NOAA OFS ' + str(model)
-            print('[ofs_loader] [OK] Successfully opened dataset from ' + str(day))
-            return ds
+    # Find a single file near the requested day - STOP AT FIRST SUCCESS
+    if nearest:
+        day_iter = _iter_nearby_days(start_dt.date(), max_days=search_days)
+    else:
+        day_iter = (start_dt.date() - timedelta(n) for n in range(0, search_days + 1))
 
-        # Only try monthly archives if no daily file was found
+    for day in day_iter:
+        if prefer_daily:
+            # Prefer daily netCDF4 first; fall back to monthly archive only if needed
+            url = first_existing_url(candidate_urls(model, day, include_monthly=False))
+            if url:
+                print('[ofs_loader] Opening: ' + str(url))
+                ds = _open_dataset_any(url, drop_vars=['siglay', 'siglev'])
+                ds = _normalize_current_ds(ds, bbox, url=url, file_time=None)
+                ds.attrs['source_urls'] = [url]
+                ds.attrs['source_desc'] = 'NOAA OFS ' + str(model)
+                ds.attrs['source_date'] = day.isoformat()
+                if nearest and day != start_dt.date():
+                    ds.attrs['source_date_requested'] = start_dt.date().isoformat()
+                print('[ofs_loader] [OK] Successfully opened dataset from ' + str(day))
+                return ds
+
+        # Only try monthly archives if no daily file was found (or prefer_daily=False)
         monthly_urls = _monthly_urls_for_day(model, day)
         if monthly_urls:
             def _pref_key(u: str):
@@ -486,10 +529,14 @@ time_window_hours: float = 0.0,
                 ds = _normalize_current_ds(ds, bbox, url=url, file_time=None)
                 ds.attrs['source_urls'] = [url]
                 ds.attrs['source_desc'] = 'NOAA OFS ' + str(model)
+                ds.attrs['source_date'] = day.isoformat()
+                if nearest and day != start_dt.date():
+                    ds.attrs['source_date_requested'] = start_dt.date().isoformat()
                 print('[ofs_loader] [OK] Successfully opened dataset from ' + str(day))
                 return ds
 
-    raise FileNotFoundError('No ' + str(model).upper() + ' data could be opened in last 14 days')
+    scope = f"within {search_days} days of {start_dt.date().isoformat()}" if nearest else f"in last {search_days} days"
+    raise FileNotFoundError('No ' + str(model).upper() + f' data could be opened {scope}')
 
 # def open_ofs_subset(
 #     model: str,
@@ -609,6 +656,10 @@ def get_current_fn(
     start: dt.datetime | None = None,
     land_gdf=None,
     time_window_hours: float | None = None,
+    daily_average: bool = False,
+    search_days: int = 14,
+    nearest: bool = False,
+    prefer_daily: bool = True,
 ) -> Callable[[np.ndarray, np.ndarray, dt.datetime], np.ndarray]:
     """Return f(lon, lat, when)->(N,2) m/s.
     Tries regional OFS → RTOFS, then falls back to a tidal proxy.
@@ -624,27 +675,63 @@ def get_current_fn(
     if start is None:
         start = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0)
     start_dt = start
-    window_hours = time_window_hours if time_window_hours is not None else 0.0
+    if daily_average:
+        window_hours = 0.0
+    else:
+        window_hours = time_window_hours if time_window_hours is not None else 0.0
         
     model = OFS_MODEL_MAP.get(port, "rtofs").lower()
     
     try:
-        ds = open_ofs_subset(model, start_dt, bbox, time_window_hours=window_hours)
+        ds = open_ofs_subset(
+            model,
+            start_dt,
+            bbox,
+            time_window_hours=window_hours,
+            search_days=search_days,
+            nearest=nearest,
+            prefer_daily=prefer_daily,
+        )
         print(f"[ofs_loader] [OK] Using {model.upper()} data")
     except FileNotFoundError as e:
         print(f"[ofs_loader] WARN: {model.upper()} open failed ({str(e)}); trying RTOFS...")
-        ds = open_ofs_subset("rtofs", start_dt, bbox, time_window_hours=window_hours)
+        ds = open_ofs_subset(
+            "rtofs",
+            start_dt,
+            bbox,
+            time_window_hours=window_hours,
+            search_days=search_days,
+            nearest=nearest,
+            prefer_daily=prefer_daily,
+        )
         print(f"[ofs_loader] [OK] Using RTOFS data")
+
+    if daily_average:
+        ds = _daily_average_current(ds, start_dt)
+        src = ds.attrs.get("source_desc")
+        if src:
+            ds.attrs["source_desc"] = f"{src} (daily avg)"
+        requested = start_dt.date().isoformat()
+        actual = ds.attrs.get("source_date")
+        if actual and actual != requested:
+            ds.attrs.setdefault("source_date_requested", requested)
+            print(f"[ofs_loader] WARN: no data for {requested}; using nearest {actual}")
     
     def _attach_source(sampler, source_override: str | None = None):
         src = source_override
         if src is None:
             src = ds.attrs.get("source_desc")
         urls = ds.attrs.get("source_urls")
+        date_used = ds.attrs.get("source_date")
+        date_req = ds.attrs.get("source_date_requested")
         if src:
             sampler._source = src
         if urls:
             sampler._source_urls = urls
+        if date_used:
+            sampler._source_date = date_used
+        if date_req:
+            sampler._source_date_requested = date_req
         if window_hours and start_dt:
             end_dt = start_dt + dt.timedelta(hours=float(window_hours))
             sampler._source_window = (start_dt.isoformat(), end_dt.isoformat())

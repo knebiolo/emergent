@@ -599,7 +599,13 @@ class simulation:
                     # be defensive: ignore any drawing errors from GUI objects
                     pass
 
-    def load_environmental_forcing(self, start: 'datetime | None' = None):
+    def load_environmental_forcing(
+        self,
+        start: 'datetime | None' = None,
+        historical_daily_average: bool | None = None,
+        historical_cutoff_days: int = 30,
+        historical_search_days: int = 30,
+    ):
         """
         Load environmental forcing data (currents and winds) from NOAA sources.
         This should be called AFTER Qt GUI is fully initialized to avoid threading conflicts.
@@ -621,11 +627,41 @@ class simulation:
         except Exception:
             window_hours = None
 
+        # If the start date is far in the past, use daily-average currents and nearest-day search.
+        if historical_daily_average is None:
+            try:
+                now = datetime.utcnow()
+                if getattr(start, 'tzinfo', None) is not None:
+                    now = datetime.now(timezone.utc)
+                age_days = (now - start).days
+            except Exception:
+                age_days = None
+            if age_days is not None and age_days >= historical_cutoff_days:
+                historical_daily_average = True
+            else:
+                historical_daily_average = False
+
+        search_days = 14
+        prefer_daily = True
+        nearest = False
+        if historical_daily_average:
+            window_hours = 0.0
+            nearest = True
+            search_days = historical_search_days
+            if search_days is None or search_days < historical_cutoff_days:
+                search_days = historical_cutoff_days
+            print(
+                f"[Simulation] Using daily-average currents for {start.date()} "
+                f"(nearest search +/-{search_days} days)"
+            )
+
         def _log_source(kind: str, sampler):
             src = getattr(sampler, '_source', None)
             urls = getattr(sampler, '_source_urls', None)
             window = getattr(sampler, '_source_window', None)
-            if not (src or urls or window):
+            date_used = getattr(sampler, '_source_date', None)
+            date_req = getattr(sampler, '_source_date_requested', None)
+            if not (src or urls or window or date_used or date_req):
                 return
             parts = []
             if src:
@@ -639,6 +675,11 @@ class simulation:
                 else:
                     url_str = str(urls)
                 parts.append(f"urls={url_str}")
+            if date_used:
+                if date_req and date_req != date_used:
+                    parts.append(f"date={date_used} (requested {date_req})")
+                else:
+                    parts.append(f"date={date_used}")
             if window:
                 if isinstance(window, (list, tuple)) and len(window) >= 2:
                     parts.append(f"window={window[0]}..{window[1]}")
@@ -810,6 +851,10 @@ class simulation:
                     start=start,
                     land_gdf=land_gdf,
                     time_window_hours=window_hours,
+                    daily_average=historical_daily_average,
+                    search_days=search_days,
+                    nearest=nearest,
+                    prefer_daily=prefer_daily,
                 )
                 # wrap with robust query wrapper then normalize output shape
                 self.current_fn = _normalize_env_sampler(wrap_sampler_for_queries(raw_current))

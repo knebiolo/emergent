@@ -519,14 +519,18 @@ class ship_viewer(QtWidgets.QWidget):
         self._env_log_timer.start()
 
         class _EnvLoaderThread(QtCore.QThread):
-            def __init__(self, sim):
+            def __init__(self, sim, start_dt):
                 super().__init__()
                 self.sim = sim
+                self.start_dt = start_dt
                 self._error = None
             def run(self):
                 try:
                     print("[ShipViewer] Loading environmental forcing (thread)...")
-                    self.sim.load_environmental_forcing()
+                    if self.start_dt is not None:
+                        self.sim.load_environmental_forcing(start=self.start_dt)
+                    else:
+                        self.sim.load_environmental_forcing()
                 except Exception as e:
                     self._error = str(e)
 
@@ -536,7 +540,8 @@ class ship_viewer(QtWidgets.QWidget):
             if getattr(self, 'chk_stream_logs', None) and self.chk_stream_logs.isChecked():
                 self.force_stream_logs = True
 
-            self._env_thread = _EnvLoaderThread(self.sim)
+            start_dt = self._get_selected_start_dt()
+            self._env_thread = _EnvLoaderThread(self.sim, start_dt)
             def _on_env_done():
                 try:
                     self._env_log_timer.stop()
@@ -584,12 +589,25 @@ class ship_viewer(QtWidgets.QWidget):
         except Exception as e:
             print(f"[ShipViewer] Thread failed to start, loading synchronously: {e}")
             try:
-                self.sim.load_environmental_forcing()
+                start_dt = self._get_selected_start_dt()
+                if start_dt is not None:
+                    self.sim.load_environmental_forcing(start=start_dt)
+                else:
+                    self.sim.load_environmental_forcing()
                 _poll_logs()
                 self._draw_quivers()
             except Exception as e2:
                 print(f"[ShipViewer] Sync load failed: {e2}")
     
+    def _get_selected_start_dt(self):
+        """Return the selected datetime from the UI date picker, or None."""
+        try:
+            if hasattr(self, "dt_edit"):
+                return self.dt_edit.dateTime().toPyDateTime()
+        except Exception:
+            return None
+        return None
+
     def _init_gui_controls(self, test_mode, ctrl_layout):
         """Initialize GUI controls - called from __init__ after quiver setup is deferred."""
         # ── status labels ────────────────────────────────────────────
@@ -1123,18 +1141,23 @@ class ship_viewer(QtWidgets.QWidget):
                         if not getattr(self.sim, '_env_loaded', False):
                             # reuse Env loader thread pattern
                             class _EnvLoaderThread2(QtCore.QThread):
-                                def __init__(self, sim):
+                                def __init__(self, sim, start_dt):
                                     super().__init__()
                                     self.sim = sim
+                                    self.start_dt = start_dt
                                     self._error = None
                                 def run(self):
                                     try:
                                         print('[ShipViewer] Loading environmental forcing (post-ENC reload)...')
-                                        self.sim.load_environmental_forcing()
+                                        if self.start_dt is not None:
+                                            self.sim.load_environmental_forcing(start=self.start_dt)
+                                        else:
+                                            self.sim.load_environmental_forcing()
                                     except Exception as e:
                                         self._error = str(e)
 
-                            self._env_thread = _EnvLoaderThread2(self.sim)
+                            start_dt = self._get_selected_start_dt()
+                            self._env_thread = _EnvLoaderThread2(self.sim, start_dt)
 
                             def _on_env_done_after_reload():
                                 try:
