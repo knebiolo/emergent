@@ -103,3 +103,10 @@ def test_pixel_geo_roundtrip():
     assert cols[0] == 0
     assert rows[1] == 0
     assert cols[1] == 0
+
+
+def test_get_arr():
+    arr = utils.get_arr(False)
+    assert arr is np
+    arr_gpu = utils.get_arr(True)
+    assert getattr(arr_gpu, "__name__", "") in ("numpy", "cupy")

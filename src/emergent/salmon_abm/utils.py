@@ -7,6 +7,21 @@ from typing import Any, Tuple, Union
 import numpy as np
 
 
+def get_arr(use_gpu: bool):
+    """Return CuPy when requested and available, otherwise NumPy.
+
+    Matches legacy sockeye behavior: optional GPU acceleration with fallback.
+    """
+    if use_gpu:
+        try:
+            import cupy as cp
+            return cp
+        except (ImportError, ModuleNotFoundError):
+            print("CuPy not found. Falling back to Numpy.")
+            return np
+    return np
+
+
 def _is_transform_like(obj: Any) -> bool:
     if obj is None:
         return False
