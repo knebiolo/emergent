@@ -172,14 +172,18 @@ def _open_dataset_any(url: str, drop_vars: list[str] | None = None) -> xr.Datase
                     shutil.copyfileobj(fin, tmpf)
 
             if magic and magic.startswith(b"CDF"):
-                return xr.open_dataset(tmp_path, engine="scipy")
+                # Windows keeps the tempfile locked while the dataset is open.
+                # Load fully, close file handle, then return an in-memory dataset.
+                with xr.open_dataset(tmp_path, engine="scipy", drop_variables=drop_vars) as ds_tmp:
+                    return ds_tmp.load()
 
-            return xr.open_dataset(
+            with xr.open_dataset(
                 tmp_path,
                 engine="h5netcdf",
                 chunks={"time": 1},
                 drop_variables=drop_vars,
-            )
+            ) as ds_tmp:
+                return ds_tmp.load()
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -774,30 +778,9 @@ def get_current_fn(
         return _attach_source(sample)
 
     if "lon" in ds and ds.lon.ndim == 2:
-        # Structured 2-D grid: bilinear interp
-        def sample(lons: np.ndarray, lats: np.ndarray, when: dt.datetime):
-            lons = np.asarray(lons, dtype=float)
-            lats = np.asarray(lats, dtype=float)
-
-            if lon_0360:
-                lons = np.where(lons < 0.0, lons + 360.0, lons)
-            arr = ds.interp(
-                time=np.datetime64(when),
-                lon=("points", lons),
-                lat=("points", lats),
-                method="linear",
-                kwargs={"fill_value": np.nan},
-            )
-            u = arr.u.values
-            v = arr.v.values
-            if u.ndim == 2: # squeeze time
-                u = u[0]
-                v = v[0]
-            return np.column_stack((u, v))
-        # annotate sampler for downstream resampling/diagnostics
-        sample._native = 'structured'
-        sample._lon_0360 = lon_0360
-        return _attach_source(sample)
+        # 2-D lon/lat coords on (ny,nx)-style grids are not valid interp dimensions
+        # for xarray.interp. Use the KDTree branch below instead.
+        print("[ofs_loader] Detected 2-D lon/lat grid - using nearest-neighbor sampler")
     
     # ROMS curvilinear C-grid: Use NearestNDInterpolator (FAST, no Delaunay)
     is_roms = "lon_rho" in ds or "lon_u" in ds

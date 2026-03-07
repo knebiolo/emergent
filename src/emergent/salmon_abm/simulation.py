@@ -8,6 +8,8 @@ weight to remain testable without heavy environment data.
 import os
 import tempfile
 import sys
+import importlib
+import importlib.util
 import h5py
 import numpy as np
 import logging
@@ -19,6 +21,111 @@ except Exception:  # pragma: no cover
 from typing import Optional
 from emergent.salmon_abm import utils, io, pid, agents, hdf5_io, hecras_io
 from emergent.salmon_abm import movement as movement_mod, behavior as behavior_mod, fatigue as fatigue_mod
+
+
+def probe_numba_cuda_runtime() -> dict:
+    """Return diagnostics for Numba CUDA runtime availability.
+
+    This is intentionally explicit so callers can see exactly why GPU mode is
+    unavailable instead of falling back silently.
+    """
+    diag = {
+        'backend': 'numba-cuda',
+        'python_version': sys.version.split()[0],
+        'numba_installed': False,
+        'numba_version': None,
+        'numba_cuda_importable': False,
+        'cuda_available': False,
+        'device_count': 0,
+        'device_name': None,
+        'compute_capability': None,
+        'ready': False,
+        'issues': [],
+    }
+
+    if importlib.util.find_spec('numba') is None:
+        diag['issues'].append("Python package 'numba' is not installed.")
+        return diag
+
+    diag['numba_installed'] = True
+    try:
+        numba_mod = importlib.import_module('numba')
+        diag['numba_version'] = getattr(numba_mod, '__version__', None)
+    except Exception as e:
+        diag['issues'].append(f"Failed to import 'numba': {type(e).__name__}: {e}")
+        return diag
+
+    try:
+        cuda_mod = importlib.import_module('numba.cuda')
+        diag['numba_cuda_importable'] = True
+    except Exception as e:
+        diag['issues'].append(f"Failed to import 'numba.cuda': {type(e).__name__}: {e}")
+        return diag
+
+    try:
+        cuda_available = bool(cuda_mod.is_available())
+    except Exception as e:
+        diag['issues'].append(f"Failed checking cuda.is_available(): {type(e).__name__}: {e}")
+        return diag
+
+    diag['cuda_available'] = cuda_available
+    if not cuda_available:
+        diag['issues'].append(
+            "CUDA is not available to Numba (missing/incompatible driver or toolkit, "
+            "or no visible GPU device)."
+        )
+        return diag
+
+    try:
+        device_count = len(cuda_mod.gpus)
+    except Exception as e:
+        diag['issues'].append(f"Failed querying CUDA devices: {type(e).__name__}: {e}")
+        return diag
+
+    diag['device_count'] = int(device_count)
+    if diag['device_count'] <= 0:
+        diag['issues'].append('No CUDA devices were detected by Numba.')
+        return diag
+
+    try:
+        dev0 = cuda_mod.gpus[0]
+        with dev0:
+            current = cuda_mod.get_current_device()
+            name = getattr(current, 'name', None)
+            if isinstance(name, bytes):
+                name = name.decode(errors='replace')
+            diag['device_name'] = str(name) if name is not None else None
+            cc = getattr(current, 'compute_capability', None)
+            if cc is not None:
+                diag['compute_capability'] = f"{cc[0]}.{cc[1]}"
+    except Exception as e:
+        diag['issues'].append(f"Failed reading CUDA device properties: {type(e).__name__}: {e}")
+        return diag
+
+    diag['ready'] = True
+    return diag
+
+
+def _format_gpu_runtime_error(diag: dict) -> str:
+    lines = [
+        "GPU mode requested (`use_gpu=True`) but CUDA runtime is not ready.",
+        f"backend={diag.get('backend')}",
+        f"python={diag.get('python_version')}",
+        f"numba_installed={diag.get('numba_installed')}",
+        f"numba_version={diag.get('numba_version')}",
+        f"numba_cuda_importable={diag.get('numba_cuda_importable')}",
+        f"cuda_available={diag.get('cuda_available')}",
+        f"device_count={diag.get('device_count')}",
+        f"device_name={diag.get('device_name')}",
+        f"compute_capability={diag.get('compute_capability')}",
+    ]
+    issues = list(diag.get('issues') or [])
+    if issues:
+        lines.append('issues:')
+        for issue in issues:
+            lines.append(f"- {issue}")
+    lines.append("Fix CUDA/driver environment first, then retry with `use_gpu=True`.")
+    return "\n".join(lines)
 
 
 class simulation:
@@ -45,6 +152,15 @@ class simulation:
                  hecras_time_mode: Optional[str] = None,
                  hecras_cell_size: Optional[float] = None,
                  hecras_wetted_threshold: float = 0.05):
+        self.use_gpu = bool(use_gpu)
+        self.gpu_diagnostics = None
+        self.cuda_diagnostics = None  # back-compat alias for callers
+        if self.use_gpu:
+            self.gpu_diagnostics = probe_numba_cuda_runtime()
+            self.cuda_diagnostics = self.gpu_diagnostics
+            if not bool(self.gpu_diagnostics.get('ready', False)):
+                raise RuntimeError(_format_gpu_runtime_error(self.gpu_diagnostics))
+
         self.model_dir = model_dir
         self.model_name = model_name
         self.crs = crs

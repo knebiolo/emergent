@@ -120,6 +120,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--basin', type=str, default='nuyakuk', help='Basin name')
     parser.add_argument('--water-temp', type=float, default=10.0, help='Water temperature (deg C)')
+    parser.add_argument('--use-gpu', action='store_true', help='Enable GPU mode (fails loud if CUDA runtime is not ready)')
     parser.add_argument('--env-dir', type=str, default=None, help='Directory containing environment rasters (depth.tif, vel_*.tif) and start polygons')
     parser.add_argument('--start-polygon', type=str, default=None, help='Start polygon shapefile path (default: env-dir/start_loc_river_right.shp if present)')
     parser.add_argument('--longitudinal-profile', type=str, default=None, help='Optional longitudinal profile shapefile path')
@@ -234,6 +235,7 @@ def main():
         crs=None,
         basin=str(args.basin),
         water_temp=float(args.water_temp),
+        use_gpu=bool(args.use_gpu),
         start_polygon=start_poly,
         env_files=env_files,
         longitudinal_profile=longitudinal_profile,
@@ -249,6 +251,16 @@ def main():
         hecras_cell_size=args.hecras_cell_size,
         hecras_wetted_threshold=args.hecras_wetted_threshold,
     )
+    if bool(args.use_gpu):
+        diag = getattr(sim, 'gpu_diagnostics', None)
+        if diag:
+            log(
+                "[OK] GPU diagnostics: "
+                f"ready={diag.get('ready')} "
+                f"device_count={diag.get('device_count')} "
+                f"device_name={diag.get('device_name')} "
+                f"cc={diag.get('compute_capability')}"
+            )
 
     def _parse_output_keys(raw):
         if raw is None:

@@ -1,0 +1,47 @@
+{
+  "simulation": {
+    "port_name": "Baltimore",
+    "dt": 1.0,
+    "T": 1800.0,
+    "n_agents": 1,
+    "load_enc": true,
+    "random_seed": 42
+  },
+  "environmental": {
+    "start_datetime": "2024-03-26T04:58:00Z",
+    "use_cbofs": true
+  },
+  "events": {
+    "power_loss_schedule": [
+      {
+        "time_s": 900.0
+      }
+    ]
+  },
+  "route": {
+    "waypoints_lonlat": [
+      [
+        -76.5510,
+        39.2260
+      ],
+      [
+        -76.5000,
+        39.2000
+      ]
+    ]
+  },
+  "vessel": {
+    "initial_conditions": {
+      "speed_knots": 8.0
+    }
+  },
+  "incident_data": {
+    "collision_coordinates": {
+      "lon": -76.529704,
+      "lat": 39.215599
+    }
+  },
+  "output": {
+    "output_dir": "outputs"
+  }
+}
