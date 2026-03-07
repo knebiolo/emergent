@@ -2,8 +2,9 @@
 CANONICAL PRODUCTION SCRIPT FOR SALMON ABM
 
 Use this script for real simulation runs with full-scale agent counts.
-This runner uses the current `simulation.run(n=..., dt=...)` API and relies on
-`simulation(...)` to import environment rasters from `--env-dir`.
+This runner supports both:
+  - HECRAS direct mode via `--hecras-plan` (preferred)
+  - Raster environment mode via `--env-dir` (legacy fallback)
 
 Usage:
     # Standard production run
@@ -95,12 +96,28 @@ def _launch_viewer(h5_path: str, *, env_depth: str | None = None) -> None:
 
 def run_production(args):
     """Run production simulation."""
-    
+
     default_env_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'salmon_abm'))
     base = os.path.abspath(args.env_dir) if getattr(args, 'env_dir', None) else default_env_dir
-    env_files = discover_env_files(base)
-    if not env_files:
-        raise FileNotFoundError(f"No environment files found in {base} (expected depth.tif, vel_*.tif)")
+
+    hecras_plan = None
+    hecras_start_index = None
+    hecras_time_mode = None
+    env_files = []
+    if getattr(args, 'hecras_plan', None):
+        hecras_plan = os.path.abspath(args.hecras_plan)
+        if not os.path.exists(hecras_plan):
+            raise FileNotFoundError(f"HECRAS plan not found: {hecras_plan}")
+        hecras_start_index = (
+            int(args.hecras_start_index)
+            if args.hecras_start_index is not None
+            else 30
+        )
+        hecras_time_mode = str(args.hecras_time_mode or "loop").strip().lower()
+    else:
+        env_files = discover_env_files(base)
+        if not env_files:
+            raise FileNotFoundError(f"No environment files found in {base} (expected depth.tif, vel_*.tif)")
 
     if args.start_polygon is not None and str(args.start_polygon).strip().lower() in ("none", "null", ""):
         start_poly = None
@@ -135,7 +152,14 @@ def run_production(args):
     print(f"dt:        {args.dt}")
     print(f"Backend:   {args.backend}")
     print(f"Mode:      {args.write_mode}")
-    print(f"Env dir:   {base}")
+    if hecras_plan:
+        print("Input:     HECRAS direct")
+        print(f"HECRAS:    {hecras_plan}")
+        print(f"Time map:  start_index={hecras_start_index}, mode={hecras_time_mode}")
+        print(f"HECRAS k:  {int(args.hecras_k)}")
+    else:
+        print("Input:     Raster env (legacy)")
+        print(f"Env dir:   {base}")
     print(f"Start:     {start_poly if start_poly else '(none)'}")
     print(f"Output:    {outdir}")
     print("=" * 70)
@@ -156,6 +180,12 @@ def run_production(args):
         db_path=db_path,
         output_write_mode=str(args.write_mode),
         output_write_backend=str(args.backend),
+        hecras_plan_path=hecras_plan,
+        hecras_start_index=hecras_start_index,
+        hecras_time_mode=hecras_time_mode,
+        hecras_k=int(args.hecras_k or 8),
+        hecras_cell_size=args.hecras_cell_size,
+        hecras_wetted_threshold=args.hecras_wetted_threshold,
     )
     
     # Disable debug features for performance
@@ -196,6 +226,9 @@ def run_production(args):
         'timestamp': timestamp,
         'db_path': db_path,
         'status': status,
+        'hecras_plan': hecras_plan,
+        'hecras_start_index': hecras_start_index,
+        'hecras_time_mode': hecras_time_mode,
     }
 
     stats_path = os.path.join(outdir, f'{model_name}_stats.json')
@@ -225,6 +258,12 @@ def main():
     parser.add_argument('--basin', type=str, default='nuyakuk', help='Basin name')
     parser.add_argument('--water-temp', type=float, default=10.0, help='Water temperature (deg C)')
     parser.add_argument('--env-dir', type=str, default=None, help='Directory containing environment rasters (depth.tif, vel_*.tif) and start polygons')
+    parser.add_argument('--hecras-plan', type=str, default=None, help='Path to HECRAS plan HDF (preferred direct mode)')
+    parser.add_argument('--hecras-start-index', type=int, default=None, help='Start index into HECRAS time series (default: 30 when hecras-plan set)')
+    parser.add_argument('--hecras-time-mode', type=str, default=None, help='HECRAS time mode: time, index, loop, clamp, hold (default: loop when hecras-plan set)')
+    parser.add_argument('--hecras-k', type=int, default=8, help='HECRAS IDW neighbors (k)')
+    parser.add_argument('--hecras-cell-size', type=float, default=None, help='Optional HECRAS grid cell size (m) for t0 rasters')
+    parser.add_argument('--hecras-wetted-threshold', type=float, default=None, help='Optional depth threshold for wetted mask at t0 (m)')
     parser.add_argument('--start-polygon', type=str, default=None, help='Start polygon shapefile path (default: env-dir/start_loc_river_right.shp if present)')
     parser.add_argument('--longitudinal-profile', type=str, default=None, help='Optional longitudinal profile shapefile path (default: env-dir/longitudinal.shp if present)')
     parser.add_argument('--outdir', type=str, default=None, help='Output directory (default: outputs/production)')

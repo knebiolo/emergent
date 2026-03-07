@@ -22,6 +22,7 @@ INFRASTRUCTURE_SUMMARY.md
 README.md
 docs\ARCHITECTURE.md
 docs\HECRAS_HDF5_STRUCTURE.md
+docs\REMOTE_VIEWER_WORKFLOW.md
 docs\USER_CONFIG_OPTIONS.md
 src\emergent\salmon_abm\.ai_journal\long term\personality.md
 
@@ -125,9 +126,21 @@ python -m emergent.salmon_abm.realtime_viewer outputs/test/<model_name>.h5
 python -m emergent.salmon_abm.rl_training_viewer --model-dir data/salmon_abm --start-polygon data/salmon_abm/start_loc_river_right.shp
 
 ## Current IO Reality (CRITICAL)
-- The current Salmon ABM pipeline uses **static environmental rasters** (e.g., `data/salmon_abm/depth.tif`, `vel_x.tif`, `vel_y.tif`, etc.).
-- The software does **NOT** directly ingest HECRAS plan HDF5 in the main run path yet.
+- The Salmon ABM pipeline supports both:
+  - **HECRAS direct mode** (`--hecras-plan`) in `tools/test_salmon_abm.py` and `tools/run_salmon_production.py`.
+  - **Static raster mode** (`--env-dir`) as legacy fallback.
 - Wetted-perimeter inference for a future direct-HECRAS interface is **not implemented** yet; do not assume `sim.perimeter_*` exists unless you confirm it in code.
+
+## Remote Viewer Workflow (PowerShell + noVNC)
+- Use this when the laptop cannot install X11 tools and access is via VS Code tunnel/SSH.
+- Node-side startup:
+  - `cd /home/kevinnebiolo/emergent && tools/novnc_stack.sh start && DISPLAY=:1 conda run -n emergent python -m emergent.salmon_abm.realtime_viewer`
+- Laptop PowerShell tunnel:
+  - `Start-Process "http://127.0.0.1:6080/vnc.html"; ssh -N -L 6080`:127.0.0.1`:6080 kevinnebiolo@192.168.102.157`
+- Keep the PowerShell tunnel terminal open while using the viewer.
+- Run simulation in a separate node terminal.
+- Transfer large gitignored HDF inputs with `scp` into:
+  - `/home/kevinnebiolo/emergent/data/salmon_abm/`
 
 ## Behavioral Weights (CRITICAL)
 Behavioral weights are applied via the simulation's `test_weights` mechanism.
