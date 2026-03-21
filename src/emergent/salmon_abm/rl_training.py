@@ -46,6 +46,7 @@ class BehavioralWeights:
     
     # Collision avoidance
     collision_weight: float = 2000.0
+    separation_weight: float = 1500.0
     
     # Additional behavioral weights
     low_speed_weight: float = 1500.0
@@ -545,7 +546,8 @@ def compute_episode_reward(
     battery_history: Optional[np.ndarray] = None,
     longitudinal_profile: Optional[Any] = None,
     velocity_field_history: Optional[np.ndarray] = None,
-    reward_weights: Optional[Dict[str, float]] = None
+    reward_weights: Optional[Dict[str, float]] = None,
+    phase_callback: Optional[Callable[[str], None]] = None,
 ) -> Tuple[float, Dict[str, float]]:
     """
     Compute total reward for a training episode.
@@ -564,6 +566,7 @@ def compute_episode_reward(
         threat_level: 0.0 = relaxed, 1.0 = high threat
         boundary_coords: Optional boundary polygon vertices, shape (M, 2)
         boundary_threshold: Distance to boundary considered "near" (meters)
+        phase_callback: Optional callback for coarse progress updates during scoring
     
     Returns:
         Tuple of (total_reward, components_dict):
@@ -596,7 +599,7 @@ def compute_episode_reward(
             'drafting_benefit': 20.0,
             'boundary_penalty': -10.0,
             'mortality_penalty': -50.0,
-            'smoothness_penalty': 1.0,
+            'smoothness_penalty': -0.2,
             'fatigue_penalty': -0.9,
             'stagnation_penalty': -0.9,
             'rheotaxis_alignment': -100.0,
@@ -606,15 +609,34 @@ def compute_episode_reward(
     
     if T == 0 or N == 0:
         return 0.0, {}
+
+    def _emit_phase(message: str) -> None:
+        if phase_callback is None:
+            return
+        try:
+            phase_callback(str(message))
+        except Exception:
+            # Best-effort status hook; never fail reward computation on callback issues.
+            pass
+
+    def _emit_progress(prefix: str, idx: int, total: int) -> None:
+        if phase_callback is None or total <= 0:
+            return
+        step = idx + 1
+        interval = max(1, total // 4)
+        if step == 1 or step == total or (step % interval == 0):
+            _emit_phase(f"{prefix} {step}/{total}")
     
     # =================================================================
     # 1. Schooling Quality (averaged over time)
     # =================================================================
+    _emit_phase("scoring: schooling metrics")
     cohesion_scores = []
     alignment_scores = []
     separation_penalties = []
     
     for t in range(T):
+        _emit_progress("scoring: schooling", t, T)
         positions_t = positions_history[t]
         headings_t = headings_history[t]
         alive_t = alive_history[t]
@@ -648,6 +670,7 @@ def compute_episode_reward(
     # =================================================================
     # 2. Upstream Progress (Flow Vector Integration)
     # =================================================================
+    _emit_phase("scoring: upstream progress")
     # Use flow vector integration: measures distance swum AGAINST current
     # Works for braided channels, pools, and any river geometry
     # Formula: upstream_progress = sum(displacement · upstream_unit_vector)
@@ -664,6 +687,7 @@ def compute_episode_reward(
     total_upstream_progress = 0.0
     
     for t in range(1, T):
+        _emit_progress("scoring: upstream", t - 1, T - 1)
         alive_t = alive_history[t]
         if np.sum(alive_t) == 0:
             continue
@@ -703,11 +727,13 @@ def compute_episode_reward(
     # =================================================================
     # 3. Energy Efficiency (distance / speed²)
     # =================================================================
+    _emit_phase("scoring: energy efficiency")
     # Energy ∝ speed², so efficiency = distance traveled / sum(speed²)
     total_distance = 0.0
     total_energy = 0.0
     
     for t in range(1, T):
+        _emit_progress("scoring: energy", t - 1, T - 1)
         alive_t = alive_history[t]
         if np.sum(alive_t) == 0:
             continue
@@ -733,10 +759,12 @@ def compute_episode_reward(
     # =================================================================
     # 5. Boundary Proximity Penalty
     # =================================================================
+    _emit_phase("scoring: boundary proximity")
     agents_near_boundary = 0
     if boundary_coords is not None:
         # Count timesteps where agents are near boundary
         for t in range(T):
+            _emit_progress("scoring: boundary", t, T)
             alive_t = alive_history[t]
             if np.sum(alive_t) == 0:
                 continue
@@ -753,6 +781,7 @@ def compute_episode_reward(
     # =================================================================
     # 6. Mortality Penalty
     # =================================================================
+    _emit_phase("scoring: mortality")
     initial_alive = np.sum(alive_history[0])
     final_alive = np.sum(alive_history[-1])
     dead_count = initial_alive - final_alive
@@ -760,10 +789,12 @@ def compute_episode_reward(
     # =================================================================
     # 7. Movement Smoothness (acceleration changes)
     # =================================================================
+    _emit_phase("scoring: smoothness")
     # Compute acceleration changes (jerk)
     accel_smoothness_penalty = 0.0
     
     for t in range(2, T):
+        _emit_progress("scoring: smoothness", t - 2, T - 2)
         alive_t = alive_history[t]
         if np.sum(alive_t) == 0:
             continue
@@ -785,6 +816,7 @@ def compute_episode_reward(
     # =================================================================
     # 8. Fatigue Penalty (CRITICAL for preventing exhaustion)
     # =================================================================
+    _emit_phase("scoring: fatigue")
     # Heavily penalize low battery states to incentivize energy management
     fatigue_penalty = 0.0
     if battery_history is not None:
@@ -792,6 +824,7 @@ def compute_episode_reward(
         # Penalize time spent below threshold
         low_battery_threshold = 0.3  # Below 30% is critical
         for t in range(T):
+            _emit_progress("scoring: fatigue", t, T)
             alive_t = alive_history[t]
             if np.sum(alive_t) == 0:
                 continue
@@ -810,6 +843,7 @@ def compute_episode_reward(
     # =================================================================
     # 8. Rheotaxis Alignment (Swimming into Flow)
     # =================================================================
+    _emit_phase("scoring: stagnation")
     # Penalize stationary fish (vibrating in place / no movement)
     # Fish should actively swim, not form static lattices
     # Compute average displacement per timestep
@@ -817,6 +851,7 @@ def compute_episode_reward(
     stagnation_penalty = 0.0
     
     for t in range(1, T):
+        _emit_progress("scoring: stagnation", t - 1, T - 1)
         alive_t = alive_history[t]
         alive_prev = alive_history[t-1]
         alive_both = alive_t & alive_prev
@@ -841,10 +876,12 @@ def compute_episode_reward(
     # Formula: misalignment = 1 - cos(heading - upstream_angle)
     # Range: 0 (perfect alignment) to 2 (swimming downstream)
     
+    _emit_phase("scoring: rheotaxis alignment")
     rheotaxis_alignment_penalty = 0.0
     
     if velocity_field_history is not None:
         for t in range(T):
+            _emit_progress("scoring: rheotaxis", t, T)
             alive_t = alive_history[t]
             if np.sum(alive_t) == 0:
                 continue
@@ -880,6 +917,7 @@ def compute_episode_reward(
     # =================================================================
     # Total Reward Calculation
     # =================================================================
+    _emit_phase("scoring: aggregation")
     
     # CRITICAL: Penalize zero/near-zero schooling weights to prevent degenerate solutions
     # where fish ignore each other and just follow rheotaxis in a line
@@ -958,6 +996,7 @@ def compute_episode_reward(
         'weight_diversity_bonus': weight_diversity_bonus,
         'total': reward
     }
+    _emit_phase("scoring: complete")
     
     return reward, components
 
@@ -1002,6 +1041,10 @@ class RLTrainer:
                 - dt: Timestep duration in seconds (default 1.0)
                 - num_timesteps: Steps per episode (optional, for factory)
                 - reward_weights: Dict of reward multipliers (optional)
+                - initial_heading_mode: 'environment', 'upstream', 'uniform', or 'downstream'
+                - initial_sog_mode: 'environment', 'uniform', or 'fixed'
+                - initial_sog_min: Minimum SOG for uniform/fixed modes (m/s)
+                - initial_sog_max: Maximum SOG for uniform mode (m/s)
         """
         self.simulation_factory = simulation_factory
         self.initial_weights = initial_weights if initial_weights else BehavioralWeights()
@@ -1012,6 +1055,14 @@ class RLTrainer:
         self.body_length = config.get('body_length', 0.5)
         self.dt = config.get('dt', 1.0)
         self.num_timesteps = config.get('num_timesteps', 100)
+        self.initial_heading_mode = str(config.get('initial_heading_mode', 'environment')).strip().lower()
+        self.initial_sog_mode = str(config.get('initial_sog_mode', 'environment')).strip().lower()
+        self.initial_sog_min = float(config.get('initial_sog_min', 0.1))
+        self.initial_sog_max = float(config.get('initial_sog_max', 1.5))
+        if self.initial_sog_max < self.initial_sog_min:
+            raise ValueError(
+                f"initial_sog_max ({self.initial_sog_max}) must be >= initial_sog_min ({self.initial_sog_min})"
+            )
         
         # Reward weights (objective function) - can be customized
         self.reward_weights = config.get('reward_weights', {
@@ -1023,7 +1074,7 @@ class RLTrainer:
             'drafting_benefit': 20.0,
             'boundary_penalty': -10.0,
             'mortality_penalty': -50.0,
-            'smoothness_penalty': 1.0,
+            'smoothness_penalty': -0.2,
             'fatigue_penalty': -0.9,
             'stagnation_penalty': -0.9,
             'rheotaxis_alignment': -100.0,
@@ -1033,10 +1084,49 @@ class RLTrainer:
         self.best_weights = self.initial_weights
         self.best_reward = -np.inf
         self.episode_history = []  # List of (episode_num, reward)
+
+    def _apply_initial_state_policy(self, sim: Any) -> None:
+        """Apply configured initial heading/SOG policy after spatial reset."""
+        rng = getattr(sim, "rng", None)
+        if rng is None:
+            rng = np.random.default_rng()
+
+        heading_mode = self.initial_heading_mode
+        if heading_mode in {"environment", "upstream"}:
+            pass
+        elif heading_mode == "uniform":
+            sim.heading = rng.uniform(0.0, 2.0 * np.pi, size=sim.num_agents).astype(np.float32)
+        elif heading_mode == "downstream":
+            vx = np.asarray(getattr(sim, "x_vel", np.zeros(sim.num_agents)), dtype=float)
+            vy = np.asarray(getattr(sim, "y_vel", np.zeros(sim.num_agents)), dtype=float)
+            heading = np.arctan2(vy, vx)
+            invalid = ~np.isfinite(heading)
+            if np.any(invalid):
+                heading[invalid] = rng.uniform(0.0, 2.0 * np.pi, size=int(np.count_nonzero(invalid)))
+            sim.heading = np.asarray(heading, dtype=np.float32)
+        else:
+            raise ValueError(f"Unsupported initial_heading_mode: {self.initial_heading_mode}")
+
+        sog_mode = self.initial_sog_mode
+        if sog_mode == "environment":
+            pass
+        elif sog_mode == "uniform":
+            sim.sog = rng.uniform(self.initial_sog_min, self.initial_sog_max, size=sim.num_agents).astype(np.float32)
+        elif sog_mode == "fixed":
+            sim.sog = np.full(sim.num_agents, self.initial_sog_min, dtype=np.float32)
+        else:
+            raise ValueError(f"Unsupported initial_sog_mode: {self.initial_sog_mode}")
+
+        sim.initial_fish_vel = np.stack(
+            (sim.sog * np.cos(sim.heading), sim.sog * np.sin(sim.heading)),
+            axis=1,
+        ).astype(np.float32)
         
     def run_episode(
         self,
-        weights: BehavioralWeights
+        weights: BehavioralWeights,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        progress_interval: int = 10,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Run a single simulation episode with given weights.
@@ -1053,6 +1143,7 @@ class RLTrainer:
         
         # Reset spatial state to get new random starting positions for this episode
         sim.reset_spatial_state()
+        self._apply_initial_state_policy(sim)
         
         # Get number of timesteps from simulation
         num_timesteps = sim.num_timesteps
@@ -1067,6 +1158,7 @@ class RLTrainer:
         velocity_field_history = np.zeros((num_timesteps, num_agents, 2), dtype=np.float32)
         
         # Run simulation timesteps (always start from t=0 for each episode)
+        progress_interval = max(1, int(progress_interval))
         for t in range(num_timesteps):
             # Run one timestep
             sim.timestep(t, self.dt)
@@ -1083,6 +1175,11 @@ class RLTrainer:
             # Collect water velocity field at agent positions (for flow integration)
             velocity_field_history[t, :, 0] = sim.x_vel
             velocity_field_history[t, :, 1] = sim.y_vel
+
+            if progress_callback is not None:
+                step_num = t + 1
+                if step_num == 1 or step_num == num_timesteps or (step_num % progress_interval == 0):
+                    progress_callback(step_num, num_timesteps)
         
         # Clean up simulation
         sim.close()

@@ -143,6 +143,9 @@ def run_production(args):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     model_name = f"{args.model_name}_{timestamp}"
     
+    backend_lower = str(args.backend or "sync").lower()
+    write_mode_lower = str(args.write_mode or "full").lower()
+
     print("=" * 70)
     print("SALMON ABM - PRODUCTION RUN")
     print("=" * 70)
@@ -187,6 +190,16 @@ def run_production(args):
         hecras_cell_size=args.hecras_cell_size,
         hecras_wetted_threshold=args.hecras_wetted_threshold,
     )
+
+    # Keep async "minimal" runs fast while still enabling fatigue-aware playback colors.
+    if backend_lower != "sync" and write_mode_lower == "minimal":
+        sim.output_write_keys = (
+            "agent_data/X",
+            "agent_data/Y",
+            "agent_data/battery",
+            "agent_data/heading",
+        )
+        print(f"Async keys: {','.join(sim.output_write_keys)}")
     
     # Disable debug features for performance
     sim.debug_movement = False
@@ -263,7 +276,7 @@ def main():
     parser.add_argument('--hecras-time-mode', type=str, default=None, help='HECRAS time mode: time, index, loop, clamp, hold (default: loop when hecras-plan set)')
     parser.add_argument('--hecras-k', type=int, default=8, help='HECRAS IDW neighbors (k)')
     parser.add_argument('--hecras-cell-size', type=float, default=None, help='Optional HECRAS grid cell size (m) for t0 rasters')
-    parser.add_argument('--hecras-wetted-threshold', type=float, default=None, help='Optional depth threshold for wetted mask at t0 (m)')
+    parser.add_argument('--hecras-wetted-threshold', type=float, default=0.05, help='Depth threshold for wetted mask at t0 (m, default: 0.05)')
     parser.add_argument('--start-polygon', type=str, default=None, help='Start polygon shapefile path (default: env-dir/start_loc_river_right.shp if present)')
     parser.add_argument('--longitudinal-profile', type=str, default=None, help='Optional longitudinal profile shapefile path (default: env-dir/longitudinal.shp if present)')
     parser.add_argument('--outdir', type=str, default=None, help='Output directory (default: outputs/production)')
