@@ -136,7 +136,7 @@ def main():
     parser.add_argument('--hecras-time-mode', type=str, default=None, help='HECRAS time mode: time, index, loop, clamp, hold (default: loop when hecras-plan set)')
     parser.add_argument('--hecras-k', type=int, default=8, help='HECRAS IDW neighbors (k)')
     parser.add_argument('--hecras-cell-size', type=float, default=None, help='Optional HECRAS grid cell size (m) for t0 rasters')
-    parser.add_argument('--hecras-wetted-threshold', type=float, default=None, help='Optional depth threshold for wetted mask at t0 (m)')
+    parser.add_argument('--hecras-wetted-threshold', type=float, default=0.05, help='Depth threshold for wetted mask at t0 (m, default: 0.05)')
     parser.add_argument('--quiet', action='store_true', help='Suppress status output (keep only progress bar if enabled)')
     parser.add_argument('--progress', action='store_true', help='Show a progress bar during simulation')
     parser.add_argument('--output-backend', type=str, default='sync', choices=('sync', 'thread', 'process', 'shm'), help='Output backend (sync or async writer)')

@@ -37,6 +37,13 @@ These are reset at the start of each new simulation:
 
 ## Usage
 
+### Current Mode Constraints (as of 2026-03-06)
+
+- RL training entrypoints are raster-oriented today.
+- `tools/train_behavioral_weights.py` expects `depth.tif` and `vel_*.tif` in `--model-dir`.
+- RL visualizer flow currently requires `longitudinal.shp` in `--model-dir`.
+- HECRAS-direct RL training/viewer support is planned but not yet merged into the canonical RL workflow.
+
 ### 1. Train Behavioral Weights (One-Time)
 
 ```powershell

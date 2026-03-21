@@ -49,6 +49,21 @@ try:
 except Exception:
     raise
 
+# Default canvas tone (muted sand) for no-raster background areas.
+DEFAULT_BG_RGB = (232, 223, 201)
+DEFAULT_WETTED_DEPTH_THRESHOLD = 0.05
+
+
+def _depth_to_blue_rgba(norm: np.ndarray, nodata_mask: np.ndarray) -> np.ndarray:
+    """Map normalized depth [0,1] to a pale-blue -> deep-blue RGBA image."""
+    n = np.clip(np.asarray(norm, dtype=float), 0.0, 1.0)
+    r = (220.0 - 170.0 * n).astype(np.uint8)
+    g = (232.0 - 120.0 * n).astype(np.uint8)
+    b = (242.0 - 20.0 * n).astype(np.uint8)
+    rgb = np.dstack([r, g, b])
+    alpha = (~np.asarray(nodata_mask, dtype=bool)).astype(np.uint8) * 245
+    return np.dstack([rgb, alpha])
+
 
 def _infer_n_agents_from_h5(f) -> Optional[int]:
     """Infer num agents from common 1D datasets, if present."""
@@ -181,22 +196,28 @@ def load_positions_from_h5(path: str) -> np.ndarray:
 def load_env_from_h5(path: str):
     """Load environment depth, x_coords, y_coords from HDF5 file.
     
-    Returns (depth_array, x_coords, y_coords) or (None, None, None) if not found.
+    Returns:
+        (depth_array, x_coords, y_coords, wetted_mask_array)
+        or (None, None, None, None) if not found.
     """
     if h5py is None:
-        return None, None, None
+        return None, None, None, None
     try:
-        f = h5py.File(path, "r")
-        if 'environment/depth' in f and 'environment/x_coords' in f and 'environment/y_coords' in f:
-            depth = np.array(f['environment/depth'])
-            x_coords = np.array(f['environment/x_coords'])
-            y_coords = np.array(f['environment/y_coords'])
-            f.close()
-            return depth, x_coords, y_coords
-        f.close()
+        with h5py.File(path, "r") as f:
+            if 'environment/depth' in f and 'environment/x_coords' in f and 'environment/y_coords' in f:
+                depth = np.array(f['environment/depth'])
+                x_coords = np.array(f['environment/x_coords'])
+                y_coords = np.array(f['environment/y_coords'])
+                wetted = None
+                if 'environment/wetted' in f:
+                    wetted = np.array(f['environment/wetted']).astype(bool)
+                else:
+                    # Fallback for legacy files where wetted was not persisted.
+                    wetted = np.isfinite(depth) & (depth > DEFAULT_WETTED_DEPTH_THRESHOLD)
+                return depth, x_coords, y_coords, wetted
     except Exception:
         pass
-    return None, None, None
+    return None, None, None, None
 
 
 def load_battery_from_h5(path: str):
@@ -272,7 +293,7 @@ def load_positions_from_csv(path: str) -> np.ndarray:
 
 
 class ReplayWidget(QOpenGLWidget):
-    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0, point_size: Optional[float] = None, env_depth: Optional[str] = None, allow_expand_bounds: bool = False, smooth_alpha: float = 1.0, env_clip_pct: tuple = (0.0, 100.0), env_depth_array: Optional[np.ndarray] = None, env_x_coords: Optional[np.ndarray] = None, env_y_coords: Optional[np.ndarray] = None, battery_array: Optional[np.ndarray] = None, heading_array: Optional[np.ndarray] = None):
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, pan_x: float = 0.0, pan_y: float = 0.0, point_size: Optional[float] = None, env_depth: Optional[str] = None, allow_expand_bounds: bool = False, smooth_alpha: float = 1.0, env_clip_pct: tuple = (0.0, 100.0), env_depth_array: Optional[np.ndarray] = None, env_x_coords: Optional[np.ndarray] = None, env_y_coords: Optional[np.ndarray] = None, wetted_mask_array: Optional[np.ndarray] = None, battery_array: Optional[np.ndarray] = None, heading_array: Optional[np.ndarray] = None):
         super().__init__(parent)
         if positions.ndim != 3 or positions.shape[2] != 2:
             raise ValueError("positions must be (T, N, 2)")
@@ -338,6 +359,10 @@ class ReplayWidget(QOpenGLWidget):
                 a = np.array(env_depth_array, dtype=float)
                 # detect nodata-like values
                 nodata_mask = np.isnan(a) | (a < -1e3)
+                if wetted_mask_array is not None:
+                    wet = np.asarray(wetted_mask_array, dtype=bool)
+                    if wet.shape == a.shape:
+                        nodata_mask = nodata_mask | (~wet)
                 valid_vals = a[~nodata_mask]
                 if valid_vals.size > 0:
                     # normalize to 0-255
@@ -350,10 +375,8 @@ class ReplayWidget(QOpenGLWidget):
                     norm = np.clip(norm, 0.0, 1.0)
                     img8 = (np.nan_to_num(norm) * 255.0).astype(np.uint8)
                     h, w = img8.shape
-                    # build RGBA
-                    rgb = np.dstack([img8, img8, img8])
-                    alpha = (~nodata_mask).astype(np.uint8) * 255
-                    rgba = np.dstack([rgb, alpha])
+                    # build RGBA using pale/deep blue colormap
+                    rgba = _depth_to_blue_rgba(norm, nodata_mask)
                     qimg = QImage(rgba.data.tobytes(), w, h, 4 * w, QImage.Format_RGBA8888)
                     # Compute bbox from x/y coords
                     env_xmin = float(np.min(env_x_coords))
@@ -376,6 +399,10 @@ class ReplayWidget(QOpenGLWidget):
                 a = np.array(arr, dtype=float)
                 # detect nodata-like values (common sentinel -9999)
                 nodata_mask = np.isnan(a) | (a < -1e3)
+                if wetted_mask_array is not None:
+                    wet = np.asarray(wetted_mask_array, dtype=bool)
+                    if wet.shape == a.shape:
+                        nodata_mask = nodata_mask | (~wet)
                 valid_vals = a[~nodata_mask]
                 if valid_vals.size == 0:
                     # nothing valid
@@ -390,12 +417,10 @@ class ReplayWidget(QOpenGLWidget):
                 norm = np.clip(norm, 0.0, 1.0)
                 img8 = (np.nan_to_num(norm) * 255.0).astype(np.uint8)
                 h, w = img8.shape
-                # Grayscale depth raster: black (shallow) to white (deep)
-                rgb = np.dstack([img8, img8, img8])
-                alpha = (~nodata_mask).astype(np.uint8) * 255
-                rgba = np.dstack([rgb, alpha])
+                # Blue depth colormap over a light background
+                rgba = _depth_to_blue_rgba(norm, nodata_mask)
                 qimg = QImage(rgba.data.tobytes(), w, h, 4 * w, QImage.Format_RGBA8888)
-                print(f"[DEPTH RASTER] Blue colormap applied: {w}×{h} pixels, valid_range=[{amin:.2f}, {amax:.2f}]")
+                print(f"[DEPTH RASTER] Blue colormap applied: {w}x{h} pixels, valid_range=[{amin:.2f}, {amax:.2f}]")
                 # Compute raster world bbox from affine transform (a,b,c,d,e,f) mapping col,row -> x,y
                 try:
                     a_t, b_t, c_t, d_t, e_t, f_t = transform
@@ -668,8 +693,8 @@ class ReplayWidget(QOpenGLWidget):
             w = self.width()
             h = self.height()
             
-            # Fill background (dark grey for better contrast)
-            painter.fillRect(0, 0, w, h, QColor(30, 30, 30))
+            # Fill background (muted sand so no-raster areas are easier on the eyes)
+            painter.fillRect(0, 0, w, h, QColor(*DEFAULT_BG_RGB))
 
             # draw light grid to show canvas area
             pen = QPen(QColor(230, 230, 230))
@@ -1058,7 +1083,7 @@ class GLViewer(QOpenGLWidget):
     widget will raise ImportError and the caller should fall back.
     """
 
-    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, force_vbo: bool = False, point_size: Optional[float] = None, env_depth_array: Optional[np.ndarray] = None, env_x_coords: Optional[np.ndarray] = None, env_y_coords: Optional[np.ndarray] = None, battery_array: Optional[np.ndarray] = None, heading_array: Optional[np.ndarray] = None):
+    def __init__(self, positions: np.ndarray, parent: Optional[QWidget] = None, pad: float = 1.15, force_vbo: bool = False, point_size: Optional[float] = None, env_depth_array: Optional[np.ndarray] = None, env_x_coords: Optional[np.ndarray] = None, env_y_coords: Optional[np.ndarray] = None, wetted_mask_array: Optional[np.ndarray] = None, battery_array: Optional[np.ndarray] = None, heading_array: Optional[np.ndarray] = None):
         super().__init__(parent)
         if positions.ndim != 3 or positions.shape[2] != 2:
             raise ValueError("positions must be (T, N, 2)")
@@ -1084,6 +1109,7 @@ class GLViewer(QOpenGLWidget):
         self.env_depth_array = env_depth_array
         self.env_x_coords = env_x_coords
         self.env_y_coords = env_y_coords
+        self.wetted_mask_array = wetted_mask_array
         self._env_texture = None
         self.battery_array = battery_array  # Battery data for fatigue visualization
         self.heading_array = heading_array  # Heading data for oriented fish rendering
@@ -1215,7 +1241,12 @@ class GLViewer(QOpenGLWidget):
             return
         GL = self._GL
         try:
-            GL.glClearColor(0.12, 0.12, 0.12, 1.0)  # Dark grey background
+            GL.glClearColor(
+                DEFAULT_BG_RGB[0] / 255.0,
+                DEFAULT_BG_RGB[1] / 255.0,
+                DEFAULT_BG_RGB[2] / 255.0,
+                1.0,
+            )
             GL.glEnable(GL.GL_PROGRAM_POINT_SIZE)  # Allow shader to control point size
             import ctypes
             # Preallocate a GPU buffer (raw GL buffer) for dynamic point data
@@ -1288,20 +1319,32 @@ class GLViewer(QOpenGLWidget):
                 try:
                     # Normalize depth to 0-1 range for visualization
                     depth_array = np.array(self.env_depth_array, dtype=float)
-                    depth_min = np.nanmin(depth_array)
-                    depth_max = np.nanmax(depth_array)
-                    if depth_max > depth_min:
-                        depth_norm = (depth_array - depth_min) / (depth_max - depth_min)
+                    wet = None
+                    if self.wetted_mask_array is not None:
+                        wet_candidate = np.asarray(self.wetted_mask_array, dtype=bool)
+                        if wet_candidate.shape == depth_array.shape:
+                            wet = wet_candidate
+                    valid = np.isfinite(depth_array) & (depth_array > -1e3)
+                    if wet is not None:
+                        valid = valid & wet
+                    if np.any(valid):
+                        depth_min = float(np.nanmin(depth_array[valid]))
+                        depth_max = float(np.nanmax(depth_array[valid]))
+                        if depth_max > depth_min:
+                            depth_norm = (depth_array - depth_min) / (depth_max - depth_min)
+                        else:
+                            depth_norm = np.zeros_like(depth_array)
                     else:
                         depth_norm = np.zeros_like(depth_array)
                     
-                    # Create RGB image (blue gradient for depth)
-                    # Deeper water = darker blue, shallower = lighter blue/white
+                    # Create RGB image (pale/deep blue ramp for depth)
                     h, w = depth_norm.shape
                     rgb_image = np.zeros((h, w, 3), dtype=np.uint8)
-                    rgb_image[:, :, 0] = (200 * depth_norm).astype(np.uint8)  # R
-                    rgb_image[:, :, 1] = (220 * depth_norm).astype(np.uint8)  # G
-                    rgb_image[:, :, 2] = (255 * depth_norm).astype(np.uint8)  # B
+                    rgb_image[:, :, 0] = (220.0 - 170.0 * depth_norm).astype(np.uint8)  # R
+                    rgb_image[:, :, 1] = (232.0 - 120.0 * depth_norm).astype(np.uint8)  # G
+                    rgb_image[:, :, 2] = (242.0 - 20.0 * depth_norm).astype(np.uint8)   # B
+                    if wet is not None:
+                        rgb_image[~wet] = np.array(DEFAULT_BG_RGB, dtype=np.uint8)
                     
                     # Flip vertically for OpenGL texture coordinates (OpenGL origin bottom-left)
                     rgb_image = np.flipud(rgb_image)
@@ -1681,7 +1724,7 @@ class GLViewer(QOpenGLWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, positions: np.ndarray, watchdog_seconds: float = 5.0, pad: float = 1.15, force_vbo: bool = False, point_size: Optional[float] = None):
+    def __init__(self, positions: np.ndarray, watchdog_seconds: float = 5.0, pad: float = 1.15, force_vbo: bool = False, point_size: Optional[float] = None, prefer_gl: bool = False):
         super().__init__()
         self.setWindowTitle("Realtime Simulation Viewer")
         self._watchdog_seconds = float(watchdog_seconds)
@@ -1690,6 +1733,7 @@ class MainWindow(QMainWindow):
         # view state
         self._pad = float(pad)
         self._force_vbo = bool(force_vbo)
+        self._prefer_gl = bool(prefer_gl)
         self._pan_x = 0.0
         self._pan_y = 0.0
         self.viewer = ReplayWidget(
@@ -1885,16 +1929,17 @@ class MainWindow(QMainWindow):
         path = os.path.abspath(path)
         positions = load_any(path)
 
-        env_depth_array, env_x_coords, env_y_coords = None, None, None
+        env_depth_array, env_x_coords, env_y_coords, wetted_mask_array = None, None, None, None
         battery_array = None
         heading_array = None
         if path.lower().endswith(('.h5', '.hdf5')):
             try:
-                depth, x_coords, y_coords = load_env_from_h5(path)
+                depth, x_coords, y_coords, wetted = load_env_from_h5(path)
                 if depth is not None:
                     env_depth_array = depth
                     env_x_coords = x_coords
                     env_y_coords = y_coords
+                    wetted_mask_array = wetted
             except Exception:
                 pass
             try:
@@ -1906,8 +1951,24 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        nagents = int(positions.shape[1]) if positions.ndim == 3 else 0
-        if nagents < 5001:
+        new_view = None
+        if self._prefer_gl:
+            try:
+                new_view = GLViewer(
+                    positions,
+                    pad=self._pad,
+                    force_vbo=self._force_vbo,
+                    point_size=self._point_size,
+                    env_depth_array=env_depth_array,
+                    env_x_coords=env_x_coords,
+                    env_y_coords=env_y_coords,
+                    wetted_mask_array=wetted_mask_array,
+                    battery_array=battery_array,
+                    heading_array=heading_array,
+                )
+            except Exception:
+                new_view = None
+        if new_view is None:
             new_view = ReplayWidget(
                 positions,
                 pad=self._pad,
@@ -1917,18 +1978,7 @@ class MainWindow(QMainWindow):
                 env_depth_array=env_depth_array,
                 env_x_coords=env_x_coords,
                 env_y_coords=env_y_coords,
-                battery_array=battery_array,
-                heading_array=heading_array,
-            )
-        else:
-            new_view = GLViewer(
-                positions,
-                pad=self._pad,
-                force_vbo=self._force_vbo,
-                point_size=self._point_size,
-                env_depth_array=env_depth_array,
-                env_x_coords=env_x_coords,
-                env_y_coords=env_y_coords,
+                wetted_mask_array=wetted_mask_array,
                 battery_array=battery_array,
                 heading_array=heading_array,
             )
@@ -2184,7 +2234,7 @@ def main(argv=None):
     parser.add_argument("--port", dest="port", type=int, default=50007, help="Port for live stream (default 50007)")
     parser.add_argument("--debug", dest="debug", action="store_true", help="Enable verbose debug logging to viewer_debug.log and stderr")
     parser.add_argument("--use-pg", dest="use_pg", action="store_true", help="Use pyqtgraph ScatterPlotItem for rendering (faster for many agents)")
-    parser.add_argument("--use-gl", dest="use_gl", action="store_true", help="Use OpenGL VBO renderer for very large agent counts (best performance if PyOpenGL available)")
+    parser.add_argument("--use-gl", dest="use_gl", action="store_true", help="Use OpenGL VBO renderer (off by default; software renderer is more reliable on headless/noVNC)")
     parser.add_argument("--view-pad", dest="view_pad", type=float, default=1.15, help="View padding factor (zoom out). Default 1.15")
     parser.add_argument("--force-vbo", dest="force_vbo", action="store_true", help="Force VBO/raw GL buffer path when available")
     parser.add_argument("--point-size", dest="point_size", type=float, default=None, help="Point radius in pixels for agent rendering (overrides default scaling)")
@@ -2218,7 +2268,14 @@ def main(argv=None):
         host = args.host
         port = args.port
         positions = np.zeros((1, 0, 2), dtype=float)
-        win = MainWindow(positions, watchdog_seconds=args.watchdog_seconds, pad=args.view_pad, force_vbo=args.force_vbo, point_size=args.point_size)
+        win = MainWindow(
+            positions,
+            watchdog_seconds=args.watchdog_seconds,
+            pad=args.view_pad,
+            force_vbo=args.force_vbo,
+            point_size=args.point_size,
+            prefer_gl=args.use_gl,
+        )
         # if an env depth file was passed, install it on the replay widget
         try:
                 if args.env_depth is not None:
@@ -2570,16 +2627,17 @@ def main(argv=None):
         return
 
     # Try to load environment depth from the HDF5 file
-    env_depth_array, env_x_coords, env_y_coords = None, None, None
+    env_depth_array, env_x_coords, env_y_coords, wetted_mask_array = None, None, None, None
     battery_array = None
     heading_array = None
     if path.endswith('.h5') or path.endswith('.hdf5'):
         try:
-            depth, x_coords, y_coords = load_env_from_h5(path)
+            depth, x_coords, y_coords, wetted = load_env_from_h5(path)
             if depth is not None:
                 env_depth_array = depth
                 env_x_coords = x_coords
                 env_y_coords = y_coords
+                wetted_mask_array = wetted
                 print(f"Loaded environment from HDF5: depth shape {depth.shape}")
         except Exception as ex:
             print(f"Could not load environment from HDF5: {ex}")
@@ -2600,57 +2658,64 @@ def main(argv=None):
         except Exception as ex:
             print(f"Could not load heading from HDF5: {ex}")
 
-    # create window and pick renderer based on agent count
-    win = MainWindow(positions, pad=args.view_pad, force_vbo=args.force_vbo, point_size=args.point_size)
+    # create window with renderer preference (software by default; GL only when requested)
+    win = MainWindow(
+        positions,
+        pad=args.view_pad,
+        force_vbo=args.force_vbo,
+        point_size=args.point_size,
+        prefer_gl=args.use_gl,
+    )
     
-    # Determine agent count for renderer selection
-    try:
-        Nagents = positions.shape[1]
-    except Exception:
-        Nagents = 0
-    
-    # Use ReplayWidget with fish bodies for better visualization (up to 5000 agents)
-    # For very large simulations, fallback to GLViewer
-    if Nagents < 5001:
+    # Default to ReplayWidget in file mode (more robust on headless/noVNC).
+    # GLViewer is opt-in via --use-gl.
+    env_clip_pct = None
+    if args.env_clip:
         try:
+            parts = [float(p) for p in args.env_clip.split(',')]
+            if len(parts) >= 2:
+                env_clip_pct = (parts[0], parts[1])
+        except Exception:
             env_clip_pct = None
-            if args.env_clip:
-                try:
-                    parts = [float(p) for p in args.env_clip.split(',')]
-                    if len(parts) >= 2:
-                        env_clip_pct = (parts[0], parts[1])
-                except Exception:
-                    env_clip_pct = None
-            # Pass depth arrays if loaded from HDF5
+
+    if args.use_gl:
+        try:
+            glw = GLViewer(
+                positions,
+                pad=win._pad,
+                force_vbo=win._force_vbo,
+                point_size=win._point_size,
+                env_depth_array=env_depth_array,
+                env_x_coords=env_x_coords,
+                env_y_coords=env_y_coords,
+                wetted_mask_array=wetted_mask_array,
+                battery_array=battery_array,
+                heading_array=heading_array,
+            )
+            swap_viewer_in_main(win, glw)
+        except Exception:
+            logger.exception('GLViewer init failed in file mode; falling back to ReplayWidget')
+
+    if not args.use_gl:
+        try:
             rv = ReplayWidget(
-                positions, 
-                pad=args.view_pad, 
-                point_size=args.point_size, 
-                env_depth=args.env_depth, 
-                allow_expand_bounds=args.allow_expand_bounds, 
-                smooth_alpha=args.smooth_alpha, 
+                positions,
+                pad=args.view_pad,
+                point_size=args.point_size,
+                env_depth=args.env_depth,
+                allow_expand_bounds=args.allow_expand_bounds,
+                smooth_alpha=args.smooth_alpha,
                 env_clip_pct=env_clip_pct,
                 env_depth_array=env_depth_array,
                 env_x_coords=env_x_coords,
                 env_y_coords=env_y_coords,
+                wetted_mask_array=wetted_mask_array,
                 battery_array=battery_array,
-                heading_array=heading_array
+                heading_array=heading_array,
             )
             swap_viewer_in_main(win, rv)
-        except Exception as ex:
+        except Exception:
             logger.exception('Failed to create ReplayWidget')
-    else:
-        # Fallback to GLViewer for very large simulations (5001+ agents)
-        use_gl_mode = args.use_gl or (Nagents >= 5001)
-        if use_gl_mode:
-            try:
-                glw = GLViewer(positions, pad=win._pad, force_vbo=win._force_vbo, point_size=win._point_size, env_depth_array=env_depth_array, env_x_coords=env_x_coords, env_y_coords=env_y_coords, battery_array=battery_array, heading_array=heading_array)
-                try:
-                    swap_viewer_in_main(win, glw)
-                except Exception:
-                    logger.exception('Failed to swap GLViewer into MainWindow (file mode)')
-            except Exception:
-                logger.exception('GLViewer init failed in file mode; using fallback')
 
     win.resize(1000, 700)
     win.show()

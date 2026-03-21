@@ -579,34 +579,49 @@ class simulation:
         # that read environment/* will have something to sample in unit tests
         hdf5_io.create_environment_placeholders(self.db)
 
-        # CRITICAL: Compute `environment/distance_to` when missing - required for border_cue
-        # Without this, fish will swim out of domain bounds!
+        # CRITICAL: Ensure wetted + distance_to rasters exist for border cues and viewer masking.
         h5 = hdf5_io.get_hdf5_obj(self)
+        wet_ds = hdf5_io.read_dataset(h5, 'environment/wetted', default=None)
         dist_ds = hdf5_io.read_dataset(h5, 'environment/distance_to', default=None)
-        if dist_ds is None:
+        if wet_ds is None or dist_ds is None:
             import logging
-            logging.getLogger(__name__).info("distance_to raster not found, computing from depth raster...")
+            logging.getLogger(__name__).info(
+                "wetted and/or distance_to rasters missing, deriving from depth raster..."
+            )
             depth_ds = hdf5_io.read_dataset(h5, 'environment/depth', default=None)
             if depth_ds is None:
                 raise ValueError(
-                    "Cannot create distance_to raster: environment/depth dataset not found in HDF5. "
-                    "Border cue requires distance_to to keep fish within domain bounds!"
+                    "Cannot create wetted/distance_to rasters: environment/depth dataset not found in HDF5. "
+                    "Border cue and viewer masking require these rasters."
                 )
             depth_arr = np.asarray(depth_ds, dtype=float)
             if depth_arr.ndim != 2 or depth_arr.size <= 1:
                 raise ValueError(
                     f"Invalid depth raster shape: {depth_arr.shape}. "
-                    "Expected 2D array with size > 1 to compute distance_to."
+                    "Expected 2D array with size > 1 to compute wetted/distance_to."
                 )
-            # Wetted area = finite depth values (not nodata -9999)
-            if self.use_hecras and self.hecras_wetted_threshold is not None:
-                wetted = np.isfinite(depth_arr) & (depth_arr > float(self.hecras_wetted_threshold))
+            # Wetted area:
+            # - HECRAS mode: use depth threshold (default 0.05 m if caller passes None)
+            # - Raster mode: treat non-nodata as wetted (legacy behavior)
+            if self.use_hecras:
+                hec_thresh = (
+                    float(self.hecras_wetted_threshold)
+                    if self.hecras_wetted_threshold is not None
+                    else 0.05
+                )
+                wetted = np.isfinite(depth_arr) & (depth_arr > hec_thresh)
             else:
                 wetted = np.isfinite(depth_arr) & (depth_arr != -9999.0)
             if not np.any(wetted):
                 raise ValueError(
                     "Depth raster contains no valid (wetted) cells! "
                     "All values are nodata (-9999) or NaN. Cannot compute distance_to."
+                )
+            if wet_ds is None:
+                hdf5_io.write_dataset(h5, 'environment/wetted', wetted.astype(np.uint8))
+                logging.getLogger(__name__).info(
+                    f"Created wetted raster: {wetted.shape}, "
+                    f"{100*np.sum(wetted)/wetted.size:.1f}% wetted area"
                 )
             # Get pixel width from transform for distance scaling
             tr = getattr(self, 'depth_rast_transform', None)
@@ -615,13 +630,14 @@ class simulation:
             pw = float(tr[0]) if hasattr(tr, '__getitem__') else 1.0
             
             # Compute distance transform: distance from each cell to nearest boundary (non-wetted cell)
-            dist_to_bound = distance_transform_edt(wetted) * abs(pw)
-            hdf5_io.write_dataset(h5, 'environment/distance_to', dist_to_bound.astype('float32'))
-            logging.getLogger(__name__).info(
-                f"Created distance_to raster: {dist_to_bound.shape}, "
-                f"max distance: {np.max(dist_to_bound):.1f}m, "
-                f"{100*np.sum(wetted)/wetted.size:.1f}% wetted area"
-            )
+            if dist_ds is None:
+                dist_to_bound = distance_transform_edt(wetted) * abs(pw)
+                hdf5_io.write_dataset(h5, 'environment/distance_to', dist_to_bound.astype('float32'))
+                logging.getLogger(__name__).info(
+                    f"Created distance_to raster: {dist_to_bound.shape}, "
+                    f"max distance: {np.max(dist_to_bound):.1f}m, "
+                    f"{100*np.sum(wetted)/wetted.size:.1f}% wetted area"
+                )
 
         # CRITICAL: Load longitudinal profile shapefile for RL reward computation
         # The reward function requires this to compute upstream progress accurately
@@ -1945,6 +1961,7 @@ class simulation:
                     self.derive_environment_refugia()
                 for k in (
                     'environment/depth',
+                    'environment/wetted',
                     'environment/vel_x',
                     'environment/vel_y',
                     'environment/vel_mag',
@@ -2014,6 +2031,7 @@ class simulation:
                     self.derive_environment_refugia()
                 for k in (
                     'environment/depth',
+                    'environment/wetted',
                     'environment/vel_x',
                     'environment/vel_y',
                     'environment/vel_mag',

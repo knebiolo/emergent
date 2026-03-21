@@ -4,6 +4,11 @@
 
 The RL Training Visualizer is a real-time PyQt5 application for watching behavioral weight optimization in progress. It provides a three-panel interface to monitor training, visualize agent movements, and control training parameters.
 
+Current input constraints:
+- Raster-first workflow (`depth.tif`, `vel_*.tif`) is required.
+- `longitudinal.shp` is required in `--model-dir`.
+- HECRAS-direct training/viewer input is not wired into this tool yet.
+
 ## Installation
 
 The visualizer requires PyQt5:
@@ -135,6 +140,7 @@ The `--model-dir` must contain:
 - `vel_y.tif`: Y-velocity component (m/s)
 - `vel_mag.tif`: Velocity magnitude (m/s)
 - `vel_dir.tif`: Velocity direction (radians)
+- `longitudinal.shp`: Longitudinal profile shapefile (required by current reward/path-progress logic)
 
 ### Start Polygon
 
@@ -204,6 +210,10 @@ Provide both `--model-dir` and `--start-polygon` arguments when launching.
 
 Check that path to model directory is correct and contains environment TIF files.
 
+### "Longitudinal profile shapefile required but not found"
+
+Add `longitudinal.shp` (and sidecar files `.shx`, `.dbf`, `.prj`) to `--model-dir`.
+
 ### "ERROR: Start polygon not found"
 
 Verify shapefile path exists and includes .shp, .shx, .dbf, .prj files.
@@ -263,5 +273,5 @@ Planned features:
 ---
 
 **Created:** 2026-01-03  
-**Last Updated:** 2026-01-03  
-**Version:** 1.0
+**Last Updated:** 2026-03-06  
+**Version:** 1.1
