@@ -33,7 +33,7 @@ set "ACTIVE_LOCAL_WEB_PORT=%LOCAL_WEB_PORT%"
 set "EXIT_CODE=0"
 set "LOGFILE=%TEMP%\spark_rl_viewer_launcher.log"
 
-> "%LOGFILE%" echo [%DATE% %TIME%] Launcher start
+> "%LOGFILE%" echo Launcher start
 
 echo.
 echo ========================================
@@ -47,38 +47,40 @@ echo Log file: %LOGFILE%
 echo.
 
 echo [1/2] Starting noVNC + RL viewer on Spark (display %PRIMARY_DISPLAY%, web port %PRIMARY_WEB_PORT%)...
->> "%LOGFILE%" echo [%DATE% %TIME%] Step 1 start primary
+>> "%LOGFILE%" echo Step 1 start primary
 ssh %SPARK_USER%@%SPARK_HOST% "cd %SPARK_REPO% && NOVNC_DISPLAY=%PRIMARY_DISPLAY% NOVNC_RFB_PORT=%PRIMARY_RFB_PORT% NOVNC_WEB_PORT=%PRIMARY_WEB_PORT% tools/novnc_stack.sh rlviewer" >> "%LOGFILE%" 2>&1
 if errorlevel 1 (
     echo.
     echo Primary display/port in use. Retrying with fallback stack...
     echo Display %FALLBACK_DISPLAY%, web port %FALLBACK_WEB_PORT%
-    >> "%LOGFILE%" echo [%DATE% %TIME%] Primary failed, trying fallback
+    >> "%LOGFILE%" echo Primary failed, trying fallback
     ssh %SPARK_USER%@%SPARK_HOST% "cd %SPARK_REPO% && NOVNC_DISPLAY=%FALLBACK_DISPLAY% NOVNC_RFB_PORT=%FALLBACK_RFB_PORT% NOVNC_WEB_PORT=%FALLBACK_WEB_PORT% tools/novnc_stack.sh rlviewer" >> "%LOGFILE%" 2>&1
     if errorlevel 1 (
         echo.
         echo ERROR: Failed to launch noVNC/RL viewer on Spark (primary and fallback).
         echo Check SSH access and retry.
         echo.
-        >> "%LOGFILE%" echo [%DATE% %TIME%] Step 1 failed
+        >> "%LOGFILE%" echo Step 1 failed
         set "EXIT_CODE=1"
         goto finish
     )
     set "ACTIVE_REMOTE_WEB_PORT=%FALLBACK_WEB_PORT%"
-    >> "%LOGFILE%" echo [%DATE% %TIME%] Step 1 fallback succeeded
+    >> "%LOGFILE%" echo Step 1 fallback succeeded
 )
-if not errorlevel 1 >> "%LOGFILE%" echo [%DATE% %TIME%] Step 1 completed
+if not errorlevel 1 (
+    >> "%LOGFILE%" echo Step 1 completed
+)
 
 echo.
 echo [2/2] Opening browser and starting local SSH tunnel...
->> "%LOGFILE%" echo [%DATE% %TIME%] Step 2 start
+>> "%LOGFILE%" echo Step 2 start
 where ssh >nul 2>&1
 if errorlevel 1 (
     echo.
     echo ERROR: ssh.exe not found on this machine PATH.
     echo Install OpenSSH client and retry.
     echo.
-    >> "%LOGFILE%" echo [%DATE% %TIME%] ssh.exe missing
+    >> "%LOGFILE%" echo ssh.exe missing
     set "EXIT_CODE=1"
     goto finish
 )
@@ -86,7 +88,7 @@ if errorlevel 1 (
 call :pick_local_port
 if "%ACTIVE_LOCAL_WEB_PORT%" NEQ "%LOCAL_WEB_PORT%" (
     echo Local port %LOCAL_WEB_PORT% is busy; using %ACTIVE_LOCAL_WEB_PORT% instead.
-    >> "%LOGFILE%" echo [%DATE% %TIME%] Local port fallback to %ACTIVE_LOCAL_WEB_PORT%
+    >> "%LOGFILE%" echo Local port fallback to %ACTIVE_LOCAL_WEB_PORT%
 )
 
 start "" "http://127.0.0.1:%ACTIVE_LOCAL_WEB_PORT%/vnc.html"
@@ -102,10 +104,10 @@ echo Tunnel is running in THIS window.
 echo Press Ctrl+C to stop tunnel when done.
 echo.
 echo Starting SSH tunnel localhost:%ACTIVE_LOCAL_WEB_PORT% ^> %SPARK_HOST%:%ACTIVE_REMOTE_WEB_PORT%
->> "%LOGFILE%" echo [%DATE% %TIME%] Starting tunnel local=%ACTIVE_LOCAL_WEB_PORT% remote=%ACTIVE_REMOTE_WEB_PORT%
+>> "%LOGFILE%" echo Starting tunnel local=%ACTIVE_LOCAL_WEB_PORT% remote=%ACTIVE_REMOTE_WEB_PORT%
 ssh -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -N -L %ACTIVE_LOCAL_WEB_PORT%:127.0.0.1:%ACTIVE_REMOTE_WEB_PORT% %SPARK_USER%@%SPARK_HOST%
 set "EXIT_CODE=%ERRORLEVEL%"
->> "%LOGFILE%" echo [%DATE% %TIME%] Tunnel exit code %EXIT_CODE%
+>> "%LOGFILE%" echo Tunnel exit code %EXIT_CODE%
 
 echo.
 if "%EXIT_CODE%"=="0" (
@@ -145,10 +147,10 @@ exit /b 0
 echo.
 if "%EXIT_CODE%"=="0" (
     echo Launcher complete. Log file: %LOGFILE%
-    >> "%LOGFILE%" echo [%DATE% %TIME%] Launcher complete
+    >> "%LOGFILE%" echo Launcher complete
 ) else (
     echo Launcher finished with errors. Log file: %LOGFILE%
-    >> "%LOGFILE%" echo [%DATE% %TIME%] Launcher failed
+    >> "%LOGFILE%" echo Launcher failed
 )
 echo Press any key to close.
 pause >nul
