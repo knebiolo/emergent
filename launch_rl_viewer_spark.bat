@@ -47,13 +47,8 @@ if errorlevel 1 (
 
 echo.
 echo [2/2] Starting local SSH tunnel and opening browser...
-set "TUNNEL_PS1=%~dp0tools\start-tunnel.ps1"
-if exist "%TUNNEL_PS1%" (
-    start "Spark noVNC Tunnel" powershell -NoExit -ExecutionPolicy Bypass -File "%TUNNEL_PS1%" -HostName "%SPARK_HOST%" -UserName "%SPARK_USER%" -LocalPort %LOCAL_WEB_PORT% -RemotePort %ACTIVE_REMOTE_WEB_PORT%
-) else (
-    echo Tunnel helper not found at "%TUNNEL_PS1%". Using inline tunnel fallback...
-    start "Spark noVNC Tunnel" powershell -NoExit -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; Start-Process 'http://127.0.0.1:%LOCAL_WEB_PORT%/vnc.html'; Write-Host 'Starting SSH tunnel localhost:%LOCAL_WEB_PORT% -> %SPARK_HOST%:%ACTIVE_REMOTE_WEB_PORT%'; ssh -N -L '%LOCAL_WEB_PORT%:127.0.0.1:%ACTIVE_REMOTE_WEB_PORT%' '%SPARK_USER%@%SPARK_HOST%'"
-)
+start "" "http://127.0.0.1:%LOCAL_WEB_PORT%/vnc.html"
+start "Spark noVNC Tunnel" cmd /k "echo Starting SSH tunnel localhost:%LOCAL_WEB_PORT% ^> %SPARK_HOST%:%ACTIVE_REMOTE_WEB_PORT% && ssh -N -L %LOCAL_WEB_PORT%:127.0.0.1:%ACTIVE_REMOTE_WEB_PORT% %SPARK_USER%@%SPARK_HOST%"
 
 echo.
 echo ========================================
@@ -62,7 +57,7 @@ echo ========================================
 echo Browser URL: http://127.0.0.1:%LOCAL_WEB_PORT%/vnc.html
 echo Spark noVNC remote port: %ACTIVE_REMOTE_WEB_PORT%
 echo.
-echo Keep the "Spark noVNC Tunnel" PowerShell window open while you use the viewer.
+echo Keep the "Spark noVNC Tunnel" command window open while you use the viewer.
 echo.
 pause
 exit /b 0
