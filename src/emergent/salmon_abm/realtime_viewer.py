@@ -301,6 +301,7 @@ class ReplayWidget(QOpenGLWidget):
         self.T, self.N, _ = positions.shape
         self.frame = 0
         self.playing = False
+        self.loop = False  # When True, wrap from last frame back to frame 0.
         self.trail = 0
         self.fish_body_length = 8  # length of fish body in pixels
         self.tail_segments = 3  # number of tail segments for animation
@@ -640,11 +641,19 @@ class ReplayWidget(QOpenGLWidget):
     def _tick(self):
         if not getattr(self, 'playing', False):
             return
+        if self.T <= 0:
+            self.playing = False
+            if self.timer.isActive():
+                self.timer.stop()
+            return
         self.frame += 1
         if self.frame >= self.T:
-            self.frame = self.T - 1
-            self.playing = False
-            self.timer.stop()
+            if getattr(self, 'loop', False):
+                self.frame = 0
+            else:
+                self.frame = self.T - 1
+                self.playing = False
+                self.timer.stop()
         self.update()
 
     def start(self):

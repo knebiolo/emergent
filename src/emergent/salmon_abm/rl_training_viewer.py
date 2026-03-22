@@ -455,9 +455,12 @@ class SimulationCanvas(QWidget):
             pad=1.15,
             point_size=4.0,
         )
+        # Keep training playback running continuously; metrics processing must not pause visualization.
+        self.replay_widget.loop = True
 
         # Connect to replay widget's timer to detect when animation finishes
         self._animation_finished_emitted = False
+        self._last_frame_seen: Optional[int] = int(self.replay_widget.frame)
         self._animation_watchdog = QTimer(self)
         self._animation_watchdog.setInterval(100)
         self._animation_watchdog.timeout.connect(self._poll_animation_complete)
@@ -665,6 +668,7 @@ class SimulationCanvas(QWidget):
             battery_array=battery_array,
             heading_array=heading_array,
         )
+        new_widget.loop = True
         if alive_array is not None:
             new_widget.alive_array = np.asarray(alive_array)
 
@@ -683,11 +687,32 @@ class SimulationCanvas(QWidget):
         old_widget.setParent(None)
         old_widget.deleteLater()
         self.replay_widget = new_widget
+        self._last_frame_seen = int(self.replay_widget.frame)
         
     def _check_animation_complete(self):
-        """Check if animation reached the end and emit signal."""
+        """Detect completed playback cycles and emit signal once per loaded trajectory."""
+        current_frame = int(getattr(self.replay_widget, "frame", 0))
+        prev_frame = self._last_frame_seen
+        self._last_frame_seen = current_frame
+
+        if self.replay_widget.T <= 0:
+            return
+
+        if getattr(self.replay_widget, "loop", False):
+            # In loop mode, completion is detected when frame index wraps from high->low.
+            if self.replay_widget.T <= 1:
+                if not self._animation_finished_emitted:
+                    self._emit_animation_finished()
+                return
+            if (
+                not self._animation_finished_emitted
+                and prev_frame is not None
+                and current_frame < prev_frame
+            ):
+                self._emit_animation_finished()
+            return
+
         if self.replay_widget.frame >= self.replay_widget.T - 1:
-            # Animation reached the end
             self.replay_widget.playing = False
             if self.replay_widget.timer.isActive():
                 self.replay_widget.timer.stop()
@@ -696,6 +721,8 @@ class SimulationCanvas(QWidget):
     def _poll_animation_complete(self):
         """Fallback watchdog in case timer callbacks miss the last frame."""
         if self._animation_finished_emitted:
+            return
+        if getattr(self.replay_widget, "loop", False):
             return
         if self.replay_widget.frame >= self.replay_widget.T - 1 and not self.replay_widget.timer.isActive():
             self._emit_animation_finished()
@@ -770,10 +797,11 @@ class SimulationCanvas(QWidget):
         # Start from first frame and auto-play the trajectory
         print(f"[RL VIEWER DEBUG] Starting animation: T={self.replay_widget.T}, N={self.replay_widget.N}, frame=0", flush=True)
         self.replay_widget.frame = 0
+        self._last_frame_seen = 0
+        self._animation_finished_emitted = False
         self.replay_widget.playing = True
         self.replay_widget.start()  # Start animation
         self.replay_widget.update()
-        self._animation_finished_emitted = False
         if not self._animation_watchdog.isActive():
             self._animation_watchdog.start()
         print(f"[RL VIEWER DEBUG] Animation started, playing={self.replay_widget.playing}", flush=True)
