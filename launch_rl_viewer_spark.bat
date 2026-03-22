@@ -46,9 +46,18 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/2] Starting local SSH tunnel and opening browser...
+echo [2/2] Opening browser and starting local SSH tunnel...
+where ssh >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo ERROR: ssh.exe not found on this machine PATH.
+    echo Install OpenSSH client and retry.
+    echo.
+    pause
+    exit /b 1
+)
+
 start "" "http://127.0.0.1:%LOCAL_WEB_PORT%/vnc.html"
-start "Spark noVNC Tunnel" cmd /k "echo Starting SSH tunnel localhost:%LOCAL_WEB_PORT% ^> %SPARK_HOST%:%ACTIVE_REMOTE_WEB_PORT% && ssh -N -L %LOCAL_WEB_PORT%:127.0.0.1:%ACTIVE_REMOTE_WEB_PORT% %SPARK_USER%@%SPARK_HOST%"
 
 echo.
 echo ========================================
@@ -57,7 +66,13 @@ echo ========================================
 echo Browser URL: http://127.0.0.1:%LOCAL_WEB_PORT%/vnc.html
 echo Spark noVNC remote port: %ACTIVE_REMOTE_WEB_PORT%
 echo.
-echo Keep the "Spark noVNC Tunnel" command window open while you use the viewer.
+echo Tunnel is running in THIS window.
+echo Press Ctrl+C to stop tunnel when done.
 echo.
-pause
+echo Starting SSH tunnel localhost:%LOCAL_WEB_PORT% ^> %SPARK_HOST%:%ACTIVE_REMOTE_WEB_PORT%
+ssh -N -L %LOCAL_WEB_PORT%:127.0.0.1:%ACTIVE_REMOTE_WEB_PORT% %SPARK_USER%@%SPARK_HOST%
+
+echo.
+echo Tunnel exited (or failed). Press any key to close.
+pause >nul
 exit /b 0
