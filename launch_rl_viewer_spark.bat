@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
 
 REM One-click launcher from laptop:
 REM - Starts/restarts Spark noVNC stack
@@ -10,6 +10,8 @@ set "SPARK_HOST=192.168.102.157"
 set "SPARK_USER=kevinnebiolo"
 set "SPARK_REPO=/home/kevinnebiolo/emergent"
 set "LOCAL_WEB_PORT=6080"
+set "LOCAL_WEB_PORT_ALT1=6081"
+set "LOCAL_WEB_PORT_ALT2=6082"
 set "PRIMARY_DISPLAY=:1"
 set "PRIMARY_RFB_PORT=5901"
 set "PRIMARY_WEB_PORT=6080"
@@ -17,6 +19,11 @@ set "FALLBACK_DISPLAY=:99"
 set "FALLBACK_RFB_PORT=5999"
 set "FALLBACK_WEB_PORT=6081"
 set "ACTIVE_REMOTE_WEB_PORT=%PRIMARY_WEB_PORT%"
+set "ACTIVE_LOCAL_WEB_PORT=%LOCAL_WEB_PORT%"
+set "EXIT_CODE=0"
+set "LOGFILE=%TEMP%\spark_rl_viewer_launcher.log"
+
+> "%LOGFILE%" echo [%DATE% %TIME%] Launcher start
 
 echo.
 echo ========================================
@@ -26,21 +33,23 @@ echo   Host: %SPARK_HOST%
 echo   User: %SPARK_USER%
 echo ========================================
 echo.
+echo Log file: %LOGFILE%
+echo.
 
 echo [1/2] Starting noVNC + RL viewer on Spark (display %PRIMARY_DISPLAY%, web port %PRIMARY_WEB_PORT%)...
-ssh %SPARK_USER%@%SPARK_HOST% "cd %SPARK_REPO% && NOVNC_DISPLAY=%PRIMARY_DISPLAY% NOVNC_RFB_PORT=%PRIMARY_RFB_PORT% NOVNC_WEB_PORT=%PRIMARY_WEB_PORT% tools/novnc_stack.sh rlviewer"
+ssh %SPARK_USER%@%SPARK_HOST% "cd %SPARK_REPO% && NOVNC_DISPLAY=%PRIMARY_DISPLAY% NOVNC_RFB_PORT=%PRIMARY_RFB_PORT% NOVNC_WEB_PORT=%PRIMARY_WEB_PORT% tools/novnc_stack.sh rlviewer" >> "%LOGFILE%" 2>&1
 if errorlevel 1 (
     echo.
     echo Primary display/port in use. Retrying with fallback stack...
     echo Display %FALLBACK_DISPLAY%, web port %FALLBACK_WEB_PORT%
-    ssh %SPARK_USER%@%SPARK_HOST% "cd %SPARK_REPO% && NOVNC_DISPLAY=%FALLBACK_DISPLAY% NOVNC_RFB_PORT=%FALLBACK_RFB_PORT% NOVNC_WEB_PORT=%FALLBACK_WEB_PORT% tools/novnc_stack.sh rlviewer"
+    ssh %SPARK_USER%@%SPARK_HOST% "cd %SPARK_REPO% && NOVNC_DISPLAY=%FALLBACK_DISPLAY% NOVNC_RFB_PORT=%FALLBACK_RFB_PORT% NOVNC_WEB_PORT=%FALLBACK_WEB_PORT% tools/novnc_stack.sh rlviewer" >> "%LOGFILE%" 2>&1
     if errorlevel 1 (
         echo.
         echo ERROR: Failed to launch noVNC/RL viewer on Spark (primary and fallback).
         echo Check SSH access and retry.
         echo.
-        pause
-        exit /b 1
+        set "EXIT_CODE=1"
+        goto finish
     )
     set "ACTIVE_REMOTE_WEB_PORT=%FALLBACK_WEB_PORT%"
 )
@@ -53,26 +62,72 @@ if errorlevel 1 (
     echo ERROR: ssh.exe not found on this machine PATH.
     echo Install OpenSSH client and retry.
     echo.
-    pause
-    exit /b 1
+    set "EXIT_CODE=1"
+    goto finish
 )
 
-start "" "http://127.0.0.1:%LOCAL_WEB_PORT%/vnc.html"
+call :pick_local_port
+if "%ACTIVE_LOCAL_WEB_PORT%" NEQ "%LOCAL_WEB_PORT%" (
+    echo Local port %LOCAL_WEB_PORT% is busy; using %ACTIVE_LOCAL_WEB_PORT% instead.
+)
+
+start "" "http://127.0.0.1:%ACTIVE_LOCAL_WEB_PORT%/vnc.html"
 
 echo.
 echo ========================================
 echo   Launch complete
 echo ========================================
-echo Browser URL: http://127.0.0.1:%LOCAL_WEB_PORT%/vnc.html
+echo Browser URL: http://127.0.0.1:%ACTIVE_LOCAL_WEB_PORT%/vnc.html
 echo Spark noVNC remote port: %ACTIVE_REMOTE_WEB_PORT%
 echo.
 echo Tunnel is running in THIS window.
 echo Press Ctrl+C to stop tunnel when done.
 echo.
-echo Starting SSH tunnel localhost:%LOCAL_WEB_PORT% ^> %SPARK_HOST%:%ACTIVE_REMOTE_WEB_PORT%
-ssh -N -L %LOCAL_WEB_PORT%:127.0.0.1:%ACTIVE_REMOTE_WEB_PORT% %SPARK_USER%@%SPARK_HOST%
+echo Starting SSH tunnel localhost:%ACTIVE_LOCAL_WEB_PORT% ^> %SPARK_HOST%:%ACTIVE_REMOTE_WEB_PORT%
+ssh -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -N -L %ACTIVE_LOCAL_WEB_PORT%:127.0.0.1:%ACTIVE_REMOTE_WEB_PORT% %SPARK_USER%@%SPARK_HOST%
+set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.
-echo Tunnel exited (or failed). Press any key to close.
-pause >nul
+if "%EXIT_CODE%"=="0" (
+    echo Tunnel exited cleanly.
+) else (
+    echo Tunnel exited with code %EXIT_CODE%.
+    echo Check log: %LOGFILE%
+)
+goto finish
+
+:pick_local_port
+set "ACTIVE_LOCAL_WEB_PORT=%LOCAL_WEB_PORT%"
+call :is_port_busy %LOCAL_WEB_PORT%
+if "!PORT_BUSY!"=="0" exit /b 0
+
+set "ACTIVE_LOCAL_WEB_PORT=%LOCAL_WEB_PORT_ALT1%"
+call :is_port_busy %LOCAL_WEB_PORT_ALT1%
+if "!PORT_BUSY!"=="0" exit /b 0
+
+set "ACTIVE_LOCAL_WEB_PORT=%LOCAL_WEB_PORT_ALT2%"
+call :is_port_busy %LOCAL_WEB_PORT_ALT2%
+if "!PORT_BUSY!"=="0" exit /b 0
+
+echo.
+echo ERROR: Local ports %LOCAL_WEB_PORT%, %LOCAL_WEB_PORT_ALT1%, and %LOCAL_WEB_PORT_ALT2% are all in use.
+echo Free one of these ports and retry.
+set "EXIT_CODE=1"
+goto finish
+
+:is_port_busy
+set "PORT_BUSY=0"
+netstat -ano | findstr /R /C:":%~1 .*LISTENING" >nul
+if not errorlevel 1 set "PORT_BUSY=1"
 exit /b 0
+
+:finish
+echo.
+if "%EXIT_CODE%"=="0" (
+    echo Launcher complete. Log file: %LOGFILE%
+) else (
+    echo Launcher finished with errors. Log file: %LOGFILE%
+)
+echo Press any key to close.
+pause >nul
+exit /b %EXIT_CODE%
