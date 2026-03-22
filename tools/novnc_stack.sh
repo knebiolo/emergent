@@ -35,6 +35,41 @@ if [ ! -w "$LOG_DIR" ]; then
   mkdir -p "$LOG_DIR"
 fi
 
+CONDA_BIN="${CONDA_BIN:-}"
+
+resolve_conda_bin() {
+  if [ -n "$CONDA_BIN" ] && [ -x "$CONDA_BIN" ]; then
+    return 0
+  fi
+
+  if command -v conda >/dev/null 2>&1; then
+    CONDA_BIN="$(command -v conda)"
+    return 0
+  fi
+
+  for candidate in \
+    "$HOME/miniconda3/bin/conda" \
+    "$HOME/anaconda3/bin/conda" \
+    "/opt/conda/bin/conda"
+  do
+    if [ -x "$candidate" ]; then
+      CONDA_BIN="$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+ensure_conda_bin() {
+  if resolve_conda_bin; then
+    return 0
+  fi
+  echo "error: conda executable not found in PATH or common locations." >&2
+  echo "hint: set CONDA_BIN=/absolute/path/to/conda and retry." >&2
+  return 1
+}
+
 stop_stack_processes() {
   pkill -f "websockify .*${NOVNC_WEB_PORT}" || true
   pkill -f "novnc_proxy --listen 127.0.0.1:${NOVNC_WEB_PORT}" || true
@@ -137,6 +172,7 @@ viewer() {
   fi
 
   start
+  ensure_conda_bin
   pkill -f 'python -m emergent.salmon_abm.realtime_viewer' || true
 
   if [ -n "$h5_path" ]; then
@@ -145,11 +181,11 @@ viewer() {
       return 1
     fi
     echo "launching viewer with: $h5_path"
-    setsid -f env DISPLAY="$NOVNC_DISPLAY" conda run -n emergent \
+    setsid -f env DISPLAY="$NOVNC_DISPLAY" "$CONDA_BIN" run -n emergent \
       python -m emergent.salmon_abm.realtime_viewer "$h5_path" >>"$LOG_DIR/viewer.log" 2>&1
   else
     echo "no .h5 found in outputs/production or outputs/test; launching empty viewer"
-    setsid -f env DISPLAY="$NOVNC_DISPLAY" conda run -n emergent \
+    setsid -f env DISPLAY="$NOVNC_DISPLAY" "$CONDA_BIN" run -n emergent \
       python -m emergent.salmon_abm.realtime_viewer >>"$LOG_DIR/viewer.log" 2>&1
   fi
 
@@ -165,8 +201,9 @@ viewer() {
 
 rlviewer() {
   start
+  ensure_conda_bin
   pkill -f 'python -m emergent.salmon_abm.rl_training_viewer' || true
-  setsid -f env DISPLAY="$NOVNC_DISPLAY" conda run -n emergent \
+  setsid -f env DISPLAY="$NOVNC_DISPLAY" "$CONDA_BIN" run -n emergent \
     python -m emergent.salmon_abm.rl_training_viewer >>"$LOG_DIR/rl_viewer.log" 2>&1
   sleep 2
   if ! pgrep -af 'python -m emergent.salmon_abm.rl_training_viewer' >/dev/null; then
