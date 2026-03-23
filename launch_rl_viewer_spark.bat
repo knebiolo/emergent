@@ -25,6 +25,7 @@ set "FALLBACK_RFB_PORT=5999"
 set "FALLBACK_WEB_PORT=6081"
 set "ACTIVE_REMOTE_WEB_PORT=%PRIMARY_WEB_PORT%"
 set "ACTIVE_LOCAL_WEB_PORT=%LOCAL_WEB_PORT%"
+set "NOVNC_QUERY=?autoconnect=1&resize=scale"
 set "EXIT_CODE=0"
 set "LOGFILE=%TEMP%\spark_rl_viewer_launcher.log"
 
@@ -71,13 +72,15 @@ if errorlevel 1 goto finish_error
 if /I not "%ACTIVE_LOCAL_WEB_PORT%"=="%LOCAL_WEB_PORT%" echo Local port %LOCAL_WEB_PORT% is busy; using %ACTIVE_LOCAL_WEB_PORT% instead.
 if /I not "%ACTIVE_LOCAL_WEB_PORT%"=="%LOCAL_WEB_PORT%" call :log Local port fallback to %ACTIVE_LOCAL_WEB_PORT%
 
-start "" "http://127.0.0.1:%ACTIVE_LOCAL_WEB_PORT%/vnc.html"
+set "NOVNC_URL=http://127.0.0.1:%ACTIVE_LOCAL_WEB_PORT%/vnc.html%NOVNC_QUERY%"
+start "" "%NOVNC_URL%"
 
 echo.
 echo ========================================
 echo   Launch complete
 echo ========================================
 echo Browser URL: http://127.0.0.1:%ACTIVE_LOCAL_WEB_PORT%/vnc.html
+echo View mode: autoconnect + scale-to-fit
 echo Spark noVNC remote port: %ACTIVE_REMOTE_WEB_PORT%
 echo.
 echo Tunnel is running in THIS window.
