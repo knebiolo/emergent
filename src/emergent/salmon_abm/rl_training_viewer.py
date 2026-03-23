@@ -1200,6 +1200,29 @@ class ControlPanel(QWidget):
     start_recording = pyqtSignal()  # Start snippet recording
     stop_recording = pyqtSignal()  # Stop snippet recording and save clip
     open_archive = pyqtSignal()  # Open an existing RL archive HDF5
+
+    DEFAULT_EPISODES = 50
+    DEFAULT_TIMESTEPS = 100
+    DEFAULT_AGENTS = 200
+    DEFAULT_EXPLORATION = 0.1
+    DEFAULT_STORAGE_INTERVAL = 10
+    DEFAULT_ARCHIVE_ENABLED = True
+    DEFAULT_INITIAL_HEADING_MODE = "upstream"
+
+    DEFAULT_REWARD_WEIGHTS = {
+        "upstream_progress": 10.0,
+        "cohesion": 0.1,
+        "alignment": 1.0,
+        "energy_efficiency": 2.0,
+        "drafting_benefit": 20.0,
+        "rheotaxis_alignment": -100.0,
+        "separation": -0.2,
+        "mortality_penalty": -50.0,
+        "fatigue_penalty": -0.9,
+        "stagnation_penalty": -0.9,
+        "smoothness_penalty": -0.2,
+        "boundary_penalty": -10.0,
+    }
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1354,7 +1377,7 @@ class ControlPanel(QWidget):
         params_layout.addWidget(QLabel("Episodes:"), 0, 0)
         self.episodes_spin = QSpinBox()
         self.episodes_spin.setRange(1, 100000)
-        self.episodes_spin.setValue(50)
+        self.episodes_spin.setValue(self.DEFAULT_EPISODES)
         self.episodes_spin.setToolTip("Number of training episodes to run. Each episode tests one set of behavioral weights.")
         params_layout.addWidget(self.episodes_spin, 0, 1)
         
@@ -1362,7 +1385,7 @@ class ControlPanel(QWidget):
         params_layout.addWidget(QLabel("Timesteps:"), 1, 0)
         self.timesteps_spin = QSpinBox()
         self.timesteps_spin.setRange(10, 100000)
-        self.timesteps_spin.setValue(100)
+        self.timesteps_spin.setValue(self.DEFAULT_TIMESTEPS)
         self.timesteps_spin.setToolTip("Number of simulation timesteps per episode. Large values increase compute and memory.")
         params_layout.addWidget(self.timesteps_spin, 1, 1)
         
@@ -1370,7 +1393,7 @@ class ControlPanel(QWidget):
         params_layout.addWidget(QLabel("Agents:"), 2, 0)
         self.agents_spin = QSpinBox()
         self.agents_spin.setRange(10, 50000)
-        self.agents_spin.setValue(200)
+        self.agents_spin.setValue(self.DEFAULT_AGENTS)
         self.agents_spin.setToolTip("Number of fish agents in the simulation. Large values can be slow and memory-heavy.")
         params_layout.addWidget(self.agents_spin, 2, 1)
         
@@ -1379,23 +1402,33 @@ class ControlPanel(QWidget):
         self.noise_spin = QDoubleSpinBox()
         self.noise_spin.setRange(0.01, 1.0)
         self.noise_spin.setSingleStep(0.01)
-        self.noise_spin.setValue(0.1)
+        self.noise_spin.setValue(self.DEFAULT_EXPLORATION)
         self.noise_spin.setToolTip("Mutation scale for exploring new behavioral weights (0.1 = 10% random variation). Higher values = more exploration, lower = more exploitation of good weights.")
         params_layout.addWidget(self.noise_spin, 3, 1)
+
+        params_layout.addWidget(QLabel("Initial Heading:"), 4, 0)
+        self.initial_heading_combo = QComboBox()
+        self.initial_heading_combo.addItem("Aligned Upstream (Into Flow)", "upstream")
+        self.initial_heading_combo.addItem("Random Directions", "uniform")
+        self.initial_heading_combo.setToolTip(
+            "How fish headings are initialized at episode start: aligned into flow direction or random."
+        )
+        self.initial_heading_combo.setCurrentIndex(0)
+        params_layout.addWidget(self.initial_heading_combo, 4, 1)
         
         # Storage interval (memory optimization)
-        params_layout.addWidget(QLabel("Store every Nth:"), 4, 0)
+        params_layout.addWidget(QLabel("Store every Nth:"), 5, 0)
         self.storage_interval_spin = QSpinBox()
         self.storage_interval_spin.setRange(1, 10000)
-        self.storage_interval_spin.setValue(10)
+        self.storage_interval_spin.setValue(self.DEFAULT_STORAGE_INTERVAL)
         self.storage_interval_spin.setToolTip("Store trajectory data for replay every N episodes (plus first 5 and best). 1=all episodes, 10=every 10th. Saves memory for long training runs.")
-        params_layout.addWidget(self.storage_interval_spin, 4, 1)
+        params_layout.addWidget(self.storage_interval_spin, 5, 1)
 
         # Persist all generations so replay can lazy-load from disk
         self.archive_hdf_check = QCheckBox("Archive episodes to HDF")
-        self.archive_hdf_check.setChecked(True)
+        self.archive_hdf_check.setChecked(self.DEFAULT_ARCHIVE_ENABLED)
         self.archive_hdf_check.setToolTip("Write every episode to an HDF archive for full generation replay")
-        params_layout.addWidget(self.archive_hdf_check, 5, 0, 1, 2)
+        params_layout.addWidget(self.archive_hdf_check, 6, 0, 1, 2)
         
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
@@ -1438,35 +1471,35 @@ class ControlPanel(QWidget):
 
         reward_layout.addWidget(QLabel("Upstream:"), row, 0)
         self.upstream_weight_spin = _new_reward_spin(
-            0, 100, 10.0, 2, "Multiplier for meters traveled upstream (PRIMARY)"
+            0, 100, self.DEFAULT_REWARD_WEIGHTS["upstream_progress"], 2, "Multiplier for meters traveled upstream (PRIMARY)"
         )
         reward_layout.addWidget(self.upstream_weight_spin, row, 1)
         row += 1
 
         reward_layout.addWidget(QLabel("Cohesion:"), row, 0)
         self.cohesion_reward_spin = _new_reward_spin(
-            0, 100, 0.1, 4, "Multiplier for cohesion score sum"
+            0, 100, self.DEFAULT_REWARD_WEIGHTS["cohesion"], 4, "Multiplier for cohesion score sum"
         )
         reward_layout.addWidget(self.cohesion_reward_spin, row, 1)
         row += 1
 
         reward_layout.addWidget(QLabel("Alignment:"), row, 0)
         self.alignment_reward_spin = _new_reward_spin(
-            0, 100, 1.0, 4, "Multiplier for alignment score sum"
+            0, 100, self.DEFAULT_REWARD_WEIGHTS["alignment"], 4, "Multiplier for alignment score sum"
         )
         reward_layout.addWidget(self.alignment_reward_spin, row, 1)
         row += 1
 
         reward_layout.addWidget(QLabel("Energy eff:"), row, 0)
         self.energy_reward_spin = _new_reward_spin(
-            0, 100, 2.0, 2, "Multiplier for distance/speed² ratio"
+            0, 100, self.DEFAULT_REWARD_WEIGHTS["energy_efficiency"], 2, "Multiplier for distance/speed² ratio"
         )
         reward_layout.addWidget(self.energy_reward_spin, row, 1)
         row += 1
 
         reward_layout.addWidget(QLabel("Drafting:"), row, 0)
         self.drafting_reward_spin = _new_reward_spin(
-            0, 100, 20.0, 1, "Multiplier for formation benefits (disabled)"
+            0, 100, self.DEFAULT_REWARD_WEIGHTS["drafting_benefit"], 1, "Multiplier for formation benefits (disabled)"
         )
         reward_layout.addWidget(self.drafting_reward_spin, row, 1)
         row += 1
@@ -1476,35 +1509,35 @@ class ControlPanel(QWidget):
 
         reward_layout.addWidget(QLabel("Rheotaxis:"), row, 0)
         self.rheotaxis_penalty_spin = _new_reward_spin(
-            -100, 100, -100.0, 2, "Penalty for facing wrong direction"
+            -100, 100, self.DEFAULT_REWARD_WEIGHTS["rheotaxis_alignment"], 2, "Penalty for facing wrong direction"
         )
         reward_layout.addWidget(self.rheotaxis_penalty_spin, row, 1)
         row += 1
 
         reward_layout.addWidget(QLabel("Separation:"), row, 0)
         self.separation_penalty_spin = _new_reward_spin(
-            -100, 100, -0.2, 4, "Penalty for crowding violations"
+            -100, 100, self.DEFAULT_REWARD_WEIGHTS["separation"], 4, "Penalty for crowding violations"
         )
         reward_layout.addWidget(self.separation_penalty_spin, row, 1)
         row += 1
 
         reward_layout.addWidget(QLabel("Mortality:"), row, 0)
         self.mortality_penalty_spin = _new_reward_spin(
-            -100, 100, -50.0, 1, "Penalty per fish death"
+            -100, 100, self.DEFAULT_REWARD_WEIGHTS["mortality_penalty"], 1, "Penalty per fish death"
         )
         reward_layout.addWidget(self.mortality_penalty_spin, row, 1)
         row += 1
 
         reward_layout.addWidget(QLabel("Fatigue:"), row, 0)
         self.fatigue_penalty_spin = _new_reward_spin(
-            -100, 100, -0.9, 3, "Penalty for low battery timesteps"
+            -100, 100, self.DEFAULT_REWARD_WEIGHTS["fatigue_penalty"], 3, "Penalty for low battery timesteps"
         )
         reward_layout.addWidget(self.fatigue_penalty_spin, row, 1)
         row += 1
 
         reward_layout.addWidget(QLabel("Stagnation:"), row, 0)
         self.stagnation_penalty_spin = _new_reward_spin(
-            -100, 100, -0.9, 3, "Penalty for stationary timesteps"
+            -100, 100, self.DEFAULT_REWARD_WEIGHTS["stagnation_penalty"], 3, "Penalty for stationary timesteps"
         )
         reward_layout.addWidget(self.stagnation_penalty_spin, row, 1)
         row += 1
@@ -1514,14 +1547,14 @@ class ControlPanel(QWidget):
 
         reward_layout.addWidget(QLabel("Smoothness:"), row, 0)
         self.smoothness_penalty_spin = _new_reward_spin(
-            -100, 100, -0.2, 4, "Penalty for jerky movement (use negative values)"
+            -100, 100, self.DEFAULT_REWARD_WEIGHTS["smoothness_penalty"], 4, "Penalty for jerky movement (use negative values)"
         )
         reward_layout.addWidget(self.smoothness_penalty_spin, row, 1)
         row += 1
 
         reward_layout.addWidget(QLabel("Boundary:"), row, 0)
         self.boundary_penalty_spin = _new_reward_spin(
-            -100, 100, -10.0, 2, "Penalty for boundary proximity (disabled)"
+            -100, 100, self.DEFAULT_REWARD_WEIGHTS["boundary_penalty"], 2, "Penalty for boundary proximity (disabled)"
         )
         reward_layout.addWidget(self.boundary_penalty_spin, row, 1)
         reward_layout.setColumnStretch(0, 1)
@@ -1545,7 +1578,7 @@ class ControlPanel(QWidget):
         # Reset button
         self.btn_reset = QPushButton("🔄 Reset Training")
         self.btn_reset.clicked.connect(self.reset_training.emit)
-        self.btn_reset.setToolTip("Reset to initial state (clears training history, keeps current weights). Start fresh without restarting the app.")
+        self.btn_reset.setToolTip("Reset to initial defaults (clears training history and restores default settings/weights).")
         layout.addWidget(self.btn_reset)
         
         # Progress
@@ -1703,6 +1736,12 @@ class ControlPanel(QWidget):
     def get_longitudinal_profile(self) -> Optional[str]:
         value = self.longitudinal_input.text().strip()
         return value or None
+
+    def get_initial_heading_mode(self) -> str:
+        value = self.initial_heading_combo.currentData()
+        if value is None:
+            value = self.DEFAULT_INITIAL_HEADING_MODE
+        return str(value)
     
     def add_episode_to_list(self, episode_num: int):
         """Add completed episode to navigation dropdown."""
@@ -1752,11 +1791,37 @@ class ControlPanel(QWidget):
         self.timesteps_spin.setEnabled(enabled)
         self.agents_spin.setEnabled(enabled)
         self.noise_spin.setEnabled(enabled)
+        self.initial_heading_combo.setEnabled(enabled)
         self.storage_interval_spin.setEnabled(enabled)
         self.archive_hdf_check.setEnabled(enabled)
         self.btn_randomize.setEnabled(enabled)
         self.btn_randomize_order.setEnabled(enabled)
         self.btn_set_blanket.setEnabled(enabled)
+
+    def reset_defaults(self):
+        """Restore training control defaults."""
+        self.episodes_spin.setValue(self.DEFAULT_EPISODES)
+        self.timesteps_spin.setValue(self.DEFAULT_TIMESTEPS)
+        self.agents_spin.setValue(self.DEFAULT_AGENTS)
+        self.noise_spin.setValue(self.DEFAULT_EXPLORATION)
+        self.storage_interval_spin.setValue(self.DEFAULT_STORAGE_INTERVAL)
+        self.archive_hdf_check.setChecked(self.DEFAULT_ARCHIVE_ENABLED)
+
+        heading_idx = self.initial_heading_combo.findData(self.DEFAULT_INITIAL_HEADING_MODE)
+        self.initial_heading_combo.setCurrentIndex(max(0, heading_idx))
+
+        self.upstream_weight_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["upstream_progress"])
+        self.cohesion_reward_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["cohesion"])
+        self.alignment_reward_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["alignment"])
+        self.energy_reward_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["energy_efficiency"])
+        self.drafting_reward_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["drafting_benefit"])
+        self.rheotaxis_penalty_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["rheotaxis_alignment"])
+        self.separation_penalty_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["separation"])
+        self.mortality_penalty_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["mortality_penalty"])
+        self.fatigue_penalty_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["fatigue_penalty"])
+        self.stagnation_penalty_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["stagnation_penalty"])
+        self.smoothness_penalty_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["smoothness_penalty"])
+        self.boundary_penalty_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["boundary_penalty"])
 
 
 class TrainingWorker(QObject):
@@ -2676,6 +2741,7 @@ class RLTrainingViewer(QMainWindow):
         num_timesteps = self.control_panel.timesteps_spin.value()
         num_agents = self.control_panel.agents_spin.value()
         exploration_noise = self.control_panel.noise_spin.value()
+        initial_heading_mode = self.control_panel.get_initial_heading_mode()
         
         self.control_panel.append_log("=" * 50)
         self.control_panel.append_log(f"Starting RL training:")
@@ -2683,6 +2749,7 @@ class RLTrainingViewer(QMainWindow):
         self.control_panel.append_log(f"  Timesteps: {num_timesteps}")
         self.control_panel.append_log(f"  Agents: {num_agents}")
         self.control_panel.append_log(f"  Exploration: {exploration_noise}")
+        self.control_panel.append_log(f"  Initial heading: {initial_heading_mode}")
         self.control_panel.status_label.setText("Initializing...")
         
         try:
@@ -2784,6 +2851,7 @@ class RLTrainingViewer(QMainWindow):
                 "reward_weights": reward_weights,
                 "body_length": 0.3,
                 "dt": 1.0,
+                "initial_heading_mode": initial_heading_mode,
                 "initial_weights": initial_weights.to_dict(),
                 "archive_h5_path": archive_h5_path,
             }
@@ -3013,15 +3081,33 @@ class RLTrainingViewer(QMainWindow):
         self.initial_reward = None
         self.best_reward = float('-inf')
         self.best_weights = None
-        
+
+        # Reset behavioral weights to defaults (not preserved across reset)
+        from emergent.salmon_abm.rl_training import BehavioralWeights
+        self.current_weights = BehavioralWeights()
+        self.weights_panel.update_weights(self.current_weights)
+        default_order = {
+            0: 'shallow',
+            1: 'border',
+            2: 'avoid',
+            3: 'collision',
+            4: 'alignment',
+            5: 'cohesion',
+            6: 'low_speed',
+            7: 'refugia',
+            8: 'rheotaxis',
+            9: 'wave_drag',
+        }
+        self.weights_panel.update_order(default_order, self.current_weights)
+
         # Clear left-panel progress plot
         self.weights_panel.clear_plot()
-        
+
         # Reset UI
         self.control_panel.progress_bar.setValue(0)
         self.control_panel.btn_pause.setText("⏸ Pause Training")
         self.control_panel.btn_play_pause.setText("⏸ Pause")
-        self.control_panel.archive_hdf_check.setChecked(True)
+        self.control_panel.reset_defaults()
         self.control_panel.status_label.setText("Ready (Reset)")
         self.weights_panel.clear_diagnostics()
         self.weights_panel.clear_background_log()
@@ -3036,7 +3122,7 @@ class RLTrainingViewer(QMainWindow):
         
         self.control_panel.append_log("=" * 50)
         self.control_panel.append_log("🔄 Training reset - ready to start fresh")
-        self.control_panel.append_log("Current weights preserved - press Randomize for new weights")
+        self.control_panel.append_log("Restored default settings and default behavioral weights")
 
     def _ensure_record_timer(self):
         """Create the recording timer if it does not exist."""
