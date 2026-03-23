@@ -602,7 +602,7 @@ def compute_episode_reward(
             'smoothness_penalty': -0.2,
             'fatigue_penalty': -0.9,
             'stagnation_penalty': -0.9,
-            'rheotaxis_alignment': -100.0,
+            'rheotaxis_alignment': 10.0,
         }
     
     T, N = positions_history.shape[0], positions_history.shape[1]
@@ -871,13 +871,14 @@ def compute_episode_reward(
     # Total stagnation count summed across all agent-timesteps
     
     # =================================================================
-    # Penalize fish swimming off-heading from upstream direction
-    # Fish should orient against flow (rheotaxis), not just move north
-    # Formula: misalignment = 1 - cos(heading - upstream_angle)
-    # Range: 0 (perfect alignment) to 2 (swimming downstream)
+    # Soft rheotaxis orientation bonus.
+    # Fish should generally orient against flow, but we intentionally avoid a
+    # strict per-step penalty so other cues can still steer local maneuvers.
     
     _emit_phase("scoring: rheotaxis alignment")
-    rheotaxis_alignment_penalty = 0.0
+    rheotaxis_alignment_bonus = 0.0
+    rheotaxis_alignment_sum = 0.0
+    rheotaxis_alignment_count = 0
     
     if velocity_field_history is not None:
         for t in range(T):
@@ -901,18 +902,19 @@ def compute_episode_reward(
                 flow_angle = np.arctan2(velocities_t[:, 1], velocities_t[:, 0])
                 upstream_angle = flow_angle + np.pi  # Opposite direction
                 
-                # Compute heading misalignment
-                # cos(angle_diff) = 1 when aligned, -1 when opposite
+                # cos(angle_diff) = 1 upstream-aligned, 0 perpendicular, -1 downstream.
                 angle_diff = headings_t - upstream_angle
                 alignment = np.cos(angle_diff)
                 
-                # Misalignment penalty: 0 when aligned, 1 when perpendicular, 2 when opposite
-                misalignment = 1.0 - alignment
-                
-                # Sum misalignment for all agents in significant flow
-                rheotaxis_alignment_penalty += np.sum(misalignment[significant_flow])
+                # Soft bonus: reward only upstream-leaning alignment.
+                # Perpendicular/downstream headings get no bonus (but no hard penalty).
+                alignment_bonus = np.maximum(alignment[significant_flow], 0.0)
+                rheotaxis_alignment_sum += float(np.sum(alignment_bonus))
+                rheotaxis_alignment_count += int(alignment_bonus.size)
         
-        # Total rheotaxis misalignment summed across all agents and timesteps
+        # Normalize so scale does not explode with num_agents * timesteps.
+        if rheotaxis_alignment_count > 0:
+            rheotaxis_alignment_bonus = rheotaxis_alignment_sum / float(rheotaxis_alignment_count)
     
     # =================================================================
     # Total Reward Calculation
@@ -974,7 +976,7 @@ def compute_episode_reward(
         accel_smoothness_penalty * reward_weights['smoothness_penalty'] +
         fatigue_penalty * reward_weights['fatigue_penalty'] +
         stagnation_penalty * reward_weights['stagnation_penalty'] +
-        rheotaxis_alignment_penalty * reward_weights['rheotaxis_alignment'] +
+        rheotaxis_alignment_bonus * reward_weights['rheotaxis_alignment'] +
         min_schooling_weight_penalty +
         weight_diversity_bonus
     )
@@ -991,7 +993,7 @@ def compute_episode_reward(
         'smoothness_penalty': accel_smoothness_penalty * reward_weights['smoothness_penalty'],
         'fatigue_penalty': fatigue_penalty * reward_weights['fatigue_penalty'],
         'stagnation_penalty': stagnation_penalty * reward_weights['stagnation_penalty'],
-        'rheotaxis_alignment': rheotaxis_alignment_penalty * reward_weights['rheotaxis_alignment'],
+        'rheotaxis_alignment': rheotaxis_alignment_bonus * reward_weights['rheotaxis_alignment'],
         'min_schooling_penalty': min_schooling_weight_penalty,
         'weight_diversity_bonus': weight_diversity_bonus,
         'total': reward
@@ -1077,7 +1079,7 @@ class RLTrainer:
             'smoothness_penalty': -0.2,
             'fatigue_penalty': -0.9,
             'stagnation_penalty': -0.9,
-            'rheotaxis_alignment': -100.0,
+            'rheotaxis_alignment': 10.0,
         })
         
         # Training state

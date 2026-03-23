@@ -140,7 +140,7 @@ def _training_process_main(config: Dict[str, Any], output_queue, control_queue) 
         reward_weights = config.get("reward_weights") or None
         body_length = float(config.get("body_length", 0.3))
         dt = float(config.get("dt", 1.0))
-        initial_heading_mode = str(config.get("initial_heading_mode", "uniform")).strip().lower()
+        initial_heading_mode = str(config.get("initial_heading_mode", "upstream")).strip().lower()
         initial_sog_mode = str(config.get("initial_sog_mode", "uniform")).strip().lower()
         initial_sog_min = float(config.get("initial_sog_min", 0.1))
         initial_sog_max = float(config.get("initial_sog_max", 1.5))
@@ -1215,7 +1215,7 @@ class ControlPanel(QWidget):
         "alignment": 1.0,
         "energy_efficiency": 2.0,
         "drafting_benefit": 20.0,
-        "rheotaxis_alignment": -100.0,
+        "rheotaxis_alignment": 10.0,
         "separation": -0.2,
         "mortality_penalty": -50.0,
         "fatigue_penalty": -0.9,
@@ -1505,9 +1505,9 @@ class ControlPanel(QWidget):
         reward_layout.addWidget(QLabel("<b>Penalties:</b>"), row, 0, 1, 2)
         row += 1
 
-        reward_layout.addWidget(QLabel("Rheotaxis:"), row, 0)
+        reward_layout.addWidget(QLabel("Rheotaxis bonus:"), row, 0)
         self.rheotaxis_penalty_spin = _new_reward_spin(
-            -100, 100, self.DEFAULT_REWARD_WEIGHTS["rheotaxis_alignment"], 2, "Penalty for facing wrong direction"
+            -100, 100, self.DEFAULT_REWARD_WEIGHTS["rheotaxis_alignment"], 2, "Bonus for upstream-facing orientation; higher values encourage orientation into flow."
         )
         reward_layout.addWidget(self.rheotaxis_penalty_spin, row, 1)
         row += 1
@@ -2810,8 +2810,8 @@ class RLTrainingViewer(QMainWindow):
                 f"mortality={reward_weights['mortality_penalty']:+.3f}, "
                 f"smoothness={reward_weights['smoothness_penalty']:+.3f}, "
                 f"fatigue={reward_weights['fatigue_penalty']:+.3f}, "
-                f"stagnation={reward_weights['stagnation_penalty']:+.3f}, "
-                f"rheotaxis={reward_weights['rheotaxis_alignment']:+.3f}"
+                f"stagnation={reward_weights['stagnation_penalty']:+.3f} | "
+                f"Rheotaxis bonus={reward_weights['rheotaxis_alignment']:+.3f}"
             )
             self.control_panel.append_log(penalty_summary)
             self._append_background_status(penalty_summary)
