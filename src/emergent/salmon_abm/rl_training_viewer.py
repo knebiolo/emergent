@@ -1912,6 +1912,7 @@ class RLTrainingViewer(QMainWindow):
         self._default_window_width = 1400
         self._default_window_height = 800
         self.resize(self._default_window_width, self._default_window_height)
+        self._prefer_maximized = True
         
         # Configuration
         self.model_dir = model_dir
@@ -1991,7 +1992,10 @@ class RLTrainingViewer(QMainWindow):
             self.init_ui()
             self._create_view_menu()
             self._load_view_preferences()
-            QTimer.singleShot(0, self._fit_window_to_screen)
+            if self._prefer_maximized:
+                QTimer.singleShot(0, self.showMaximized)
+            else:
+                QTimer.singleShot(0, self._fit_window_to_screen)
             print(f"RLTrainingViewer init: init_ui() complete", flush=True)
         except Exception as e:
             import traceback
@@ -2000,7 +2004,7 @@ class RLTrainingViewer(QMainWindow):
             raise
 
     def _fit_window_to_screen(self):
-        """Clamp window size/position to the active screen so it stays usable in noVNC."""
+        """Fit window to the active screen so it can use the full noVNC viewport."""
         app = QApplication.instance()
         if app is None:
             return
@@ -2016,41 +2020,28 @@ class RLTrainingViewer(QMainWindow):
         if available.width() <= 0 or available.height() <= 0:
             return
 
-        margin_px = 40
-        min_width = 980
-        min_height = 620
-        max_width = max(640, available.width() - margin_px)
-        max_height = max(420, available.height() - margin_px)
-        target_width = min(self._default_window_width, max_width)
-        target_height = min(self._default_window_height, max_height)
-        target_width = max(min_width, target_width)
-        target_height = max(min_height, target_height)
-
-        # Guard against edge cases where available geometry is very small.
-        target_width = max(640, min(target_width, max_width))
-        target_height = max(420, min(target_height, max_height))
-
+        margin_px = 8
+        target_width = max(640, available.width() - margin_px)
+        target_height = max(420, available.height() - margin_px)
         self.resize(target_width, target_height)
-        x = available.x() + max(0, (available.width() - target_width) // 2)
-        y = available.y() + max(0, (available.height() - target_height) // 2)
+        x = available.x() + max(0, margin_px // 2)
+        y = available.y() + max(0, margin_px // 2)
         self.move(x, y)
 
     def _fit_from_maximize(self) -> None:
-        """Handle title-bar maximize by fitting to safe noVNC geometry instead."""
+        """Fallback helper when a WM ignores maximize hints."""
         if self._window_state_adjusting:
             return
         self._window_state_adjusting = True
         try:
-            if self.isMaximized():
-                self.showNormal()
             self._fit_window_to_screen()
         finally:
             self._window_state_adjusting = False
 
     def changeEvent(self, event):
-        if event.type() == QEvent.WindowStateChange:
-            if self.isMaximized() and not self._window_state_adjusting:
-                QTimer.singleShot(0, self._fit_from_maximize)
+        if event.type() == QEvent.WindowStateChange and self.isMaximized():
+            # Respect native maximize so the viewer can fill the noVNC desktop.
+            self._window_state_adjusting = False
         super().changeEvent(event)
 
     def _append_background_status(self, message: str):

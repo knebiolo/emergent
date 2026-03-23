@@ -23,6 +23,7 @@ set "PRIMARY_WEB_PORT=6080"
 set "FALLBACK_DISPLAY=:99"
 set "FALLBACK_RFB_PORT=5999"
 set "FALLBACK_WEB_PORT=6081"
+set "NOVNC_RESOLUTION=1920x1200"
 set "ACTIVE_REMOTE_WEB_PORT=%PRIMARY_WEB_PORT%"
 set "ACTIVE_LOCAL_WEB_PORT=%LOCAL_WEB_PORT%"
 set "NOVNC_QUERY=?autoconnect=1&resize=scale"
@@ -44,7 +45,7 @@ echo.
 
 echo [1/2] Starting noVNC + RL viewer on Spark (display %PRIMARY_DISPLAY%, web port %PRIMARY_WEB_PORT%)...
 call :log Step 1 start primary
-ssh %SPARK_USER%@%SPARK_HOST% "cd %SPARK_REPO% && NOVNC_DISPLAY=%PRIMARY_DISPLAY% NOVNC_RFB_PORT=%PRIMARY_RFB_PORT% NOVNC_WEB_PORT=%PRIMARY_WEB_PORT% tools/novnc_stack.sh rlviewer" >> "%LOGFILE%" 2>&1
+ssh %SPARK_USER%@%SPARK_HOST% "cd %SPARK_REPO% && NOVNC_RESOLUTION=%NOVNC_RESOLUTION% NOVNC_DISPLAY=%PRIMARY_DISPLAY% NOVNC_RFB_PORT=%PRIMARY_RFB_PORT% NOVNC_WEB_PORT=%PRIMARY_WEB_PORT% tools/novnc_stack.sh rlviewer" >> "%LOGFILE%" 2>&1
 if errorlevel 1 goto step1_fallback
 call :log Step 1 primary succeeded
 goto step2
@@ -54,7 +55,7 @@ echo.
 echo Primary display/port in use. Retrying with fallback stack...
 echo Display %FALLBACK_DISPLAY%, web port %FALLBACK_WEB_PORT%
 call :log Primary failed, trying fallback
-ssh %SPARK_USER%@%SPARK_HOST% "cd %SPARK_REPO% && NOVNC_DISPLAY=%FALLBACK_DISPLAY% NOVNC_RFB_PORT=%FALLBACK_RFB_PORT% NOVNC_WEB_PORT=%FALLBACK_WEB_PORT% tools/novnc_stack.sh rlviewer" >> "%LOGFILE%" 2>&1
+ssh %SPARK_USER%@%SPARK_HOST% "cd %SPARK_REPO% && NOVNC_RESOLUTION=%NOVNC_RESOLUTION% NOVNC_DISPLAY=%FALLBACK_DISPLAY% NOVNC_RFB_PORT=%FALLBACK_RFB_PORT% NOVNC_WEB_PORT=%FALLBACK_WEB_PORT% tools/novnc_stack.sh rlviewer" >> "%LOGFILE%" 2>&1
 if errorlevel 1 goto startup_failed
 set "ACTIVE_REMOTE_WEB_PORT=%FALLBACK_WEB_PORT%"
 call :log Step 1 fallback succeeded
