@@ -1406,15 +1406,13 @@ class ControlPanel(QWidget):
         self.noise_spin.setToolTip("Mutation scale for exploring new behavioral weights (0.1 = 10% random variation). Higher values = more exploration, lower = more exploitation of good weights.")
         params_layout.addWidget(self.noise_spin, 3, 1)
 
-        params_layout.addWidget(QLabel("Initial Heading:"), 4, 0)
-        self.initial_heading_combo = QComboBox()
-        self.initial_heading_combo.addItem("Aligned Upstream (Into Flow)", "upstream")
-        self.initial_heading_combo.addItem("Random Directions", "uniform")
-        self.initial_heading_combo.setToolTip(
-            "How fish headings are initialized at episode start: aligned into flow direction or random."
+        params_layout.addWidget(QLabel("Random Heading:"), 4, 0)
+        self.initial_heading_random_check = QCheckBox("On")
+        self.initial_heading_random_check.setChecked(False)
+        self.initial_heading_random_check.setToolTip(
+            "Off = initialize fish heading upstream. On = random heading directions."
         )
-        self.initial_heading_combo.setCurrentIndex(0)
-        params_layout.addWidget(self.initial_heading_combo, 4, 1)
+        params_layout.addWidget(self.initial_heading_random_check, 4, 1)
         
         # Storage interval (memory optimization)
         params_layout.addWidget(QLabel("Store every Nth:"), 5, 0)
@@ -1738,10 +1736,9 @@ class ControlPanel(QWidget):
         return value or None
 
     def get_initial_heading_mode(self) -> str:
-        value = self.initial_heading_combo.currentData()
-        if value is None:
-            value = self.DEFAULT_INITIAL_HEADING_MODE
-        return str(value)
+        if self.initial_heading_random_check.isChecked():
+            return "uniform"
+        return str(self.DEFAULT_INITIAL_HEADING_MODE)
     
     def add_episode_to_list(self, episode_num: int):
         """Add completed episode to navigation dropdown."""
@@ -1791,7 +1788,7 @@ class ControlPanel(QWidget):
         self.timesteps_spin.setEnabled(enabled)
         self.agents_spin.setEnabled(enabled)
         self.noise_spin.setEnabled(enabled)
-        self.initial_heading_combo.setEnabled(enabled)
+        self.initial_heading_random_check.setEnabled(enabled)
         self.storage_interval_spin.setEnabled(enabled)
         self.archive_hdf_check.setEnabled(enabled)
         self.btn_randomize.setEnabled(enabled)
@@ -1807,8 +1804,7 @@ class ControlPanel(QWidget):
         self.storage_interval_spin.setValue(self.DEFAULT_STORAGE_INTERVAL)
         self.archive_hdf_check.setChecked(self.DEFAULT_ARCHIVE_ENABLED)
 
-        heading_idx = self.initial_heading_combo.findData(self.DEFAULT_INITIAL_HEADING_MODE)
-        self.initial_heading_combo.setCurrentIndex(max(0, heading_idx))
+        self.initial_heading_random_check.setChecked(self.DEFAULT_INITIAL_HEADING_MODE == "uniform")
 
         self.upstream_weight_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["upstream_progress"])
         self.cohesion_reward_spin.setValue(self.DEFAULT_REWARD_WEIGHTS["cohesion"])
